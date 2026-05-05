@@ -24,6 +24,23 @@ def test_generated_tests_directory(generated_project: Path) -> None:
     assert (generated_project / "tests").is_dir()
     assert (generated_project / "tests" / "__init__.py").exists()
     assert (generated_project / "tests" / "conftest.py").exists()
+    assert (generated_project / "tests" / "helpers" / "__init__.py").exists()
+
+
+def test_tests_init_rendered(generated_project: Path) -> None:
+    """Test that tests/__init__.py has no unrendered template variables."""
+    content = (generated_project / "tests" / "__init__.py").read_text()
+    assert "{{" not in content
+    assert "}}" not in content
+    assert "My Test Project" in content
+
+
+def test_tests_helpers_init_rendered(generated_project: Path) -> None:
+    """Test that tests/helpers/__init__.py has no unrendered template variables."""
+    content = (generated_project / "tests" / "helpers" / "__init__.py").read_text()
+    assert "{{" not in content
+    assert "}}" not in content
+    assert "My Test Project" in content
 
 
 def test_pyproject_toml_rendered(generated_project: Path) -> None:
