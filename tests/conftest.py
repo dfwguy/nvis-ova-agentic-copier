@@ -19,7 +19,9 @@ def project_root() -> Path:
 
 
 @pytest.fixture(scope="session")
-def generated_project(tmp_path_factory: pytest.TempPathFactory, template_dir: Path) -> Path:
+def generated_project(
+    tmp_path_factory: pytest.TempPathFactory, template_dir: Path
+) -> Path:
     """Generate a project from the template once per test session."""
     output_dir = tmp_path_factory.mktemp("generated") / "my_project"
     copier.run_copy(
