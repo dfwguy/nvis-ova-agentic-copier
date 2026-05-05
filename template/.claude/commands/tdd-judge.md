@@ -11,5 +11,5 @@ Required briefing:
 - Mention the agreed test-pass / lint-clean / type-clean expectation.
 
 When the subagent returns:
-- If it approves, route to `/judge-quality`.
+- If it approves, route to `/judge-quality` immediately.
 - If it rejects, present the failures verbatim and ask the user whether to send back to `/tdd-green` (production-code fix) or `/tdd-red` (test fix).
