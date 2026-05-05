@@ -15,7 +15,22 @@ packages = ["breese_copier"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["template"]
 python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+    "--ignore=template",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -24,6 +39,9 @@ exclude = ["*project_slug*"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["S101", "S105", "S106", "EXE", "SLF001", "PLR0913"]
+# T201: these helpers are CLI scripts that write to stdout/stderr by design
+"tests/helpers/*.py" = ["T201"]
+"template/tests/helpers/*.py" = ["T201"]
 
 [tool.tox]
 requires = ["tox>=4.19", "tox-uv>=1.20"]

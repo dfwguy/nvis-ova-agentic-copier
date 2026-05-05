@@ -2,29 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
-
-@pytest.fixture
-def generated_project(tmp_path: Path, template_dir: Path) -> Path:
-    """Generate a project from the template and return its path."""
-    import copier
-
-    output_dir = tmp_path / "my_project"
-    copier.run_copy(
-        str(template_dir.parent),
-        str(output_dir),
-        data={
-            "project_name": "My Test Project",
-            "project_slug": "my_test_project",
-            "description": "A test project",
-        },
-        defaults=True,
-        overwrite=True,
-        unsafe=True,
-    )
-    return output_dir
-
 
 def test_generated_project_structure(generated_project: Path) -> None:
     """Test that the generated project has the expected top-level structure."""

@@ -1,3 +1,1 @@
-"""
-Test package for {{ cookiecutter.project_name }}.
-"""
+"""Test package for {{ project_name }}."""
