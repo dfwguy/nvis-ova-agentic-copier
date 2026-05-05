@@ -1,0 +1,20 @@
+## What This Project Is
+
+**{{ project_name }}** — {{ description }}
+
+## Architecture
+
+### Package (`{{ project_slug }}/`)
+Main Python package. Add modules here.
+
+### Tests (`tests/`)
+Pytest test suite. Fixtures are in `conftest.py`.
+
+### Configuration (`pyproject.toml`)
+Single source of truth for project metadata, dependencies, ruff rules, pytest options, tox environments, and coverage settings.
+
+## Python Versions
+
+- Minimum: **3.11**
+- Tested: **3.11** and **3.14** (via tox)
+- Avoid `3.12+` stdlib additions

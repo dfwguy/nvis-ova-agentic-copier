@@ -1,0 +1,21 @@
+_subdirectory: template
+
+_tasks:
+  - git init
+  - uv sync
+  - uv run pre-commit install
+
+project_name:
+  type: str
+  help: Human-readable project name
+  default: My Python Project
+
+project_slug:
+  type: str
+  help: Python package name (auto-derived from project_name)
+  default: "{{ project_name | lower | replace(' ', '_') | replace('-', '_') }}"
+
+description:
+  type: str
+  help: Short project description
+  default: A Python project generated with copier

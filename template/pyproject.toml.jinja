@@ -1,0 +1,80 @@
+[project]
+name = "{{ project_slug }}"
+version = "0.0.1"
+description = "{{ description }}"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["{{ project_slug }}"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--cov={{ project_slug }} --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["{{ project_slug }}"]
+omit = ["tests/*", "*/tests/*"]
+
+[tool.uv.sources]
+{{ project_slug }} = { workspace = true }
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["E501","G004","D203","D213","COM812","S603"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["S101","S105","S106","EXE","SLF001","PLR0913"]
+
+[tool.tox]
+requires = ["tox>=4.19", "tox-uv>=1.20"]
+env_list = ["py311", "py314"]
+
+[tool.tox.env.py311]
+description = "Run tests with Python 3.11"
+deps = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "pytest-mock>=3.14.0",
+    "pytest-subprocess>=1.5.3",
+    "pytest-timeout>=2.2.0",
+    "requests-mock>=1.12.1",
+]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "-v", "--junitxml=test-results.xml"]]
+
+[tool.tox.env.py314]
+description = "Run tests with Python 3.14"
+deps = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "pytest-mock>=3.14.0",
+    "pytest-subprocess>=1.5.3",
+    "pytest-timeout>=2.2.0",
+    "requests-mock>=1.12.1",
+]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "-v", "--junitxml=test-results.xml"]]
+
+[dependency-groups]
+test = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "pytest-mock>=3.14.0",
+    "pytest-subprocess>=1.5.3",
+    "pytest-timeout>=2.2.0",
+    "requests-mock>=1.12.1",
+]
+dev = [
+    "{{ project_slug }}",
+    {include-group = "test"},
+    "ty>=0.0.1a11",
+    "yamllint>=1.37.1",
+    "ruff>=0.15.10",
+    "tox>=4.27.0",
+]

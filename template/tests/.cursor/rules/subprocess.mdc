@@ -1,0 +1,218 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Subprocess Testing Guidelines
+
+> **Note**: Use `pytest-subprocess` for mocking subprocess calls. This provides a clean way to test code that executes external commands without actually running them.
+
+## Core Principles
+
+- Always mock subprocess calls in tests
+- Use `pytest-subprocess` fixtures (`fp`) for mocking
+- Test both success and failure scenarios
+- Verify command execution and output
+- Mock the exact command that will be executed
+
+## Basic Usage
+
+### Setup
+
+Install pytest-subprocess:
+```bash
+uv add pytest-subprocess --dev
+```
+
+### Simple Command Mocking
+
+```python
+import subprocess
+import pytest
+
+def get_git_branch():
+    """Get current Git branch"""
+    return subprocess.check_output(
+        ["git", "branch", "--show-current"],
+        text=True
+    ).strip()
+
+def test_get_git_branch(fp):
+    """Test getting current Git branch"""
+    # Mock the command
+    fp.register(
+        ["git", "branch", "--show-current"],
+        stdout="main\n",
+        returncode=0
+    )
+
+    result = get_git_branch()
+    assert result == "main"
+
+    # Verify command was called
+    assert fp.call_count() == 1
+```
+
+## Complex Examples
+
+### Deployment Script Testing
+
+```python
+import subprocess
+import pytest
+from typing import Literal
+
+def deploy_app(environment: Literal["production", "staging"]) -> str:
+    """
+    Deploy application to specified environment
+
+    Args:
+        environment: Target environment
+
+    Returns:
+        Build output
+
+    Raises:
+        RuntimeError: If build fails
+    """
+    # Get current Git branch
+    branch = subprocess.check_output(
+        ["git", "branch", "--show-current"],
+        text=True
+    ).strip()
+
+    # Build Docker image
+    build_cmd = f"docker build -t app:{branch}-{environment} ."
+    build_result = subprocess.run(
+        build_cmd,
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+
+    if build_result.returncode != 0:
+        raise RuntimeError(f"Build failed: {build_result.stderr}")
+
+    return build_result.stdout
+
+def test_deploy_production_success(fp):
+    """Test successful deployment to production"""
+    # Mock Git branch output
+    fp.register(
+        ["git", "branch", "--show-current"],
+        stdout="main\n",
+        returncode=0
+    )
+
+    # Mock Docker build command
+    fp.register(
+        "docker build -t app:main-production .",
+        stdout="Successfully built image\n",
+        returncode=0
+    )
+
+    # Execute deployment
+    result = deploy_app("production")
+
+    # Verify output
+    assert "Successfully built image" in result
+
+    # Verify command history
+    assert fp.call_count() == 2
+    assert "docker build" in fp.calls[1].command
+
+def test_deploy_staging_failure(fp):
+    """Test build failure handling"""
+    # Mock Git branch
+    fp.register(
+        ["git", "branch", "--show-current"],
+        stdout="dev\n"
+    )
+
+    # Mock Docker build failure
+    fp.register(
+        "docker build -t app:dev-staging .",
+        stderr="Error: Dockerfile missing",
+        returncode=1
+    )
+
+    # Test exception handling
+    with pytest.raises(RuntimeError) as exc:
+        deploy_app("staging")
+
+    assert "Dockerfile missing" in str(exc.value)
+```
+
+## Advanced Patterns
+
+### Parameterized Subprocess Testing
+
+```python
+import pytest
+
+@pytest.mark.parametrize(
+    "branch,environment,expected_tag",
+    [
+        ("main", "production", "app:main-production"),
+        ("dev", "staging", "app:dev-staging"),
+        ("feature", "test", "app:feature-test"),
+    ]
+)
+def test_deploy_different_environments(fp, branch, environment, expected_tag):
+    """Test deployment with different branch/environment combinations"""
+    fp.register(["git", "branch", "--show-current"], stdout=f"{branch}\n")
+    fp.register(f"docker build -t {expected_tag} .", stdout="Success")
+
+    result = deploy_app(environment)
+    assert "Success" in result
+```
+
+### Testing Command Arguments
+
+```python
+def test_command_arguments(fp):
+    """Test that commands are called with correct arguments"""
+    fp.register(["git", "status"], stdout="clean")
+
+    subprocess.run(["git", "status"], capture_output=True, text=True)
+
+    # Verify command was called with exact arguments
+    call = fp.calls[0]
+    assert call.command == ["git", "status"]
+    assert call.returncode == 0
+```
+
+### Testing Different Return Codes
+
+```python
+@pytest.mark.parametrize(
+    "returncode,should_raise",
+    [
+        (0, False),
+        (1, True),
+        (127, True),  # Command not found
+    ]
+)
+def test_return_code_handling(fp, returncode, should_raise):
+    """Test handling of different return codes"""
+    fp.register(
+        ["some", "command"],
+        returncode=returncode,
+        stderr="Error message" if returncode != 0 else ""
+    )
+
+    if should_raise:
+        with pytest.raises(subprocess.CalledProcessError):
+            subprocess.check_call(["some", "command"])
+    else:
+        subprocess.check_call(["some", "command"])
+```
+
+## Best Practices
+
+1. **Mock exact commands**: Use the exact command that will be executed
+2. **Test both success and failure**: Always test error conditions
+3. **Verify command history**: Check that commands were called as expected
+4. **Use meaningful output**: Provide realistic stdout/stderr in mocks
+5. **Test return codes**: Verify proper handling of different exit codes
+6. **Parameterize when possible**: Use parameterization for similar test scenarios

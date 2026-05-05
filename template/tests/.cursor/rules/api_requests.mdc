@@ -1,0 +1,22 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# API Request Testing Guidelines
+
+## Core Principle
+
+- Use `requests-mock` for API request mocking
+
+## Example Usage
+
+```python
+import requests
+import requests_mock
+
+with requests_mock.Mocker() as m:
+    m.get('http://test.com', text='resp')
+    response = requests.get('http://test.com')
+    assert response.text == 'resp'
+```

@@ -1,0 +1,30 @@
+---
+description:
+globs: **.py
+alwaysApply: false
+---
+# Test-Driven Development
+
+## Always
+
+* Write a failing test before any implementation — no exceptions
+* Confirm the test is Red (failing) before switching to implementation
+* Write the minimum code to make the test pass — nothing more
+* Confirm Green (all tests passing) before refactoring
+* Refactor only while tests remain Green
+
+## Agent Roles
+
+Work in explicit phases with distinct roles:
+
+* **Test Writer**: writes failing tests that define the desired behavior; stops when tests are confirmed Red
+* **Implementer**: writes minimal code to pass the failing tests; stops when tests are confirmed Green
+* **Judge**: validates the full cycle — meaningful tests, clean implementation, all tooling passing, functional patterns followed
+
+## Never
+
+* Write implementation code before a failing test exists
+* Skip the Red confirmation step
+* Add functionality not covered by a test
+* Suppress a failing test — fix the code instead
+* Approve (Judge) code that has ruff, ty, or pytest failures

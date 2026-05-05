@@ -1,0 +1,8 @@
+---
+description:
+globs: **.md
+alwaysApply: true
+---
+# Markdown
+
+* Always provide a language for code blocks. `text` if there is no highlighting needed or `bash` or `python` where applicable along with others as needed
