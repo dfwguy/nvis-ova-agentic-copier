@@ -23,7 +23,7 @@ uv run pre-commit run --all-files
 
 ## Sandbox
 
-Always run commands inside the sandbox first. Only retry with the sandbox disabled after seeing an actual sandbox-related failure (e.g. "Operation not permitted", network host denied) — never preemptively. Pausing to ask before trying the sandbox is the wrong default; trying and failing is cheap.
+Run commands in the sandbox first — never preemptively disable it. On a sandbox failure, try to fix the command (or sandbox config) before falling back to disabling the sandbox.
 
 ## Linting
 
