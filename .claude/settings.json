@@ -10,5 +10,12 @@
       "Bash(uv run pre-commit run *)",
       "Bash(uv run tox *)"
     ]
+  },
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "~/.cache/uv"
+      ]
+    }
   }
 }

@@ -113,6 +113,16 @@ def test_template_python_type_annotations(template_dir: Path) -> None:
     assert "->" in content
 
 
+def test_copier_answers_file_generated(generated_project: Path) -> None:
+    """Test that .copier-answers.yml is generated so `copier update`/`recopy` work."""
+    answers_file = generated_project / ".copier-answers.yml"
+    assert answers_file.exists()
+    content = answers_file.read_text()
+    assert "_src_path:" in content
+    assert "project_name: My Test Project" in content
+    assert "project_slug: my_test_project" in content
+
+
 def test_copier_yaml_exists(project_root: Path) -> None:
     """Test that copier.yaml exists and defines the expected variables."""
     copier_yaml = project_root / "copier.yaml"
