@@ -1,5 +1,13 @@
 _subdirectory: template
 
+_skip_if_exists:
+  - pyproject.toml
+  - README.md
+  - .gitlab-ci.yml
+  - .pre-commit-config.yaml
+  - .claude/project.md
+  - "{{ project_slug }}/__init__.py"
+
 _tasks:
   - git init
   - uv sync
