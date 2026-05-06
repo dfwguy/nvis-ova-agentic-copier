@@ -106,6 +106,10 @@ New feature or non-trivial change
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
+### Routing back on rejection
+
+When a judge (`/tdd-judge`, `/judge-quality`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+
 ## Script Conventions
 
 When writing standalone scripts:
