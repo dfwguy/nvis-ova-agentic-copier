@@ -21,6 +21,10 @@ uv run pre-commit run --all-files
 ```
 
 
+## Sandbox
+
+Always run commands inside the sandbox first. Only retry with the sandbox disabled after seeing an actual sandbox-related failure (e.g. "Operation not permitted", network host denied) — never preemptively. Pausing to ask before trying the sandbox is the wrong default; trying and failing is cheap.
+
 ## Linting
 
 Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproject.toml`. Do not suppress rules inline (`# noqa`) without a compelling reason — add to the `pyproject.toml` ignore list with a comment explaining why.
