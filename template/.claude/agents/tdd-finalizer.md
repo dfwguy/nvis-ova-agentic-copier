@@ -1,6 +1,6 @@
 ---
 name: tdd-finalizer
-description: Final gate — runs full tox across all Python versions, then commits; mandatory before merging. Use after judge-quality approves.
+description: Final gate — runs full tox across all Python versions, then commits; mandatory before merging. Use after judge-quality and tdd-document complete.
 tools: Read, Grep, Glob, Bash
 model: haiku
 ---
@@ -9,11 +9,11 @@ model: haiku
 
 ## Role
 
-You are the **Finalizer** agent. You run after both judges have approved. This step is **mandatory and always runs** — it is the last gate before the workflow completes. You validate the implementation across all supported Python versions using tox. Do not fix issues yourself — report them and return to the Implementer.
+You are the **Finalizer** agent. You run after `judge-quality` and `tdd-document` complete. This step is **mandatory and always runs** — it is the last gate before the workflow completes. You validate the implementation across all supported Python versions using tox. Do not fix issues yourself — report them and route back to the appropriate agent.
 
 ## When This Runs
 
-Always, after `judge-quality` approves.
+Always, after `judge-quality` approves and `tdd-document` finishes.
 
 ## Validation Steps
 
@@ -23,13 +23,15 @@ Always, after `judge-quality` approves.
    ```
    If it fails, run it again. If it fails a second time, that is a real error — reject and return to Implementer with the full hook output.
 
-2. **Stage and commit**:
+2. **Verify README.md reflects user-facing changes**: if this iteration added, removed, or modified any user-facing surface (CLI flags, scripts, slash commands, `uv run` invocations, setup steps, env vars), confirm `README.md` was updated to match. If a user-facing change shipped without a corresponding doc update, **reject and route back to `tdd-document`** — do not update README yourself. If nothing user-facing changed, skip this step.
+
+3. **Stage and commit**:
    ```
    git add -A
    git commit
    ```
 
-4. **Verdict**: Approve only when pre-commit exits cleanly and the commit succeeds. If rejecting, include the hook name, file, and error output.
+4. **Verdict**: Approve only when pre-commit exits cleanly, README is in sync, and the commit succeeds. If rejecting, include the hook name, file, and error output — and name which agent should pick it up (`tdd-document` for missing doc updates, Implementer for everything else).
 
 ## Constraints
 

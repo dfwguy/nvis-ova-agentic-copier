@@ -80,11 +80,16 @@ New feature or non-trivial change
         ▼
    /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
         │
-        ▼
-  /judge-quality       ← pure code review, no tooling; Pass / Minor / Reject per section
-        │
-        ▼
-  /tdd-finalizer       ← always runs; full pre-commit (inc. tox), run until clean
+        ├──────────────┬────────────────────┐
+        ▼              ▼                    ▼
+  /judge-quality   /tdd-document     (run in parallel after tdd-judge)
+   pure review     syncs README to
+                   user-facing changes
+        │              │
+        └──────┬───────┘
+               ▼
+        /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
+                          commits. Rejects to /tdd-document if README is stale.
 ```
 
 ### Agent Summary
@@ -96,9 +101,10 @@ New feature or non-trivial change
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
 | `/tdd-judge` | Stages files, runs pytest + pre-commit (inc. tox) | Fix issues — rejects and routes back |
 | `/judge-quality` | Pure code review: design, clarity, conventions | Run any tooling |
-| `/tdd-finalizer` | Stages files, runs tox across all Python versions, commits; mandatory final gate | Fix issues — rejects and routes back |
+| `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
+| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate | Fix issues — rejects and routes back |
 
-Never write implementation before a failing test exists. Never merge without all three validators approving.
+Never write implementation before a failing test exists. Never merge without all validators approving.
 
 ## Script Conventions
 
