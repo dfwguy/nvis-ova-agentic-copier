@@ -28,7 +28,7 @@ Running this template produces a Python project that is ready to develop in imme
 ## Quick start
 
 ```bash
-copier copy gh:breese/ova-agentic-flow-copier my-project
+copier copy ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project
 cd my-project
 uv run pytest
 ```
@@ -50,7 +50,7 @@ Defined in [`copier.yaml`](copier.yaml). Copier prompts for these interactively;
 Non-interactive example:
 
 ```bash
-copier copy gh:breese/ova-agentic-flow-copier my-project \
+copier copy ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project \
   --data project_name="Order Service" \
   --data description="Order ingestion pipeline"
 ```
