@@ -14,7 +14,8 @@
   "sandbox": {
     "filesystem": {
       "allowWrite": [
-        "~/.cache/uv"
+        "~/.cache/uv",
+        "~/.cache/pre-commit"
       ]
     }
   }
