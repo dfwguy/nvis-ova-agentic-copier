@@ -12,5 +12,5 @@ Required briefing:
 - The subagent has no Bash — do not ask it to run anything; it returns Pass/Minor/Reject per section.
 
 When the subagent returns:
-- If approved, route to `/tdd-finalizer` immediately.
+- If approved, wait for `/tdd-document` and `/judge-cicd` to also return before routing to `/tdd-finalizer`.
 - If rejected, present the issues verbatim and ask the user before routing back to `/tdd-green`.

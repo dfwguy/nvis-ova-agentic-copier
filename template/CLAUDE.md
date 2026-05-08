@@ -80,13 +80,14 @@ New feature or non-trivial change
         ▼
    /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
         │
-        ├──────────────┬────────────────────┐
-        ▼              ▼                    ▼
-  /judge-quality   /tdd-document     (run in parallel after tdd-judge)
-   pure review     syncs README to
-                   user-facing changes
-        │              │
-        └──────┬───────┘
+        ├──────────────┬─────────────────┬────────────────────┐
+        ▼              ▼                 ▼                    ▼
+  /judge-quality   /tdd-document    /judge-cicd       (run in parallel after tdd-judge)
+   pure review     syncs README to  checks .gitlab-ci.yml
+                   user-facing      sync + pipeline
+                   changes          health via glab
+        │              │                 │
+        └──────┬───────┴─────────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
                           commits. Rejects to /tdd-document if README is stale.
@@ -102,9 +103,14 @@ New feature or non-trivial change
 | `/tdd-judge` | Stages files, runs pytest + pre-commit (inc. tox) | Fix issues — rejects and routes back |
 | `/judge-quality` | Pure code review: design, clarity, conventions | Run any tooling |
 | `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
+| `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
+
+### Routing back on rejection
+
+When a judge (`/tdd-judge`, `/judge-quality`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
 ## Script Conventions
 

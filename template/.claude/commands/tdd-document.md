@@ -11,4 +11,4 @@ Required briefing:
 - Mention any user-facing surface that changed (CLI flags, scripts, slash commands, setup steps, env vars). If you're unsure whether a change is user-facing, say so — the subagent will decide.
 - The subagent edits docs only — it will not touch code, tests, or agent definitions.
 
-When the subagent returns, present the list of updated doc files (or "no documentation changes needed").
+When the subagent returns, present the list of updated doc files (or "no documentation changes needed"). Wait for `/judge-quality` and `/judge-cicd` to also return before routing to `/tdd-finalizer`.
