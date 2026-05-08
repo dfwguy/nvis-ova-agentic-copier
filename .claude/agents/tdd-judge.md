@@ -30,7 +30,7 @@ You are the **Judge** agent. Validate the complete implementation. Reject anythi
    - [ ] Type annotations on every function and method
    - [ ] Docstrings on every public function, class, and module
    - [ ] `pathlib` used for all path operations (no `os.path`)
-   - [ ] Dependency inversion — external calls passed as arguments, not hardcoded
+   - [ ] Dependency inversion — every external call (subprocess, filesystem, HTTP, time, env) is a parameter; real implementations are wired in only at the entry point. No `unittest.mock.patch` of project-internal symbols in tests.
    - [ ] No `sys.exit` — `raise` used for error conditions
    - [ ] No global mutable state
    - [ ] Tests are meaningful — they would catch a wrong implementation

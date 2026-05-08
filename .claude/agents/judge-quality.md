@@ -31,7 +31,8 @@ You are running on a strong model (Opus) specifically so you can hold the whole 
 - [ ] No global mutable state
 
 ### Structure and Design
-- [ ] Dependency inversion applied — external dependencies passed as arguments, not hardcoded
+- [ ] Dependency inversion applied — every external call (subprocess, filesystem, HTTP, time, env) enters the function as a parameter, not a direct module-level import. Real implementations are wired in only at the entry point.
+- [ ] Tests pass test doubles through those same parameters — **no `unittest.mock.patch` of project-internal symbols**. Patching is acceptable only at true system boundaries (`pytest-subprocess`, `requests-mock`, stdlib `unittest.mock` for things we cannot inject). A `patch("our_pkg...")` line is a Reject and a signal to refactor the production code.
 - [ ] Dataclasses used for grouped configuration or parameters
 - [ ] Private functions (`_` prefix) for anything not part of the public interface
 - [ ] No dead code, commented-out blocks, or unused imports

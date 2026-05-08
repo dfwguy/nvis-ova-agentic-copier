@@ -28,12 +28,12 @@ Route to the Architect before starting any work that involves:
    - Python 3.11 minimum
    - All ruff rules active (`select = ["ALL"]`)
    - Functional style preferred (pure functions, immutable data, composition)
-   - Dependency inversion required for external calls
+   - **Dependency inversion is mandatory**: every external call (subprocess, filesystem, HTTP, time, environment) must be a parameter, not a direct import. Real implementations are wired in only at the entry point.
    - No global mutable state
 4. **Produce a design** that includes:
    - Module and function breakdown with responsibilities
    - Data structures (dataclasses preferred)
-   - Dependency boundaries — what is injected vs. owned
+   - Dependency boundaries — every injection point named explicitly (see Output Format)
    - What is explicitly out of scope
 5. **State assumptions** — list anything you assumed that the user should validate
 6. **Hand off** — specify what the Test Writer should write tests for and what the Implementer should build
@@ -50,7 +50,12 @@ Route to the Architect before starting any work that involves:
 <dataclass definitions or descriptions>
 
 ### Dependency Boundaries
-<what is injected, what is internal>
+List every external call this design touches (subprocess, filesystem, HTTP, time, env). For each, name:
+- the parameter it is injected through (e.g. `run_command: Callable[..., CompletedProcess]`)
+- where the real implementation is wired in (typically `main()`)
+- what the test will pass instead (fake, stub, or pytest-subprocess/requests-mock)
+
+If a function calls something external and the design does not name an injection point for it, the design is incomplete.
 
 ### Out of Scope
 <explicit list>

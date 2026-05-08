@@ -32,7 +32,7 @@ Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproj
 ## Python Conventions
 
 - **Pathlib** over `os` for all path operations
-- **Dependency inversion**: pass functions as arguments rather than calling external dependencies directly — keeps code testable without patching
+- **Dependency inversion** (see [Dependency Inversion](#dependency-inversion) below) — external calls are passed in as parameters, not imported and called directly
 - **Dataclasses** for structured configuration or grouped parameters
 - **Type annotations** on all functions and methods
 - **Docstrings** on all public functions, classes, and modules
@@ -41,6 +41,20 @@ Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproj
 - **Private functions** prefixed with `_` when not part of the public interface
 - **No `print`** — use `logger` everywhere; `print` is only acceptable inside `if __name__ == "__main__"` guards
 - Use `uv run` — never invoke `python` directly
+
+## Dependency Inversion
+
+We use dependency inversion throughout. Every external call — subprocess, filesystem, HTTP, time, environment lookups, anything that crosses a system boundary — is **passed in as a parameter** rather than imported and invoked directly.
+
+The pattern:
+
+- Functions accept their external dependencies as arguments (typically `Callable`s, small protocols, or dataclasses of callables).
+- Real implementations are wired in once, at the entry point (`main()` or a top-level orchestrator).
+- Tests pass fakes/stubs through the same parameters — no module-level patching.
+
+If a test reaches for `unittest.mock.patch` to swap a symbol inside our own code, the production code needs DI applied first — that's a refactor, not a test workaround. Patching is reserved for true system boundaries handled by purpose-built tools: `pytest-subprocess` for subprocess, `requests-mock` for HTTP, stdlib `unittest.mock` for things we genuinely cannot inject.
+
+The architect names every injection point in the design; the implementer wires them through; the judges reject changes that hardcode external calls or that patch internal modules in tests.
 
 ## Functional Programming
 

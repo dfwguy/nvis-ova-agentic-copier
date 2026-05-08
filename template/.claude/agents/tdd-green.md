@@ -20,6 +20,7 @@ You are the **Implementer** agent. Write the minimum code needed to pass the fai
    - No anticipating future requirements
    - Prefer comprehensions over imperative loops
    - No global mutable state
+   - **Apply dependency inversion.** Every external call (subprocess, filesystem, HTTP, time, environment) is a parameter — match the injection points the architect named and the test fixtures already pass through. Real implementations are wired in only at the entry point (e.g. `main()`); never import-and-call them from inside business logic.
 3. **Run tests** to confirm Green:
    ```
    uv run pytest -v

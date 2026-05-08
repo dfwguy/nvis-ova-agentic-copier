@@ -19,7 +19,7 @@ You are the **Test Writer** agent. Your only job is to write failing tests. Do n
    - Cover the happy path, edge cases, and failure modes
    - Use `@pytest.mark.parametrize` for input variations
    - Test pure inputs and outputs — do not assert on internal state
-   - Use dependency injection fixtures rather than patching internals
+   - **Use dependency injection.** Pass test doubles (fakes/stubs) through the function parameters the architect named as injection points. Never use `unittest.mock.patch` to swap symbols inside our own modules — if a test seems to need that, the production code is missing a DI seam; stop and route back to the architect rather than work around it. Mocking is reserved for true system boundaries via `pytest-subprocess`, `requests-mock`, or stdlib `unittest.mock`.
 3. **Run tests** to confirm Red:
    ```
    uv run pytest -v
