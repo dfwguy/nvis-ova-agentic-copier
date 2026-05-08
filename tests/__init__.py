@@ -1,1 +1,1 @@
-"""Tests for the breese-copier template."""
+"""Tests for the ova-agentic-flow-copier template."""

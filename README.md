@@ -1,4 +1,4 @@
-# breese-copier
+# OVA Agentic Flow copier
 
 A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python projects with a modern toolchain (UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI) **and** a multi-agent Claude Code workflow wired in from day one.
 
@@ -28,7 +28,7 @@ Running this template produces a Python project that is ready to develop in imme
 ## Quick start
 
 ```bash
-copier copy gh:breese/breese-copier my-project
+copier copy gh:breese/ova-agentic-flow-copier my-project
 cd my-project
 uv run pytest
 ```
@@ -50,7 +50,7 @@ Defined in [`copier.yaml`](copier.yaml). Copier prompts for these interactively;
 Non-interactive example:
 
 ```bash
-copier copy gh:breese/breese-copier my-project \
+copier copy gh:breese/ova-agentic-flow-copier my-project \
   --data project_name="Order Service" \
   --data description="Order ingestion pipeline"
 ```
