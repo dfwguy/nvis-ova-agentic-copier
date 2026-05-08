@@ -20,22 +20,23 @@ Running this template produces a Python project that is ready to develop in imme
 
 ## Prerequisites
 
-- **Copier ≥ 9** — install with `uv tool install copier` or `pipx install copier`. See [Copier installation docs](https://copier.readthedocs.io/en/stable/#installation).
-- **UV** — install per [UV installation docs](https://docs.astral.sh/uv/getting-started/installation/). Required because the post-generation tasks run `uv sync`. UV will also fetch Python interpreters as needed.
+- **UV** — install per [UV installation docs](https://docs.astral.sh/uv/getting-started/installation/). Everything here runs through `uv` and `uvx` — including Copier itself, which we invoke as `uvx copier` rather than installing globally. UV also fetches Python interpreters on demand and runs the post-generation `uv sync`.
 - **Git** — `git init` is run automatically after generation.
 - **[`glab`](https://gitlab.com/gitlab-org/cli)** — required by the `/judge-cicd` agent to inspect GitLab pipeline health. Install via your package manager (e.g. `brew install glab`) and authenticate with `glab auth login`.
 
 ## Quick start
 
 ```bash
-copier copy ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project
+uvx copier copy --trust ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project
 cd my-project
 uv run pytest
 ```
 
+`--trust` is required because [`copier.yaml`](copier.yaml) declares `_tasks` (`git init`, `uv sync`, `uv run pre-commit install`) that execute on your machine after rendering. Copier refuses to run them without explicit trust.
+
 You'll be prompted for three values (see [Template variables](#template-variables)). After the prompts, Copier runs the [post-generation tasks](#post-generation-tasks) and you're ready to commit.
 
-To regenerate a project later when this template gets new features, run `copier update` from inside the generated project — see [Updating an existing project](#updating-an-existing-project).
+To regenerate a project later when this template gets new features, run `uvx copier update --trust` from inside the generated project — see [Updating an existing project](#updating-an-existing-project).
 
 ## Template variables
 
@@ -50,7 +51,7 @@ Defined in [`copier.yaml`](copier.yaml). Copier prompts for these interactively;
 Non-interactive example:
 
 ```bash
-copier copy ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project \
+uvx copier copy --trust ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-ova-agentic-copier.git my-project \
   --data project_name="Order Service" \
   --data description="Order ingestion pipeline"
 ```
@@ -159,7 +160,7 @@ Copier remembers the answers in `.copier-answers.yml` inside the generated proje
 
 ```bash
 cd my-project
-copier update
+uvx copier update --trust
 ```
 
 Copier produces a 3-way merge against your local changes. Files listed under `_skip_if_exists` in [`copier.yaml`](copier.yaml) (e.g. `pyproject.toml`, `README.md`, `.gitlab-ci.yml`, the package's `__init__.py`) are **not** overwritten on update — your project's customizations are safe. See [Copier's update docs](https://copier.readthedocs.io/en/stable/updating/) for conflict-resolution details.
