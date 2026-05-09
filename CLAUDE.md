@@ -77,6 +77,8 @@ Prefer functional style throughout:
 
 All feature work routes through explicit agents invoked as slash commands (e.g. `/architect`). Definitions are in `.claude/commands/`.
 
+**Scope: this workflow is for Python projects.** The agents assume `uv`, `ruff`, `ty`, `pytest`, and `tox` are available, and the conventions enforced by `/judge-quality` (pathlib, dependency inversion, type annotations, docstrings, `pytest.mark.parametrize`, etc.) are Python-specific. Do not invoke this flow against non-Python code.
+
 ### Routing
 
 ```
@@ -115,7 +117,7 @@ New feature or non-trivial change
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
 | `/tdd-judge` | Stages files, runs pytest + pre-commit (inc. tox) | Fix issues — rejects and routes back |
-| `/judge-quality` | Pure code review: design, clarity, conventions | Run any tooling |
+| `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
 | `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate | Fix issues — rejects and routes back |
@@ -125,6 +127,16 @@ Never write implementation before a failing test exists. Never merge without all
 ### Routing back on rejection
 
 When a judge (`/tdd-judge`, `/judge-quality`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+
+### `/judge-quality` severity model
+
+`/judge-quality` classifies every finding as one of:
+
+- **Major** — defect in this change. Triggers `Overall: Reject`; the main agent reroutes to `/tdd-green` automatically.
+- **Minor** — non-blocking style/clarity nit caused or kept by this change. Does not reroute.
+- **Existing** — pre-existing issue in surrounding code, not introduced by this change. Never blocks.
+
+The **main agent owns the deferred-findings list**: when `/judge-quality` returns `Overall: Approve` with Minor or Existing findings, the main agent records them verbatim and surfaces them to the user **after** `/tdd-finalizer` commits — at that point the user decides whether to defer, fix in a follow-up, or ignore each item. Do not silently drop these findings between the parallel fan-out and the finalizer.
 
 ## Script Conventions
 

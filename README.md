@@ -90,7 +90,9 @@ my-project/
 
 ## Agentic workflow
 
-The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
+The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates **for Python code**. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
+
+The workflow is Python-specific: it assumes `uv`, `ruff`, `ty`, `pytest`, and `tox`, and the `/judge-quality` checklist enforces Python conventions (pathlib, dependency inversion, type annotations, docstrings, `pytest.mark.parametrize`, etc.). It is not designed for non-Python projects.
 
 > Background reading: [Claude Code overview](https://docs.claude.com/en/docs/claude-code/overview), [subagents](https://docs.claude.com/en/docs/claude-code/sub-agents), [slash commands](https://docs.claude.com/en/docs/claude-code/slash-commands).
 
@@ -132,7 +134,7 @@ New feature or non-trivial change
 | `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
 | `/tdd-judge`      | Stages files, runs pytest + pre-commit (inc. tox)                                                     | Fix issues — rejects and routes back        |
-| `/judge-quality`  | Pure code review: design, clarity, conventions                                                        | Run any tooling                             |
+| `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
 | `/tdd-document`   | Updates `README.md` and other user-facing docs to reflect command/CLI changes                         | Touch code, tests, or agent definitions     |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
 | `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate              | Fix issues — rejects and routes back        |
@@ -141,6 +143,16 @@ New feature or non-trivial change
 
 1. Never write implementation before a failing test exists.
 2. Never merge without all validators approving.
+
+### Quality finding severity
+
+`/judge-quality` classifies every finding as one of:
+
+- **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes to `/tdd-green` automatically.
+- **Minor** — non-blocking style or clarity nit caused or kept by this change.
+- **Existing** — pre-existing issue in surrounding code that this change did not introduce.
+
+**Minor and Existing findings never block the merge.** The main agent collects them and presents the list **after** `/tdd-finalizer` commits, at which point the user decides per-item whether to defer, fix in a follow-up, or ignore.
 
 ### Using the workflow
 

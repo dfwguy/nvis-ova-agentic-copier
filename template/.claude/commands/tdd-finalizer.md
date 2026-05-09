@@ -13,6 +13,6 @@ Required briefing:
 - Do NOT pass `--no-verify` or `--no-gpg-sign`. Reject if a hook fails for a real (non-auto-fix) reason.
 
 When the subagent returns:
-- If approved, present the final commit hash and `git status` output.
+- If approved, present the final commit hash and `git status` output. **Then**, if `/judge-quality` produced any tracked **Minor** or **Existing** findings during this iteration, present them verbatim and ask the user how to handle each (defer, fix in a follow-up, ignore). Do not act on them without explicit user direction.
 - If rejected for missing README updates, route back to `/tdd-document`.
 - If rejected for any other reason, route back to `/tdd-green`.
