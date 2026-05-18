@@ -27,6 +27,20 @@ uv run pre-commit run --all-files
 
 Run commands in the sandbox first — never preemptively disable it. On a sandbox failure, try to fix the command (or sandbox config) before falling back to disabling the sandbox.
 
+## Git Remote (HTTPS over the sandbox proxy)
+
+The Claude Code sandbox proxies HTTPS to allow-listed domains but blocks raw TCP/UDP — including DNS — so SSH-based git remotes fail in-sandbox at hostname resolution. Configure this repo's `origin` to use HTTPS, with `glab` providing the credential, so the full git-flow (pull, push, `glab mr ...`) runs in-sandbox without `dangerouslyDisableSandbox`.
+
+One-time setup per clone:
+
+```bash
+glab auth status                          # verify glab is authenticated for gitlab-master.nvidia.com
+git remote set-url origin https://gitlab-master.nvidia.com/<group>/<project>.git
+git config credential.https://gitlab-master.nvidia.com.helper '!glab auth git-credential'
+```
+
+After this, `git pull`, `git push`, `glab mr create`, and `glab mr list` all work in-sandbox.
+
 ## Linting
 
 Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproject.toml`. Do not suppress rules inline (`# noqa`) without a compelling reason — add to the `pyproject.toml` ignore list with a comment explaining why.

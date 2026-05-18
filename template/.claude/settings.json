@@ -11,6 +11,12 @@
       "Bash(uv run tox *)",
       "Bash(git pull*)",
       "Bash(git fetch*)",
+      "Bash(git log*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git switch*)",
       "Bash(glab mr list*)",
       "Bash(glab mr view*)",
       "Bash(glab ci status*)",
@@ -28,14 +34,6 @@
       "allowedDomains": [
         "gitlab-master.nvidia.com"
       ]
-    },
-    "excludedCommands": [
-      "git pull",
-      "git fetch",
-      "glab mr list",
-      "glab mr view",
-      "glab ci status",
-      "glab ci list"
-    ]
+    }
   }
 }
