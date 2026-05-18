@@ -24,6 +24,11 @@
         "~/.cache/pre-commit"
       ]
     },
+    "network": {
+      "allowedDomains": [
+        "gitlab-master.nvidia.com"
+      ]
+    },
     "excludedCommands": [
       "git pull",
       "git fetch",
