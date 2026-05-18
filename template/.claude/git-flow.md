@@ -50,7 +50,7 @@ git checkout -b claude/<slug>
 
 If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
 
-`git pull` and the `glab` reads need network; run them in-sandbox first and only disable the sandbox on actual failure (per `CLAUDE.md` → "Sandbox"). The other commands are local-only and sandbox-safe.
+`git pull` and the `glab` reads need network; they run in-sandbox over HTTPS via the sandbox proxy, so no `dangerouslyDisableSandbox` is needed (see `CLAUDE.md` → "Git Remote"). The other commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
@@ -61,7 +61,7 @@ Either path lands at a local commit on the feature branch.
 
 ## Step 3: Publish (push + MR)
 
-Run from the main thread, **outside the sandbox** (`dangerouslyDisableSandbox: true`). One user approval per remote-touching command.
+Run from the main thread, **in-sandbox** — the HTTPS remote (see `CLAUDE.md` → "Git Remote") routes through the sandbox's HTTPS proxy, so `dangerouslyDisableSandbox` is not used. One user approval per remote-touching command.
 
 1. **Sanity-check branch** (in-sandbox):
    ```bash
@@ -77,7 +77,7 @@ Run from the main thread, **outside the sandbox** (`dangerouslyDisableSandbox: t
    - Non-empty → MR exists, go to 3b.
    - `glab` unauthenticated or errors for tooling reasons → surface the error and stop. Do not retry blindly.
 
-3a. **No existing MR — combined push + create** (sandbox disabled, single approval):
+3a. **No existing MR — combined push + create** (single approval):
    - `--title`: `git log -1 --format=%s` (the commit subject)
    - `--description`: Summary section (commit body, or 2–3 bullets of what shipped) + Test plan section (commands reviewers can run, e.g. `uv run tox`)
    - `--target-branch`: `main` (or the default branch from `git symbolic-ref refs/remotes/origin/HEAD` if different)
@@ -94,7 +94,7 @@ Run from the main thread, **outside the sandbox** (`dangerouslyDisableSandbox: t
    ```
    `--push` pushes the branch first, then opens the MR. `--remove-source-branch` deletes the feature branch when the MR merges; `--squash-before-merge` collapses the branch's commits into one on merge. `--yes` skips glab's own confirmation, so the Claude permission prompt is the only approval.
 
-3b. **MR exists — just push** (sandbox disabled):
+3b. **MR exists — just push**:
    ```bash
    git push
    ```
