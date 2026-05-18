@@ -1,5 +1,5 @@
 ---
-description: Final gate — runs full tox across all Python versions; mandatory before merging
+description: Final gate — runs full tox across all Python versions, commits locally; orchestrator then publishes per git-flow.md
 ---
 
 Use the Agent tool with `subagent_type: tdd-finalizer` to run pre-commit (full tox) and create the commit. Brief the subagent fully — it has no memory of this conversation.
@@ -13,6 +13,8 @@ Required briefing:
 - Do NOT pass `--no-verify` or `--no-gpg-sign`. Reject if a hook fails for a real (non-auto-fix) reason.
 
 When the subagent returns:
-- If approved, present the final commit hash and `git status` output. **Then**, if `/judge-quality` produced any tracked **Minor** or **Existing** findings during this iteration, present them verbatim and ask the user how to handle each (defer, fix in a follow-up, ignore). Do not act on them without explicit user direction.
 - If rejected for missing README updates, route back to `/tdd-document`.
 - If rejected for any other reason, route back to `/tdd-green`.
+- If approved, present the final commit hash and `git status`, then **follow `.claude/git-flow.md` Step 3 (publish: push + MR) and Step 4 (return to main)**. Do not duplicate the recipe here — git-flow.md is the source of truth.
+
+After the MR is reported, surface any deferred `/judge-quality` Minor/Existing findings verbatim and ask the user how to handle each (defer, follow-up, ignore). Do not act on them without explicit user direction.
