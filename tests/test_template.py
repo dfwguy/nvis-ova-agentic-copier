@@ -93,6 +93,16 @@ def test_claude_commands_present(generated_project: Path) -> None:
     assert len(command_files) > 0
 
 
+def test_claude_git_flow_present(generated_project: Path) -> None:
+    """Test that the git-flow lifecycle doc is included so the orchestrator loads it."""
+    git_flow = generated_project / ".claude" / "git-flow.md"
+    assert git_flow.exists()
+    content = git_flow.read_text()
+    assert "glab mr create" in content
+    assert "git checkout -b" in content
+    assert "git checkout main" in content
+
+
 def test_yamllint_helper_present(generated_project: Path) -> None:
     """Test that the yamllint helper script is included."""
     helper = generated_project / "tests" / "helpers" / "yamllint_to_json.py"

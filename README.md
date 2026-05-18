@@ -96,10 +96,24 @@ The workflow is Python-specific: it assumes `uv`, `ruff`, `ty`, `pytest`, and `t
 
 > Background reading: [Claude Code overview](https://docs.claude.com/en/docs/claude-code/overview), [subagents](https://docs.claude.com/en/docs/claude-code/sub-agents), [slash commands](https://docs.claude.com/en/docs/claude-code/slash-commands).
 
-### Routing
+### Git-flow lifecycle
+
+Every change — TDD or trivial — wraps in the same lifecycle, documented in [`.claude/git-flow.md`](template/.claude/git-flow.md) and `@`-loaded from `CLAUDE.md` so the main agent always has it in context:
+
+1. **Branch** — if on `main`/`master`, the main agent creates `claude/<slug>` from the task description.
+2. **Work** — either the TDD agents (below) or, for ≤~10-line trivial edits, a direct edit + commit.
+3. **Publish** — `git push` + `glab mr create --push --target-branch main --yes` (combined into one command when no MR exists yet; just `git push` if one does). Runs outside the sandbox, one user approval.
+4. **Return to main** — `git checkout main` so the next piece of work starts clean.
+
+The TDD agents below own the middle "work" phase only.
+
+### Routing (TDD work phase)
 
 ```
 New feature or non-trivial change
+        │
+        ▼
+   (git-flow Step 1: ensure feature branch)
         │
         ▼
    /architect          ← design first; skippable only for trivial single-function changes
@@ -123,7 +137,10 @@ New feature or non-trivial change
         └──────┬───────┴─────────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
-                          commits. Rejects to /tdd-document if README is stale.
+                          and commits locally. Rejects to /tdd-document if README is stale.
+        │
+        ▼
+   (git-flow Steps 3–4: push + MR, then return to main)
 ```
 
 ### Agents
@@ -137,7 +154,7 @@ New feature or non-trivial change
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
 | `/tdd-document`   | Updates `README.md` and other user-facing docs to reflect command/CLI changes                         | Touch code, tests, or agent definitions     |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
-| `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate              | Fix issues — rejects and routes back        |
+| `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli), then return to main) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
 

@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @.claude/project.md
 
+@.claude/git-flow.md
+
 ## Commands
 
 ```bash
@@ -81,8 +83,13 @@ All feature work routes through explicit agents invoked as slash commands (e.g. 
 
 ### Routing
 
+The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
+
 ```
 New feature or non-trivial change
+        │
+        ▼
+   (Step 1 of git-flow.md: ensure feature branch)
         │
         ▼
    /architect          ← design first; skippable only for trivial single-function changes
@@ -106,7 +113,11 @@ New feature or non-trivial change
         └──────┬───────┴─────────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
-                          commits. Rejects to /tdd-document if README is stale.
+                          and commits locally. Rejects to /tdd-document if README is
+                          stale.
+        │
+        ▼
+   (Steps 3–4 of git-flow.md: push + open/update MR, then return to main)
 ```
 
 ### Agent Summary
@@ -120,7 +131,7 @@ New feature or non-trivial change
 | `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
 | `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
-| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits; mandatory final gate | Fix issues — rejects and routes back |
+| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR + return to main) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
