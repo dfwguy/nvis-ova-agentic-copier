@@ -88,9 +88,11 @@ Run from the main thread, **outside the sandbox** (`dangerouslyDisableSandbox: t
      --target-branch main \
      --title "<commit subject>" \
      --description "<built body>" \
+     --remove-source-branch \
+     --squash-before-merge \
      --yes
    ```
-   `--push` pushes the branch first, then opens the MR. `--yes` skips glab's own confirmation, so the Claude permission prompt is the only approval.
+   `--push` pushes the branch first, then opens the MR. `--remove-source-branch` deletes the feature branch when the MR merges; `--squash-before-merge` collapses the branch's commits into one on merge. `--yes` skips glab's own confirmation, so the Claude permission prompt is the only approval.
 
 3b. **MR exists — just push** (sandbox disabled):
    ```bash
