@@ -8,7 +8,13 @@
       "Bash(uv run ruff format --check *)",
       "Bash(uv run ty check *)",
       "Bash(uv run pre-commit run *)",
-      "Bash(uv run tox *)"
+      "Bash(uv run tox *)",
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(glab mr list*)",
+      "Bash(glab mr view*)",
+      "Bash(glab ci status*)",
+      "Bash(glab ci list*)"
     ]
   },
   "sandbox": {
@@ -17,6 +23,14 @@
         "~/.cache/uv",
         "~/.cache/pre-commit"
       ]
-    }
+    },
+    "excludedCommands": [
+      "git pull",
+      "git fetch",
+      "glab mr list",
+      "glab mr view",
+      "glab ci status",
+      "glab ci list"
+    ]
   }
 }
