@@ -2,7 +2,7 @@
 
 Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, return to `main`. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
-## Step 1: Feature branch (before any code / test / doc change)
+## Step 1: Start a feature branch from clean `main`
 
 Run from the main thread with Bash:
 
@@ -10,13 +10,47 @@ Run from the main thread with Bash:
 git rev-parse --abbrev-ref HEAD
 ```
 
-- If the result is `main` or `master`, derive a kebab-case slug (≤40 chars) from the task description, then:
-  ```bash
-  git checkout -b claude/<slug>
-  ```
-- Otherwise (already on a feature branch), do **not** create another branch. Follow-up iterations append commits to the same branch and update the same MR.
+- **Already on a `claude/<slug>` feature branch** → do nothing. Follow-up iterations append commits to the same branch and update the same MR. Skip the rest of this step.
 
-Both commands are local-only and sandbox-safe. If the sandbox ever blocks them, retry with sandbox disabled — they only touch `.git/`.
+- **On `main` / `master`** → run the four pre-flight checks below first; only create the feature branch once all are clean.
+
+### Pre-flight checks (only when starting from `main`)
+
+1. **Pull latest `main`**:
+   ```bash
+   git pull --ff-only
+   ```
+   Non-fast-forward failure means local `main` has diverged — stop and surface the state to the user. Do not force-update or rebase silently.
+
+2. **Local tests**:
+   ```bash
+   uv run pytest
+   ```
+   Fast smoke test. The full `tox` matrix still runs at `/tdd-finalizer` time.
+
+3. **GitLab pipeline health on `main`**:
+   ```bash
+   glab ci status --branch main
+   ```
+   Treat `failed` / `canceled` on the latest pipeline as a failing check.
+
+4. **Outstanding merge requests**:
+   ```bash
+   glab mr list --output json
+   ```
+   Any open MR in the repo (regardless of author) counts as outstanding.
+
+**All four clean** → derive a kebab-case slug (≤40 chars) from the task description and create the branch:
+
+```bash
+git checkout -b claude/<slug>
+```
+
+**Any check fails or MRs are outstanding** → stop and ask the user to approve before continuing. Summarize what failed (test names, pipeline ID + URL, MR titles + URLs) so the decision is informed. Do not attempt to fix failures or close MRs as part of pre-flight — that's a separate task the user must direct.
+
+If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
+
+`git pull` and the `glab` reads need network; run them in-sandbox first and only disable the sandbox on actual failure (per `CLAUDE.md` → "Sandbox"). The other commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
