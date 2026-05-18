@@ -5,6 +5,7 @@ description = "{{ description }}"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "pydantic>=2.0",
 ]
 
 [build-system]
@@ -43,32 +44,38 @@ env_list = ["py311", "py314"]
 [tool.tox.env.py311]
 description = "Run tests with Python 3.11"
 deps = [
+    "hypothesis>=6.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
     "pytest-mock>=3.14.0",
+    "pytest-randomly>=3.15.0",
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "requests-mock>=1.12.1",
 ]
-commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "-v", "--junitxml=test-results.xml"]]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "--cov-fail-under=85", "-v", "--junitxml=test-results.xml"]]
 
 [tool.tox.env.py314]
 description = "Run tests with Python 3.14"
 deps = [
+    "hypothesis>=6.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
     "pytest-mock>=3.14.0",
+    "pytest-randomly>=3.15.0",
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "requests-mock>=1.12.1",
 ]
-commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "-v", "--junitxml=test-results.xml"]]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "--cov-fail-under=85", "-v", "--junitxml=test-results.xml"]]
 
 [dependency-groups]
 test = [
+    "hypothesis>=6.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
     "pytest-mock>=3.14.0",
+    "pytest-randomly>=3.15.0",
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "requests-mock>=1.12.1",
