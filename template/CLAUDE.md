@@ -35,7 +35,7 @@ Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproj
 
 - **Pathlib** over `os` for all path operations
 - **Dependency inversion** (see [Dependency Inversion](#dependency-inversion) below) — external calls are passed in as parameters, not imported and called directly
-- **Dataclasses** for structured configuration or grouped parameters
+- **Pydantic at boundaries, dataclasses internally** — any structured data crossing a system boundary (config files, CLI args, HTTP payloads, file-format I/O) is parsed into a Pydantic model so validation happens once at the edge. Internal grouped data uses `@dataclass(frozen=True)` — cheap to construct in tests, immutable by default, no runtime validation overhead. Do not reach for Pydantic on internal types just because it's available.
 - **Type annotations** on all functions and methods
 - **Docstrings** on all public functions, classes, and modules
 - **`raise`** instead of `sys.exit(1)` for error conditions
@@ -74,6 +74,9 @@ Prefer functional style throughout:
 - Use `pytest.mark.parametrize` over duplicated test functions for data-driven cases
 - Test behavior, not implementation — avoid mocking internal code; mock at system boundaries only
 - Use `pytest-subprocess` for subprocess isolation; `unittest.mock` (stdlib) for other external calls; `requests-mock` for HTTP calls
+- **Property-based tests with `hypothesis`** for pure functions — declare the invariant, let hypothesis find the counterexamples. Use it alongside `parametrize` (handpicked cases for known edges, hypothesis for the unknown ones), not as a replacement.
+- **`pytest-randomly` is enabled** — tests must be order-independent. A test that only passes in a given order is broken; fix the shared state rather than pinning order.
+- **Coverage gate**: tox enforces `--cov-fail-under=85` as the floor. Raise it as the codebase matures; never lower it to make a CI run pass.
 
 ## Multi-Agent Workflow
 
