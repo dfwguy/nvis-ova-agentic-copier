@@ -114,7 +114,7 @@ All feature work routes through explicit agents invoked as slash commands (e.g. 
 
 ### Routing
 
-The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
+The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. Branch protection on `main` (configured by `/setup-repo`) enforces this: direct pushes are rejected and merging requires approval, so even a one-line edit must go through a feature branch and an MR. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
 
 ```
 New feature or non-trivial change
@@ -175,10 +175,54 @@ When a judge (`/tdd-judge`, `/judge-quality`, `/judge-cicd`, `/tdd-finalizer`) r
 `/judge-quality` classifies every finding as one of:
 
 - **Major** — defect in this change. Triggers `Overall: Reject`; the main agent reroutes to `/tdd-green` automatically.
-- **Minor** — non-blocking style/clarity nit caused or kept by this change. Does not reroute.
-- **Existing** — pre-existing issue in surrounding code, not introduced by this change. Never blocks.
+- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent (under the `/judge-quality` slash command) appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change. Does not reroute. See "FIXME.md and TODO.md" below.
+- **Existing** — pre-existing issue in surrounding code, not introduced by this change. Surfaced verbatim in the judge's report but **not** written to `FIXME.md`. Never blocks.
 
-The **main agent owns the deferred-findings list**: when `/judge-quality` returns `Overall: Approve` with Minor or Existing findings, the main agent records them verbatim and surfaces them to the user **after** `/tdd-finalizer` commits — at that point the user decides whether to defer, fix in a follow-up, or ignore each item. Do not silently drop these findings between the parallel fan-out and the finalizer.
+`/judge-quality` ends its return note with `Added <N> entries to FIXME.md` (or `No new FIXME entries`). The main agent forwards that line to `/tdd-finalizer` so the finalizer knows whether `FIXME.md` is part of this commit, and so post-MR the user is asked whether to elevate any FIXME entries to `TODO.md`. Existing findings are surfaced to the user at the same point but kept out of `FIXME.md`.
+
+## FIXME.md and TODO.md
+
+Two repo-root, checked-in files capture work that is not part of the current change but should not be forgotten. Both apply to this repo and to projects scaffolded from it (mirrored under `template/`).
+
+### `FIXME.md` — agent-written, deferred quality findings
+
+- **Source.** Only `/judge-quality` writes to `FIXME.md`, and only for **Minor** findings (`Existing` findings stay in the judge's report). Other judges (`/judge-cicd`, `/tdd-judge`, `/tdd-finalizer`) never touch it.
+- **When.** During the `/judge-quality` slash command, after the subagent returns `Overall: Approve` with Minor findings. The main agent appends, then `git add FIXME.md` so `/tdd-finalizer` commits it in the same commit as the change.
+- **Schema.**
+  ```markdown
+  # FIXME
+
+  Non-blocking Minor findings from `/judge-quality`. Entries are removed by the main agent when the user directs the fix and it lands. See CLAUDE.md → "FIXME.md and TODO.md".
+
+  ## YYYY-MM-DD — <branch name>
+
+  - **<file>:<line>** — <verbatim Minor finding>
+  ```
+  New iterations append a new dated `##` section; do not collapse history.
+- **Lifecycle.** Entries leave `FIXME.md` when the user directs them to be addressed and the corresponding fix lands. The main agent removes the entry as part of the fix's commit. No agent auto-prunes; no append-only rule — explicit user direction drives removal.
+
+### `TODO.md` — user-driven, future work
+
+- **Source.** Only the **main agent** writes to `TODO.md`, and only at user direction (never auto-appended). The trigger is always a confirmation step: main agent asks, user answers, then main agent writes.
+- **When the main agent asks.**
+  1. **After `/tdd-finalizer` reports the MR.** When `FIXME.md` gained entries this iteration, ask whether any should be elevated to `TODO.md` as scheduled follow-up. If so, move them (remove from `FIXME.md`, add to `TODO.md`) in a separate trivial commit per `git-flow.md`.
+  2. **At `/architect` time.** When the design splits into phases or carves scope for "later", ask whether the deferred phases / follow-ups go into `TODO.md` before routing to `/tdd-red`.
+  3. **Mid-conversation.** When the user describes work as multi-step or explicitly out of scope ("we'll do Y later", "phase 2 is…"), confirm and write it down.
+- **Schema.**
+  ```markdown
+  # TODO
+
+  Deferred work, multi-phase plans, and follow-ups recorded at user direction. Agents only append at user direction; entries are removed when the work lands or the user says to drop them. See CLAUDE.md → "FIXME.md and TODO.md".
+
+  ## YYYY-MM-DD — <short title>
+
+  <context the user provided; link to originating MR / discussion if useful>
+  ```
+- **Lifecycle.** Entries leave when the work lands (main agent removes as part of that work's commit) or when the user explicitly says to drop them. No agent auto-prunes.
+
+### Why both files are checked in
+
+`FIXME.md` and `TODO.md` are part of the repo so reviewers and future-you can see what is deferred. They are not scratch — keep entries terse and link to context rather than dumping detail. Both files travel with the change that produced them, so the MR diff is the audit trail.
 
 ## Script Conventions
 
