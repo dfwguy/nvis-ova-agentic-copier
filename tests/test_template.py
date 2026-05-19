@@ -1,5 +1,6 @@
 """Tests for the copier template."""
 
+import json
 from pathlib import Path
 
 
@@ -131,6 +132,40 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
     assert "_src_path:" in content
     assert "project_name: My Test Project" in content
     assert "project_slug: my_test_project" in content
+
+
+def test_setup_repo_command_present(generated_project: Path) -> None:
+    """Test that the /setup-repo command is included so new projects can lock down GitLab."""
+    setup_repo = generated_project / ".claude" / "commands" / "setup-repo.md"
+    assert setup_repo.exists()
+    content = setup_repo.read_text()
+    assert "protected_branches" in content
+    assert "approval_rules" in content
+    assert "/approvals" in content, (
+        "self-approval block must target /projects/<id>/approvals, not the bare project endpoint"
+    )
+
+
+def test_contributing_md_absent_in_generated_project(generated_project: Path) -> None:
+    """Test that CONTRIBUTING.md is NOT generated — its absence is the gate trigger in CLAUDE.md."""
+    assert not (generated_project / "CONTRIBUTING.md").exists()
+
+
+def test_generated_claude_md_has_lockdown_gate(generated_project: Path) -> None:
+    """Test that the generated CLAUDE.md tells Claude to refuse work when CONTRIBUTING.md is missing."""
+    content = (generated_project / "CLAUDE.md").read_text()
+    assert "Repo lock-down gate" in content
+    assert "CONTRIBUTING.md" in content
+    assert "/setup-repo" in content
+    assert "glab mr approve" in content
+
+
+def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:
+    """Test that the generated .claude/settings.json denies AI-driven MR approval."""
+    settings = json.loads((generated_project / ".claude" / "settings.json").read_text())
+    deny = settings.get("permissions", {}).get("deny", [])
+    assert any("glab mr approve" in entry for entry in deny)
+    assert any("glab mr revoke" in entry for entry in deny)
 
 
 def test_copier_yaml_exists(project_root: Path) -> None:

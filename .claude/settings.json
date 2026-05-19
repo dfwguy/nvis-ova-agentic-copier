@@ -21,6 +21,10 @@
       "Bash(glab mr view*)",
       "Bash(glab ci status*)",
       "Bash(glab ci list*)"
+    ],
+    "deny": [
+      "Bash(glab mr approve*)",
+      "Bash(glab mr revoke*)"
     ]
   },
   "sandbox": {
