@@ -146,6 +146,17 @@ def test_setup_repo_command_present(generated_project: Path) -> None:
     )
 
 
+def test_setup_repo_interviews_self_approval(generated_project: Path) -> None:
+    """Test that /setup-repo interviews the user before blocking self-approval (single-user opt-out)."""
+    content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()
+    assert "AskUserQuestion" in content, (
+        "setup-repo must interview the user about self-approval"
+    )
+    assert "Block self-approval" in content
+    assert "Allow self-approval" in content
+    assert "single-user" in content
+
+
 def test_contributing_md_absent_in_generated_project(generated_project: Path) -> None:
     """Test that CONTRIBUTING.md is NOT generated — its absence is the gate trigger in CLAUDE.md."""
     assert not (generated_project / "CONTRIBUTING.md").exists()
