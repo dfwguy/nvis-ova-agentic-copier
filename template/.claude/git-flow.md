@@ -1,6 +1,6 @@
 # Git Flow
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, return to `main`. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
+Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, return to `main`. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
 ## Step 1: Start a feature branch from clean `main`
 
@@ -55,9 +55,9 @@ If `glab` is unauthenticated or errors for tooling reasons, surface the error an
 ## Step 2: Do the work
 
 - **Non-trivial change** → route through the TDD agents (`/architect` → `/tdd-red` → `/tdd-green` → `/tdd-judge` → parallel judges → `/tdd-finalizer`). See `CLAUDE.md` → "Multi-Agent Workflow" for the routing.
-- **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) → the main agent may edit + commit directly without spawning the TDD agents. Pre-commit hooks still run at commit time, so quality gates are not bypassed.
+- **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) → the main agent may edit + commit on the feature branch without spawning the TDD subagents. Pre-commit hooks still run at commit time, so quality gates are not bypassed.
 
-Either path lands at a local commit on the feature branch.
+Either path lands at a local commit on the feature branch. **Both paths then proceed to Step 3 (push + MR)** — the trivial shortcut skips the TDD subagents, not the merge request.
 
 ## Step 3: Publish (push + MR)
 
@@ -116,4 +116,4 @@ Local-only, sandbox-safe. Skip this only if the user explicitly says they want t
 ## When the lifecycle does not apply
 
 - Read-only sessions (the user is asking questions, not asking for changes).
-- Explicit user override ("don't branch", "don't open an MR", etc.) — honor it but mention what you're skipping.
+- Explicit user override to **defer publishing** ("don't push yet", "let me iterate locally first") — honor it, but mention that the change still needs an MR to land on `main` (branch protection makes this non-optional). The user can ask to skip Step 3 *for now*; they cannot ask to bypass the MR entirely.

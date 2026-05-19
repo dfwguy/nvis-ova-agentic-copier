@@ -12,3 +12,5 @@ Required briefing:
 - Point to any prior design notes (e.g. REFACTOR_PLAN.md) the subagent should read.
 
 When the architect returns, present the design verbatim and route to `/tdd-red` — no approval step needed unless the design surfaces a genuine open question for the user.
+
+**If the design splits the work into phases, identifies follow-ups, or carves out scope for "later"**, pause before routing and ask the user whether the deferred phases / follow-ups should be recorded in `TODO.md` (see `CLAUDE.md` → "FIXME.md and TODO.md"). Capture only what the user confirms; do not append speculatively. After recording (or skipping), continue to `/tdd-red` with the current-phase scope.
