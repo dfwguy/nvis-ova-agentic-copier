@@ -6,6 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @.claude/git-flow.md
 
+## Repo lock-down gate
+
+**Check before every response**: does `CONTRIBUTING.md` exist at the repo root?
+
+- **Missing** → the GitLab repo has not been locked down (no branch protection, no MR approval rules). Until that file exists:
+  1. Open the response with: `⚠ Repo not locked down — run /setup-repo to configure branch protection.`
+  2. Close the response with the same line.
+  3. Do not commit, push, or open an MR. Reading code and editing files locally is fine. The first action that touches `git commit`, `git push`, or `glab mr create` must be `/setup-repo`.
+- **Present** → the gate is silent; proceed normally.
+
+`/setup-repo` writes `CONTRIBUTING.md` and applies GitLab branch protection + MR approval rules in one shot. It is idempotent — re-running is a no-op.
+
+**Never run `glab mr approve` or `glab mr revoke`.** AI must not approve or unapprove merge requests; approval is reserved for human reviewers. `.claude/settings.json` denies these commands as a backstop.
+
 ## Commands
 
 ```bash
