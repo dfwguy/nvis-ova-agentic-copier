@@ -134,21 +134,22 @@ New feature or non-trivial change
         ▼
    /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
         │
-        ├──────────────┬─────────────────┬────────────────────┐
-        ▼              ▼                 ▼                    ▼
-  /judge-quality   /tdd-document    /judge-cicd       (run in parallel after tdd-judge)
-   pure review     syncs README to  checks .gitlab-ci.yml
-                   user-facing      sync + pipeline
-                   changes          health via glab
-        │              │                 │
-        └──────┬───────┴─────────────────┘
+        ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
+        ▼              ▼              ▼              ▼
+  /judge-quality   /judge-test    /tdd-document  /judge-cicd
+   pure code       pure test      syncs README   checks .gitlab-ci.yml
+   review          review (tests  to user-facing sync + pipeline
+                   adhere to best changes        health via glab
+                   practices)
+        │              │              │              │
+        └──────┬───────┴──────────────┴──────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
                           and commits locally. Rejects to /tdd-document if README is
                           stale.
         │
         ▼
-   (Steps 3–4 of git-flow.md: push + open/update MR, then return to main)
+   (Steps 3–4 of git-flow.md: push + open/update MR, then stay on the branch until it merges)
 ```
 
 ### Agent Summary
@@ -160,25 +161,28 @@ New feature or non-trivial change
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
 | `/tdd-judge` | Stages files, runs pytest + pre-commit (inc. tox) | Fix issues — rejects and routes back |
 | `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
+| `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
 | `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
-| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR + return to main) | Fix issues — rejects and routes back |
+| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
 ### Routing back on rejection
 
-When a judge (`/tdd-judge`, `/judge-quality`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge (`/tdd-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
-### `/judge-quality` severity model
+### `/judge-quality` and `/judge-test` severity model
 
-`/judge-quality` classifies every finding as one of:
+`/judge-quality` (production-code review) and `/judge-test` (test-quality review) both classify every finding as one of:
 
-- **Major** — defect in this change. Triggers `Overall: Reject`; the main agent reroutes to `/tdd-green` automatically.
-- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent (under the `/judge-quality` slash command) appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change. Does not reroute. See "FIXME.md and TODO.md" below.
-- **Existing** — pre-existing issue in surrounding code, not introduced by this change. Surfaced verbatim in the judge's report but **not** written to `FIXME.md`. Never blocks.
+- **Major** — defect in this change. Triggers `Overall: Reject`. `/judge-quality` reroutes to `/tdd-green`; `/judge-test` reroutes to `/tdd-red` (test defects belong to the Test Writer) — except a `/judge-test` Major flagging production code that *forces* internal mocking (a missing injection point), which reroutes to `/tdd-green`. Reroutes are automatic.
+- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent (under the `/judge-quality` or `/judge-test` slash command) appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change. Does not reroute. See "FIXME.md and TODO.md" below.
+- **Existing** — pre-existing issue in surrounding code or tests, not introduced by this change. Surfaced verbatim in the judge's report but **not** written to `FIXME.md`. Never blocks.
 
-`/judge-quality` ends its return note with `Added <N> entries to FIXME.md` (or `No new FIXME entries`). The main agent forwards that line to `/tdd-finalizer` so the finalizer knows whether `FIXME.md` is part of this commit, and so post-MR the user is asked whether to elevate any FIXME entries to `TODO.md`. Existing findings are surfaced to the user at the same point but kept out of `FIXME.md`.
+Both reviewers end their return note with `Added <N> entries to FIXME.md` (or `No new FIXME entries`). The main agent forwards those lines to `/tdd-finalizer` so the finalizer knows whether `FIXME.md` is part of this commit, and so post-MR the user is asked whether to elevate any FIXME entries to `TODO.md`. Existing findings are surfaced to the user at the same point but kept out of `FIXME.md`.
+
+`/judge-quality` owns production-code quality; `/judge-test` runs on **Sonnet** and owns test quality — meaningful assertions that would catch a wrong implementation, `pytest.mark.parametrize`, `hypothesis` for pure functions, order-independence (`pytest-randomly`), dependency-injected test doubles instead of internal-symbol patching, and test hygiene. The two reviewers do not duplicate each other.
 
 ## FIXME.md and TODO.md
 
@@ -186,8 +190,8 @@ Two repo-root, checked-in files capture work that is not part of the current cha
 
 ### `FIXME.md` — agent-written, deferred quality findings
 
-- **Source.** Only `/judge-quality` writes to `FIXME.md`, and only for **Minor** findings (`Existing` findings stay in the judge's report). Other judges (`/judge-cicd`, `/tdd-judge`, `/tdd-finalizer`) never touch it.
-- **When.** During the `/judge-quality` slash command, after the subagent returns `Overall: Approve` with Minor findings. The main agent appends, then `git add FIXME.md` so `/tdd-finalizer` commits it in the same commit as the change.
+- **Source.** Only the quality reviewers `/judge-quality` (production code) and `/judge-test` (tests) write to `FIXME.md`, and only for **Minor** findings (`Existing` findings stay in the judge's report). The other agents (`/judge-cicd`, `/tdd-judge`, `/tdd-finalizer`) never touch it.
+- **When.** During the `/judge-quality` or `/judge-test` slash command, after the subagent returns `Overall: Approve` with Minor findings. The main agent appends, then `git add FIXME.md` so `/tdd-finalizer` commits it in the same commit as the change.
 - **Schema.**
   ```markdown
   # FIXME
@@ -231,4 +235,7 @@ When writing standalone scripts:
 - Define a `main()` function as the entry point
 - Define `parse_arguments()` separately from `main()`
 - Add a `--debug` / `-d` flag that routes extra output to `logger.debug`
+- **Add a `--dry-run` / `-n` flag to any script or CLI that mutates state** (writes files, calls a network/external service, changes git state, deletes anything). With `--dry-run` set, the script makes **no** changes — it logs each action it *would* take via `logger.info` (prefixed e.g. `[dry-run]`) and exits success. This is non-negotiable for mutating tools: the user must always be able to preview the effect before committing to it. Read-only scripts do not need the flag.
 - Use `logger.info` (not `print`) once the logger is initialized
+
+The dry-run path should share the same code path as the real run, branching only at the side-effecting boundary (the injected dependency) — so a dry run exercises the same logic and a `--dry-run` value flows in as a parameter rather than being checked ad hoc throughout.

@@ -58,6 +58,7 @@ If a finding is borderline between Major and Minor, default to Major — the orc
 - [ ] `raise` used for errors — no `sys.exit`
 - [ ] `uv run` referenced in any subprocess calls that invoke Python tools
 - [ ] Compatible with Python 3.11 — no `3.12+` stdlib
+- [ ] Any script or CLI that **mutates state** (writes files, network/external calls, git changes, deletions) exposes a working `--dry-run` / `-n` flag that suppresses every side effect and logs the intended actions instead. A mutating tool that lacks it — or where `--dry-run` still performs a side effect — is **Major**.
 
 ## Output format
 
