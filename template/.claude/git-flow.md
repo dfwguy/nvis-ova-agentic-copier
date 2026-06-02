@@ -1,6 +1,6 @@
 # Git Flow
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, return to `main`. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
+Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, then stay on the branch and return to `main` only once the MR has merged and the post-merge pipeline is green. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
 ## Step 1: Start a feature branch from clean `main`
 
@@ -10,11 +10,15 @@ Run from the main thread with Bash:
 git rev-parse --abbrev-ref HEAD
 ```
 
-- **Already on a `claude/<slug>` feature branch** → do nothing. Follow-up iterations append commits to the same branch and update the same MR. Skip the rest of this step.
+- **Already on a `claude/<slug>` feature branch** → confirm it belongs to the *current* task. If it does, do nothing — follow-up iterations append commits to the same branch and update the same MR; skip the rest of this step. If it is a leftover branch from earlier, unrelated, or already-merged work, switch back with `git checkout main` and start fresh below. Never pile new, unrelated work onto a stale branch.
 
-- **On `main` / `master`** → run the four pre-flight checks below first; only create the feature branch once all are clean.
+- **On `main` / `master`** → this is the expected starting point. Run the pre-flight checks below first; only create the feature branch once all are clean.
+
+- **On any other branch** (detached `HEAD`, or a non-`claude/` branch) → stop and surface it. You are not at a known-good starting point; let the user say whether to switch to `main` first rather than guessing.
 
 ### Pre-flight checks (only when starting from `main`)
+
+**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the four checks:
 
 1. **Pull latest `main`**:
    ```bash
@@ -102,16 +106,41 @@ Run from the main thread, **in-sandbox** — the HTTPS remote (see `CLAUDE.md` �
 
 4. **Report** to the user: the MR URL (from `glab mr create`, or `glab mr view --web` in 3b), the final commit hash, and a one-line summary.
 
-## Step 4: Return to `main`
+## Step 4: Stay on the branch until the MR merges (then return to `main`)
 
-After the MR is reported, switch back so the next piece of work starts clean:
+Do **not** return to `main` as soon as the MR is opened. The work is not done when the MR exists — it is done when a human reviewer has merged it and the resulting pipeline on `main` is green. AI must never approve or merge the MR itself (see `CLAUDE.md` → "Repo lock-down gate"), so "landing" always depends on a human.
 
-```bash
-git status            # confirm clean working tree
-git checkout main
-```
+After Step 3 reports the MR, **remain on the feature branch** and tell the user the workflow is paused pending (a) human review + merge of the MR, and (b) a green post-merge pipeline. Then:
 
-Local-only, sandbox-safe. Skip this only if the user explicitly says they want to stay on the feature branch (e.g., to keep iterating without re-checking out).
+1. **Do not busy-poll the remote.** Report and wait for the user to come back (e.g. "it's merged" or "continue"). When the user prompts you — or asks you to check — verify the MR state in-sandbox:
+   ```bash
+   glab mr view --output json    # state "merged" means it landed
+   ```
+   While it is still `opened`, there is nothing to return to — stay on the branch. Follow-up iterations (review feedback, fixes) append commits to this same branch and update the same MR per Step 1 / Step 3b.
+
+2. **Confirm tests are green after the merge.** Once the MR is `merged`, check the pipeline on the default branch:
+   ```bash
+   glab ci status --branch main
+   ```
+   Treat anything other than a passing latest pipeline as "not landed yet" — surface the failing jobs to the user and stay engaged. Do not walk away from a red `main` you just merged into.
+
+3. **Only once the MR is merged AND `main` is green**, switch back so the next piece of work starts from a clean, up-to-date `main`:
+   ```bash
+   git status            # confirm clean working tree
+   git checkout main
+   git pull --ff-only    # pick up the just-merged commit
+   ```
+
+4. **Tidy up** so the next start is clean (and Step 1's "clean starting point" checks pass without leftovers):
+   ```bash
+   git branch -d claude/<slug>   # delete the merged local branch (the remote copy was auto-removed by --remove-source-branch)
+   git fetch --prune             # drop stale remote-tracking refs for branches deleted on the remote
+   ```
+   `git branch -d` is the **safe** delete — it refuses if the branch is not fully merged into `main`. If it complains, the MR did not actually land; investigate rather than forcing it with `-D`.
+
+Local git is sandbox-safe; the `glab` reads and `git pull` run in-sandbox over the HTTPS proxy (see `CLAUDE.md` → "Git Remote").
+
+Skip the wait only if the user explicitly says to — e.g. "open the MR and move on" or "stay on the branch and keep iterating." Honor the override, but state what you're skipping.
 
 ## When the lifecycle does not apply
 

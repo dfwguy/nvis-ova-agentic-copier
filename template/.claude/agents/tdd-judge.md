@@ -35,7 +35,7 @@ You are the **Judge** agent. Validate the complete implementation. Reject anythi
    - [ ] No global mutable state
    - [ ] Tests are meaningful — they would catch a wrong implementation
 
-5. **Verdict**: Approve only when all steps pass without exception. If rejecting, list each specific failure with the file and line number. On approval, hand off to `judge-quality` subagent.
+5. **Verdict**: Approve only when all steps pass without exception. If rejecting, list each specific failure with the file and line number. On approval, the orchestrator fans out to the parallel reviewers — `judge-quality`, `judge-test`, `judge-cicd`, and `tdd-document`.
 
 ## Constraints
 

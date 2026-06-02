@@ -16,7 +16,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[pre-commit](https://pre-commit.com/)** hooks: ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, and `type_check`. Code quality and JUnit reports are wired into GitLab's UI.
 - **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, and a `CLAUDE.md` that routes feature work through architect → red → green → judges → finalizer (see [Agentic workflow](#agentic-workflow) below).
-- **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking.
+- **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and a `--dry-run` flag on any state-mutating script.
 
 ## Prerequisites
 
@@ -100,10 +100,10 @@ The workflow is Python-specific: it assumes `uv`, `ruff`, `ty`, `pytest`, and `t
 
 Every change — TDD or trivial — wraps in the same lifecycle, documented in [`.claude/git-flow.md`](template/.claude/git-flow.md) and `@`-loaded from `CLAUDE.md` so the main agent always has it in context:
 
-1. **Branch** — if on `main`/`master`, the main agent creates `claude/<slug>` from the task description.
+1. **Branch** — from a clean, up-to-date `main` (a clean working tree is required to start), the main agent creates `claude/<slug>` from the task description.
 2. **Work** — either the TDD agents (below) or, for ≤~10-line trivial edits, a direct edit + commit.
-3. **Publish** — `git push` + `glab mr create --push --target-branch main --yes` (combined into one command when no MR exists yet; just `git push` if one does). Runs outside the sandbox, one user approval.
-4. **Return to main** — `git checkout main` so the next piece of work starts clean.
+3. **Publish** — `git push` + `glab mr create --push --target-branch main --yes` (combined into one command when no MR exists yet; just `git push` if one does). Runs **in-sandbox** over the HTTPS proxy, one approval per remote command. Branch protection makes the MR mandatory — there is no direct-to-`main` path, even for a one-line fix.
+4. **Stay until it merges** — do **not** return to `main` when the MR opens. Remain on the branch until a human reviewer merges the MR **and** the post-merge pipeline on `main` is green (AI never approves or merges), then `git checkout main` + `git pull` and delete the merged local branch.
 
 The TDD agents below own the middle "work" phase only.
 
@@ -127,20 +127,21 @@ New feature or non-trivial change
         ▼
    /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
         │
-        ├──────────────┬─────────────────┬────────────────────┐
-        ▼              ▼                 ▼                    ▼
-  /judge-quality   /tdd-document    /judge-cicd       (run in parallel after tdd-judge)
-   pure review     syncs README to  checks .gitlab-ci.yml
-                   user-facing      sync + pipeline
-                   changes          health via glab
-        │              │                 │
-        └──────┬───────┴─────────────────┘
+        ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
+        ▼              ▼              ▼              ▼
+  /judge-quality   /judge-test    /tdd-document  /judge-cicd
+   pure code       pure test      syncs README   checks .gitlab-ci.yml
+   review          review (tests  to user-facing sync + pipeline
+                   adhere to best changes        health via glab
+                   practices)
+        │              │              │              │
+        └──────┬───────┴──────────────┴──────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
                           and commits locally. Rejects to /tdd-document if README is stale.
         │
         ▼
-   (git-flow Steps 3–4: push + MR, then return to main)
+   (git-flow Steps 3–4: push + MR, then stay on the branch until it merges)
 ```
 
 ### Agents
@@ -152,9 +153,10 @@ New feature or non-trivial change
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
 | `/tdd-judge`      | Stages files, runs pytest + pre-commit (inc. tox)                                                     | Fix issues — rejects and routes back        |
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
+| `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
 | `/tdd-document`   | Updates `README.md` and other user-facing docs to reflect command/CLI changes                         | Touch code, tests, or agent definitions     |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
-| `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli), then return to main) | Fix issues — rejects and routes back        |
+| `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
 
@@ -163,13 +165,13 @@ New feature or non-trivial change
 
 ### Quality finding severity
 
-`/judge-quality` classifies every finding as one of:
+The two quality reviewers — `/judge-quality` (production code) and `/judge-test` (tests) — classify every finding as one of:
 
-- **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes to `/tdd-green` automatically.
-- **Minor** — non-blocking style or clarity nit caused or kept by this change.
-- **Existing** — pre-existing issue in surrounding code that this change did not introduce.
+- **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes automatically: `/judge-quality` to `/tdd-green`, `/judge-test` to `/tdd-red` (test defects belong to the Test Writer).
+- **Minor** — non-blocking style or clarity nit caused or kept by this change. The main agent appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change.
+- **Existing** — pre-existing issue in surrounding code or tests that this change did not introduce. Surfaced in the report but never written to `FIXME.md`.
 
-**Minor and Existing findings never block the merge.** The main agent collects them and presents the list **after** `/tdd-finalizer` commits, at which point the user decides per-item whether to defer, fix in a follow-up, or ignore.
+**Minor and Existing findings never block the merge.** `FIXME.md` (deferred quality findings) and its companion `TODO.md` (user-directed follow-ups) are checked into the repo so deferred work stays visible. After `/tdd-finalizer` reports the MR, the user is asked whether any `FIXME.md` entries should be elevated to `TODO.md`.
 
 ### Using the workflow
 
