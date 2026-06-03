@@ -28,6 +28,27 @@ def test_generated_tests_directory(generated_project: Path) -> None:
     assert (generated_project / "tests" / "helpers" / "__init__.py").exists()
 
 
+def test_package_init_rendered(generated_project: Path) -> None:
+    """Test that the package __init__.py has a rendered module docstring."""
+    content = (generated_project / "my_test_project" / "__init__.py").read_text()
+    assert "{{" not in content
+    assert "}}" not in content
+    assert content.strip() == '"""My Test Project."""'
+
+
+def test_generated_starter_test_exists(generated_project: Path) -> None:
+    """Test that a starter test ships so pytest collects >=1 item (no exit 5)."""
+    assert (generated_project / "tests" / "test_my_test_project.py").exists()
+
+
+def test_starter_test_rendered(generated_project: Path) -> None:
+    """Test that the starter test renders and imports the generated package."""
+    content = (generated_project / "tests" / "test_my_test_project.py").read_text()
+    assert "{{" not in content
+    assert "}}" not in content
+    assert "import my_test_project" in content
+
+
 def test_tests_init_rendered(generated_project: Path) -> None:
     """Test that tests/__init__.py has no unrendered template variables."""
     content = (generated_project / "tests" / "__init__.py").read_text()
