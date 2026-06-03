@@ -235,7 +235,7 @@ When writing standalone scripts:
 - Define a `main()` function as the entry point
 - Define `parse_arguments()` separately from `main()`
 - Add a `--debug` / `-d` flag that routes extra output to `logger.debug`
-- **Add a `--dry-run` / `-n` flag to any script or CLI that mutates state** (writes files, calls a network/external service, changes git state, deletes anything). With `--dry-run` set, the script makes **no** changes — it logs each action it *would* take via `logger.info` (prefixed e.g. `[dry-run]`) and exits success. This is non-negotiable for mutating tools: the user must always be able to preview the effect before committing to it. Read-only scripts do not need the flag.
+- **Make no changes by default; require an `--apply` / `-a` flag to mutate state** for any script or CLI that writes files, calls a network/external service, changes git state, or deletes anything. Without `--apply`, the script makes **no** changes — it logs each action it *would* take via `logger.info` (prefixed e.g. `[dry-run]`) and exits success. The mutation only happens when the user passes `--apply`. This safe-by-default stance is non-negotiable for mutating tools: a bare invocation must always be a harmless preview. Read-only scripts do not need the flag.
 - Use `logger.info` (not `print`) once the logger is initialized
 
-The dry-run path should share the same code path as the real run, branching only at the side-effecting boundary (the injected dependency) — so a dry run exercises the same logic and a `--dry-run` value flows in as a parameter rather than being checked ad hoc throughout.
+The preview and apply paths should share the same code path, branching only at the side-effecting boundary (the injected dependency) — so a preview run exercises the same logic and the `--apply` value flows in as a parameter rather than being checked ad hoc throughout.
