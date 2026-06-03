@@ -16,7 +16,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[pre-commit](https://pre-commit.com/)** hooks: ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, and `type_check`. Code quality and JUnit reports are wired into GitLab's UI.
 - **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, and a `CLAUDE.md` that routes feature work through architect → red → green → judges → finalizer (see [Agentic workflow](#agentic-workflow) below).
-- **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and a `--dry-run` flag on any state-mutating script.
+- **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
 
