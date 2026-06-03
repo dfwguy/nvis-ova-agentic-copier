@@ -143,10 +143,10 @@ After Step 3 reports the MR, **remain on the feature branch** and tell the user 
 
 4. **Tidy up** so the next start is clean (and Step 1's "clean starting point" checks pass without leftovers):
    ```bash
-   git branch -d claude/<slug>   # delete the merged local branch (the remote copy was auto-removed by --remove-source-branch)
+   git branch -D claude/<slug>   # delete the local branch (the remote copy was auto-removed by --remove-source-branch)
    git fetch --prune             # drop stale remote-tracking refs for branches deleted on the remote
    ```
-   `git branch -d` is the **safe** delete — it refuses if the branch is not fully merged into `main`. If it complains, the MR did not actually land; investigate rather than forcing it with `-D`.
+   Use `-D`, not the "safe" `-d`. Because the MR merged with `--squash-before-merge`, the branch's commits were collapsed into a *new* commit on `main` and are never ancestors of it, so `git branch -d` would refuse ("not fully merged") even though the work fully landed. The safety check therefore lives **earlier**: only reach this step once Steps 4.1–4.2 confirmed `glab mr view` reports `merged` and `main` is green. If you have **not** confirmed the merge, do not `-D` — investigate first, since for a genuinely unmerged branch `-D` would discard work.
 
 Local git is sandbox-safe; the `glab` reads and `git pull` run in-sandbox over the HTTPS proxy (see `CLAUDE.md` → "Git Remote").
 
