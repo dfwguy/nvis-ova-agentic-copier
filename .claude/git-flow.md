@@ -4,13 +4,23 @@ Every change in this repo — full TDD workflow or one-off trivial edit — foll
 
 ## Step 1: Start a feature branch from clean `main`
 
+> **This step runs first in *every* session that will make a change — a full TDD feature or a one-line trivial edit alike. It is not part of the TDD workflow; it gates it.** The most common and most damaging mistake is to skip it because "I'm already on a branch that looks right" and append to a branch whose work has already merged — that re-creates the deleted remote branch, re-introduces merged commits, and produces merge conflicts. Always verify the starting point *mechanically* (below); never infer it from the branch name.
+
 Run from the main thread with Bash:
 
 ```bash
 git rev-parse --abbrev-ref HEAD
 ```
 
-- **Already on a `claude/<slug>` feature branch** → confirm it belongs to the *current* task. If it does, do nothing — follow-up iterations append commits to the same branch and update the same MR; skip the rest of this step. If it is a leftover branch from earlier, unrelated, or already-merged work, switch back with `git checkout main` and start fresh below. Never pile new, unrelated work onto a stale branch.
+- **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
+   ```bash
+   git fetch origin --prune
+   glab mr list --source-branch "$(git rev-parse --abbrev-ref HEAD)" --state all --output json
+   ```
+   - **A merged MR exists for this branch**, or `git log --oneline origin/main..HEAD` shows only commits whose content is already in `main` → the branch is **stale / already-landed**, even when its name still matches your topic. Switch back with `git checkout main` and start fresh below. **Never re-push a merged branch** — doing so re-creates the deleted remote branch and re-introduces already-merged commits, which is exactly what causes merge conflicts.
+   - **Only an open MR — or no MR yet — for genuinely unfinished current-task work** → this is a real follow-up iteration: append commits to the same branch and update the same MR (Step 3b); skip the rest of this step.
+
+   Never pile new or unrelated work onto a stale branch, and never assume a branch is live just because its name fits the task.
 
 - **On `main` / `master`** → this is the expected starting point. Run the pre-flight checks below first; only create the feature branch once all are clean.
 
@@ -104,7 +114,7 @@ Run from the main thread, **in-sandbox** — the HTTPS remote (see `CLAUDE.md` �
    ```
    GitLab updates the existing MR with the new commits. Do not create a duplicate MR.
 
-4. **Report** to the user: the MR URL (from `glab mr create`, or `glab mr view --web` in 3b), the final commit hash, and a one-line summary.
+4. **Report** to the user: the MR URL (from `glab mr create`, or `glab mr view --web` in 3b), the current local commit hash, and a one-line summary. Because the MR uses `--squash-before-merge`, GitLab collapses the branch into a **single new commit on `main` with a different hash** when it merges — so the hash you report now is the local branch tip, *not* the SHA that will land. Don't present it as the final merged hash; the canonical post-merge SHA only exists after Step 4 (read it then with `git log -1 --format=%H` on the updated `main` if the user needs it).
 
 ## Step 4: Stay on the branch until the MR merges (then return to `main`)
 
@@ -128,7 +138,7 @@ After Step 3 reports the MR, **remain on the feature branch** and tell the user 
    ```bash
    git status            # confirm clean working tree
    git checkout main
-   git pull --ff-only    # pick up the just-merged commit
+   git pull --ff-only    # pick up the just-merged commit (the squashed SHA, not your branch tip)
    ```
 
 4. **Tidy up** so the next start is clean (and Step 1's "clean starting point" checks pass without leftovers):

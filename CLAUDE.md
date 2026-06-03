@@ -41,6 +41,18 @@ uv run pre-commit run --all-files
 
 Run commands in the sandbox first — never preemptively disable it. On a sandbox failure, try to fix the command (or sandbox config) before falling back to disabling the sandbox.
 
+## Links in responses
+
+This terminal makes a URL clickable **only when it sits on its own line inside a fenced code block**. Every other form renders as styled, unclickable text: bare URLs in prose, inline-code URLs (single backticks), Markdown `[text](url)` links, and `<url>` angle brackets all fail. When surfacing a URL the user may want to click (MR/pipeline links, docs, dashboards), put it alone in a fenced block:
+
+````
+```
+https://example.com/path
+```
+````
+
+Add any label as plain prose *before* the block, not inside it.
+
 ## Git Remote (HTTPS over the sandbox proxy)
 
 The Claude Code sandbox proxies HTTPS to allow-listed domains but blocks raw TCP/UDP — including DNS — so SSH-based git remotes fail in-sandbox at hostname resolution. Configure this repo's `origin` to use HTTPS, with `glab` providing the credential, so the full git-flow (pull, push, `glab mr ...`) runs in-sandbox without `dangerouslyDisableSandbox`.
@@ -239,3 +251,9 @@ When writing standalone scripts:
 - Use `logger.info` (not `print`) once the logger is initialized
 
 The preview and apply paths should share the same code path, branching only at the side-effecting boundary (the injected dependency) — so a preview run exercises the same logic and the `--apply` value flows in as a parameter rather than being checked ad hoc throughout.
+
+### Verifying mutating commands against the real environment
+
+Our tests inject fakes at every system boundary (see [Dependency Inversion](#dependency-inversion)) and never reach a real API, network, or filesystem outside the sandbox — fast and hermetic, but it means **green tests alone don't prove the command works against the real thing**: auth, connectivity, argument wiring, and the read side all go unexercised. So before and after changing a mutating script or CLI, run the **actual command outside the sandbox, without `--apply`**, to smoke-test it against the real environment. Run it *before* the change to confirm the baseline works, and *after* to confirm the change didn't break the real-world path. Omitting `--apply` keeps the run a harmless preview — it drives the real code path up to the side-effecting boundary and logs what it *would* do, mutating nothing — which is exactly what makes it safe to run for real.
+
+This is the deliberate exception to the "sandbox first" rule above: the run is sanctioned outside the sandbox precisely because the tests cannot cover this path. Assume the working directory is already provisioned for these local runs (authenticated tooling, configured remotes, installed dependencies) **unless the project's `.claude/project.md` notes otherwise** — if it says the environment isn't set up for local running, skip the real-environment run rather than guessing.
