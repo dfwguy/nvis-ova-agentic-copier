@@ -15,7 +15,7 @@ git rev-parse --abbrev-ref HEAD
 - **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
    ```bash
    git fetch origin --prune
-   glab mr list --source-branch "$(git rev-parse --abbrev-ref HEAD)" --state all --output json
+   glab mr list --source-branch "$(git rev-parse --abbrev-ref HEAD)" --all --output json
    ```
    - **A merged MR exists for this branch**, or `git log --oneline origin/main..HEAD` shows only commits whose content is already in `main` → the branch is **stale / already-landed**, even when its name still matches your topic. Switch back with `git checkout main` and start fresh below. **Never re-push a merged branch** — doing so re-creates the deleted remote branch and re-introduces already-merged commits, which is exactly what causes merge conflicts.
    - **Only an open MR — or no MR yet — for genuinely unfinished current-task work** → this is a real follow-up iteration: append commits to the same branch and update the same MR (Step 3b); skip the rest of this step.
