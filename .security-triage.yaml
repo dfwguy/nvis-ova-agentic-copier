@@ -1,0 +1,40 @@
+version: "1.0"
+project: nvis-ova/nvis-ova-agentic-copier
+last_updated: "2026-06-23"
+
+false_positives: []
+
+accepted_risks:
+  - slug: threat-copier-trust-task-execution
+    title: "Copier --trust task execution with tampered template"
+    reason: >
+      The --trust flag is Copier's intentional, explicit-consent mechanism for running
+      post-generation tasks. Removing it would require removing git init / uv sync /
+      pre-commit install from _tasks, which breaks the primary UX. Mitigated by branch
+      protection + MR approval requirements making it hard to merge tampered _tasks
+      without human review.
+    triaged_by: breese@nvidia.com
+    date: "2026-06-23"
+
+  - slug: assumption-project-slug-unvalidated
+    title: "project_slug unvalidated in pyproject.toml.jinja (TOML injection)"
+    reason: >
+      Copier templates are scaffolded by users for their own projects -- project_slug
+      is supplied by the same user who will own the resulting pyproject.toml. No
+      cross-trust boundary or external attack surface exists in normal use. Risk
+      increases only in automated CI pipelines passing untrusted --data, which is
+      outside the assumed usage pattern. Argus finding 796e7078 accepted 2026-05-18.
+    triaged_by: breese@nvidia.com
+    date: "2026-06-23"
+
+  - slug: assumption-broad-agent-read-allowlist
+    title: "AI agent broad git/glab read allowlist enables repo enumeration"
+    reason: >
+      The settings.json allow list grants git log*, git diff*, glab mr view*, etc.
+      These read-only permissions are required for the agent workflow to function
+      (branch checks, diff review, MR state inspection). A prompt-injected agent
+      could enumerate repo history, but this is an inherent capability of any
+      read-access tool use. No credentials or secrets are stored in git history.
+      Accepted as architectural -- the deny list addresses write/approval actions.
+    triaged_by: breese@nvidia.com
+    date: "2026-06-23"

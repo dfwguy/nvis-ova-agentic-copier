@@ -24,7 +24,9 @@
     ],
     "deny": [
       "Bash(glab mr approve*)",
-      "Bash(glab mr revoke*)"
+      "Bash(glab mr revoke*)",
+      "Bash(glab api*merge_requests*approve*)",
+      "Bash(glab api*merge_requests*merge*)"
     ]
   },
   "sandbox": {
