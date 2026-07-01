@@ -5,6 +5,8 @@ tools: Read, Grep, Glob
 model: sonnet
 ---
 
+@.claude/lang/python.md
+
 # Test Judge — Test-Quality Review Only
 
 ## Role

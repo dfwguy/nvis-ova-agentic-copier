@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Bash
 model: opus
 ---
 
+@.claude/lang/python.md
+
 # Architect Agent
 
 ## Role

@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Bash
 model: haiku
 ---
 
+@.claude/lang/python.md
+
 # TDD Finalizer — Multi-Python Validator
 
 ## Role

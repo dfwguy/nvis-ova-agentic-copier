@@ -1,0 +1,6 @@
+---
+description: Python testing patterns (fixtures, subprocess, HTTP, imports, logging)
+globs: "**/test_*.py,**/conftest.py"
+alwaysApply: false
+---
+@.claude/lang/python-testing.md
