@@ -1,26 +1,6 @@
 ---
-description:
-globs: **.py
+description: Python coding conventions for this project
+globs: "**/*.py"
 alwaysApply: false
 ---
-# Python
-
-## Always
-
-* Include docstrings
-* Include typing
-* Use dependency inversion - pass functions to functions when dealing with external dependencies
-* Include short arguments like -c for --commands
-* Create private functions with _ when not called from main
-* Never add `sys.exit(1)`, use `raise` instead
-* Use Pathlib instead of os, where applicable
-* Use `uv`, do not call `python` directly
-* Be concise
-
-## Initial Creation and Cleanup
-
-* Have a main function
-* Have a shebang
-* Use `logger.info` after our logger is setup instead of `print`
-* `parse_arguments` should be a separate function from `main`
-* Add a --debug -d flag that outputs to logger.debug extra information
+@.claude/lang/python.md

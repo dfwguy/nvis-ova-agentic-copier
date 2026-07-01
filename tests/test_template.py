@@ -200,6 +200,79 @@ def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:
     assert any("glab mr revoke" in entry for entry in deny)
 
 
+def test_agents_md_present(generated_project: Path) -> None:
+    """Test that AGENTS.md is generated for Codex and other AI agent compatibility."""
+    agents_md = generated_project / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text()
+    assert "CLAUDE.md" in content
+    assert ".claude/lang/python.md" in content
+
+
+def test_claude_lang_python_present(generated_project: Path) -> None:
+    """Test that .claude/lang/python.md is generated with Python conventions."""
+    python_md = generated_project / ".claude" / "lang" / "python.md"
+    assert python_md.exists()
+    content = python_md.read_text()
+    assert "uv run pytest" in content
+    assert "Dependency Inversion" in content
+    assert "pytest.mark.parametrize" in content
+
+
+def test_generated_claude_md_has_language_index(generated_project: Path) -> None:
+    """Test that the generated CLAUDE.md references the language conventions file."""
+    content = (generated_project / "CLAUDE.md").read_text()
+    assert ".claude/lang/python.md" in content
+    assert "Language-Specific Conventions" in content
+
+
+def test_claude_lang_python_testing_present(generated_project: Path) -> None:
+    """Test that the detailed testing reference is generated as a canonical language file."""
+    testing_md = generated_project / ".claude" / "lang" / "python-testing.md"
+    assert testing_md.exists()
+    content = testing_md.read_text()
+    assert "pytest-subprocess" in content
+    assert "requests-mock" in content
+
+
+def test_cursor_testing_rule_references_canonical_file(generated_project: Path) -> None:
+    """Test the Cursor test rule is a thin @-import of the canonical file, not a duplicate."""
+    rule = generated_project / "tests" / ".cursor" / "rules" / "testing.mdc"
+    assert rule.exists()
+    content = rule.read_text()
+    assert "@.claude/lang/python-testing.md" in content
+    # The old per-topic duplicated rules must be gone.
+    rules_dir = generated_project / "tests" / ".cursor" / "rules"
+    assert not (rules_dir / "subprocess.mdc").exists()
+    assert not (rules_dir / "modify_tests.mdc").exists()
+
+
+def test_claude_guidance_present(generated_project: Path) -> None:
+    """Test that language-agnostic guidance files are generated in .claude/guidance/."""
+    guidance = generated_project / ".claude" / "guidance"
+    assert (guidance / "tdd.md").exists()
+    assert (guidance / "markdown.md").exists()
+    assert "Red" in (guidance / "tdd.md").read_text()
+
+
+def test_general_cursor_rules_reference_canonical_files(
+    generated_project: Path,
+) -> None:
+    """Test the general Cursor rules are thin @-imports of the canonical guidance files."""
+    rules = generated_project / ".cursor" / "rules"
+    assert "@.claude/guidance/tdd.md" in (rules / "tdd.mdc").read_text()
+    assert "@.claude/guidance/markdown.md" in (rules / "markdown.mdc").read_text()
+
+
+def test_generated_claude_md_has_general_guidance_index(
+    generated_project: Path,
+) -> None:
+    """Test that the generated CLAUDE.md references the general guidance layer."""
+    content = (generated_project / "CLAUDE.md").read_text()
+    assert "General Guidance" in content
+    assert ".claude/guidance/tdd.md" in content
+
+
 def test_copier_yaml_exists(project_root: Path) -> None:
     """Test that copier.yaml exists and defines the expected variables."""
     copier_yaml = project_root / "copier.yaml"

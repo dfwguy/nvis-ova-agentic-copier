@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
 ---
 
+@.claude/lang/python.md
+
 # TDD Red Phase — Test Writer
 
 ## Role

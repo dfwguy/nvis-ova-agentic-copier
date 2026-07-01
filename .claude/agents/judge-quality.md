@@ -5,6 +5,8 @@ tools: Read, Grep, Glob
 model: opus
 ---
 
+@.claude/lang/python.md
+
 # Quality Judge — Code Review Only
 
 ## Role
