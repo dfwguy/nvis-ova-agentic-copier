@@ -9,7 +9,8 @@ If you're starting a new Python project on the team, this is the starting point.
 The [documentation index](docs/README.md) organizes deeper material using
 [Diátaxis](https://diataxis.fr/): a first-project tutorial, task-focused
 how-to guides, a template reference, and explanations of the template design
-and [why its coding standards exist](docs/explanation/coding-standards.md).
+and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
+[why its coding standards exist](docs/explanation/coding-standards.md).
 
 ## What you get
 

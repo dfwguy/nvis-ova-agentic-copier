@@ -10,7 +10,8 @@ copier template. Choose the page that matches what you need now.
 - **[Reference](reference/template-contract.md)** is the authoritative lookup
   for template inputs, generated files, tasks, and supported tooling.
 - **[Explanation](explanation/)** provides the reasoning behind the template
-  design and its coding standards.
+  design, [why it uses Diátaxis](explanation/why-diataxis.md), and its coding
+  standards.
 
 The repository's [Diátaxis process](diataxis.md) explains how contributors keep
 these documentation types distinct.
