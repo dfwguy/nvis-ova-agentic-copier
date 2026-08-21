@@ -2,7 +2,7 @@
 description: Implementer — writes minimal code to pass failing tests; no extras
 ---
 
-Use the Agent tool with `subagent_type: tdd-green` to implement the minimum code needed to pass the failing tests. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: tdd-green` and the current `group_id` to implement the minimum code needed to pass the failing tests. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 

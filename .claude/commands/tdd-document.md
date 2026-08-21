@@ -2,7 +2,7 @@
 description: Update README.md (and other user-facing docs) to reflect command/CLI changes
 ---
 
-Use the Agent tool with `subagent_type: tdd-document` to sync user-facing documentation. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: tdd-document` and the current `group_id` to sync user-facing documentation. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 

@@ -46,12 +46,12 @@ A change to the template directory may need both updated; a change to `tests/` o
    - Jobs missing `tags`, `rules`, or `artifacts` patterns the others use.
    - `allow_failure: true` on a job that should block.
 
-4. **Check pipeline health via `glab`**. From the repo root:
+4. **Check pipeline health via `glab` only after the local checks pass**. The config-sync and pipeline-shape checks above are local and cheap; if either produces a Reject, return that rejection immediately and do not make remote `glab` calls. From the repo root:
    ```
    glab ci status                   # current branch's latest pipeline
    glab ci list --per-page 5        # recent pipelines on this project
    ```
-   If `glab` is not authenticated, not configured, or fails for sandbox/permission reasons, **note it as "needs verification"** and continue — do not Reject for tooling issues outside the change. If pipelines exist and the most recent run on `main` (or the current branch) is `failed`, surface the failing jobs and Reject so the failure gets addressed before the new commit lands on top of a broken pipeline.
+   Run `glab ci status` first. If it identifies a failed pipeline relevant to this iteration, reject immediately and do not run `glab ci list`. Otherwise, run the recent-pipeline listing. If `glab` is not authenticated, not configured, or fails for sandbox/permission reasons, **note it as "needs verification"** and continue — do not Reject for tooling issues outside the change. If pipelines exist and the most recent run on `main` (or the current branch) is `failed`, surface the failing jobs and Reject so the failure gets addressed before the new commit lands on top of a broken pipeline.
 
 ## Verdict
 
@@ -68,3 +68,4 @@ On approval, hand off to `tdd-finalizer`. On rejection, name the agent that shou
 - Do not run `uv run pytest`, `ruff`, `ty`, or `pre-commit` here — `tdd-judge` already ran those. Re-running them is wasted work.
 - Do not push, retry pipelines, or take any action against the remote. `glab` is for read-only inspection.
 - If a finding can only be confirmed by running the pipeline, flag it as "needs verification" rather than rejecting.
+- Return immediately after the first blocking failure; do not run later commands or checks after a Reject.

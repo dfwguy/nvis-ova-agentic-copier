@@ -2,7 +2,7 @@
 description: Design phase — produces a module/function breakdown before any code is written
 ---
 
-Use the Agent tool with `subagent_type: architect` to design the following work in a fresh subagent context. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: architect` and the current `group_id` to design the following work in a fresh subagent context. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 

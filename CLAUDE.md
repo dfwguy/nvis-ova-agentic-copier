@@ -105,7 +105,7 @@ New feature or non-trivial change
    /tdd-green          ← Implementer: minimal code to pass tests
         │
         ▼
-   /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
+   /tdd-judge          ← runs ruff + non-tox pre-commit checks
         │
         ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
         ▼              ▼              ▼              ▼
@@ -117,7 +117,7 @@ New feature or non-trivial change
         │              │              │              │
         └──────┬───────┴──────────────┴──────────────┘
                ▼
-        /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
+        /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
                           and commits locally. Rejects to /tdd-document if README is
                           stale.
         │
@@ -132,7 +132,7 @@ New feature or non-trivial change
 | `/architect` | Designs modules, data structures, dependency boundaries | Write code or tests |
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
-| `/tdd-judge` | Stages files, runs pytest + pre-commit (inc. tox) | Fix issues — rejects and routes back |
+| `/tdd-judge` | Runs ruff + non-tox pre-commit checks | Fix issues — rejects and routes back |
 | `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
 | `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
 | `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
@@ -140,6 +140,10 @@ New feature or non-trivial change
 | `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
+
+### Completion requires publication
+
+For any user-requested repository change, local validation is not a completion point. The main agent must continue through `.claude/git-flow.md` Step 3 and report the direct merge-request URL and branch-tip commit in its final response. It may stop before publication only when the user explicitly requests local-only work or a concrete commit, authentication, push, or MR-creation blocker prevents it; report that blocker and the required next action plainly.
 
 ### Routing back on rejection
 

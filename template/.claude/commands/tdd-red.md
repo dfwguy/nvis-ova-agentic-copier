@@ -2,7 +2,7 @@
 description: Test Writer — writes failing tests and confirms Red before any implementation
 ---
 
-Use the Agent tool with `subagent_type: tdd-red` to write failing tests in a fresh subagent context. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: tdd-red` and the current `group_id` to write failing tests in a fresh subagent context. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 

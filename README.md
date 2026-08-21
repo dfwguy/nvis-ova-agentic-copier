@@ -125,7 +125,7 @@ New feature or non-trivial change
    /tdd-green          ← Implementer: minimal code to pass tests
         │
         ▼
-   /tdd-judge          ← stages files, runs pytest + pre-commit (inc. tox)
+   /tdd-judge          ← runs ruff + non-tox pre-commit checks
         │
         ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
         ▼              ▼              ▼              ▼
@@ -137,7 +137,7 @@ New feature or non-trivial change
         │              │              │              │
         └──────┬───────┴──────────────┴──────────────┘
                ▼
-        /tdd-finalizer  ← always runs; verifies README, runs pre-commit (inc. tox),
+        /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
                           and commits locally. Rejects to /tdd-document if README is stale.
         │
         ▼
@@ -151,7 +151,7 @@ New feature or non-trivial change
 | `/architect`      | Designs modules, data structures, dependency boundaries                                               | Write code or tests                         |
 | `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
-| `/tdd-judge`      | Stages files, runs pytest + pre-commit (inc. tox)                                                     | Fix issues — rejects and routes back        |
+| `/tdd-judge`      | Runs ruff + non-tox pre-commit checks                                                                  | Fix issues — rejects and routes back        |
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
 | `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
 | `/tdd-document`   | Updates `README.md` and other user-facing docs to reflect command/CLI changes                         | Touch code, tests, or agent definitions     |
