@@ -2,7 +2,7 @@
 description: Final gate — runs full tox across all Python versions, commits locally; orchestrator then publishes per git-flow.md
 ---
 
-Use the Agent tool with `subagent_type: tdd-finalizer` and the current `group_id` to run ruff checks, direct pytest, then pre-commit (full tox), and create the commit. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: tdd-finalizer` and the current `group_id` to run ruff checks, non-tox pre-commit, then the full tox matrix once, and create the commit. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 
@@ -12,7 +12,7 @@ Required briefing:
 - The `Added <N> entries to FIXME.md` line from `/judge-quality` **and** `/judge-test` (or `No new FIXME entries`) so the subagent knows whether `FIXME.md` is part of this commit.
 - Whether the change touched any user-facing surface (CLI flags, scripts, slash commands, setup steps, env vars). The subagent will verify `README.md` reflects it and reject back to `tdd-document` if not.
 - Do NOT pass `--no-verify` or `--no-gpg-sign`. Reject if a hook fails for a real (non-auto-fix) reason.
-- Require the subagent to run `uv run ruff check`, `uv run ruff format --check`, and direct pytest in that order, then stop and return on the first blocking failure. It must not rerun a failing hook or stage/commit after any failed validation.
+- Require the subagent to run `uv run ruff check`, `uv run ruff format --check`, non-tox pre-commit, and `uv run tox run-parallel` in that order. Tox is the single test execution; do not run direct pytest. Stop and return on the first blocking failure; do not rerun a failing hook or stage/commit after any failed validation.
 
 The subagent must also confirm that `FIXME.md` is staged whenever `/judge-quality` or `/judge-test` reported new entries, so the findings land in the same commit as the change that produced them. If `FIXME.md` was modified but not staged, the subagent stages it before committing.
 

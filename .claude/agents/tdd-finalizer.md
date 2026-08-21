@@ -31,17 +31,17 @@ Always, after `judge-quality` approves, `judge-test` approves, `tdd-document` fi
    ```
    On failure, reject and return to the Implementer **immediately**. Do not run tests, pre-commit, check documentation, stage files, or commit.
 
-3. **Run the next-cheapest test gate**:
+3. **Run the remaining non-test hooks**:
    ```
-   uv run pytest -v
+   SKIP=tox uv run pre-commit run --files $(git diff --name-only HEAD; git ls-files --others --exclude-standard)
    ```
-   On failure, reject and return to the Implementer **immediately**. Do not run pre-commit, check documentation, stage files, or commit.
+   On failure, reject and return to the Implementer **immediately**. Do not run tox, check documentation, stage files, or commit.
 
-4. **Run the full, more-expensive validation only after the cheap gates pass**:
+4. **Run the test suite once across all supported Python versions**:
    ```
-   uv run pre-commit run --files $(git diff --name-only HEAD; git ls-files --others --exclude-standard)
+   uv run tox run-parallel
    ```
-   This includes the type and tox hooks. On failure, reject and return to the Implementer **immediately** with the full hook output. Do not rerun it and do not continue to later steps.
+   Do not run direct pytest: tox is the single test execution and runs pytest in every supported interpreter. On failure, reject and return to the Implementer **immediately** with the full output. Do not rerun it and do not continue to later steps.
 
 5. **Verify README.md reflects user-facing changes**: if this iteration added, removed, or modified any user-facing surface (CLI flags, scripts, slash commands, `uv run` invocations, setup steps, env vars), confirm `README.md` was updated to match. If a user-facing change shipped without a corresponding doc update, **reject and route back to `tdd-document` immediately** — do not update README yourself. If nothing user-facing changed, skip this step.
 
@@ -51,7 +51,7 @@ Always, after `judge-quality` approves, `judge-test` approves, `tdd-document` fi
    git commit
    ```
 
-7. **Verdict**: Approve only when ruff, pytest, and pre-commit exit cleanly, README is in sync, and the commit succeeds. If rejecting, include the first blocking failure's hook name, file, and error output — and name which agent should pick it up (`tdd-document` for missing doc updates, Implementer for everything else).
+7. **Verdict**: Approve only when ruff, non-test pre-commit hooks, and tox exit cleanly, README is in sync, and the commit succeeds. If rejecting, include the first blocking failure's hook name, file, and error output — and name which agent should pick it up (`tdd-document` for missing doc updates, Implementer for everything else).
 
 ## Hand-off to publish
 
