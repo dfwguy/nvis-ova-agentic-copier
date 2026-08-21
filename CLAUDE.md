@@ -78,6 +78,7 @@ Language-agnostic guidance lives in `.claude/guidance/`. Read the relevant file 
 |-------|------|
 | Test-driven development | `.claude/guidance/tdd.md` |
 | Markdown conventions | `.claude/guidance/markdown.md` |
+| Diátaxis documentation process | `docs/diataxis.md` |
 
 ## Multi-Agent Workflow
 
@@ -99,27 +100,30 @@ New feature or non-trivial change
    /architect          ← design first; skippable only for trivial single-function changes
         │
         ▼
-   /tdd-red            ← Test Writer: write and confirm failing tests
-        │
-        ▼
+   /tdd-red ──────────── /diataxis-writer
+   failing tests          docs/ content by Diátaxis category
+        │                         │
+        └──────────────┬──────────┘
+                       ▼
    /tdd-green          ← Implementer: minimal code to pass tests
         │
-        ▼
-   /tdd-judge          ← runs ruff + non-tox pre-commit checks
-        │
-        ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
+        ├─────────────────────────┐   (run in parallel after tdd-green)
+        ▼                         ▼
+   /tdd-judge              /diataxis-judge
+   implementation checks    docs/ accuracy + Diátaxis fit
+        │                         │
+        └──────────────┬──────────┘
+                       ▼
+        ├──────────────┬──────────────┬──────────────┐   (run in parallel after both approve)
         ▼              ▼              ▼              ▼
   /judge-quality   /judge-test    /tdd-document  /judge-cicd
-   pure code       pure test      syncs README   checks .gitlab-ci.yml
-   review          review (tests  to user-facing sync + pipeline
-                   adhere to best changes        health via glab
-                   practices)
+   pure code       pure test      README landing checks .gitlab-ci.yml
+   review          review         accuracy       + pipeline health
         │              │              │              │
         └──────┬───────┴──────────────┴──────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
-                          and commits locally. Rejects to /tdd-document if README is
-                          stale.
+                          and commits locally. Rejects to /tdd-document if README is stale.
         │
         ▼
    (Steps 3–4 of git-flow.md: push + open/update MR, then stay on the branch until it merges)
@@ -131,15 +135,26 @@ New feature or non-trivial change
 |---------|------|----------|
 | `/architect` | Designs modules, data structures, dependency boundaries | Write code or tests |
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
+| `/diataxis-writer` | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
 | `/tdd-judge` | Runs ruff + non-tox pre-commit checks | Fix issues — rejects and routes back |
+| `/diataxis-judge` | Read-only validation that `docs/` is technically accurate and fits its Diátaxis category | Edit docs, code, tests, or README.md |
 | `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
 | `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
-| `/tdd-document` | Updates README.md and other user-facing docs to reflect command/CLI changes | Touch code, tests, or agent definitions |
+| `/tdd-document` | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
+
+### Diátaxis documentation
+
+Diátaxis separates documentation by reader need: **Tutorials** teach through a
+lesson, **How-to guides** solve a task, **Reference** supports accurate lookup,
+and **Explanation** supplies understanding and rationale. The writer and judge
+use this separation so `docs/` remains navigable instead of becoming a mixed
+collection of catch-all pages. See [`docs/diataxis.md`](docs/diataxis.md) for
+the required workflow and category guidance.
 
 ### Completion requires publication
 
@@ -147,7 +162,7 @@ For any user-requested repository change, local validation is not a completion p
 
 ### Routing back on rejection
 
-When a judge (`/tdd-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
 ### `/judge-quality` and `/judge-test` severity model
 

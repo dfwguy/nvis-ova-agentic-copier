@@ -1,6 +1,6 @@
 ---
 name: judge-quality
-description: Code reviewer — pure quality assessment, no tooling; classifies findings as Major / Minor / Existing per section. Use after tdd-judge approves.
+description: Code reviewer — pure quality assessment, no tooling; classifies findings as Major / Minor / Existing per section. Use after the TDD and Diátaxis judges approve.
 tools: Read, Grep, Glob
 model: opus
 ---

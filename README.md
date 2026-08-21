@@ -15,7 +15,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
 - **[pre-commit](https://pre-commit.com/)** hooks: ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, and `type_check`. Code quality and JUnit reports are wired into GitLab's UI.
-- **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, and a `CLAUDE.md` that routes feature work through architect → red → green → judges → finalizer (see [Agentic workflow](#agentic-workflow) below).
+- **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that routes feature work through architecture, TDD, Diátaxis documentation, judges, and finalization (see [Agentic workflow](#agentic-workflow) below).
 - **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
@@ -71,13 +71,14 @@ You can re-run any of these manually if a step fails.
 ```
 my-project/
 ├── .claude/
-│   ├── agents/            # Claude Code agent definitions (architect, tdd-*, judge-*)
+│   ├── agents/            # Claude Code agent definitions (architect, tdd-*, diataxis-*, judge-*)
 │   ├── commands/          # Slash-command wrappers for the agents above
 │   ├── project.md         # Project-specific Claude context (loaded by CLAUDE.md)
 │   └── settings.json
 ├── .gitlab-ci.yml         # GitLab CI pipeline (ruff, pytest+tox, yamllint, ty)
 ├── .pre-commit-config.yaml
 ├── CLAUDE.md              # Conventions + agentic workflow instructions
+├── docs/                  # Diátaxis documentation: tutorials, how-tos, reference, explanation
 ├── README.md              # Generated stub — fill in for your project
 ├── my_project/
 │   └── __init__.py
@@ -107,6 +108,14 @@ Every change — TDD or trivial — wraps in the same lifecycle, documented in [
 
 The TDD agents below own the middle "work" phase only.
 
+### Diátaxis documentation
+
+[Diátaxis](https://diataxis.fr/) organizes documentation by the reader's need:
+**Tutorials** teach a lesson, **How-to guides** complete a task, **Reference**
+supports accurate lookup, and **Explanation** builds understanding. Generated
+projects include [`docs/diataxis.md`](template/docs/diataxis.md), which defines
+the documentation process and keeps these four kinds of content distinct.
+
 ### Routing (TDD work phase)
 
 ```
@@ -119,21 +128,25 @@ New feature or non-trivial change
    /architect          ← design first; skippable only for trivial single-function changes
         │
         ▼
-   /tdd-red            ← Test Writer: write and confirm failing tests
-        │
-        ▼
+   /tdd-red ──────────── /diataxis-writer       (run in parallel)
+   failing tests          docs/ content by Diátaxis category
+        │                         │
+        └──────────────┬──────────┘
+                       ▼
    /tdd-green          ← Implementer: minimal code to pass tests
         │
-        ▼
-   /tdd-judge          ← runs ruff + non-tox pre-commit checks
-        │
-        ├──────────────┬──────────────┬──────────────┐   (run in parallel after tdd-judge)
+        ├─────────────────────────┐   (run in parallel after tdd-green)
+        ▼                         ▼
+   /tdd-judge              /diataxis-judge
+   implementation checks    docs/ accuracy + Diátaxis fit
+        │                         │
+        └──────────────┬──────────┘
+                       ▼
+        ├──────────────┬──────────────┬──────────────┐   (run in parallel after both approve)
         ▼              ▼              ▼              ▼
   /judge-quality   /judge-test    /tdd-document  /judge-cicd
-   pure code       pure test      syncs README   checks .gitlab-ci.yml
-   review          review (tests  to user-facing sync + pipeline
-                   adhere to best changes        health via glab
-                   practices)
+   pure code       pure test      README landing checks .gitlab-ci.yml
+   review          review         accuracy       + pipeline health
         │              │              │              │
         └──────┬───────┴──────────────┴──────────────┘
                ▼
@@ -150,11 +163,13 @@ New feature or non-trivial change
 |-------------------|-------------------------------------------------------------------------------------------------------|---------------------------------------------|
 | `/architect`      | Designs modules, data structures, dependency boundaries                                               | Write code or tests                         |
 | `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
+| `/diataxis-writer`| Creates or updates `docs/` content as a Tutorial, How-to guide, Reference, or Explanation            | Touch code, tests, or README.md             |
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
 | `/tdd-judge`      | Runs ruff + non-tox pre-commit checks                                                                  | Fix issues — rejects and routes back        |
+| `/diataxis-judge` | Read-only validation that `docs/` is accurate and fits its Diátaxis category                          | Edit docs, code, tests, or README.md        |
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
 | `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
-| `/tdd-document`   | Updates `README.md` and other user-facing docs to reflect command/CLI changes                         | Touch code, tests, or agent definitions     |
+| `/tdd-document`   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
 | `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
 
@@ -181,7 +196,7 @@ In a Claude Code session opened against the generated project:
 /architect add a CSV ingestion module that streams rows into the existing pipeline
 ```
 
-Claude designs the module, then you proceed with `/tdd-red`, `/tdd-green`, and onward. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
+Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/tdd-judge` and `/diataxis-judge` run together before the remaining gates. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
 
 The same agents and commands also live in **this** repo's `.claude/`, so you can dogfood the workflow while developing the template itself.
 

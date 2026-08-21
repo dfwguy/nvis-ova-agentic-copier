@@ -115,6 +115,30 @@ def test_claude_commands_present(generated_project: Path) -> None:
     assert len(command_files) > 0
 
 
+def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -> None:
+    """Test that generated projects include the Diataxis documentation gates."""
+    docs_process = generated_project / "docs" / "diataxis.md"
+    writer = generated_project / ".claude" / "agents" / "diataxis-writer.md"
+    judge = generated_project / ".claude" / "agents" / "diataxis-judge.md"
+    command = generated_project / ".claude" / "commands" / "diataxis-writer.md"
+
+    assert docs_process.exists()
+    assert "Tutorials" in docs_process.read_text()
+    assert "How-to guides" in docs_process.read_text()
+    assert "Reference" in docs_process.read_text()
+    assert "Explanation" in docs_process.read_text()
+    assert writer.exists()
+    assert judge.exists()
+    assert command.exists()
+    assert "/tdd-red" in command.read_text()
+    assert "/tdd-judge" in judge.read_text()
+    assert (
+        "README.md"
+        in (generated_project / ".claude" / "agents" / "tdd-document.md").read_text()
+    )
+    assert "docs/" in writer.read_text()
+
+
 def test_claude_git_flow_present(generated_project: Path) -> None:
     """Test that the git-flow lifecycle doc is included so the orchestrator loads it."""
     git_flow = generated_project / ".claude" / "git-flow.md"
