@@ -4,6 +4,13 @@ A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python pr
 
 If you're starting a new Python project on the team, this is the starting point. It saves you a day of boilerplate setup and gives you a TDD-enforced workflow with quality and CI gates pre-configured.
 
+## Documentation
+
+The [documentation index](docs/README.md) organizes deeper material using
+[Diátaxis](https://diataxis.fr/): a first-project tutorial, task-focused
+how-to guides, a template reference, and explanations of the template design
+and [why its coding standards exist](docs/explanation/coding-standards.md).
+
 ## What you get
 
 Running this template produces a Python project that is ready to develop in immediately:
