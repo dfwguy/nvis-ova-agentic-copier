@@ -2,7 +2,7 @@
 description: CI/CD reviewer — verifies .gitlab-ci.yml is in sync with the change and checks pipeline health via glab
 ---
 
-Use the Agent tool with `subagent_type: judge-cicd` to review the CI/CD impact of this iteration. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: judge-cicd` and the current `group_id` to review the CI/CD impact of this iteration. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 
@@ -11,6 +11,7 @@ Required briefing:
 - Note whether the change touched `/template/` content (which has its own `.gitlab-ci.yml`) versus repo-level files.
 - Mention any new tooling, linters, file types, or scripts that might need a matching CI job.
 - The subagent runs `glab` for pipeline health; do not also run `glab` here.
+- Require it to complete the local CI checks first and return immediately on a blocking local or pipeline-health failure.
 
 When the subagent returns:
 - If approved, route to `/tdd-finalizer` immediately (after `/judge-quality`, `/judge-test`, and `/tdd-document` have also returned).

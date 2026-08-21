@@ -141,6 +141,10 @@ New feature or non-trivial change
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
+### Completion requires publication
+
+For any user-requested repository change, local validation is not a completion point. The main agent must continue through `.claude/git-flow.md` Step 3 and report the direct merge-request URL and branch-tip commit in its final response. It may stop before publication only when the user explicitly requests local-only work or a concrete commit, authentication, push, or MR-creation blocker prevents it; report that blocker and the required next action plainly.
+
 ### Routing back on rejection
 
 When a judge (`/tdd-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
