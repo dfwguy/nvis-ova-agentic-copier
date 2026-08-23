@@ -185,6 +185,43 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "docs/" in writer.read_text()
 
 
+def test_generated_remediation_workflow_and_documentation_index_rule(
+    generated_project: Path,
+) -> None:
+    """Test that projects can remediate themselves and keep documentation navigable."""
+    remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
+    remediation_command = generated_project / ".claude" / "commands" / "remediate.md"
+    documentation_process = generated_project / "docs" / "diataxis.md"
+    documentation_index = generated_project / "docs" / "README.md"
+
+    assert remediation_agent.exists()
+    assert remediation_command.exists()
+    assert "Make this repo meet our standards" in remediation_agent.read_text()
+    assert "baseline" in remediation_agent.read_text()
+    assert "Documentation index" in documentation_process.read_text()
+    assert "Diátaxis page" in documentation_process.read_text()
+    assert documentation_index.exists()
+    assert "diataxis.md" in documentation_index.read_text()
+
+
+def test_documentation_index_links_every_diataxis_page(project_root: Path) -> None:
+    """Test that the source documentation index exposes every Diataxis page."""
+    index = (project_root / "docs" / "README.md").read_text()
+
+    for page in (
+        "tutorials/create-your-first-project.md",
+        "how-to/create-a-project-non-interactively.md",
+        "how-to/customize-a-generated-project.md",
+        "how-to/update-a-generated-project.md",
+        "reference/template-contract.md",
+        "explanation/template-and-generated-project.md",
+        "explanation/why-diataxis.md",
+        "explanation/coding-standards.md",
+        "diataxis.md",
+    ):
+        assert page in index
+
+
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the CLI syntax design gate."""
     agent = generated_project / ".claude" / "agents" / "cli-syntax-judge.md"

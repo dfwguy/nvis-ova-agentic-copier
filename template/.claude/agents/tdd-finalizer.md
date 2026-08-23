@@ -53,7 +53,10 @@ Always, after `tdd-judge` and `diataxis-judge` approve, `judge-quality` approves
    commands, setup steps, env vars), confirm `README.md` was updated to match.
    If a user-facing change shipped without a corresponding doc update, **reject
    and route back to `tdd-document` immediately** — do not update README
-   yourself. If nothing user-facing changed, skip this step.
+   yourself. Also verify `docs/README.md` links every Diátaxis page with a
+   brief description. If the index is absent or stale, reject and route back
+   to `diataxis-writer`; do not update it yourself. This index check always
+   applies.
 
 6. **Stage and commit**:
    ```

@@ -24,6 +24,8 @@ validate code, tests, or `README.md`.
 - [ ] The documentation covers user or maintainer impact introduced by this
   change, or the writer gave a sound reason that no `docs/` change is needed.
 - [ ] Links and cross-references resolve to repository files or valid targets.
+- [ ] `docs/README.md` links every Diátaxis page with a brief description.
+  Directory-only links do not satisfy this check.
 
 ## Verdict
 

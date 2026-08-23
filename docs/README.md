@@ -3,15 +3,21 @@
 This documentation explains how to use and maintain the OVA Agentic Flow
 copier template. Choose the page that matches what you need now.
 
-- **[Tutorials](tutorials/create-your-first-project.md)** teach by taking you
-  through a complete first project.
-- **[How-to guides](how-to/)** solve a focused task, such as updating a
-  generated project or supplying Copier answers non-interactively.
-- **[Reference](reference/template-contract.md)** is the authoritative lookup
-  for template inputs, generated files, tasks, and supported tooling.
-- **[Explanation](explanation/)** provides the reasoning behind the template
-  design, [why it uses Diátaxis](explanation/why-diataxis.md), and its coding
-  standards.
-
-The repository's [Diátaxis process](diataxis.md) explains how contributors keep
-these documentation types distinct.
+- **Tutorial:** [Create your first project](tutorials/create-your-first-project.md)
+  — create and validate a project generated from this template.
+- **How-to:** [Create a project non-interactively](how-to/create-a-project-non-interactively.md)
+  — supply Copier answers in a script or CI job.
+- **How-to:** [Customize a generated project](how-to/customize-a-generated-project.md)
+  — safely tailor the generated package and tooling.
+- **How-to:** [Update a generated project](how-to/update-a-generated-project.md)
+  — bring template improvements into an existing project.
+- **Reference:** [Template contract](reference/template-contract.md) — look up
+  inputs, generated files, tasks, and supported tooling.
+- **Explanation:** [Template and generated project](explanation/template-and-generated-project.md)
+  — understand the boundary between the template and its output.
+- **Explanation:** [Why Diátaxis](explanation/why-diataxis.md) — understand
+  the documentation structure.
+- **Explanation:** [Why coding standards exist](explanation/coding-standards.md)
+  — understand the rationale for the development rules.
+- **Process:** [Diátaxis documentation process](diataxis.md) — maintain these
+  categories and this index.

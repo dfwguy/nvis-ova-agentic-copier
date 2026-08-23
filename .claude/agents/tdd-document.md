@@ -29,7 +29,9 @@ If none of the above affects what a person needs to understand or start using th
 
 1. **Identify the change**: read the staged/changed files (`git diff --name-only HEAD` and `git ls-files --others --exclude-standard`) to understand what shipped.
 2. **Decide if README needs updating**: apply the scope criteria above. If a visitor would not need this change to understand or start using the project, stop and report.
-3. **Update README.md**: edit the relevant section to match the new behavior. Keep the existing tone, structure, and formatting. Do not restructure unrelated sections.
+3. **Update README.md**: edit the relevant section to match the new behavior.
+   Keep the existing tone, structure, and formatting. Do not restructure
+   unrelated sections.
 
 ## Constraints
 

@@ -30,3 +30,16 @@ part of the TDD workflow:
 The Diátaxis Writer edits `docs/` only. The Diátaxis Judge is read-only and
 routes documentation defects back to the writer. Neither changes code, tests,
 or `README.md`.
+
+## Documentation index
+
+`docs/README.md` is the documentation landing page. It must link every
+Diátaxis page in `docs/`—Tutorials, How-to guides, Reference, and
+Explanation—with a brief description that helps readers choose the right page.
+It also links the Diátaxis process itself. The index need not duplicate page
+contents, but directory links alone are insufficient when they hide individual
+pages.
+
+The Diátaxis Writer owns this index. Whenever a change adds, removes, renames,
+or materially repurposes a Diátaxis page, it updates `docs/README.md` in the
+same change. The Diátaxis Judge and finalizer verify the index is complete.
