@@ -116,7 +116,7 @@ Every change — TDD or trivial — wraps in the same lifecycle, documented in [
 
 1. **Branch** — from a clean, up-to-date `main` (a clean working tree is required to start), the main agent creates `claude/<slug>` from the task description.
 2. **Work** — either the TDD agents (below) or, for ≤~10-line trivial edits, a direct edit + commit.
-3. **Publish** — `git push` + `glab mr create --push --target-branch main --yes` (combined into one command when no MR exists yet; just `git push` if one does). Runs **in-sandbox** over the HTTPS proxy, one approval per remote command. Branch protection makes the MR mandatory — there is no direct-to-`main` path, even for a one-line fix.
+3. **Publish** — `git push` followed by `glab api` against the numeric `GITLAB_PROJECT_ID` to create an MR (or just `git push` if one exists). Runs **in-sandbox** over the HTTPS proxy, one approval per remote command. Branch protection makes the MR mandatory — there is no direct-to-`main` path, even for a one-line fix.
 4. **Stay until it merges** — do **not** return to `main` when the MR opens. Remain on the branch until a human reviewer merges the MR **and** the post-merge pipeline on `main` is green (AI never approves or merges), then `git checkout main` + `git pull` and delete the merged local branch.
 
 The TDD agents below own the middle "work" phase only.

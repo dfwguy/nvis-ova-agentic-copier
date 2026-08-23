@@ -70,7 +70,7 @@ Always, after `tdd-judge` and `diataxis-judge` approve, `judge-quality` approves
 
 ## Hand-off to publish
 
-The push and merge-request creation happen in the **orchestrator** (main thread) after you return — they need network access outside the sandbox and a user approval. **Do not** run `git push`, `glab mr create`, or any other remote-touching command yourself. Stop at the local commit.
+The push and merge-request creation happen in the **orchestrator** (main thread) after you return — they need main-thread access and a user approval. **Do not** run `git push`, `glab api`, or any other remote-touching command yourself. Stop at the local commit.
 
 ## Constraints
 

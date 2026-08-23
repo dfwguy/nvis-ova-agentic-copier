@@ -13,10 +13,13 @@ All `glab` calls are in-sandbox HTTPS via the proxy; no `dangerouslyDisableSandb
 ### 1. Resolve the project
 
 ```bash
-glab repo view --output json
+glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
 ```
 
-Extract `id` (numeric project ID) and `default_branch` from the JSON. If `glab` is unauthenticated or errors, stop and tell the user to run `glab auth login`.
+Require `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID` from the environment;
+never derive a project path from the Git remote. Confirm the returned `id`
+matches `GITLAB_PROJECT_ID` and extract `default_branch` from the JSON. If the
+call errors, stop and surface the error.
 
 ### 2. Protect the default branch
 
