@@ -28,6 +28,16 @@ def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> 
     assert "kingfisher-bin" in pyproject
 
 
+def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> None:
+    """Test that generated projects syntax-check and lint shell scripts."""
+    config = (generated_project / ".pre-commit-config.yaml").read_text()
+
+    assert "id: bash-syntax" in config
+    assert "entry: bash -n" in config
+    assert "id: shellcheck" in config
+    assert "entry: shellcheck" in config
+
+
 def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
     """Test that generated projects scan committed content for secrets in CI."""
     ci_config = (generated_project / ".gitlab-ci.yml").read_text()
@@ -36,6 +46,14 @@ def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
     assert "--git-history none" in ci_config
     assert "--no-validate" in ci_config
     assert "--exclude .git" in ci_config
+
+
+def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
+    """Test that generated projects lint Bash and shell-script shebangs in CI."""
+    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+
+    assert "shellcheck:" in ci_config
+    assert "apt-get install -y --no-install-recommends shellcheck" in ci_config
 
 
 def test_generated_package_directory(generated_project: Path) -> None:
@@ -253,6 +271,20 @@ def test_generated_claude_md_has_lockdown_gate(generated_project: Path) -> None:
     assert "CONTRIBUTING.md" in content
     assert "/setup-repo" in content
     assert "glab mr approve" in content
+
+
+def test_generated_claude_workflow_supports_bash(generated_project: Path) -> None:
+    """Test that generated agent guidance selects Bash-specific validation."""
+    workflow = (generated_project / "CLAUDE.md").read_text()
+    bash_conventions = generated_project / ".claude" / "lang" / "bash.md"
+    judge = generated_project / ".claude" / "agents" / "tdd-judge.md"
+    finalizer = generated_project / ".claude" / "agents" / "tdd-finalizer.md"
+
+    assert bash_conventions.exists()
+    assert "ShellCheck" in bash_conventions.read_text()
+    assert "supports Python and Bash projects" in workflow
+    assert "bash -n" in judge.read_text()
+    assert "shellcheck" in finalizer.read_text()
 
 
 def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:

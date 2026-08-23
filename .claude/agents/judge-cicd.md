@@ -46,12 +46,22 @@ A change to the template directory may need both updated; a change to `tests/` o
    - Jobs missing `tags`, `rules`, or `artifacts` patterns the others use.
    - `allow_failure: true` on a job that should block.
 
-4. **Check pipeline health via `glab` only after the local checks pass**. The config-sync and pipeline-shape checks above are local and cheap; if either produces a Reject, return that rejection immediately and do not make remote `glab` calls. From the repo root:
+4. **Check pipeline health via the project-ID `glab api` workaround only after
+   the local checks pass**. The config-sync and pipeline-shape checks above are
+   local and cheap; if either produces a Reject, return that rejection
+   immediately and do not make remote calls. `GITLAB_HOST` and
+   `GITLAB_PROJECT_ID` identify the GitLab project; never derive a project path
+   from a remote URL. From the repo root:
    ```
-   glab ci status                   # current branch's latest pipeline
-   glab ci list --per-page 5        # recent pipelines on this project
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=5"
    ```
-   Run `glab ci status` first. If it identifies a failed pipeline relevant to this iteration, reject immediately and do not run `glab ci list`. Otherwise, run the recent-pipeline listing. If `glab` is not authenticated, not configured, or fails for sandbox/permission reasons, **note it as "needs verification"** and continue — do not Reject for tooling issues outside the change. If pipelines exist and the most recent run on `main` (or the current branch) is `failed`, surface the failing jobs and Reject so the failure gets addressed before the new commit lands on top of a broken pipeline.
+   Inspect the newest pipeline first. If it is failed and relevant to this
+   iteration, reject immediately. If `glab` is not authenticated, not
+   configured, or fails for sandbox/permission reasons, **note it as "needs
+   verification"** and continue — do not Reject for tooling issues outside the
+   change. If the newest pipeline on `main` is failed, surface its jobs and
+   Reject so the failure gets addressed before the new commit lands on top of a
+   broken pipeline.
 
 ## Verdict
 

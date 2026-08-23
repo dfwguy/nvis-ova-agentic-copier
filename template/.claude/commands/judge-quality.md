@@ -2,7 +2,7 @@
 description: Code reviewer — pure quality assessment, no tooling; classifies findings as Major / Minor / Existing
 ---
 
-Use the Agent tool with `subagent_type: judge-quality` and the current `group_id` to do a pure code-quality review of **Python** changes. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: judge-quality` and the current `group_id` to do a pure code-quality review. Identify whether changed files are Python, Bash, or mixed and require the corresponding language checklist. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 
