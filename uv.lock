@@ -249,6 +249,19 @@ wheels = [
 ]
 
 [[package]]
+name = "kingfisher-bin"
+version = "1.112.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/a6/387ec7e12abd5fb987a47fce76aec6e05119dc45a51acb9daf48289c4b96/kingfisher_bin-1.112.0-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:c1a985ec1ebbf6fe70d70bfff76786761911fbc65a06e793f8694337797acfa3", size = 14023423, upload-time = "2026-08-08T01:45:57.054Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/69/6ec8289f1d688f454bf88fd04a0917172f5208c082ade339aa25fbaedf93/kingfisher_bin-1.112.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c0c9643dafdb3bcf3924b3570f23988bb4c930818623d228c7bb2588991fb84d", size = 12463507, upload-time = "2026-08-08T01:45:59.017Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/58/e80c481671b9d48ca866c5df6fbb2db1ae4118544b4c1f36ab3292e8d5e8/kingfisher_bin-1.112.0-py3-none-manylinux_2_17_aarch64.musllinux_1_2_aarch64.whl", hash = "sha256:50385cd9b800234dda786750ebc716f56e3ec0c0e31beda9c6ccc8f1654e135f", size = 14113237, upload-time = "2026-08-08T01:46:00.928Z" },
+    { url = "https://files.pythonhosted.org/packages/11/63/da8ff1f8e6cebe55deecaa5d35fa422cc2b4129e6962c7cef63fc376fb3d/kingfisher_bin-1.112.0-py3-none-manylinux_2_17_x86_64.musllinux_1_2_x86_64.whl", hash = "sha256:b4e95a485435d1d11fa4108be5b66038979a7d74b4ae55d5c3fc81248ce19b88", size = 14894913, upload-time = "2026-08-08T01:46:02.724Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/7a/1f9bef450ab5ca598c834e875d3bacc91f518cc983a3a915cbb57ac1e60a/kingfisher_bin-1.112.0-py3-none-win_amd64.whl", hash = "sha256:fdbd726c06eef0a25f0ce399181604729be647b9607340f4042a5f404526e156", size = 27734165, upload-time = "2026-08-08T01:46:04.841Z" },
+    { url = "https://files.pythonhosted.org/packages/73/c8/24c7fc41c6000220c39128d27c596cd347cf4255926c207bec35b6f22193/kingfisher_bin-1.112.0-py3-none-win_arm64.whl", hash = "sha256:99093018483795ba9bb5ce6166b6a55e99dc268e3c09e7196a1bad1ccdcbe968", size = 26176886, upload-time = "2026-08-08T01:46:07.148Z" },
+]
+
+[[package]]
 name = "markupsafe"
 version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -339,6 +352,7 @@ source = { editable = "." }
 [package.dev-dependencies]
 dev = [
     { name = "copier" },
+    { name = "kingfisher-bin" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -366,6 +380,7 @@ test = [
 [package.metadata.requires-dev]
 dev = [
     { name = "copier", specifier = ">=9.0.0" },
+    { name = "kingfisher-bin", specifier = ">=1.112.0" },
     { name = "pre-commit", specifier = ">=4.6.2" },
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-cov", specifier = ">=6.1.1" },

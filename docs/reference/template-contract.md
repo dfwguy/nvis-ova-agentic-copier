@@ -37,8 +37,8 @@ Copier runs these tasks only when the caller passes `--trust`:
 | Dependencies | UV-managed project, test, and development dependency groups. |
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
-| Hooks | YAML validation, Ruff, ty, and tox through pre-commit. |
-| CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, and type checking. |
+| Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
+| CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, and type checking. |
 | Agent workflow | `CLAUDE.md`, `.claude/`, and `docs/diataxis.md` for architecture, TDD, documentation, review, and publication routing. |
 
 ## Update behavior

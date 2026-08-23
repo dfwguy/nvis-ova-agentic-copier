@@ -71,6 +71,15 @@ yamllint:
       codequality: yamllint-report.json
     when: always
 
+kingfisher:
+  extends: .base_uv
+  tags:
+    - size/medium
+  script:
+    - uv run kingfisher --version
+    - echo "Scanning working tree for secrets"
+    - uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
+
 type_check:
   extends: .base_uv
   tags:
