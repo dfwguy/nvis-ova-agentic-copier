@@ -24,7 +24,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, Bash syntax, [ShellCheck](https://www.shellcheck.net/), local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, `type_check`, and `shellcheck`. Code quality and JUnit reports are wired into GitLab's UI.
 - **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that routes feature work through architecture, TDD, Diátaxis documentation, judges, and finalization (see [Agentic workflow](#agentic-workflow) below).
-- **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
+- **Coding conventions** baked into `CLAUDE.md`: standard Python `src/<package>/` layout, a single public Bash `bin/<tool>` CLI backed by `src/` or `lib/`, pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
 
@@ -117,10 +117,12 @@ my-project/
 ├── .gitlab-ci.yml         # GitLab CI pipeline (ruff, pytest+tox, yamllint, ty)
 ├── .pre-commit-config.yaml
 ├── CLAUDE.md              # Conventions + agentic workflow instructions
+├── bin/                   # Optional convention; add only for one public Bash <tool> CLI
 ├── docs/                  # Diátaxis documentation: tutorials, how-tos, reference, explanation
 ├── README.md              # Generated stub — fill in for your project
-├── my_project/
-│   └── __init__.py
+├── src/
+│   └── my_project/        # Importable Python production code
+│       └── __init__.py
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py
@@ -133,6 +135,12 @@ my-project/
 The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
 
 The workflow detects the changed files before validation. Python uses `uv`, `ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed changes run both applicable paths. The judges use the matching language conventions, including strict Bash scripting, quoted expansions, safe mutation defaults, and isolated shell tests.
+
+Before finalization, `/filesystem-structure-judge` verifies that Python
+production code is in `src/<package>/` with tests in `tests/`, and that each
+Bash application exposes one public `bin/<tool>` CLI backed by `src/` or
+`lib/`. Any different layout must be documented in `.claude/project.md` with
+the replaced rule, paths, and rationale.
 
 CLI changes also pass `/cli-syntax-judge`, which applies the [Command Line
 Interface Guidelines](https://clig.dev): one entry point, verb-based
@@ -216,6 +224,7 @@ New feature or non-trivial change
 | `/tdd-document`   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
 | `/cli-syntax-judge` | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
+| `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a documented project-specific deviation | Edit files, run tooling, or review non-layout quality |
 | `/tdd-finalizer`  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
@@ -254,14 +263,14 @@ cd my-project
 uvx copier update --trust
 ```
 
-Copier produces a 3-way merge against your local changes. Files listed under `_skip_if_exists` in [`copier.yaml`](copier.yaml) (e.g. `pyproject.toml`, `README.md`, `.gitlab-ci.yml`, the package's `__init__.py`) are **not** overwritten on update — your project's customizations are safe. See [Copier's update docs](https://copier.readthedocs.io/en/stable/updating/) for conflict-resolution details.
+Copier produces a 3-way merge against your local changes. Files listed under `_skip_if_exists` in [`copier.yaml`](copier.yaml) (e.g. `pyproject.toml`, `README.md`, `.gitlab-ci.yml`, `.claude/project.md`, the package's `__init__.py`) are **not** overwritten on update — your project's customizations are safe. Legacy flat packages receive an update warning and must be migrated manually before updating. See [Copier's update docs](https://copier.readthedocs.io/en/stable/updating/) for conflict-resolution details.
 
 ## Developing this template
 
 The structure of this repo:
 
 - `copier.yaml` — variables, post-generation tasks, skip-if-exists list.
-- `template/` — the template payload. Files with `.jinja` get rendered and the extension stripped (`pyproject.toml.jinja` → `pyproject.toml`). Paths containing `{{ … }}` are also rendered (e.g. `{{ project_slug }}/__init__.py`).
+- `template/` — the template payload. Files with `.jinja` get rendered and the extension stripped (`pyproject.toml.jinja` → `pyproject.toml`). Paths containing `{{ … }}` are also rendered (e.g. `src/{{ project_slug }}/__init__.py`).
 - `tests/test_template.py` — exercises template generation via `copier.run_copy()` and inspects the output.
 - `CLAUDE.md` (root) vs. `template/CLAUDE.md` — **separate files**. The root one applies when working on the template; the template one is what gets copied into generated projects.
 

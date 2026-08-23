@@ -30,6 +30,16 @@ Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproj
 
 ## Python Conventions
 
+### Filesystem structure
+
+- Keep importable production code in `src/<package>/`; do not add a top-level
+  importable package beside `pyproject.toml`.
+- Keep tests in `tests/`, outside the production package.
+- Keep packaging metadata in `pyproject.toml`; declare Python CLI entry points
+  through `[project.scripts]` so they invoke the installed package.
+- A nonstandard layout is allowed only when `.claude/project.md` records the
+  language, replaced rule, actual paths, and rationale.
+
 - **Pathlib** over `os` for all path operations
 - **Dependency inversion** (see [Dependency Inversion](#dependency-inversion) below) — external calls are passed in as parameters, not imported and called directly
 - **Pydantic at boundaries, dataclasses internally** — any structured data crossing a system boundary (config files, CLI args, HTTP payloads, file-format I/O) is parsed into a Pydantic model so validation happens once at the edge. Internal grouped data uses `@dataclass(frozen=True)` — cheap to construct in tests, immutable by default, no runtime validation overhead. Do not reach for Pydantic on internal types just because it's available.

@@ -76,6 +76,26 @@ initialized project until the command preflight has passed.
 | CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, and type checking. |
 | Agent workflow | `CLAUDE.md`, `.claude/`, and `docs/diataxis.md` for architecture, TDD, documentation, review, and publication routing. |
 
+## Generated filesystem layout
+
+Generated Python projects use a `src` layout. Importable application code lives
+at `src/<project_slug>/`; tests live outside the production package. Packaging
+metadata and Python command-line entry points belong in `pyproject.toml`.
+Python console commands are declared in `[project.scripts]` and delegate into
+the installed package.
+
+When a generated project includes Bash, it has one user-facing executable in
+`bin/<tool>`. Bash implementation or library files live in a separate `src/`
+or `lib/` directory, and tests remain outside production code. Clearly labeled
+development and CI helpers are not public CLI entry points and do not belong in
+`bin/`.
+
+The filesystem-structure gate reviews these defaults before finalization. A
+project may depart from them only when `.claude/project.md` records the affected
+language, the standard rule being departed from, the actual source and
+entry-point paths, and the compatibility or operational rationale. The default
+generated project records no filesystem-structure deviations.
+
 ## Update behavior
 
 `uvx copier update --trust` reads `.copier-answers.yml` from the generated
@@ -87,7 +107,12 @@ preserved when they already exist:
 - `.gitlab-ci.yml`
 - `.pre-commit-config.yaml`
 - `.claude/project.md`
-- `<project_slug>/__init__.py`
+- `src/<project_slug>/__init__.py`
+
+`pyproject.toml` and `.claude/project.md` are project-specific and remain
+preserved. A legacy flat-package project must update its own package path and
+project context deliberately before accepting this template update; Copier does
+not overwrite either file to perform that migration.
 
 ## Related pages
 

@@ -38,6 +38,10 @@ Route to the Architect before starting any work that involves:
      `--help`, and `--apply`; default to dry-run; require flag-based inputs;
      use exit codes `0`/`1`/`2`; and use stdlib `argparse` for Python unless
      Click or Typer is already a dependency.
+   - **Filesystem structure gate**: Python production code belongs in
+     `src/<package>/` with external tests and `[project.scripts]` CLI metadata;
+     Bash has one public `bin/<tool>` entry point backed by `src/` or `lib/`.
+     A different layout needs a specific `.claude/project.md` deviation record.
 4. **Produce a design** that includes:
    - Module and function breakdown with responsibilities
    - Data structures (dataclasses preferred)
@@ -70,6 +74,9 @@ If a function calls something external and the design does not name an injection
 
 ### Assumptions
 <list — user should confirm>
+
+### Filesystem Structure
+<standard paths, or the exact `.claude/project.md` deviation to record>
 
 ### Handoff to Test Writer
 <what behaviors need tests, in priority order>

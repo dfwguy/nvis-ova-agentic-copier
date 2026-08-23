@@ -28,6 +28,17 @@ pre-commit run --files path/to/script.sh
 
 ## Script Conventions
 
+### Filesystem structure
+
+- Put user-facing Bash CLI code behind exactly one user-facing entry point in
+  `bin/<tool>`; do not add additional user-executable wrappers.
+- Keep sourceable implementation and library code in a separate `src/` or
+  `lib/` directory. Keep tests outside production code.
+- Clearly labeled development and CI helpers are not user-facing CLIs and do
+  not belong in `bin/`.
+- A nonstandard layout is allowed only when `.claude/project.md` records the
+  language, replaced rule, actual paths, and rationale.
+
 - Start Bash scripts with a Bash shebang and `set -Eeuo pipefail` unless a
   documented compatibility need prevents it.
 - Quote parameter expansions and command substitutions. Prefer arrays for

@@ -24,6 +24,9 @@ project-specific conventions or tooling after its initial creation.
    branch and merge-request flow.
 
 Do not expect `uvx copier update --trust` to overwrite the generated project's
-`pyproject.toml`, `README.md`, `.gitlab-ci.yml`, or package initializer: the
-template deliberately preserves those files. For the reasoning, see
+`README.md`, `.gitlab-ci.yml`, or package initializer: the template deliberately
+preserves those files. It also preserves `pyproject.toml` and
+`.claude/project.md`, which contain project-specific package metadata and agent
+context. Update those files deliberately when changing the project layout. For
+the reasoning, see
 [why the template separates source from generated output](../explanation/template-and-generated-project.md).
