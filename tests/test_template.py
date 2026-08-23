@@ -189,6 +189,29 @@ def test_pyproject_toml_rendered(generated_project: Path) -> None:
     assert "{{ description }}" not in content
 
 
+def test_ruff_uses_version_016_defaults(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Test that the template relies on Ruff 0.16's expanded default rules."""
+    root_config = tomllib.loads((project_root / "pyproject.toml").read_text())
+    generated_config = tomllib.loads(
+        (generated_project / "pyproject.toml").read_text(),
+    )
+
+    for config in (root_config, generated_config):
+        lint_config = config["tool"]["ruff"]["lint"]
+        assert "select" not in lint_config
+        assert lint_config["ignore"] == [
+            "E501",
+            "G004",
+            "D203",
+            "D213",
+            "COM812",
+            "S603",
+        ]
+        assert "ruff>=0.16.4" in config["dependency-groups"]["dev"]
+
+
 def test_generated_hatch_configuration_builds_the_src_package(
     generated_project: Path,
 ) -> None:
