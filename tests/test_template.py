@@ -35,6 +35,7 @@ def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
     assert "kingfisher:" in ci_config
     assert "--git-history none" in ci_config
     assert "--no-validate" in ci_config
+    assert "--exclude .git" in ci_config
 
 
 def test_generated_package_directory(generated_project: Path) -> None:
