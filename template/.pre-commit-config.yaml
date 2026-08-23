@@ -17,6 +17,16 @@ repos:
         entry: "uv run python -c 'import sys, tomllib; from pathlib import Path; [tomllib.loads(Path(path).read_text()) for path in sys.argv[1:]]'"
         language: system
         types: [toml]
+      - id: bash-syntax
+        name: Bash syntax
+        entry: bash -n
+        language: system
+        types: [shell]
+      - id: shellcheck
+        name: ShellCheck
+        entry: shellcheck
+        language: system
+        types: [shell]
       - id: kingfisher
         name: Kingfisher secret scan
         entry: uv run kingfisher scan . --staged --no-validate --no-update-check
@@ -44,7 +54,3 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
-
-      # check-illegal-windows-names needs a cross-platform filename policy tool.
-      # The two executable/shebang checks need an organization-approved policy
-      # for generated and vendored scripts. Ruff already validates Python ASTs.

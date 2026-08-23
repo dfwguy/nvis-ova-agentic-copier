@@ -2,7 +2,7 @@
 description: Test-quality reviewer — pure review of test design against our testing conventions; classifies findings Major / Minor / Existing
 ---
 
-Use the Agent tool with `subagent_type: judge-test` and the current `group_id` to do a pure test-quality review of the **tests** in this change. Brief the subagent fully — it has no memory of this conversation.
+Use the Agent tool with `subagent_type: judge-test` and the current `group_id` to do a pure test-quality review. Identify whether the change exercises Python, Bash, or both and require language-appropriate test practices. Brief the subagent fully — it has no memory of this conversation.
 
 Task: $ARGUMENTS
 

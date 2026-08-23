@@ -10,7 +10,9 @@ Required briefing:
 - List the files changed in this iteration with paths (the subagent will Read them).
 - Note whether the change touched `/template/` content (which has its own `.gitlab-ci.yml`) versus repo-level files.
 - Mention any new tooling, linters, file types, or scripts that might need a matching CI job.
-- The subagent runs `glab` for pipeline health; do not also run `glab` here.
+- Provide `GITLAB_HOST` and `GITLAB_PROJECT_ID`; the subagent uses the
+  project-ID `glab api` workaround for pipeline health. Do not also run `glab`
+  here.
 - Require it to complete the local CI checks first and return immediately on a blocking local or pipeline-health failure.
 
 When the subagent returns:

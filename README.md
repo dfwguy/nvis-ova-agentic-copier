@@ -1,6 +1,6 @@
 # OVA Agentic Flow copier
 
-A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python projects with a modern toolchain (UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI) **and** a multi-agent Claude Code workflow wired in from day one.
+A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python projects with a modern toolchain (UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI) **and** a multi-agent Claude Code workflow wired in from day one. The workflow also recognizes Bash scripts in generated projects and applies Bash-specific checks when they are present.
 
 If you're starting a new Python project on the team, this is the starting point. It saves you a day of boilerplate setup and gives you a TDD-enforced workflow with quality and CI gates pre-configured.
 
@@ -21,8 +21,8 @@ Running this template produces a Python project that is ready to develop in imme
 - **ty** for type checking (Astral's fast type checker).
 - **[pytest](https://docs.pytest.org/)** with `pytest-cov`, `pytest-mock`, `pytest-subprocess`, `pytest-timeout`, and `requests-mock`.
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
-- **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
-- **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, and `type_check`. Code quality and JUnit reports are wired into GitLab's UI.
+- **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, Bash syntax, [ShellCheck](https://www.shellcheck.net/), local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
+- **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, `type_check`, and `shellcheck`. Code quality and JUnit reports are wired into GitLab's UI.
 - **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that routes feature work through architecture, TDD, Diátaxis documentation, judges, and finalization (see [Agentic workflow](#agentic-workflow) below).
 - **Coding conventions** baked into `CLAUDE.md`: pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
@@ -99,9 +99,9 @@ my-project/
 
 ## Agentic workflow
 
-The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates **for Python code**. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
+The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
 
-The workflow is Python-specific: it assumes `uv`, `ruff`, `ty`, `pytest`, and `tox`, and the `/judge-quality` checklist enforces Python conventions (pathlib, dependency inversion, type annotations, docstrings, `pytest.mark.parametrize`, etc.). It is not designed for non-Python projects.
+The workflow detects the changed files before validation. Python uses `uv`, `ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed changes run both applicable paths. The judges use the matching language conventions, including strict Bash scripting, quoted expansions, safe mutation defaults, and isolated shell tests.
 
 CLI changes also pass `/cli-syntax-judge`, which applies the [Command Line
 Interface Guidelines](https://clig.dev): one entry point, verb-based
@@ -178,14 +178,14 @@ New feature or non-trivial change
 | `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
 | `/diataxis-writer`| Creates or updates `docs/` content as a Tutorial, How-to guide, Reference, or Explanation            | Touch code, tests, or README.md             |
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
-| `/tdd-judge`      | Runs ruff + non-tox pre-commit checks                                                                  | Fix issues — rejects and routes back        |
+| `/tdd-judge`      | Runs applicable Python/Bash lint + non-test pre-commit checks                                          | Fix issues — rejects and routes back        |
 | `/diataxis-judge` | Read-only validation that `docs/` is accurate and fits its Diátaxis category                          | Edit docs, code, tests, or README.md        |
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
 | `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
 | `/tdd-document`   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
 | `/cli-syntax-judge` | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
-| `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
+| `/tdd-finalizer`  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
 
@@ -246,6 +246,10 @@ uv run ty check
 
 # Pre-commit
 uv run pre-commit run --all-files
+
+# Bash scripts (when present)
+bash -n path/to/script.sh
+shellcheck path/to/script.sh
 ```
 
 Conventions for changes to this repo are in [`CLAUDE.md`](CLAUDE.md) — same agentic workflow applies.

@@ -65,8 +65,13 @@ When working on code in this repo, read the relevant file for conventions, comma
 | Language | Conventions file |
 |----------|-----------------|
 | Python | `.claude/lang/python.md` |
+| Bash | `.claude/lang/bash.md` |
 
-Subagents that work on Python code load `.claude/lang/python.md` automatically via their agent definition. When you (the main agent) are about to write, review, or reason about Python code and haven't yet read that file, read it first.
+Before assigning work or running validators, identify the language of the
+changed files. Python applies to `*.py` and Python entry points; Bash applies
+to `*.sh` and files with a Bash shebang. Load every matching conventions file
+for mixed changes. Do not infer that a project is Python-only just because it
+contains `pyproject.toml`; run only the relevant gates, plus shared checks.
 
 > Adding a new language? Create `.claude/lang/<language>.md` following the same structure, then add a row above and update the subagents that will work in that language.
 
@@ -84,7 +89,11 @@ Language-agnostic guidance lives in `.claude/guidance/`. Read the relevant file 
 
 All feature work routes through explicit agents invoked as slash commands (e.g. `/architect`). Definitions are in `.claude/commands/`.
 
-**Scope: this workflow currently targets Python projects.** The agents assume `uv`, `ruff`, `ty`, `pytest`, and `tox` are available. See `.claude/lang/python.md` for the full Python convention set.
+**Scope: this workflow supports Python and Bash projects.** First detect the
+language of the changed files, then run the matching gates: Python uses `uv`,
+`ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed
+changes run both sets of applicable checks. See the language convention files
+for the complete rules.
 
 ### Routing
 
@@ -137,14 +146,14 @@ New feature or non-trivial change
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
 | `/diataxis-writer` | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
-| `/tdd-judge` | Runs ruff + non-tox pre-commit checks | Fix issues — rejects and routes back |
+| `/tdd-judge` | Runs applicable Python/Bash lint and non-test pre-commit checks | Fix issues — rejects and routes back |
 | `/diataxis-judge` | Read-only validation that `docs/` is technically accurate and fits its Diátaxis category | Edit docs, code, tests, or README.md |
-| `/judge-quality` | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
-| `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
+| `/judge-quality` | Pure code review: design, clarity, language conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
+| `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions and language-appropriate test practices; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
 | `/tdd-document` | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/cli-syntax-judge` | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
-| `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
+| `/tdd-finalizer` | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
