@@ -1,32 +1,21 @@
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
-    hooks:
-      - id: check-yaml
-        args: [--allow-multiple-documents, --unsafe]
-      - id: trailing-whitespace
-      - id: check-toml
-      - id: detect-private-key
-      - id: check-illegal-windows-names
-      - id: check-ast
-      - id: check-executables-have-shebangs
-      - id: check-shebang-scripts-are-executable
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 77039ccbba72c8aede339c5f8ae29b42aced0a2e  # frozen: v0.15.18
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
-  - repo: https://github.com/adrienverge/yamllint
-    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530  # frozen: v1.38.0
-    hooks:
-      - id: yamllint
-        args: ["--config-data={extends: default, rules: {line-length: disable, document-start: disable}}"]
-
   - repo: local
     hooks:
+      - id: yamllint
+        name: yamllint
+        entry: "uv run yamllint --config-data='{extends: default, rules: {line-length: disable, document-start: disable}}'"
+        language: system
+        types: [yaml]
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
       - id: ty
         name: ty check
         entry: uv run ty check

@@ -19,4 +19,5 @@ When the subagent returns:
 - If it rejects, present the first blocking issue verbatim and route
   automatically to `/diataxis-writer`.
 - If it approves, wait for `/tdd-judge` to approve. Only then fan out to
-  `/judge-quality`, `/judge-test`, `/tdd-document`, and `/judge-cicd`.
+  `/judge-quality`, `/judge-test`, `/tdd-document`, `/judge-cicd`, and
+  `/cli-syntax-judge`.

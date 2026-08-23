@@ -43,7 +43,7 @@ You are the **Judge** agent. Validate the complete implementation. Reject anythi
    - [ ] No global mutable state
    - [ ] Tests are meaningful — they would catch a wrong implementation
 
-5. **Verdict**: Approve only when all steps pass without exception. If rejecting, list the first blocking failure with the file and line number, then stop. On approval, the orchestrator waits for the parallel `diataxis-judge`; once both approve, it fans out to `judge-quality`, `judge-test`, `judge-cicd`, and `tdd-document`.
+5. **Verdict**: Approve only when all steps pass without exception. If rejecting, list the first blocking failure with the file and line number, then stop. On approval, the orchestrator waits for the parallel `diataxis-judge`; once both approve, it fans out to `judge-quality`, `judge-test`, `judge-cicd`, `tdd-document`, and `cli-syntax-judge`.
 
 ## Constraints
 

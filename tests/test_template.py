@@ -14,6 +14,16 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> None:
+    """Test that generated projects do not fetch remote hook repositories."""
+    config = (generated_project / ".pre-commit-config.yaml").read_text()
+    pyproject = (generated_project / "pyproject.toml").read_text()
+
+    assert "repo: local" in config
+    assert "repo: https://" not in config
+    assert "pre-commit>=4.6.2" in pyproject
+
+
 def test_generated_package_directory(generated_project: Path) -> None:
     """Test that the package directory is created with the correct name."""
     assert (generated_project / "my_test_project").is_dir()
@@ -137,6 +147,21 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
         in (generated_project / ".claude" / "agents" / "tdd-document.md").read_text()
     )
     assert "docs/" in writer.read_text()
+
+
+def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
+    """Test that generated projects include the CLI syntax design gate."""
+    agent = generated_project / ".claude" / "agents" / "cli-syntax-judge.md"
+    command = generated_project / ".claude" / "commands" / "cli-syntax-judge.md"
+    workflow = (generated_project / "CLAUDE.md").read_text()
+
+    assert agent.exists()
+    assert command.exists()
+    assert "https://clig.dev" in agent.read_text()
+    assert "--json" in agent.read_text()
+    assert "--apply" in agent.read_text()
+    assert "/cli-syntax-judge" in workflow
+    assert "/architect" in workflow
 
 
 def test_claude_git_flow_present(generated_project: Path) -> None:

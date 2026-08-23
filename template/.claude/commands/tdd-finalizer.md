@@ -8,7 +8,7 @@ Task: $ARGUMENTS
 
 Required briefing:
 - The intended commit message subject + body (the subagent will create the commit).
-- Confirmation that prior gates (`tdd-judge`, `diataxis-judge`, `judge-quality`, `judge-test`, `judge-cicd`) approved and `tdd-document` finished.
+- Confirmation that prior gates (`tdd-judge`, `diataxis-judge`, `judge-quality`, `judge-test`, `judge-cicd`, `cli-syntax-judge`) approved and `tdd-document` finished.
 - The `Added <N> entries to FIXME.md` line from `/judge-quality` **and** `/judge-test` (or `No new FIXME entries`) so the subagent knows whether `FIXME.md` is part of this commit.
 - Whether the change touched any user-facing surface (CLI flags, scripts, slash commands, setup steps, env vars). The subagent will verify `README.md` reflects it and reject back to `tdd-document` if not.
 - Do NOT pass `--no-verify` or `--no-gpg-sign`. Reject if a hook fails for a real (non-auto-fix) reason.

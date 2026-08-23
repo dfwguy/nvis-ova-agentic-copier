@@ -11,4 +11,4 @@ Required briefing:
 - Mention any user-facing surface that changed (CLI flags, scripts, slash commands, setup steps, env vars). If you're unsure whether a change is user-facing, say so — the subagent will decide.
 - The subagent edits `README.md` only — the Diátaxis Writer owns `docs/`.
 
-When the subagent returns, present whether `README.md` was updated (or why it was already accurate). Wait for `/judge-quality` and `/judge-cicd` to also return before routing to `/tdd-finalizer`.
+When the subagent returns, present whether `README.md` was updated (or why it was already accurate). Wait for `/judge-quality`, `/judge-test`, `/judge-cicd`, and `/cli-syntax-judge` to also return before routing to `/tdd-finalizer`.

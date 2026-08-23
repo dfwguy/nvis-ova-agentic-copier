@@ -12,5 +12,5 @@ Required briefing:
 - Require the subagent to run `uv run ruff check`, `uv run ruff format --check`, and then non-tox pre-commit checks in that order, returning immediately on the first blocking failure. Tox is the sole test execution in `/tdd-finalizer`.
 
 When the subagent returns:
-- If it approves, wait for `/diataxis-judge`, which runs in parallel. Once both approve, fan out to `/judge-quality`, `/judge-test`, `/tdd-document`, and `/judge-cicd` in parallel (single message, multiple Agent calls). Route to `/tdd-finalizer` once all four have returned approval.
+- If it approves, wait for `/diataxis-judge`, which runs in parallel. Once both approve, fan out to `/judge-quality`, `/judge-test`, `/tdd-document`, `/judge-cicd`, and `/cli-syntax-judge` in parallel (single message, multiple Agent calls). Route to `/tdd-finalizer` once all five have returned approval.
 - If it rejects, present the first blocking failure verbatim and route automatically to `/tdd-green` (production-code fix) or `/tdd-red` (test fix).

@@ -14,6 +14,6 @@ Required briefing:
 - Require it to complete the local CI checks first and return immediately on a blocking local or pipeline-health failure.
 
 When the subagent returns:
-- If approved, route to `/tdd-finalizer` immediately (after `/judge-quality`, `/judge-test`, and `/tdd-document` have also returned).
+- If approved, route to `/tdd-finalizer` immediately (after `/judge-quality`, `/judge-test`, `/tdd-document`, and `/cli-syntax-judge` have also returned).
 - If rejected for a config gap or remote failure caused by this iteration, route back to `/tdd-green`.
 - If rejected for an unrelated remote failure, surface the finding to the user and do not auto-route.
