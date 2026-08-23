@@ -22,6 +22,9 @@ def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> 
     assert "repo: local" in config
     assert "repo: https://" not in config
     assert "pre-commit>=4.6.2" in pyproject
+    assert "trailing-whitespace" in config
+    assert "check-toml" in config
+    assert "detect-private-key" in config
 
 
 def test_generated_package_directory(generated_project: Path) -> None:

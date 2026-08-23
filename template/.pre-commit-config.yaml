@@ -6,6 +6,17 @@ repos:
         entry: "uv run yamllint --config-data='{extends: default, rules: {line-length: disable, document-start: disable}}'"
         language: system
         types: [yaml]
+      - id: trailing-whitespace
+        name: trailing whitespace
+        entry: '[ \t]+$'
+        language: pygrep
+        types: [text]
+        args: [--multiline]
+      - id: check-toml
+        name: TOML parsing
+        entry: "uv run python -c 'import sys, tomllib; from pathlib import Path; [tomllib.loads(Path(path).read_text()) for path in sys.argv[1:]]'"
+        language: system
+        types: [toml]
       - id: ruff
         name: ruff check
         entry: uv run ruff check --fix
@@ -27,3 +38,8 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+
+      # detect-private-key needs an organization-approved secret scanner.
+      # check-illegal-windows-names needs a cross-platform filename policy tool.
+      # The two executable/shebang checks need an organization-approved policy
+      # for generated and vendored scripts. Ruff already validates Python ASTs.
