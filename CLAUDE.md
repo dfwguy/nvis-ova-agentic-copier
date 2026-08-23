@@ -28,7 +28,7 @@ Run commands in the sandbox first — never preemptively disable it. On a sandbo
 
 This terminal makes a URL clickable **only when it sits on its own line inside a fenced code block**. Every other form renders as styled, unclickable text: bare URLs in prose, inline-code URLs (single backticks), Markdown `[text](url)` links, and `<url>` angle brackets all fail. When surfacing a URL the user may want to click (MR/pipeline links, docs, dashboards), put it alone in a fenced block:
 
-````
+````text
 ```
 https://example.com/path
 ```
@@ -107,7 +107,7 @@ the affected language, replaced rule, actual paths, and rationale.
 
 The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. Branch protection on `main` (configured by `/setup-repo`) enforces this: direct pushes are rejected and merging requires approval, so even a one-line edit must go through a feature branch and an MR. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
 
-```
+```text
 New feature or non-trivial change
         │
         ▼

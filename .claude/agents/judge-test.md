@@ -63,7 +63,7 @@ If a finding is borderline between Major and Minor, default to Major — the orc
 
 For each section, give a section verdict (**Pass** or the highest severity present: **Minor**, **Major**, or **Existing**). Then list every finding under that section with this exact shape:
 
-```
+```text
 - [Major]   tests/test_foo.py:42 — short description of the problem and why it lets a bug through
 - [Minor]   tests/test_foo.py:88 — short description
 - [Existing] tests/test_bar.py:12 — short description (notes this predates the diff)

@@ -80,7 +80,7 @@ If a finding is borderline between Major and Minor, default to Major — the orc
 
 For each section, give a section verdict (**Pass** or the highest severity present in that section: **Minor**, **Major**, or **Existing**). Then list every finding under that section with this exact shape:
 
-```
+```text
 - [Major]   path/to/file.py:42 — short description of the problem and why it matters
 - [Minor]   path/to/file.py:88 — short description
 - [Existing] path/to/other.py:12 — short description (notes this predates the diff)

@@ -11,6 +11,8 @@ copier template. Choose the page that matches what you need now.
   — safely tailor the generated package and tooling.
 - **How-to:** [Update a generated project](how-to/update-a-generated-project.md)
   — bring template improvements into an existing project.
+- **How-to:** [Validate template changes](how-to/validate-template-changes.md)
+  — run the same quality checks that protect this template's pipeline.
 - **Reference:** [Template contract](reference/template-contract.md) — look up
   inputs, generated files, tasks, and supported tooling.
 - **Explanation:** [Template and generated project](explanation/template-and-generated-project.md)

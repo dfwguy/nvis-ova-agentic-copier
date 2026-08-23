@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -58,6 +60,68 @@ def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
 
     assert "shellcheck:" in ci_config
     assert "apt-get install -y --no-install-recommends shellcheck" in ci_config
+
+
+def test_root_ci_shellcheck_excludes_generated_environments(project_root: Path) -> None:
+    """Test that the root CI ShellCheck job skips generated tool environments."""
+    ci_config = (project_root / ".gitlab-ci.yml").read_text()
+
+    assert "-not -path './.venv/*'" in ci_config
+    assert "-not -path './.tox/*'" in ci_config
+
+
+def test_root_tox_generates_enforced_coverage_artifacts(project_root: Path) -> None:
+    """Test that root tox produces the coverage artifacts uploaded by CI."""
+    config = tomllib.loads((project_root / "pyproject.toml").read_text())
+    expected_arguments = {
+        "--cov-fail-under=85",
+        "--cov-report=xml:coverage.xml",
+        "--cov-report=html",
+        "--junitxml=test-results.xml",
+    }
+
+    for environment in ("py311", "py314"):
+        command = config["tool"]["tox"]["env"][environment]["commands"][0]
+        assert expected_arguments.issubset(command)
+
+
+def _unlabeled_markdown_fences(content: str) -> list[str]:
+    """Return unlabeled Markdown fence openings in content."""
+    fence = re.compile(r"^(`{3,}|~{3,})([^`~\s]+)?\s*$")
+    open_fence: str | None = None
+    unlabeled_fences: list[str] = []
+
+    for line in content.splitlines():
+        match = fence.fullmatch(line)
+        if match is None:
+            continue
+        marker, language = match.groups()
+        if marker == open_fence and language is None:
+            open_fence = None
+        elif open_fence is None:
+            if language is None:
+                unlabeled_fences.append(marker)
+            open_fence = marker
+
+    return unlabeled_fences
+
+
+def test_markdown_fences_have_a_language(project_root: Path) -> None:
+    """Test that maintained Markdown fences declare a language."""
+    ignored_paths = {".git", ".venv", ".tox", ".pytest_cache", ".ruff_cache"}
+
+    markdown_paths = (*project_root.rglob("*.md"), *project_root.rglob("*.md.jinja"))
+    for markdown_path in markdown_paths:
+        if ignored_paths.intersection(markdown_path.relative_to(project_root).parts):
+            continue
+        assert not _unlabeled_markdown_fences(markdown_path.read_text()), markdown_path
+
+
+def test_markdown_fence_guard_rejects_unlabeled_tilde_fences() -> None:
+    """Test that the Markdown guard handles all standard fence marker types."""
+    content = "~~~\nexample\n~~~\n\n```text\nexample\n```\n"
+
+    assert _unlabeled_markdown_fences(content) == ["~~~"]
 
 
 def test_generated_package_directory(generated_project: Path) -> None:
@@ -202,6 +266,7 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "How-to guides" in docs_process.read_text()
     assert "Reference" in docs_process.read_text()
     assert "Explanation" in docs_process.read_text()
+    assert "include a Mermaid flowchart" in docs_process.read_text()
     assert writer.exists()
     assert judge.exists()
     assert command.exists()
@@ -242,6 +307,7 @@ def test_documentation_index_links_every_diataxis_page(project_root: Path) -> No
         "how-to/create-a-project-non-interactively.md",
         "how-to/customize-a-generated-project.md",
         "how-to/update-a-generated-project.md",
+        "how-to/validate-template-changes.md",
         "reference/template-contract.md",
         "explanation/template-and-generated-project.md",
         "explanation/why-diataxis.md",
@@ -249,6 +315,20 @@ def test_documentation_index_links_every_diataxis_page(project_root: Path) -> No
         "diataxis.md",
     ):
         assert page in index
+
+
+def test_explanations_and_readme_use_mermaid_for_relationship_diagrams(
+    project_root: Path,
+) -> None:
+    """Test that documentation uses Mermaid for relationship and workflow diagrams."""
+    readme = (project_root / "README.md").read_text()
+    explanation = (
+        project_root / "docs" / "explanation" / "template-and-generated-project.md"
+    ).read_text()
+
+    assert "```mermaid\nflowchart" in readme
+    assert 'filesystem["/filesystem-structure-judge"]' in readme
+    assert "```mermaid\nflowchart" in explanation
 
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
