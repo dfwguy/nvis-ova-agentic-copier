@@ -31,16 +31,15 @@ The Diátaxis Writer edits `docs/` only. The Diátaxis Judge is read-only and
 routes documentation defects back to the writer. Neither changes code, tests,
 or `README.md`.
 
-## README map
+## Documentation index
 
-`README.md` is the repository's landing page, not a Diátaxis quadrant. It
-must contain a **Repository map** that lists every tracked top-level file and
-directory, each with a brief explanation of its purpose. Exclude `.git/` and
-other untracked/generated working files; list tracked dotfiles too. A directory
-may link readers to its own index rather than recursively duplicating every
-file beneath it.
+`docs/README.md` is the documentation landing page. It must link every
+Diátaxis page in `docs/`—Tutorials, How-to guides, Reference, and
+Explanation—with a brief description that helps readers choose the right page.
+It also links the Diátaxis process itself. The index need not duplicate page
+contents, but directory links alone are insufficient when they hide individual
+pages.
 
-`/tdd-document` owns this map. Whenever a change adds, removes, renames, or
-materially repurposes a tracked top-level entry, it updates the map in the same
-change. `/diataxis-judge` verifies that the Diátaxis documents are accurate;
-the README-map check belongs to `/tdd-document` and the finalizer.
+The Diátaxis Writer owns this index. Whenever a change adds, removes, renames,
+or materially repurposes a Diátaxis page, it updates `docs/README.md` in the
+same change. The Diátaxis Judge and finalizer verify the index is complete.

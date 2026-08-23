@@ -15,7 +15,7 @@ Required briefing:
 - Identify the tracked languages and load every applicable convention before
   running checks.
 - Require a read-only baseline with the command output/evidence, a Diátaxis
-  assessment, and a README-map assessment.
+  assessment, and a `docs/README.md` index assessment.
 - Require independently reviewable remediation slices with Red tests,
   documentation updates, and validation gates. Do not bulk-fix the repository
   in a single unreviewable edit.

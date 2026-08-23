@@ -185,39 +185,41 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "docs/" in writer.read_text()
 
 
-def test_generated_remediation_workflow_and_readme_map_rule(
+def test_generated_remediation_workflow_and_documentation_index_rule(
     generated_project: Path,
 ) -> None:
-    """Test that projects can remediate themselves and keep README navigation current."""
+    """Test that projects can remediate themselves and keep documentation navigable."""
     remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
     remediation_command = generated_project / ".claude" / "commands" / "remediate.md"
     documentation_process = generated_project / "docs" / "diataxis.md"
-    readme_agent = generated_project / ".claude" / "agents" / "tdd-document.md"
+    documentation_index = generated_project / "docs" / "README.md"
 
     assert remediation_agent.exists()
     assert remediation_command.exists()
     assert "Make this repo meet our standards" in remediation_agent.read_text()
     assert "baseline" in remediation_agent.read_text()
-    assert "README map" in documentation_process.read_text()
-    assert "every tracked top-level file and" in documentation_process.read_text()
-    assert "README map" in readme_agent.read_text()
-    readme = (generated_project / "README.md").read_text()
-    for entry in (
-        ".claude/",
-        ".copier-answers.yml",
-        ".cursor/",
-        ".gitignore",
-        ".gitlab-ci.yml",
-        ".pre-commit-config.yaml",
-        "AGENTS.md",
-        "CLAUDE.md",
-        "docs/",
-        "my_test_project/",
-        "pyproject.toml",
-        "README.md",
-        "tests/",
+    assert "Documentation index" in documentation_process.read_text()
+    assert "Diátaxis page" in documentation_process.read_text()
+    assert documentation_index.exists()
+    assert "diataxis.md" in documentation_index.read_text()
+
+
+def test_documentation_index_links_every_diataxis_page(project_root: Path) -> None:
+    """Test that the source documentation index exposes every Diataxis page."""
+    index = (project_root / "docs" / "README.md").read_text()
+
+    for page in (
+        "tutorials/create-your-first-project.md",
+        "how-to/create-a-project-non-interactively.md",
+        "how-to/customize-a-generated-project.md",
+        "how-to/update-a-generated-project.md",
+        "reference/template-contract.md",
+        "explanation/template-and-generated-project.md",
+        "explanation/why-diataxis.md",
+        "explanation/coding-standards.md",
+        "diataxis.md",
     ):
-        assert entry in readme
+        assert page in index
 
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:

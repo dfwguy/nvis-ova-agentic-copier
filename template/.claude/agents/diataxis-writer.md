@@ -32,6 +32,9 @@ categories into an unfocused page.
    for that category's reader need.
 4. Keep commands, options, examples, and links consistent with the design and
    repository source. Do not document speculative behavior.
+5. Update `docs/README.md` whenever a Diátaxis page is added, removed,
+   renamed, or materially repurposed. The index must link every Diátaxis page
+   with a brief description; a directory-only link is not enough.
 
 ## Output
 

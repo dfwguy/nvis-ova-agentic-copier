@@ -12,30 +12,6 @@ how-to guides, a template reference, and explanations of the template design
 and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
 [why its coding standards exist](docs/explanation/coding-standards.md).
 
-## Repository map
-
-- [`.claude/`](.claude/) — canonical agent workflow, commands, and coding
-  conventions used to maintain this template.
-- [`.cursor/`](.cursor/) — Cursor rules that import the canonical Claude
-  guidance.
-- [`.gitignore`](.gitignore) — ignored local and generated files.
-- [`.gitlab-ci.yml`](.gitlab-ci.yml) — GitLab continuous-integration jobs.
-- [`.pre-commit-config.yaml`](.pre-commit-config.yaml) — local quality hooks.
-- [`.security-triage.yaml`](.security-triage.yaml) — security-triage settings.
-- [`AGENTS.md`](AGENTS.md) — entry point and workflow notes for coding agents.
-- [`CLAUDE.md`](CLAUDE.md) — primary repository standards and workflow.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — repository contribution and approval
-  requirements.
-- [`copier.yaml`](copier.yaml) — Copier questions and post-generation tasks.
-- [`docs/`](docs/README.md) — Diátaxis documentation for using and maintaining
-  the template.
-- [`pyproject.toml`](pyproject.toml) — Python package, tool, and test settings.
-- [`README.md`](README.md) — this landing page.
-- [`SECURITY.md`](SECURITY.md) — security reporting and triage guidance.
-- [`template/`](template/) — files rendered into each generated project.
-- [`tests/`](tests/) — tests that verify the rendered Copier project.
-- [`uv.lock`](uv.lock) — locked development dependencies for reproducible runs.
-
 ## What you get
 
 Running this template produces a Python project that is ready to develop in immediately:

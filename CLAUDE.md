@@ -174,7 +174,7 @@ It treats this repository's checked-in standards as the baseline unless the
 user supplies another written standard, audits each applicable gate, and turns
 every gap into a small normal-workflow slice. Do not claim compliance merely
 because a best-effort review found nothing: all required checks plus the
-Diátaxis and README-map reviews must pass. The workflow never weakens a
+Diátaxis and documentation-index reviews must pass. The workflow never weakens a
 configured standard to make the report green.
 
 ### Completion requires publication

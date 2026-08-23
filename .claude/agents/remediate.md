@@ -20,7 +20,7 @@ edit files, relax standards, commit, or publish.
 Unless the user supplies a different written standard, “our standards” means
 the repository's checked-in requirements: `CLAUDE.md`, applicable files under
 `.claude/lang/`, `.claude/guidance/`, configured pre-commit hooks, CI, tests,
-the Diátaxis process, and the README map rule. A passing baseline means every
+the Diátaxis process and its documentation-index rule. A passing baseline means every
 applicable required check passes and every detected documentation/README gap
 has been resolved; it does **not** promise an absence of every possible design
 improvement.
@@ -30,14 +30,14 @@ improvement.
 1. Read `CLAUDE.md`, `.claude/project.md`, `docs/diataxis.md`, the relevant
    language conventions, and the current CI/pre-commit configuration.
 2. Inventory tracked source, tests, scripts, CI, documentation, and the
-   root-level README map. Identify languages from actual tracked files.
+   `docs/README.md` documentation index. Identify languages from actual tracked files.
 3. Run the applicable existing validation commands without changing files.
    Record each failure exactly once with its command, affected files, and a
    short evidence-backed diagnosis. Treat unavailable tooling as a blocker,
    not a pass.
 4. Review the documentation separately: classify missing or stale `docs/`
-   material by Diátaxis quadrant and check that `README.md` maps every tracked
-   top-level file and directory with a brief explanation.
+   material by Diátaxis quadrant and check that `docs/README.md` links every
+   Diátaxis page with a brief explanation.
 5. Produce a small-to-large sequence of independently reviewable remediation
    slices. Each slice must name its acceptance tests, documentation work, and
    expected validation gates. Use the normal architect → Red → Green → judges
@@ -63,7 +63,7 @@ improvement.
 1. <bounded change — tests, docs, gates>
 
 ### Definition of done
-<explicit command and README/Diátaxis checks>
+<explicit command and Diátaxis-index checks>
 
 ### Blockers and assumptions
 <only genuine blockers or user decisions>
