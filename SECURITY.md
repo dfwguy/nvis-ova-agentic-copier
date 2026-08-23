@@ -44,9 +44,9 @@ locally on developer workstations and interacts with GitLab via the `glab` CLI.
 - **Template execution boundary**: `copier copy --trust` executes `_tasks` (shell commands:
   `git init`, `uv sync`, `uv run pre-commit install`) on the user's machine. The `--trust`
   flag is explicit user consent; without it, Copier refuses to run tasks.
-- **External hook boundary**: pre-commit hooks pull from external GitHub repos
-  (pre-commit/pre-commit-hooks, astral-sh/ruff-pre-commit, adrienverge/yamllint) pinned
-  by tag in `.pre-commit-config.yaml`.
+- **Local hook boundary**: pre-commit invokes project-managed tools through
+  `uv` from `.pre-commit-config.yaml`; their versions are resolved through the
+  project's dependency metadata and lockfile.
 - **AI agent control boundary**: `.claude/settings.json` restricts which shell commands the
   Claude Code AI agent may execute, including a deny list blocking `glab mr approve*` and
   `glab mr revoke*` to prevent AI from approving its own merge requests.
@@ -63,12 +63,10 @@ The following scenarios represent the primary security concerns for this project
    could approve its own MR via the raw GitLab API endpoint, bypassing the deny rule.
    (Open Argus finding `0a1f365f`; confidence 0.84.)
 
-2. **Supply chain compromise via pre-commit hook sources:** Both `.pre-commit-config.yaml`
-   and `template/.pre-commit-config.yaml` pull hooks from GitHub repos pinned by tag
-   (not commit hash). A compromised tag on `pre-commit/pre-commit-hooks`,
-   `astral-sh/ruff-pre-commit`, or `adrienverge/yamllint` would execute arbitrary code on
-   every developer's machine during `pre-commit run`. The `detect-private-key` hook itself
-   is sourced from the same supply chain it is meant to protect.
+2. **Supply chain compromise via local development tools:** Both
+   `.pre-commit-config.yaml` files invoke `uv`-managed tooling. A compromised
+   package or lockfile update could execute arbitrary code on a developer's
+   machine during `pre-commit run`.
 
 3. **Copier `--trust` task execution with tampered template:** The `_tasks` block in
    `copier.yaml` runs three shell commands on the user's machine after rendering. An
@@ -100,9 +98,9 @@ The following scenarios represent the primary security concerns for this project
 - **The developer workstation is trusted.** `copier copy --trust` and pre-commit hooks
   execute code on the local machine. No sandbox or verification layer protects the
   execution environment.
-- **Pre-commit hook sources are uncompromised.** The toolchain assumes the GitHub repos
-  referenced in `.pre-commit-config.yaml` have not been tampered with at the pinned tags.
-  Commit-hash pinning is not used.
+- **Local development tools are uncompromised.** The toolchain assumes the
+  packages resolved through the project's dependency metadata and lockfile have
+  not been tampered with.
 - **`glab` OAuth session integrity.** The `/setup-repo` command and AI agent git flow
   assume the `glab` OAuth token is valid and uncompromised. A stolen token grants full
   GitLab API access at the authenticated user's permission level.

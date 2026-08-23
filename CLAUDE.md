@@ -114,13 +114,13 @@ New feature or non-trivial change
         │                         │
         └──────────────┬──────────┘
                        ▼
-        ├──────────────┬──────────────┬──────────────┐   (run in parallel after both approve)
-        ▼              ▼              ▼              ▼
-  /judge-quality   /judge-test    /tdd-document  /judge-cicd
-   pure code       pure test      README landing checks .gitlab-ci.yml
-   review          review         accuracy       + pipeline health
-        │              │              │              │
-        └──────┬───────┴──────────────┴──────────────┘
+        ├──────────────┬──────────────┬──────────────┬─────────────────┐   (run in parallel after both approve)
+        ▼              ▼              ▼              ▼                 ▼
+  /judge-quality   /judge-test    /tdd-document  /judge-cicd  /cli-syntax-judge
+   pure code       pure test      README landing checks CI + pipeline  CLIG + CLI contract
+   review          review         accuracy       health
+        │              │              │              │                 │
+        └──────┬───────┴──────────────┴──────────────┴─────────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
                           and commits locally. Rejects to /tdd-document if README is stale.
@@ -143,6 +143,7 @@ New feature or non-trivial change
 | `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
 | `/tdd-document` | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
+| `/cli-syntax-judge` | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
 | `/tdd-finalizer` | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
@@ -162,7 +163,7 @@ For any user-requested repository change, local validation is not a completion p
 
 ### Routing back on rejection
 
-When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
 ### `/judge-quality` and `/judge-test` severity model
 

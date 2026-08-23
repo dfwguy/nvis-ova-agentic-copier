@@ -32,6 +32,11 @@ Route to the Architect before starting any work that involves:
    - Functional style preferred (pure functions, immutable data, composition)
    - **Dependency inversion is mandatory**: every external call (subprocess, filesystem, HTTP, time, environment) must be a parameter, not a direct import. Real implementations are wired in only at the entry point.
    - No global mutable state
+   - **CLI changes must follow CLIG**: use one entry point and verb-based
+     `tool resource action` subcommands; every subcommand supports `--json`,
+     `--help`, and `--apply`; default to dry-run; require flag-based inputs;
+     use exit codes `0`/`1`/`2`; and use stdlib `argparse` for Python unless
+     Click or Typer is already a dependency.
 4. **Produce a design** that includes:
    - Module and function breakdown with responsibilities
    - Data structures (dataclasses preferred)
@@ -67,6 +72,10 @@ If a function calls something external and the design does not name an injection
 
 ### Handoff to Test Writer
 <what behaviors need tests, in priority order>
+
+### CLI Contract (when applicable)
+<entry point, subcommands, flags, dry-run behavior, JSON schema, stdout/stderr,
+exit codes, and parser choice>
 ```
 
 ## Constraints

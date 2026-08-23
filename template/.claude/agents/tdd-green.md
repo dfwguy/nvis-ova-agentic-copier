@@ -23,6 +23,10 @@ You are the **Implementer** agent. Write the minimum code needed to pass the fai
    - Prefer comprehensions over imperative loops
    - No global mutable state
    - **Apply dependency inversion.** Every external call (subprocess, filesystem, HTTP, time, environment) is a parameter — match the injection points the architect named and the test fixtures already pass through. Real implementations are wired in only at the entry point (e.g. `main()`); never import-and-call them from inside business logic.
+   - For CLI code, implement the architect's CLIG contract: `argparse` unless an
+     approved parser dependency already exists, `--json`/`--help`/`--apply` on
+     every subcommand, dry-run by default, flag-only inputs, and exit codes
+     `0`/`1`/`2`.
 3. **Run tests** to confirm Green:
    ```
    uv run pytest -v

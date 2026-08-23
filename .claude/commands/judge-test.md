@@ -17,5 +17,5 @@ When the subagent returns:
 - **`Overall: Approve`** with any findings (same mechanism as `/judge-quality` — see `CLAUDE.md` → "FIXME.md and TODO.md"):
   - **Minor** findings → **append each one to `FIXME.md` at the repo root** under a `## YYYY-MM-DD — <current branch>` header (create the file with the standard header if it does not exist). Each entry is one line: `- **<file>:<line>** — <verbatim Minor finding>`. After writing, run `git add FIXME.md` so `/tdd-finalizer` includes it in the commit.
   - **Existing** findings → present verbatim in your return note for visibility, but do NOT write them to `FIXME.md` (they are not introduced by this change).
-- Route to `/tdd-finalizer` only once `/judge-quality`, `/judge-cicd`, and `/tdd-document` have **also** returned approval.
+- Route to `/tdd-finalizer` only once `/judge-quality`, `/judge-cicd`, `/tdd-document`, and `/cli-syntax-judge` have **also** returned approval.
 - End your response to the orchestrator with a one-line note: `Added <N> entries to FIXME.md` (or `No new FIXME entries` when there were no Minor findings). `/tdd-finalizer` uses this note when surfacing the change to the user after the MR is reported.

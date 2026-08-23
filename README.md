@@ -18,7 +18,7 @@ Running this template produces a Python project that is ready to develop in imme
 
 - **[UV](https://docs.astral.sh/uv/)** for dependency management and virtualenv (`uv sync`, `uv run …`).
 - **[Ruff](https://docs.astral.sh/ruff/)** for linting and formatting, configured with `select = ["ALL"]` and curated exceptions.
-- **[ty](https://github.com/astral-sh/ty)** for type checking (Astral's fast type checker).
+- **ty** for type checking (Astral's fast type checker).
 - **[pytest](https://docs.pytest.org/)** with `pytest-cov`, `pytest-mock`, `pytest-subprocess`, `pytest-timeout`, and `requests-mock`.
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
 - **[pre-commit](https://pre-commit.com/)** hooks: ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
@@ -103,6 +103,11 @@ The generated project ships with a Claude Code multi-agent workflow that enforce
 
 The workflow is Python-specific: it assumes `uv`, `ruff`, `ty`, `pytest`, and `tox`, and the `/judge-quality` checklist enforces Python conventions (pathlib, dependency inversion, type annotations, docstrings, `pytest.mark.parametrize`, etc.). It is not designed for non-Python projects.
 
+CLI changes also pass `/cli-syntax-judge`, which applies the [Command Line
+Interface Guidelines](https://clig.dev): one entry point, verb-based
+subcommands, `--json`/`--help`/`--apply` support, dry-run safety by default,
+non-interactive flag inputs, structured JSON output, and consistent exit codes.
+
 > Background reading: [Claude Code overview](https://docs.claude.com/en/docs/claude-code/overview), [subagents](https://docs.claude.com/en/docs/claude-code/sub-agents), [slash commands](https://docs.claude.com/en/docs/claude-code/slash-commands).
 
 ### Git-flow lifecycle
@@ -150,13 +155,13 @@ New feature or non-trivial change
         │                         │
         └──────────────┬──────────┘
                        ▼
-        ├──────────────┬──────────────┬──────────────┐   (run in parallel after both approve)
-        ▼              ▼              ▼              ▼
-  /judge-quality   /judge-test    /tdd-document  /judge-cicd
-   pure code       pure test      README landing checks .gitlab-ci.yml
-   review          review         accuracy       + pipeline health
-        │              │              │              │
-        └──────┬───────┴──────────────┴──────────────┘
+        ├──────────────┬──────────────┬──────────────┬─────────────────┐   (run in parallel after both approve)
+        ▼              ▼              ▼              ▼                 ▼
+  /judge-quality   /judge-test    /tdd-document  /judge-cicd  /cli-syntax-judge
+   pure code       pure test      README landing checks CI + pipeline  CLIG + CLI contract
+   review          review         accuracy       health
+        │              │              │              │                 │
+        └──────┬───────┴──────────────┴──────────────┴─────────────────┘
                ▼
         /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
                           and commits locally. Rejects to /tdd-document if README is stale.
@@ -179,6 +184,7 @@ New feature or non-trivial change
 | `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
 | `/tdd-document`   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
+| `/cli-syntax-judge` | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
 | `/tdd-finalizer`  | Verifies README sync, runs tox across all Python versions, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
@@ -204,7 +210,7 @@ In a Claude Code session opened against the generated project:
 /architect add a CSV ingestion module that streams rows into the existing pipeline
 ```
 
-Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/tdd-judge` and `/diataxis-judge` run together before the remaining gates. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
+Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/tdd-judge` and `/diataxis-judge` run together before the remaining gates, including `/cli-syntax-judge`. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
 
 The same agents and commands also live in **this** repo's `.claude/`, so you can dogfood the workflow while developing the template itself.
 
@@ -249,7 +255,7 @@ Conventions for changes to this repo are in [`CLAUDE.md`](CLAUDE.md) — same ag
 - [Copier documentation](https://copier.readthedocs.io/)
 - [UV documentation](https://docs.astral.sh/uv/)
 - [Ruff documentation](https://docs.astral.sh/ruff/)
-- [ty (type checker)](https://github.com/astral-sh/ty)
+- ty (type checker)
 - [pytest](https://docs.pytest.org/)
 - [tox](https://tox.wiki/)
 - [pre-commit](https://pre-commit.com/)
