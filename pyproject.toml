@@ -33,7 +33,6 @@ markers = [
 ]
 
 [tool.ruff.lint]
-select = ["ALL"]
 ignore = ["E501", "G004", "D203", "D213", "COM812", "S603"]
 exclude = ["*project_slug*"]
 
@@ -89,6 +88,6 @@ dev = [
     "pre-commit>=4.6.2",
     "ty>=0.0.1a11",
     "yamllint>=1.37.1",
-    "ruff>=0.15.10",
+    "ruff>=0.16.4",
     "tox>=4.27.0",
 ]

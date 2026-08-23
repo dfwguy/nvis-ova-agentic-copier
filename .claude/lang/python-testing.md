@@ -68,8 +68,10 @@ import pytest
 @pytest.fixture
 def set_argv(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
     """Set sys.argv for a test invoking a CLI entry point."""
+
     def _set_argv(args: list[str]) -> None:
         monkeypatch.setattr(sys, "argv", ["pytest", *args])
+
     return _set_argv
 ```
 
@@ -126,7 +128,9 @@ CLI argument variations (needs the `set_argv` fixture):
     ("args", "expected"),
     [(["--verbose"], "verbose"), (["--output", "out.log"], "out.log")],
 )
-def test_multiple_args(set_argv: Callable[[list[str]], None], args: list[str], expected: str) -> None:
+def test_multiple_args(
+    set_argv: Callable[[list[str]], None], args: list[str], expected: str
+) -> None:
     set_argv(args)
     assert parse_args() == expected
 ```
@@ -195,9 +199,15 @@ import pytest
 
 def fake_open_success(_filename: str, _mode: str):
     class DummyFile:
-        def __enter__(self): return self
-        def __exit__(self, *_args): return False
-        def read(self) -> str: return "hello world"
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> str:
+            return "hello world"
+
     return DummyFile()
 
 
