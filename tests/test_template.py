@@ -201,7 +201,7 @@ def test_claude_git_flow_present(generated_project: Path) -> None:
     git_flow = generated_project / ".claude" / "git-flow.md"
     assert git_flow.exists()
     content = git_flow.read_text()
-    assert "glab mr create" in content
+    assert "projects/$GITLAB_PROJECT_ID/merge_requests" in content
     assert "git checkout -b" in content
     assert "git checkout main" in content
 
@@ -296,12 +296,16 @@ def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:
 
 
 def test_agents_md_present(generated_project: Path) -> None:
-    """Test that AGENTS.md is generated for Codex and other AI agent compatibility."""
+    """Test that AGENTS.md provides a native Codex workflow."""
     agents_md = generated_project / "AGENTS.md"
     assert agents_md.exists()
     content = agents_md.read_text()
     assert "CLAUDE.md" in content
     assert ".claude/lang/python.md" in content
+    assert "gpt-5.6-sol" in content
+    assert "gpt-5.6-terra" in content
+    assert "gpt-5.6-luna" in content
+    assert "GITLAB_PROJECT_ID" in content
 
 
 def test_claude_lang_python_present(generated_project: Path) -> None:
