@@ -9,6 +9,49 @@ _skip_if_exists:
   - "{{ project_slug }}/__init__.py"
 
 _tasks:
+  - |-
+    missing=0
+    if ! command -v git >/dev/null 2>&1; then
+      printf 'Missing required command: git\n' >&2
+      missing=1
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+      printf 'Missing required command: uv\n' >&2
+      missing=1
+    fi
+    if ! command -v bash >/dev/null 2>&1; then
+      printf 'Missing required command: bash\n' >&2
+      missing=1
+    fi
+    if ! command -v shellcheck >/dev/null 2>&1; then
+      printf 'Missing required command: shellcheck\n' >&2
+      missing=1
+    fi
+    if ! command -v glab >/dev/null 2>&1; then
+      printf 'Missing required command: glab\n' >&2
+      missing=1
+    fi
+    if command -v git >/dev/null 2>&1; then
+      git_user_name="$(git config --global --get user.name 2>/dev/null || true)"
+      if [ -z "$git_user_name" ]; then
+        printf 'Git configuration user.name must be nonempty.\n' >&2
+        missing=1
+      fi
+      git_user_email="$(git config --global --get user.email 2>/dev/null || true)"
+      if [ -z "$git_user_email" ]; then
+        printf 'Git configuration user.email must be nonempty.\n' >&2
+        missing=1
+      fi
+    fi
+    if command -v glab >/dev/null 2>&1 \
+      && ! glab auth status --hostname gitlab-master.nvidia.com; then
+      printf 'Authenticate glab with: glab auth login --hostname gitlab-master.nvidia.com\n' >&2
+      missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
+      printf 'Resolve every prerequisite above, then rerun Copier.\n' >&2
+      exit 1
+    fi
   - git init
   - uv sync
   - uv run pre-commit install

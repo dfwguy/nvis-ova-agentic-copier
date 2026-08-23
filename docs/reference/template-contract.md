@@ -19,15 +19,41 @@ The template payload is the [`template/`](../../template) directory. Copier
 renders `.jinja` files and removes their extension. It also renders path names
 that contain Jinja expressions. All other files are copied unchanged.
 
-## Post-generation tasks
+## Trusted post-render tasks
 
-Copier runs these tasks only when the caller passes `--trust`:
+Copier runs these tasks only when the caller passes `--trust`. They run after
+files are rendered; Copier cannot perform this preflight before creating the
+destination directory.
 
 | Order | Task | Effect |
 | --- | --- | --- |
-| 1 | `git init` | Creates a Git repository. |
-| 2 | `uv sync` | Creates the virtual environment and installs dependencies. |
-| 3 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
+| 1 | Prerequisite preflight | Validates required commands, Git identity, and GitLab authentication. A failure prevents all later tasks. |
+| 2 | `git init` | Creates a Git repository. |
+| 3 | `uv sync` | Creates the virtual environment and installs dependencies. |
+| 4 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
+
+### Preflight contract
+
+The prerequisite preflight validates all of the following:
+
+| Requirement | Validation |
+| --- | --- |
+| Required commands | `git`, `uv`, `bash`, `shellcheck`, and `glab` are available on `PATH`. |
+| Git commit identity | `git config --global --get user.name` and `git config --global --get user.email` each return a nonempty value. |
+| GitLab CLI authentication | `glab auth status --hostname gitlab-master.nvidia.com` succeeds. |
+
+The preflight reports all failed requirements together and exits unsuccessfully;
+`git init`, dependency synchronization, and hook installation do not run.
+UV supplies the Python interpreter and the generated project's Python tools,
+so Python, Ruff, pytest, tox, and pre-commit are not separate preflight
+requirements.
+
+To resolve a failure, install every missing command, configure the Git identity
+values, or run `glab auth login --hostname gitlab-master.nvidia.com` as
+applicable. Then re-run the trusted Copier command. Since the check runs after
+rendering, remove or choose another destination directory only when Copier
+requires an empty target; do not treat the rendered files as a successfully
+initialized project until the preflight has passed.
 
 ## Generated capabilities
 

@@ -28,9 +28,21 @@ Running this template produces a Python project that is ready to develop in imme
 
 ## Prerequisites
 
+The first trusted Copier task checks these requirements and stops before project
+setup if one is missing:
+
 - **UV** — install per [UV installation docs](https://docs.astral.sh/uv/getting-started/installation/). Everything here runs through `uv` and `uvx` — including Copier itself, which we invoke as `uvx copier` rather than installing globally. UV also fetches Python interpreters on demand and runs the post-generation `uv sync`.
-- **Git** — `git init` is run automatically after generation.
-- **[`glab`](https://gitlab.com/gitlab-org/cli)** — required by the `/judge-cicd` agent to inspect GitLab pipeline health. Install via your package manager (e.g. `brew install glab`) and authenticate with `glab auth login`.
+- **Git** — `git init` is run automatically after generation. Configure both
+  `git config --global user.name` and `git config --global user.email` with
+  nonempty values; generated-project commits need this identity.
+- **Bash** and **[ShellCheck](https://www.shellcheck.net/)** — the generated
+  pre-commit configuration checks Bash scripts with ShellCheck.
+- **[`glab`](https://gitlab.com/gitlab-org/cli)** — required by the generated
+  workflow to inspect GitLab pipeline health. Authenticate it to
+  `gitlab-master.nvidia.com` with `glab auth login --hostname gitlab-master.nvidia.com`.
+
+The preflight does not require a separately installed Python, Ruff, pytest, or
+other project tool: UV manages the Python interpreter and project tooling.
 
 ## Quick start
 
@@ -40,9 +52,13 @@ cd my-project
 uv run pytest
 ```
 
-`--trust` is required because [`copier.yaml`](copier.yaml) declares `_tasks` (`git init`, `uv sync`, `uv run pre-commit install`) that execute on your machine after rendering. Copier refuses to run them without explicit trust.
+`--trust` is required because [`copier.yaml`](copier.yaml) declares `_tasks`
+that execute on your machine after rendering. Copier refuses to run them
+without explicit trust. Its first task is a prerequisite preflight; it runs
+after rendering (a Copier limitation), but before `git init`, `uv sync`, or
+pre-commit installation make setup changes.
 
-You'll be prompted for three values (see [Template variables](#template-variables)). After the prompts, Copier runs the [post-generation tasks](#post-generation-tasks) and you're ready to commit.
+You'll be prompted for three values (see [Template variables](#template-variables)). After the prompts, Copier runs the [post-generation tasks](#post-generation-tasks) and you're ready to commit. If the preflight fails, install the named command, configure the reported Git identity, or sign in to the reported GitLab host, then run the Copier command again.
 
 To regenerate a project later when this template gets new features, run `uvx copier update --trust` from inside the generated project — see [Updating an existing project](#updating-an-existing-project).
 
@@ -68,11 +84,19 @@ uvx copier copy --trust ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-o
 
 After rendering, Copier runs (configured in [`copier.yaml`](copier.yaml) under `_tasks`):
 
-1. `git init` — initialize a git repository.
-2. `uv sync` — create the venv and install dependencies.
-3. `uv run pre-commit install` — install the git pre-commit hook.
+1. A prerequisite preflight — checks `git`, `uv`, `bash`, `shellcheck`, and
+   `glab`; a nonempty Git `user.name` and `user.email`; and an authenticated
+   `glab` session for `gitlab-master.nvidia.com`. It reports every failed
+   requirement and stops the remaining tasks.
+2. `git init` — initialize a git repository.
+3. `uv sync` — create the venv and install dependencies.
+4. `uv run pre-commit install` — install the git pre-commit hook.
 
-You can re-run any of these manually if a step fails.
+Copier has already rendered files by the time it can run a task, so a failed
+preflight can leave the destination directory behind. Correct the reported
+requirement and re-run Copier; use a new or empty destination directory if
+Copier will not reuse the existing one. You can re-run a later setup command
+manually only after the preflight passes.
 
 ## Generated project layout
 

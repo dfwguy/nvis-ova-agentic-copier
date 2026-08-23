@@ -1,7 +1,11 @@
 """Tests for the copier template."""
 
 import json
+import os
+import subprocess
 from pathlib import Path
+
+import yaml
 
 
 def test_generated_project_structure(generated_project: Path) -> None:
@@ -382,3 +386,113 @@ def test_copier_yaml_exists(project_root: Path) -> None:
     assert "description" in content
     assert "_subdirectory" in content
     assert "_tasks" in content
+
+
+def test_copier_preflight_checks_required_tools_before_git_init(
+    project_root: Path,
+) -> None:
+    """Test that Copier verifies setup prerequisites before mutating the output."""
+    content = (project_root / "copier.yaml").read_text()
+    tasks = content.split("_tasks:\n", maxsplit=1)[1].split(
+        "\n\nproject_name:", maxsplit=1
+    )[0]
+    preflight, git_init, _ = tasks.partition("  - git init")
+
+    assert git_init, "git init must remain a Copier task"
+    assert preflight, "a preflight task must run before git init"
+    for prerequisite in (
+        "command -v git",
+        "git config --global --get user.name",
+        "git config --global --get user.email",
+        "command -v uv",
+        "command -v bash",
+        "command -v shellcheck",
+        "command -v glab",
+        "glab auth status --hostname gitlab-master.nvidia.com",
+    ):
+        assert prerequisite in preflight
+
+
+def _copier_tasks(project_root: Path) -> list[str]:
+    """Load Copier tasks from the template configuration."""
+    configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
+    return configuration["_tasks"]
+
+
+def _write_command(path: Path, body: str) -> None:
+    """Create an executable POSIX-shell command stub."""
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+
+
+def _run_copier_tasks(tasks: list[str], environment: dict[str, str]) -> list[str]:
+    """Run Copier tasks in order, stopping after the first failed task."""
+    results = []
+    for task in tasks:
+        result = subprocess.run(
+            ["/bin/sh", "-c", task],
+            check=False,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+        results.append(result.stdout + result.stderr)
+        if result.returncode != 0:
+            break
+    return results
+
+
+def test_copier_preflight_stops_setup_when_glab_auth_fails(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Test that a failed preflight prevents every setup task."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    marker = tmp_path / "setup-ran"
+    _write_command(
+        commands / "git",
+        """case "$1:$2:$3:$4" in
+  config:--global:--get:user.name) printf 'Template User\\n' ;;
+  config:--global:--get:user.email) printf 'template@example.com\\n' ;;
+  init:*) printf 'git init\\n' >> "$MARKER" ;;
+esac""",
+    )
+    _write_command(commands / "uv", 'printf \'uv %s\\n\' "$1" >> "$MARKER"')
+    _write_command(commands / "bash", "exit 0")
+    _write_command(commands / "shellcheck", "exit 0")
+    _write_command(commands / "glab", "exit 1")
+    environment = os.environ | {"MARKER": str(marker), "PATH": str(commands)}
+
+    results = _run_copier_tasks(_copier_tasks(project_root), environment)
+
+    assert len(results) == 1
+    assert "Authenticate glab with" in results[0]
+    assert not marker.exists()
+
+
+def test_copier_preflight_allows_setup_on_ready_workstation(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Test that a passing preflight permits setup tasks in their declared order."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    marker = tmp_path / "setup-ran"
+    _write_command(
+        commands / "git",
+        """case "$1:$2:$3:$4" in
+  config:--global:--get:user.name) printf 'Template User\\n' ;;
+  config:--global:--get:user.email) printf 'template@example.com\\n' ;;
+  init:*) printf 'git init\\n' >> "$MARKER" ;;
+esac""",
+    )
+    _write_command(commands / "uv", 'printf \'uv %s\\n\' "$1" >> "$MARKER"')
+    _write_command(commands / "bash", "exit 0")
+    _write_command(commands / "shellcheck", "exit 0")
+    _write_command(commands / "glab", "exit 0")
+    environment = os.environ | {"MARKER": str(marker), "PATH": str(commands)}
+
+    results = _run_copier_tasks(_copier_tasks(project_root), environment)
+
+    expected_task_count = 4
+    assert len(results) == expected_task_count
+    assert marker.read_text().splitlines() == ["git init", "uv sync", "uv run"]
