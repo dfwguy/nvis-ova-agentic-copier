@@ -24,7 +24,17 @@ def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> 
     assert "pre-commit>=4.6.2" in pyproject
     assert "trailing-whitespace" in config
     assert "check-toml" in config
-    assert "detect-private-key" in config
+    assert "Kingfisher secret scan" in config
+    assert "kingfisher-bin" in pyproject
+
+
+def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
+    """Test that generated projects scan committed content for secrets in CI."""
+    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+
+    assert "kingfisher:" in ci_config
+    assert "--git-history none" in ci_config
+    assert "--no-validate" in ci_config
 
 
 def test_generated_package_directory(generated_project: Path) -> None:
