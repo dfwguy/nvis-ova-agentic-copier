@@ -185,6 +185,41 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "docs/" in writer.read_text()
 
 
+def test_generated_remediation_workflow_and_readme_map_rule(
+    generated_project: Path,
+) -> None:
+    """Test that projects can remediate themselves and keep README navigation current."""
+    remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
+    remediation_command = generated_project / ".claude" / "commands" / "remediate.md"
+    documentation_process = generated_project / "docs" / "diataxis.md"
+    readme_agent = generated_project / ".claude" / "agents" / "tdd-document.md"
+
+    assert remediation_agent.exists()
+    assert remediation_command.exists()
+    assert "Make this repo meet our standards" in remediation_agent.read_text()
+    assert "baseline" in remediation_agent.read_text()
+    assert "README map" in documentation_process.read_text()
+    assert "every tracked top-level file and" in documentation_process.read_text()
+    assert "README map" in readme_agent.read_text()
+    readme = (generated_project / "README.md").read_text()
+    for entry in (
+        ".claude/",
+        ".copier-answers.yml",
+        ".cursor/",
+        ".gitignore",
+        ".gitlab-ci.yml",
+        ".pre-commit-config.yaml",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/",
+        "my_test_project/",
+        "pyproject.toml",
+        "README.md",
+        "tests/",
+    ):
+        assert entry in readme
+
+
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the CLI syntax design gate."""
     agent = generated_project / ".claude" / "agents" / "cli-syntax-judge.md"

@@ -53,7 +53,10 @@ Always, after `tdd-judge` and `diataxis-judge` approve, `judge-quality` approves
    commands, setup steps, env vars), confirm `README.md` was updated to match.
    If a user-facing change shipped without a corresponding doc update, **reject
    and route back to `tdd-document` immediately** — do not update README
-   yourself. If nothing user-facing changed, skip this step.
+   yourself. Also verify its **Repository map** lists every tracked top-level
+   file and directory (including dotfiles) with a brief purpose. If the map is
+   absent or stale, reject and route back to `tdd-document`; do not update it
+   yourself. If nothing user-facing changed, the map check still applies.
 
 6. **Stage and commit**:
    ```

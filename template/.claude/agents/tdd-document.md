@@ -22,6 +22,8 @@ A change needs README updates when it adds, removes, or modifies any of:
 - `uv run` invocations users would type
 - Installation, setup, or configuration steps
 - Environment variables or config-file keys users set
+- A tracked top-level file or directory, including a rename or material change
+  to its purpose
 
 If none of the above affects what a person needs to understand or start using the project, leave `README.md` alone and report "README is accurate."
 
@@ -29,7 +31,13 @@ If none of the above affects what a person needs to understand or start using th
 
 1. **Identify the change**: read the staged/changed files (`git diff --name-only HEAD` and `git ls-files --others --exclude-standard`) to understand what shipped.
 2. **Decide if README needs updating**: apply the scope criteria above. If a visitor would not need this change to understand or start using the project, stop and report.
-3. **Update README.md**: edit the relevant section to match the new behavior. Keep the existing tone, structure, and formatting. Do not restructure unrelated sections.
+3. **Update README.md**: edit the relevant section to match the new behavior.
+   Keep the existing tone, structure, and formatting. Do not restructure
+   unrelated sections.
+4. **Verify the README map**: compare the **Repository map** against
+   `git ls-files` at the repository root. It must list every tracked top-level
+   file and directory (including dotfiles) with a brief purpose. `.git/` and
+   untracked/generated working files do not belong in the map.
 
 ## Constraints
 
@@ -37,6 +45,8 @@ If none of the above affects what a person needs to understand or start using th
 - Match the existing doc style; do not introduce new sections or headings unless the change genuinely needs one.
 - Be terse. Prefer one-line additions over paragraphs.
 - Do not remove unrelated content.
+- A README without a complete Repository map is not accurate, even when this
+  change did not otherwise alter a user-facing surface.
 
 ## Output
 

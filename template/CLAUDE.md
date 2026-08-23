@@ -144,6 +144,7 @@ New feature or non-trivial change
 | Command | Role | Does not |
 |---------|------|----------|
 | `/architect` | Designs modules, data structures, dependency boundaries | Write code or tests |
+| `/remediate` | Establishes an evidence-backed standards baseline and sequences existing-repository fixes | Edit files, weaken standards, or declare skipped gates passing |
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
 | `/diataxis-writer` | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
@@ -166,6 +167,16 @@ and **Explanation** supplies understanding and rationale. The writer and judge
 use this separation so `docs/` remains navigable instead of becoming a mixed
 collection of catch-all pages. See [`docs/diataxis.md`](docs/diataxis.md) for
 the required workflow and category guidance.
+
+### Remediation workflow
+
+When a user says **“Make this repo meet our standards”**, run `/remediate`.
+It treats this repository's checked-in standards as the baseline unless the
+user supplies another written standard, audits each applicable gate, and turns
+every gap into a small normal-workflow slice. Do not claim compliance merely
+because a best-effort review found nothing: all required checks plus the
+Diátaxis and README-map reviews must pass. The workflow never weakens a
+configured standard to make the report green.
 
 ### Completion requires publication
 
