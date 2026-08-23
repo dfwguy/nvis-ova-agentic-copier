@@ -6,7 +6,13 @@ _skip_if_exists:
   - .gitlab-ci.yml
   - .pre-commit-config.yaml
   - .claude/project.md
-  - "{{ project_slug }}/__init__.py"
+  - "src/{{ project_slug }}/__init__.py"
+
+message_before_update: |-
+  This template uses src/<package>/ for Python code. If your project still has
+  a legacy flat <package>/ directory, stop and migrate it before continuing:
+  move the package to src/<package>/, update pyproject.toml, and run the
+  project checks. Do not accept an update that leaves both package paths.
 
 _tasks:
   - |-

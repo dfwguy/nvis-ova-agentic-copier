@@ -61,9 +61,12 @@ def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
 
 
 def test_generated_package_directory(generated_project: Path) -> None:
-    """Test that the package directory is created with the correct name."""
-    assert (generated_project / "my_test_project").is_dir()
-    assert (generated_project / "my_test_project" / "__init__.py").exists()
+    """Test that Python packages use the standard isolated ``src/`` layout."""
+    package = generated_project / "src" / "my_test_project"
+
+    assert package.is_dir()
+    assert (package / "__init__.py").exists()
+    assert not (generated_project / "my_test_project").exists()
 
 
 def test_generated_tests_directory(generated_project: Path) -> None:
@@ -76,7 +79,9 @@ def test_generated_tests_directory(generated_project: Path) -> None:
 
 def test_package_init_rendered(generated_project: Path) -> None:
     """Test that the package __init__.py has a rendered module docstring."""
-    content = (generated_project / "my_test_project" / "__init__.py").read_text()
+    content = (
+        generated_project / "src" / "my_test_project" / "__init__.py"
+    ).read_text()
     assert "{{" not in content
     assert "}}" not in content
     assert content.strip() == '"""My Test Project."""'
@@ -120,6 +125,17 @@ def test_pyproject_toml_rendered(generated_project: Path) -> None:
     assert "{{ description }}" not in content
 
 
+def test_generated_hatch_configuration_builds_the_src_package(
+    generated_project: Path,
+) -> None:
+    """Test that Hatch builds the generated package from ``src/``."""
+    content = (generated_project / "pyproject.toml").read_text()
+
+    assert "[tool.hatch.build.targets.wheel]" in content
+    assert 'packages = ["src/my_test_project"]' in content
+    assert "[project.scripts]" in content
+
+
 def test_readme_rendered(generated_project: Path) -> None:
     """Test that README.md was rendered with the correct variable values."""
     content = (generated_project / "README.md").read_text()
@@ -137,6 +153,19 @@ def test_claude_project_md_rendered(generated_project: Path) -> None:
     assert "My Test Project" in content
     assert "A test project" in content
     assert "{{ project_name }}" not in content
+
+
+def test_generated_project_documents_filesystem_structure_defaults(
+    generated_project: Path,
+) -> None:
+    """Test that a generated project records its required layout and deviations."""
+    content = (generated_project / ".claude" / "project.md").read_text()
+
+    assert "src/{{ project_slug }}/" not in content
+    assert "src/my_test_project/" in content
+    assert "Filesystem structure deviations: None" in content
+    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
+        assert field in content
 
 
 def test_no_jinja_extension_in_output(generated_project: Path) -> None:
@@ -328,6 +357,120 @@ def test_generated_claude_workflow_supports_bash(generated_project: Path) -> Non
     assert "shellcheck" in finalizer.read_text()
 
 
+def test_generated_language_guidance_requires_a_separate_code_directory(
+    generated_project: Path,
+) -> None:
+    """Test that generated Python and Bash guidance sets layout boundaries."""
+    python_guidance = (generated_project / ".claude" / "lang" / "python.md").read_text()
+    bash_guidance = (generated_project / ".claude" / "lang" / "bash.md").read_text()
+
+    assert "src/" in python_guidance
+    assert "src/<package>/" in python_guidance
+    assert "tests/" in python_guidance
+    assert "outside the production" in python_guidance.lower()
+    assert "[project.scripts]" in python_guidance
+    assert "exactly one user-facing" in bash_guidance
+    assert "bin/<tool>" in bash_guidance
+    assert "implementation" in bash_guidance.lower()
+    assert "`src/`" in bash_guidance
+    assert "`lib/`" in bash_guidance
+    assert "tests outside production" in bash_guidance.lower()
+
+
+def test_source_and_template_language_guidance_define_the_same_structure_gate(
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that Copier source and generated guidance both specify the gate."""
+    for guidance_dir in (
+        project_root / ".claude" / "lang",
+        template_dir / ".claude" / "lang",
+    ):
+        python_guidance = (guidance_dir / "python.md").read_text()
+        bash_guidance = (guidance_dir / "bash.md").read_text()
+
+        assert "src/" in python_guidance
+        assert "src/<package>/" in python_guidance
+        assert "tests/" in python_guidance
+        assert "outside the production" in python_guidance.lower()
+        assert "[project.scripts]" in python_guidance
+        assert "exactly one user-facing" in bash_guidance
+        assert "bin/<tool>" in bash_guidance
+        assert "implementation" in bash_guidance.lower()
+        assert "`src/`" in bash_guidance
+        assert "`lib/`" in bash_guidance
+        assert "tests outside production" in bash_guidance.lower()
+
+
+def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
+    generated_project: Path,
+) -> None:
+    """Test that generated projects review layout before finalization."""
+    agent = generated_project / ".claude" / "agents" / "filesystem-structure-judge.md"
+    command = (
+        generated_project / ".claude" / "commands" / "filesystem-structure-judge.md"
+    )
+    workflow = (generated_project / "CLAUDE.md").read_text()
+    finalizer = (
+        generated_project / ".claude" / "agents" / "tdd-finalizer.md"
+    ).read_text()
+
+    assert agent.exists()
+    assert command.exists()
+    assert "src/" in agent.read_text()
+    assert "bin/" in agent.read_text()
+    assert "Filesystem structure deviations" in agent.read_text()
+    assert "subagent_type: filesystem-structure-judge" in command.read_text()
+    assert "/filesystem-structure-judge" in workflow
+    assert "`filesystem-structure-judge` approves" in finalizer
+
+
+def test_source_and_template_workflows_wire_the_filesystem_structure_judge(
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that the source workflow and Copier output retain the same gate."""
+    for root in (project_root, template_dir):
+        workflow = (root / "CLAUDE.md").read_text()
+        finalizer = (root / ".claude" / "agents" / "tdd-finalizer.md").read_text()
+        agent = root / ".claude" / "agents" / "filesystem-structure-judge.md"
+        command = root / ".claude" / "commands" / "filesystem-structure-judge.md"
+
+        assert agent.exists()
+        assert command.exists()
+        assert "subagent_type: filesystem-structure-judge" in command.read_text()
+        assert "/filesystem-structure-judge" in workflow
+        assert "`filesystem-structure-judge` approves" in finalizer
+
+
+def test_filesystem_structure_judge_defines_concrete_layout_and_deviation_rules(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that every shipped filesystem judge enforces the full contract."""
+    judge_paths = (
+        generated_project / ".claude" / "agents" / "filesystem-structure-judge.md",
+        project_root / ".claude" / "agents" / "filesystem-structure-judge.md",
+        template_dir / ".claude" / "agents" / "filesystem-structure-judge.md",
+    )
+
+    for judge_path in judge_paths:
+        content = judge_path.read_text()
+
+        assert "src/<package>" in content
+        assert "tests" in content.lower()
+        assert "[project.scripts]" in content
+        assert "exactly one user-facing" in content
+        assert "bin/<tool>" in content
+        assert "`src/`" in content
+        assert "`lib/`" in content
+        assert "language" in content.lower()
+        assert "rule" in content.lower()
+        assert "actual paths" in content.lower()
+        assert "rationale" in content.lower()
+
+
 def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:
     """Test that the generated .claude/settings.json denies AI-driven MR approval."""
     settings = json.loads((generated_project / ".claude" / "settings.json").read_text())
@@ -423,6 +566,91 @@ def test_copier_yaml_exists(project_root: Path) -> None:
     assert "description" in content
     assert "_subdirectory" in content
     assert "_tasks" in content
+
+
+def test_copier_skip_paths_preserve_project_specific_metadata(
+    project_root: Path,
+) -> None:
+    """Test that Copier preserves source and project-specific metadata."""
+    configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
+
+    assert "src/{{ project_slug }}/__init__.py" in configuration["_skip_if_exists"]
+    assert "{{ project_slug }}/__init__.py" not in configuration["_skip_if_exists"]
+    assert "pyproject.toml" in configuration["_skip_if_exists"]
+    assert ".claude/project.md" in configuration["_skip_if_exists"]
+
+
+def test_copier_update_warns_legacy_flat_packages_to_stop_and_migrate(
+    project_root: Path,
+) -> None:
+    """Test that Copier does not silently update a legacy flat package layout."""
+    configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
+
+    message = configuration["message_before_update"].lower()
+    assert "legacy flat" in message
+    assert "<package>/" in message
+    assert "src/<package>/" in message
+    assert "stop" in message
+    assert "migrate" in message
+
+
+def test_filesystem_structure_judge_rejects_split_legacy_python_layouts(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that the layout gate blocks a flat and src package split."""
+    judge_paths = (
+        generated_project / ".claude" / "agents" / "filesystem-structure-judge.md",
+        project_root / ".claude" / "agents" / "filesystem-structure-judge.md",
+        template_dir / ".claude" / "agents" / "filesystem-structure-judge.md",
+    )
+
+    for judge_path in judge_paths:
+        content = judge_path.read_text().lower()
+
+        assert "<package>/" in content
+        assert "src/<package>/" in content
+        assert "split" in content
+        assert "overall: reject" in content
+        assert "migrate" in content
+
+
+def test_update_how_to_gives_safe_legacy_flat_layout_migration_steps(
+    project_root: Path,
+) -> None:
+    """Test that old-layout projects get backup, move, and verification guidance."""
+    content = (
+        (project_root / "docs" / "how-to" / "update-a-generated-project.md")
+        .read_text()
+        .lower()
+    )
+
+    assert "legacy flat" in content
+    assert "backup" in content
+    assert "clean working tree" in content
+    assert "move" in content
+    assert "<package>/" in content
+    assert "src/<package>/" in content
+    assert "uv run pytest" in content
+    assert "uv run tox" in content
+
+
+def test_root_and_template_project_notes_declare_structure_compliance(
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that every project records deviations from the standard layout."""
+    root_notes = (project_root / ".claude" / "project.md").read_text()
+    template_notes = (template_dir / ".claude" / "project.md.jinja").read_text()
+
+    assert "Filesystem structure deviations" in root_notes
+    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
+        assert field in root_notes
+    assert "src/{{ project_slug }}/" in template_notes
+    assert "Filesystem structure deviations: None" in template_notes
+    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
+        assert field in template_notes
 
 
 def test_copier_preflight_requires_only_git_uv_and_glab_before_git_init(

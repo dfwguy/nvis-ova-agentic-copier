@@ -23,7 +23,28 @@ uv run tox
 ```
 
 Files listed in the template's `_skip_if_exists` configuration, including
-`README.md`, `pyproject.toml`, `.gitlab-ci.yml`, and the package initializer,
+`README.md`, `.gitlab-ci.yml`, and the package initializer,
 are preserved instead of overwritten. Consult the
 [template reference](../reference/template-contract.md#update-behavior) when
 deciding whether to incorporate a change manually.
+
+## Migrate a legacy flat Python package
+
+The current template uses `src/<package>/`. If an older project keeps its
+application in a top-level `<package>/` directory, migrate it deliberately
+before accepting this template update. Do not leave both paths in the working
+tree: that is a split layout and the generated filesystem gate rejects it.
+
+1. Start with a clean working tree and create a backup branch or tag before
+   changing the package layout.
+2. Create `src/`, then move every application file from `<package>/` to
+   `src/<package>/`. Review the move so user-created modules are included; do
+   not rely on Copier to infer or relocate them.
+3. Update `pyproject.toml` so Hatch builds `packages = ["src/<package>"]`.
+   Keep or add any Python console commands in `[project.scripts]`.
+4. Run `uv run pytest` and `uv run tox`. Fix imports, packaging configuration,
+   and tests before continuing.
+5. Update `.claude/project.md` if it describes the old layout, then run
+   `uvx copier update --trust`. Copier preserves `pyproject.toml` and
+   `.claude/project.md`, so it will not overwrite this project-specific
+   migration work. Rerun the checks afterward.

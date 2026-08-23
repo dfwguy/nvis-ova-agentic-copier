@@ -1,11 +1,33 @@
 # Why the coding standards exist
 
 **Diátaxis category: Explanation.** This page explains the intent behind the
-Python conventions generated in `CLAUDE.md` and `.claude/lang/python.md`.
+Python and Bash conventions generated in `CLAUDE.md` and `.claude/lang/`.
 
 The standards are designed to make ordinary changes safe to review, easy to
 test, and unsurprising to maintain. They are defaults for a new project, not a
 claim that every Python program needs the same architecture.
+
+## Give source code and entry points clear homes
+
+Python projects use the conventional `src/<package>/` layout. Keeping
+importable code below `src/` makes a test exercise the installed package rather
+than accidentally importing code from the repository root. Tests therefore sit
+outside the production package, while `pyproject.toml` remains the single place
+for packaging metadata and Python console-script declarations.
+
+Bash has a different packaging model, but benefits from the same separation of
+responsibilities. A generated Bash tool has a single public executable in
+`bin/`; its implementation lives under `src/` or `lib/`. This gives users one
+obvious command to invoke and keeps sourceable helpers from becoming accidental
+public interfaces. Development and CI helpers can live elsewhere when their
+purpose is clear, but they are not additional user CLIs.
+
+Some projects have genuine compatibility or operational reasons for another
+layout. Those decisions are explicit rather than implicit: `.claude/project.md`
+must identify the affected language, the normal rule being replaced, the actual
+source and entry-point paths, and the reason. The filesystem-structure gate
+uses that record to distinguish a deliberate exception from structure that has
+simply drifted.
 
 ## Make boundaries explicit
 
@@ -66,7 +88,7 @@ The agent workflow adds independent review and documentation checks around
 these tools. It is deliberately process-oriented: the aim is reliable handoff
 to a human reviewer, not automation that bypasses review or merge protections.
 
-For the commands and exact tooling versions, use the
+For the generated layout, commands, and exact tooling versions, use the
 [template reference](../reference/template-contract.md). For the broader
 template design, read
 [why the template and generated project are separate](template-and-generated-project.md).

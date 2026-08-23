@@ -95,6 +95,14 @@ language of the changed files, then run the matching gates: Python uses `uv`,
 changes run both sets of applicable checks. See the language convention files
 for the complete rules.
 
+### Filesystem structure gate
+
+Before finalization, the filesystem-structure judge verifies that Python uses
+`src/<package>/` with tests outside production code, and that a Bash application
+uses one public `bin/<tool>` entry point backed by implementation in `src/` or
+`lib/`. A project may use another layout only when `.claude/project.md` records
+the affected language, replaced rule, actual paths, and rationale.
+
 ### Routing
 
 The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. Branch protection on `main` (configured by `/setup-repo`) enforces this: direct pushes are rejected and merging requires approval, so even a one-line edit must go through a feature branch and an MR. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
@@ -123,14 +131,12 @@ New feature or non-trivial change
         │                         │
         └──────────────┬──────────┘
                        ▼
-        ├──────────────┬──────────────┬──────────────┬─────────────────┐   (run in parallel after both approve)
-        ▼              ▼              ▼              ▼                 ▼
-  /judge-quality   /judge-test    /tdd-document  /judge-cicd  /cli-syntax-judge
-   pure code       pure test      README landing checks CI + pipeline  CLIG + CLI contract
-   review          review         accuracy       health
-        │              │              │              │                 │
-        └──────┬───────┴──────────────┴──────────────┴─────────────────┘
-               ▼
+        ├───────── fan out after both approve ─────────┐
+        ▼                                               ▼
+ /judge-quality  /judge-test  /tdd-document  /judge-cicd  /cli-syntax-judge  /filesystem-structure-judge
+        │                                               │
+        └──────── every final gate approves ───────────┘
+                               ▼
         /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
                           and commits locally. Rejects to /tdd-document if README is stale.
         │
@@ -154,7 +160,8 @@ New feature or non-trivial change
 | `/tdd-document` | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/cli-syntax-judge` | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
-| `/tdd-finalizer` | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
+| `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
+| `/tdd-finalizer` | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
@@ -183,7 +190,7 @@ For any user-requested repository change, local validation is not a completion p
 
 ### Routing back on rejection
 
-When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/filesystem-structure-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
 ### `/judge-quality` and `/judge-test` severity model
 
