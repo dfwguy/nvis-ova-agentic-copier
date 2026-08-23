@@ -98,4 +98,4 @@ shellcheck:
     - apt-get update -qq && apt-get install -y --no-install-recommends shellcheck
     - shellcheck --version
     - echo "Linting all shell scripts"
-    - find . -type f -not -path './.git/*' -exec sh -c 'case "$1" in *.sh) shellcheck "$1";; *) if head -n1 "$1" | grep -Eq "^#!.*(ba)?sh"; then shellcheck "$1"; fi;; esac' _ {} \;
+    - find . -type f -not -path './.git/*' -not -path './.venv/*' -not -path './.tox/*' -exec sh -c 'case "$1" in *.sh) shellcheck "$1";; *) if head -n1 "$1" | grep -Eq "^#!.*(ba)?sh"; then shellcheck "$1"; fi;; esac' _ {} \;

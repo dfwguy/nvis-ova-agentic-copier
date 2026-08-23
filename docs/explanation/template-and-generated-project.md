@@ -3,6 +3,17 @@
 **Diátaxis category: Explanation.** This page explains the boundary between
 this repository and the projects it creates.
 
+```mermaid
+flowchart LR
+    template[Template repository] --> render[Copier renders the template]
+    render --> project[Generated project]
+    project --> customize[Project-specific customization]
+    template --> update[Template improvements]
+    update --> merge[Copier three-way update]
+    customize --> merge
+    merge --> project
+```
+
 This repository is a Copier template, not a starter application that happens
 to be copied occasionally. Its `template/` directory is the product: Copier
 renders that directory into a new project's files. The root-level tests verify

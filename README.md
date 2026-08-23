@@ -107,7 +107,7 @@ setup, but must be corrected before the corresponding commit or GitLab action.
 
 ## Generated project layout
 
-```
+```text
 my-project/
 ├── .claude/
 │   ├── agents/            # Claude Code agent definitions (architect, tdd-*, diataxis-*, judge-*)
@@ -170,43 +170,33 @@ the documentation process and keeps these four kinds of content distinct.
 
 ### Routing (TDD work phase)
 
-```
-New feature or non-trivial change
-        │
-        ▼
-   (git-flow Step 1: ensure feature branch)
-        │
-        ▼
-   /architect          ← design first; skippable only for trivial single-function changes
-        │
-        ▼
-   /tdd-red ──────────── /diataxis-writer       (run in parallel)
-   failing tests          docs/ content by Diátaxis category
-        │                         │
-        └──────────────┬──────────┘
-                       ▼
-   /tdd-green          ← Implementer: minimal code to pass tests
-        │
-        ├─────────────────────────┐   (run in parallel after tdd-green)
-        ▼                         ▼
-   /tdd-judge              /diataxis-judge
-   implementation checks    docs/ accuracy + Diátaxis fit
-        │                         │
-        └──────────────┬──────────┘
-                       ▼
-        ├──────────────┬──────────────┬──────────────┬─────────────────┐   (run in parallel after both approve)
-        ▼              ▼              ▼              ▼                 ▼
-  /judge-quality   /judge-test    /tdd-document  /judge-cicd  /cli-syntax-judge
-   pure code       pure test      README landing checks CI + pipeline  CLIG + CLI contract
-   review          review         accuracy       health
-        │              │              │              │                 │
-        └──────┬───────┴──────────────┴──────────────┴─────────────────┘
-               ▼
-        /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
-                          and commits locally. Rejects to /tdd-document if README is stale.
-        │
-        ▼
-   (git-flow Steps 3–4: push + MR, then stay on the branch until it merges)
+Mermaid flowcharts are recommended when a workflow has relationships that are
+hard to scan in prose or a text diagram.
+
+```mermaid
+flowchart TD
+    branch[Feature branch] --> architect["/architect"]
+    architect --> red["/tdd-red"]
+    architect --> writer["/diataxis-writer"]
+    red --> green["/tdd-green"]
+    writer --> green
+    green --> implementation["/tdd-judge"]
+    green --> documentation["/diataxis-judge"]
+    implementation --> approved[Both judges approve]
+    documentation --> approved
+    approved --> quality["/judge-quality"]
+    approved --> tests["/judge-test"]
+    approved --> landing["/tdd-document"]
+    approved --> cicd["/judge-cicd"]
+    approved --> cli["/cli-syntax-judge"]
+    approved --> filesystem["/filesystem-structure-judge"]
+    quality --> finalizer["/tdd-finalizer"]
+    tests --> finalizer
+    landing --> finalizer
+    cicd --> finalizer
+    cli --> finalizer
+    filesystem --> finalizer
+    finalizer --> publish[Push and open or update MR]
 ```
 
 ### Agents
@@ -246,7 +236,7 @@ The two quality reviewers — `/judge-quality` (production code) and `/judge-tes
 
 In a Claude Code session opened against the generated project:
 
-```
+```text
 /architect add a CSV ingestion module that streams rows into the existing pipeline
 ```
 

@@ -88,7 +88,7 @@ The agent workflow adds independent review and documentation checks around
 these tools. It is deliberately process-oriented: the aim is reliable handoff
 to a human reviewer, not automation that bypasses review or merge protections.
 
-For the generated layout, commands, and exact tooling versions, use the
+For the generated layout, commands, and tooling requirements, use the
 [template reference](../reference/template-contract.md). For the broader
 template design, read
 [why the template and generated project are separate](template-and-generated-project.md).

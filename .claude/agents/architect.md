@@ -52,7 +52,7 @@ Route to the Architect before starting any work that involves:
 
 ## Output Format
 
-```
+```text
 ## Design: <feature name>
 
 ### Modules / Functions

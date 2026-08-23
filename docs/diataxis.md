@@ -11,6 +11,15 @@ Do not blend these needs into a single catch-all page. Choose the reader's need
 first, then write the page in its appropriate quadrant. A how-to may link to a
 reference page, for example, but it should not become one.
 
+## Diagrams in explanations
+
+When an Explanation describes a lifecycle, relationship, or decision path that
+is difficult to scan in prose, include a Mermaid flowchart. Use a fenced
+`mermaid` block and keep the surrounding prose: the diagram should clarify the
+explanation, not replace its rationale. Do not add diagrams merely as
+decoration; tutorials, how-to guides, and reference pages should use one only
+when it directly helps their reader task.
+
 ## Workflow
 
 For non-trivial changes, documentation is built and checked as a first-class
