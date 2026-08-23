@@ -27,33 +27,42 @@ destination directory.
 
 | Order | Task | Effect |
 | --- | --- | --- |
-| 1 | Prerequisite preflight | Validates required commands, Git identity, and GitLab authentication. A failure prevents all later tasks. |
+| 1 | Command preflight | Validates required commands. A failure prevents all later tasks. |
 | 2 | `git init` | Creates a Git repository. |
-| 3 | `uv sync` | Creates the virtual environment and installs dependencies. |
-| 4 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
+| 3 | Readiness diagnostics | Checks the Git identity resolved in the new repository and authenticated GitLab API access. Diagnostics do not prevent later setup tasks. |
+| 4 | `uv sync` | Creates the virtual environment and installs dependencies. |
+| 5 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
 
 ### Preflight contract
 
-The prerequisite preflight validates all of the following:
+The command preflight validates all of the following:
 
 | Requirement | Validation |
 | --- | --- |
-| Required commands | `git`, `uv`, `bash`, `shellcheck`, and `glab` are available on `PATH`. |
-| Git commit identity | `git config --global --get user.name` and `git config --global --get user.email` each return a nonempty value. |
-| GitLab CLI authentication | `glab auth status --hostname gitlab-master.nvidia.com` succeeds. |
+| Required commands | `git`, `uv`, and `glab` are available on `PATH`. |
 
-The preflight reports all failed requirements together and exits unsuccessfully;
+The preflight reports all missing commands together and exits unsuccessfully;
 `git init`, dependency synchronization, and hook installation do not run.
 UV supplies the Python interpreter and the generated project's Python tools,
 so Python, Ruff, pytest, tox, and pre-commit are not separate preflight
 requirements.
 
-To resolve a failure, install every missing command, configure the Git identity
-values, or run `glab auth login --hostname gitlab-master.nvidia.com` as
-applicable. Then re-run the trusted Copier command. Since the check runs after
+After `git init`, readiness diagnostics run `git var GIT_AUTHOR_IDENT` in the
+generated repository and make an authenticated `glab api user` request to
+`${GITLAB_HOST:-gitlab-master.nvidia.com}`. Git identity may come from
+repository configuration or the standard Git identity environment variables,
+so a directory-scoped `direnv` configuration is supported; global Git
+configuration is not required. The GitLab request accepts credentials supplied
+to `glab` by the environment, such as a directory-scoped `GITLAB_TOKEN`; it
+does not rely on `glab auth status`. These diagnostics do not block dependency
+setup or hook installation, but must be resolved before committing or using
+the generated GitLab workflow.
+
+Bash and ShellCheck are required when running the generated Bash validation,
+but are not Copier generation requirements. Since the command check runs after
 rendering, remove or choose another destination directory only when Copier
 requires an empty target; do not treat the rendered files as a successfully
-initialized project until the preflight has passed.
+initialized project until the command preflight has passed.
 
 ## Generated capabilities
 
