@@ -54,7 +54,3 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
-
-      # check-illegal-windows-names needs a cross-platform filename policy tool.
-      # The two executable/shebang checks need an organization-approved policy
-      # for generated and vendored scripts. Ruff already validates Python ASTs.
