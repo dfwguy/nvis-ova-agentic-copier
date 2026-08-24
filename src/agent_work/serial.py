@@ -96,6 +96,10 @@ def _branch(issue: GitLabIssue) -> str:
     return f"agent/issue-{issue.iid}"
 
 
+def _discard_progress(_: str) -> None:
+    """Ignore progress when a caller does not need interactive status."""
+
+
 def _prompt(issue: GitLabIssue, project: GitLabProject, branch: str) -> str:
     return f"""Use $work-item-runner to implement GitLab issue #{issue.iid}.
 
@@ -177,13 +181,16 @@ def _finish_from_evidence(
     )
 
 
-def _preview(dependencies: RunNextDependencies) -> RunReport:
+def _preview(
+    dependencies: RunNextDependencies, report_progress: Callable[[str], None]
+) -> RunReport:
     dependencies.gitlab.verify_project()
     running = dependencies.gitlab.list_running()
     if len(running) > 1:
         raise RunNextError("multiple issues are marked agent::running")
     if running:
         issue = running[0]
+        report_progress(f"Issue #{issue.iid} is already running on {_branch(issue)}.")
         return RunReport(
             outcome="preview_running",
             issue_iid=issue.iid,
@@ -191,19 +198,25 @@ def _preview(dependencies: RunNextDependencies) -> RunReport:
         )
     eligible = dependencies.gitlab.list_eligible()
     if not eligible:
+        report_progress("No eligible work items found.")
         return RunReport(outcome="idle")
     issue = eligible[0]
+    report_progress(f"Issue #{issue.iid} is ready on {_branch(issue)}.")
     return RunReport(
         outcome="preview_ready", issue_iid=issue.iid, branch=_branch(issue)
     )
 
 
 def run_next(
-    dependencies: RunNextDependencies, *, apply: bool, timeout_seconds: int
+    dependencies: RunNextDependencies,
+    *,
+    apply: bool,
+    timeout_seconds: int,
+    report_progress: Callable[[str], None] = _discard_progress,
 ) -> RunReport:
     """Preview or route at most one GitLab issue, then exit."""
     if not apply:
-        return _preview(dependencies)
+        return _preview(dependencies, report_progress)
 
     with dependencies.lock():
         project = dependencies.gitlab.verify_project()
@@ -211,10 +224,14 @@ def run_next(
         if len(running) > 1:
             raise RunNextError("multiple issues are marked agent::running")
         if running:
+            report_progress(
+                f"Reconciling running issue #{running[0].iid} on {_branch(running[0])}."
+            )
             return _finish_from_evidence(dependencies, running[0], project)
 
         eligible = dependencies.gitlab.list_eligible()
         if not eligible:
+            report_progress("No eligible work items found.")
             return RunReport(outcome="idle")
         issue = dependencies.gitlab.fetch_issue(eligible[0].iid)
         if not _is_eligible(issue):
@@ -223,6 +240,7 @@ def run_next(
         dependencies.checkout.applied_preflight(project)
         branch = _branch(issue)
         dependencies.checkout.ensure_branch_available(branch)
+        report_progress(f"Claiming issue #{issue.iid} on {branch}.")
         dependencies.gitlab.mark_running(issue)
         claimed = dependencies.gitlab.list_running()
         if len(claimed) != 1 or claimed[0].iid != issue.iid:
@@ -235,6 +253,7 @@ def run_next(
             dependencies.gitlab.mark_failed(issue)
             return RunReport(outcome="failed", issue_iid=issue.iid, branch=branch)
         try:
+            report_progress(f"Starting agent for issue #{issue.iid} on {branch}.")
             dependencies.invoke.invoke(
                 checkout,
                 _prompt(issue, project, branch),

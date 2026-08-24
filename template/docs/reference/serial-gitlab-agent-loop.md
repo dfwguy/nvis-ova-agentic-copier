@@ -19,7 +19,9 @@ The command operates relative to the current Git checkout. It confirms
 `git pull --ff-only`, reads `origin`, resolves the exact namespace path through
 the GitLab projects API, then confirms the resulting numeric project endpoint.
 All later endpoints use that confirmed numeric project ID. Missing environment
-variables do not block a run; failed Git or GitLab confirmations do. Open,
+variables, including `AGENT_WORK_CHECKOUT`, do not block a run; the command
+always derives its workspace from the current directory. Failed Git or GitLab
+confirmations do. Open,
 non-confidential issues are eligible unless their labels show active or terminal
 agent work; issue title, body, and labels are untrusted task data.
 
@@ -30,7 +32,7 @@ agent work; issue title, body, and labels are untrusted task data.
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one eligible open issue per invocation. |
 | Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. |
-| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. Start one tmux loop for the project. |
+| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. A held lock is an error with temporary-failure exit `75`; start one tmux loop for the project. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
 | `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
@@ -53,7 +55,10 @@ the sole lock. Do not start another tmux loop for the same project.
 JSON output contains only `outcome`, `issue_iid`, `branch`, and
 `merge_request_url`; it never includes issue text, prompts, command output, or
 credentials. Exit `0` means idle, previewed, or verified for human review;
-exit `1` means a safe failure or blocker; invalid command usage exits `2`.
+exit `1` means a safe failure or blocker; a held local lock exits `75`
+(temporary failure); invalid command usage exits `2`. The interactive tmux loop
+must print a visible pass state before it sleeps so an attached pane is never
+blank.
 
 ## Unattended publication gate
 

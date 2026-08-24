@@ -84,11 +84,13 @@ def main(
 ) -> int:
     """Run one preview or applied pass and return its documented exit code."""
     parsed = build_parser().parse_args(arguments)
+    write_stderr("Checking for next work item...")
     try:
         report = run(
             dependencies_factory(),
             apply=parsed.apply,
             timeout_seconds=parsed.timeout_seconds,
+            report_progress=write_stderr,
         )
     except LockBusy as error:
         write_stderr(str(error))
