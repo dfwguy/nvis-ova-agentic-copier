@@ -13,13 +13,19 @@ copier template. Choose the page that matches what you need now.
   — bring template improvements into an existing project.
 - **How-to:** [Validate template changes](how-to/validate-template-changes.md)
   — run the same quality checks that protect this template's pipeline.
+- **How-to:** [Run one GitLab issue](how-to/run-one-gitlab-issue.md) — preview
+  or manually publish work for one explicitly selected, ready issue.
 - **Reference:** [Template contract](reference/template-contract.md) — look up
   inputs, generated files, tasks, and supported tooling.
+- **Reference:** [Phase 1 `run-issue`](reference/phase-1-run-issue.md) — look
+  up the bounded runner's CLI, output, exits, and side effects.
 - **Explanation:** [Template and generated project](explanation/template-and-generated-project.md)
   — understand the boundary between the template and its output.
 - **Explanation:** [Why Diátaxis](explanation/why-diataxis.md) — understand
   the documentation structure.
 - **Explanation:** [Why coding standards exist](explanation/coding-standards.md)
   — understand the rationale for the development rules.
+- **Explanation:** [Why the Phase 1 runner is bounded](explanation/bounded-phase-1-runner.md)
+  — understand its trust, workspace, and human-handoff boundaries.
 - **Process:** [Diátaxis documentation process](diataxis.md) — maintain these
   categories and this index.

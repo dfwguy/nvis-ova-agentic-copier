@@ -239,14 +239,15 @@ def test_ruff_uses_version_016_defaults(
         assert "ruff>=0.16.4" in config["dependency-groups"]["dev"]
 
 
-def test_generated_hatch_configuration_builds_the_src_package(
+def test_generated_hatch_configuration_builds_both_src_packages(
     generated_project: Path,
 ) -> None:
-    """Test that Hatch builds the generated package from ``src/``."""
+    """Test that Hatch builds project and bounded-runner packages from ``src/``."""
     content = (generated_project / "pyproject.toml").read_text()
 
     assert "[tool.hatch.build.targets.wheel]" in content
-    assert 'packages = ["src/my_test_project"]' in content
+    assert 'packages = ["src/my_test_project", "src/agent_work"]' in content
+    assert "force-include" not in content
     assert "[project.scripts]" in content
 
 

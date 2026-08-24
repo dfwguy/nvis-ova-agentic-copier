@@ -2,7 +2,9 @@
 
 A [copier](https://copier.readthedocs.io/) template for generating new Python projects. Running `copier copy` against this repo scaffolds a complete Python project with UV, ruff, pytest, pre-commit, and GitLab CI/CD pre-configured.
 
-Key distinction: the `template/` directory is the **template output**, not the source being developed here. The source code lives in `tests/`.
+Key distinction: the `template/` directory is the **template output**, not the
+source being developed here. The bounded runner itself is importable production
+code in `src/agent_work/`; the Copier contract tests live in `tests/`.
 
 ## Architecture
 
@@ -29,19 +31,19 @@ generated `pyproject.toml`.
 
 ## Filesystem structure deviations
 
-This repository is a Copier template, so its production payload is under
-`template/` rather than an application `src/` directory. This is the documented
-exception to the generated-project layout.
+This repository is a Copier template, whose generated-project payload is under
+`template/`, and it also ships the `src/agent_work/` runner package.
 
 - **Language:** Python
 - **Rule:** importable application code lives under `src/<package>/`.
-- **Actual paths:** template source is under `template/`, template tests are
-  under `tests/`, and no root user CLI exists. Generated Python code is at
-  `src/<project_slug>/`; generated Python entry points use
+- **Actual paths:** root runner code is at `src/agent_work/`; template source
+  is under `template/`, and contract tests are under `tests/`. Generated
+  Python code is at `src/<project_slug>/` and `src/agent_work/`; generated
+  Python entry points use
   `[project.scripts]`, and generated Bash projects add a single `bin/<tool>`
   only when they introduce a Bash application.
-- **Rationale:** this repository produces project files instead of shipping an
-  importable application.
+- **Rationale:** the root runner validates the Copier payload's bounded
+  work-item workflow while the repository continues to produce project files.
 
 ## File Sync Notes
 

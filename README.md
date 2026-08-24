@@ -12,6 +12,24 @@ how-to guides, a template reference, and explanations of the template design
 and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
 [why its coding standards exist](docs/explanation/coding-standards.md).
 
+## Run one GitLab issue
+
+Generated projects include the `agent-work` CLI and `work-item-runner` skill
+for one human-selected GitLab issue. Set `GITLAB_HOST` and a numeric
+`GITLAB_PROJECT_ID`, then preview safely before allowing publication:
+
+```bash
+agent-work run-issue 123 --mode publish --json
+agent-work run-issue 123 --mode publish --apply --json
+```
+
+The selected issue must be open, non-confidential, and labelled
+`agent::ready`. An applied run opens or updates an MR, retains its independent
+Git working copy with private metadata, reports `awaiting_human`, and stops for
+human review and merge. See the generated
+[how-to](template/docs/how-to/run-one-gitlab-issue.md) and the
+repository [skill](.agents/skills/work-item-runner/SKILL.md).
+
 ## What you get
 
 Running this template produces a Python project that is ready to develop in immediately:

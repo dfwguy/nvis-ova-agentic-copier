@@ -50,11 +50,38 @@ checking the current checkout:
 intended_branch="claude/<slug>"
 ```
 
+The `agent/issue-<iid>` form is reserved for the verified `work-item-runner`
+Phase 1 flow: a project-scoped independent Git working copy. Its starting
+point is the configured default branch. A runner child must mechanically
+verify that it is in that independent clone, then continue its already-selected
+workflow without recursively invoking `agent-work run-issue` or creating an
+ordinary branch:
+
+```bash
+git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
+test -d "$(git rev-parse --show-toplevel)/.git"
+expected_origin="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" --jq .http_url_to_repo)"
+test "$(git remote get-url origin)" = "$expected_origin"
+configured_default_branch="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" --jq .default_branch)"
+git merge-base --is-ancestor "origin/$configured_default_branch" HEAD
+```
+
+Only the runner uses this verified path. An ordinary checkout that finds an
+`agent/issue-<iid>` branch must refuse it rather than create, reuse, or publish
+that reserved form. The runner retains its working copy at `awaiting_human` for
+review and follow-up.
+
 Run from the main thread with Bash:
 
 ```bash
 git rev-parse --abbrev-ref HEAD
 ```
+
+- **On a mechanically verified runner `agent/issue-<iid>` branch** → use the
+  checks above to prove the independent `.git` directory, configured project
+  origin, and configured default branch. Then continue the runner-selected
+  workflow on this branch. `agent-work run-issue` is the parent invocation that
+  selected it; never invoke that command recursively from the runner child.
 
 - **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
    ```bash
