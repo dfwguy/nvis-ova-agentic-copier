@@ -227,10 +227,10 @@ flowchart TD
 The two quality reviewers — `/judge-quality` (production code) and `/judge-test` (tests) — classify every finding as one of:
 
 - **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes automatically: `/judge-quality` to `/tdd-green`, `/judge-test` to `/tdd-red` (test defects belong to the Test Writer).
-- **Minor** — non-blocking style or clarity nit caused or kept by this change. The main agent appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change.
-- **Existing** — pre-existing issue in surrounding code or tests that this change did not introduce. Surfaced in the report but never written to `FIXME.md`.
+- **Minor** — non-blocking style or clarity nit caused or kept by this change. The main agent files it with the GitLab Bug template and links it from the merge request.
+- **Existing** — pre-existing issue in surrounding code or tests that this change did not introduce. Surfaced in the report but not automatically filed.
 
-**Minor and Existing findings never block the merge.** `FIXME.md` (deferred quality findings) and its companion `TODO.md` (user-directed follow-ups) are checked into the repo so deferred work stays visible. After `/tdd-finalizer` reports the MR, the user is asked whether any `FIXME.md` entries should be elevated to `TODO.md`.
+**Minor and Existing findings never block the merge.** Deferred quality work and user-directed follow-ups are tracked as GitLab issues, created from the Bug and Feature templates in `.gitlab/issue_templates/`. Each issue records priority (`P0`–`P3`) and severity (`S1`–`S4`), so urgency and impact are visible separately.
 
 ### Using the workflow
 

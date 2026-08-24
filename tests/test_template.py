@@ -20,6 +20,30 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+def test_generated_project_includes_structured_gitlab_issue_templates(
+    generated_project: Path,
+) -> None:
+    """Test that generated projects track work with GitLab issue templates."""
+    templates = generated_project / ".gitlab" / "issue_templates"
+
+    bug = (templates / "Bug.md").read_text()
+    feature = (templates / "Feature.md").read_text()
+
+    for template in (bug, feature):
+        assert "## Priority" in template
+        assert "P0" in template
+        assert "P3" in template
+        assert "## Severity" in template
+        assert "S1" in template
+        assert "S4" in template
+
+    assert "## Steps to reproduce" in bug
+    assert "## Expected behavior" in bug
+    assert "## Actual behavior" in bug
+    assert "## Problem" in feature
+    assert "## Acceptance criteria" in feature
+
+
 def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> None:
     """Test that generated projects do not fetch remote hook repositories."""
     config = (generated_project / ".pre-commit-config.yaml").read_text()

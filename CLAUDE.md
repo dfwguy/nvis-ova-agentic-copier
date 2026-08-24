@@ -197,53 +197,31 @@ When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, 
 `/judge-quality` (production-code review) and `/judge-test` (test-quality review) both classify every finding as one of:
 
 - **Major** — defect in this change. Triggers `Overall: Reject`. `/judge-quality` reroutes to `/tdd-green`; `/judge-test` reroutes to `/tdd-red` (test defects belong to the Test Writer) — except a `/judge-test` Major flagging production code that *forces* internal mocking (a missing injection point), which reroutes to `/tdd-green`. Reroutes are automatic.
-- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent (under the `/judge-quality` or `/judge-test` slash command) appends each Minor finding to `FIXME.md` and stages it so `/tdd-finalizer` commits it alongside the change. Does not reroute. See "FIXME.md and TODO.md" below.
-- **Existing** — pre-existing issue in surrounding code or tests, not introduced by this change. Surfaced verbatim in the judge's report but **not** written to `FIXME.md`. Never blocks.
+- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent creates a GitLab issue from the Bug template, records the finding, and labels it `type::quality`. Does not reroute. See "GitLab issues" below.
+- **Existing** — pre-existing issue in surrounding code or tests, not introduced by this change. Surfaced verbatim in the judge's report but not automatically filed. Never blocks.
 
-Both reviewers end their return note with `Added <N> entries to FIXME.md` (or `No new FIXME entries`). The main agent forwards those lines to `/tdd-finalizer` so the finalizer knows whether `FIXME.md` is part of this commit, and so post-MR the user is asked whether to elevate any FIXME entries to `TODO.md`. Existing findings are surfaced to the user at the same point but kept out of `FIXME.md`.
+Both reviewers end their return note with `Created <N> GitLab issues` (or `No new issues`). The main agent forwards those lines to `/tdd-finalizer` so the finalizer can link the issues from the MR. Existing findings are surfaced to the user at the same point but are not automatically filed.
 
 `/judge-quality` owns production-code quality; `/judge-test` runs on **Sonnet** and owns test quality — meaningful assertions that would catch a wrong implementation, `pytest.mark.parametrize`, `hypothesis` for pure functions, order-independence (`pytest-randomly`), dependency-injected test doubles instead of internal-symbol patching, and test hygiene. The two reviewers do not duplicate each other.
 
-## FIXME.md and TODO.md
+## GitLab issues
 
-Two repo-root, checked-in files capture work that is not part of the current change but should not be forgotten. Both apply to this repo and to projects scaffolded from it (mirrored under `template/`).
+GitLab issues are the system of record for deferred work, planned work, and non-blocking quality findings. Do not create or maintain `TODO.md` or `FIXME.md`; both this repository and generated projects use the templates in `.gitlab/issue_templates/` instead.
 
-### `FIXME.md` — agent-written, deferred quality findings
+### Templates and fields
 
-- **Source.** Only the quality reviewers `/judge-quality` (production code) and `/judge-test` (tests) write to `FIXME.md`, and only for **Minor** findings (`Existing` findings stay in the judge's report). The other agents (`/judge-cicd`, `/tdd-judge`, `/tdd-finalizer`) never touch it.
-- **When.** During the `/judge-quality` or `/judge-test` slash command, after the subagent returns `Overall: Approve` with Minor findings. The main agent appends, then `git add FIXME.md` so `/tdd-finalizer` commits it in the same commit as the change.
-- **Schema.**
-  ```markdown
-  # FIXME
+- Use **Bug** for defects and deferred Minor quality findings. It captures reproduction steps, expected and actual behavior, environment, priority, and severity.
+- Use **Feature** for requested capabilities and planned follow-up work. It captures the problem, intended outcome, acceptance criteria, scope, dependencies, priority, and severity.
+- In every issue choose exactly one **priority**: `P0` (stop-ship), `P1` (current milestone), `P2` (planned), or `P3` (low/no current commitment).
+- In every issue choose exactly one **severity**: `S1` (critical), `S2` (major), `S3` (moderate), or `S4` (minor). Priority measures urgency; severity measures impact. For features, severity is the impact of not delivering the capability.
 
-  Non-blocking Minor findings from `/judge-quality`. Entries are removed by the main agent when the user directs the fix and it lands. See CLAUDE.md → "FIXME.md and TODO.md".
+### Workflow
 
-  ## YYYY-MM-DD — <branch name>
+- The main agent files a Bug issue for each new **Minor** finding after an approving quality or test review, uses `S4` unless the finding has greater impact, and applies the `type::quality` label when that label exists. The issue must link to the relevant file, line, MR, or review note.
+- Existing findings remain in the review report and are never filed automatically.
+- When design, planning, or conversation identifies deferred scope, the main agent files a Feature issue after confirming it with the user. Link it from the originating issue or MR.
+- Close issues only when the associated work lands or a user explicitly drops it. Link MRs with `Closes #<issue>` when the MR resolves the work.
 
-  - **<file>:<line>** — <verbatim Minor finding>
-  ```
-  New iterations append a new dated `##` section; do not collapse history.
-- **Lifecycle.** Entries leave `FIXME.md` when the user directs them to be addressed and the corresponding fix lands. The main agent removes the entry as part of the fix's commit. No agent auto-prunes; no append-only rule — explicit user direction drives removal.
+### Suggested labels
 
-### `TODO.md` — user-driven, future work
-
-- **Source.** Only the **main agent** writes to `TODO.md`, and only at user direction (never auto-appended). The trigger is always a confirmation step: main agent asks, user answers, then main agent writes.
-- **When the main agent asks.**
-  1. **After `/tdd-finalizer` reports the MR.** When `FIXME.md` gained entries this iteration, ask whether any should be elevated to `TODO.md` as scheduled follow-up. If so, move them (remove from `FIXME.md`, add to `TODO.md`) in a separate trivial commit per `git-flow.md`.
-  2. **At `/architect` time.** When the design splits into phases or carves scope for "later", ask whether the deferred phases / follow-ups go into `TODO.md` before routing to `/tdd-red`.
-  3. **Mid-conversation.** When the user describes work as multi-step or explicitly out of scope ("we'll do Y later", "phase 2 is…"), confirm and write it down.
-- **Schema.**
-  ```markdown
-  # TODO
-
-  Deferred work, multi-phase plans, and follow-ups recorded at user direction. Agents only append at user direction; entries are removed when the work lands or the user says to drop them. See CLAUDE.md → "FIXME.md and TODO.md".
-
-  ## YYYY-MM-DD — <short title>
-
-  <context the user provided; link to originating MR / discussion if useful>
-  ```
-- **Lifecycle.** Entries leave when the work lands (main agent removes as part of that work's commit) or when the user explicitly says to drop them. No agent auto-prunes.
-
-### Why both files are checked in
-
-`FIXME.md` and `TODO.md` are part of the repo so reviewers and future-you can see what is deferred. They are not scratch — keep entries terse and link to context rather than dumping detail. Both files travel with the change that produced them, so the MR diff is the audit trail.
+Create scoped labels in GitLab once for consistent filtering: `type::bug`, `type::feature`, `type::quality`, `priority::p0` through `priority::p3`, and `severity::s1` through `severity::s4`. The templates remain useful without these labels, but the labels make boards and triage views easier to maintain.
