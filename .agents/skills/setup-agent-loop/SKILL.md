@@ -89,9 +89,10 @@ before checking repository safeguards.
    fi
    printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval audit and attestation not required for this readiness policy.'
    ```
-2. Require absolute `AGENT_WORK_CHECKOUT` and `AGENT_WORK_LOCK_FILE` in
-   addition to the validated host/project settings. Use only numeric-project
-   endpoints, never `origin` inference.
+2. Require absolute `AGENT_WORK_CHECKOUT` in addition to the validated
+   host/project settings. The local lock is always the fixed, gitignored
+   `$AGENT_WORK_CHECKOUT/.agent-work.lock`; it is not configurable. Use only
+   numeric-project endpoints, never `origin` inference.
 3. Create a clean dedicated checkout that is not an operator's active checkout.
    Its `origin` must match the verified project, and `git -C
    "$AGENT_WORK_CHECKOUT" ls-remote origin HEAD` must succeed without prompts.
