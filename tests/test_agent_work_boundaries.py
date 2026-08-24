@@ -16,6 +16,7 @@ from agent_work.adapters import (
     LockBusy,
     ProjectLock,
     ServiceCheckout,
+    build_default_dependencies,
     load_environment_config,
 )
 from agent_work.cli import build_parser, main
@@ -81,6 +82,105 @@ def test_environment_derives_one_fixed_lock_file_from_the_checkout(
     )
 
     assert config.lock_file == checkout / ".agent-work.lock"
+
+
+def test_default_dependencies_discover_checkout_and_project_without_environment(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    project_payload = json.dumps(
+        {
+            "id": 310967,
+            "path_with_namespace": "group/project",
+            "default_branch": "main",
+            "web_url": "https://gitlab.example.com/group/project",
+            "http_url_to_repo": "https://gitlab.example.com/group/project.git",
+        }
+    )
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, json.dumps([json.loads(project_payload)]), ""),
+            CommandResult(0, project_payload, ""),
+        )
+    )
+
+    dependencies = build_default_dependencies(
+        environment={}, run_command=commands, current_directory=tmp_path
+    )
+
+    assert dependencies.checkout.path == checkout
+    assert commands.calls == [
+        (("git", "-C", str(tmp_path), "rev-parse", "--show-toplevel"), {}),
+        (("git", "-C", str(checkout), "pull", "--ff-only"), {}),
+        (("git", "-C", str(checkout), "remote", "get-url", "origin"), {}),
+        (
+            (
+                "glab",
+                "api",
+                "--hostname",
+                "gitlab.example.com",
+                "-X",
+                "GET",
+                "projects?search=project&simple=true&per_page=100",
+            ),
+            {},
+        ),
+        (
+            (
+                "glab",
+                "api",
+                "--hostname",
+                "gitlab.example.com",
+                "-X",
+                "GET",
+                "projects/310967",
+            ),
+            {},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure_at", "message"),
+    (
+        (1, "git pull --ff-only failed"),
+        (3, "GitLab project lookup failed"),
+    ),
+)
+def test_default_dependencies_name_the_failed_confirmation(
+    tmp_path: Path, failure_at: int, message: str
+) -> None:
+    results = [
+        CommandResult(0, str(tmp_path), ""),
+        CommandResult(0, "", ""),
+        CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+        CommandResult(
+            0,
+            json.dumps(
+                [
+                    {
+                        "id": 310967,
+                        "path_with_namespace": "group/project",
+                        "default_branch": "main",
+                        "web_url": "https://gitlab.example.com/group/project",
+                    }
+                ]
+            ),
+            "",
+        ),
+        CommandResult(0, "{}", ""),
+    ]
+    results[failure_at] = CommandResult(1, "", "connection failed")
+
+    with pytest.raises(AdapterError, match=message):
+        build_default_dependencies(
+            environment={},
+            run_command=_Commands(tuple(results)),
+            current_directory=tmp_path,
+        )
 
 
 def test_gitlab_selection_uses_only_the_numeric_project_endpoint(

@@ -11,14 +11,15 @@ single tmux Ralph loop. Each issue labelled `agent::ready` becomes a branch and
 human-gated merge request; the loop never approves or merges it.
 
 ```bash
-uv tool install --force .
-agent-work run-next --json
-tmux new-session -d -s agent-work 'while agent-work run-next --apply --json; do sleep 300; done'
+uv run agent-work run-next --json
+tmux new-session -d -s agent-work 'while uv run agent-work run-next --apply --json; do sleep 300; done'
 tmux attach -t agent-work
 ```
 
-Set the GitLab target and dedicated-checkout variables first; the complete
-commands are in the [serial loop how-to](docs/how-to/setup-serial-gitlab-agent-loop.md).
+Run it from the repository it should operate on. The runner confirms that
+checkout with `git pull --ff-only`, derives the GitLab host and project from
+`origin`, and confirms that project through GitLab before it selects work. The
+complete commands are in the [serial loop how-to](docs/how-to/setup-serial-gitlab-agent-loop.md).
 
 ## Documentation
 
@@ -31,16 +32,15 @@ and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
 ## Serial GitLab agent loop
 
 Generated projects use GitLab-only polling for one opted-in issue at a time.
-Set `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID`; the loop addresses the
-configured numeric project rather than inferring it from `origin`. A Developer
-account can poll eligible issues, so no webhook or inbound service is required:
+The runner derives its checkout and GitLab project from the current repository,
+then confirms both Git and GitLab access before work begins. A Developer account
+can poll eligible issues, so no webhook or inbound service is required:
 
 ```bash
-uv tool install --force .
-agent-work run-next --json
+uv run agent-work run-next --json
 ```
 
-An applied run uses a dedicated agent checkout, opens one MR, and
+An applied run uses the current repository checkout, opens one MR, and
 stops at `awaiting_human`. It never approves or merges. Run the Ralph loop in
 one lingering tmux session only after a human explicitly authorizes
 publication. For a constrained

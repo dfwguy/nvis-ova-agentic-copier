@@ -6,57 +6,36 @@ Use this procedure to configure one serial agent loop for one GitLab project.
 It uses Developer-compatible polling, not a webhook, and it does not authorize
 unattended publication until the explicit gate below is complete.
 
-## Check prerequisites and bind the project
+## Check prerequisites and confirm the current checkout
 
-Set and validate the non-secret GitLab target before checking its authenticated
-session. Do not print, export, or put tokens in this setup file:
-
-```bash
-export GITLAB_HOST=gitlab.example.com
-export GITLAB_PROJECT_ID=12345
-case "$GITLAB_HOST" in ''|*://*|*/*) exit 2;; esac
-case "$GITLAB_PROJECT_ID" in ''|*[!0-9]*) exit 2;; esac
-```
+Run the loop from the repository it should operate on. No GitLab-target or
+checkout environment variables are required. The runner itself confirms Git
+access with `git pull --ff-only`, derives the GitLab host and project path from
+`origin`, resolves that exact path through the GitLab API, and confirms the
+numeric project endpoint. Do not print, export, or put tokens in this setup.
 
 Check the preinstalled Git, `glab`, and Codex tools, then verify the existing
-`glab` and Codex sessions. From the dedicated checkout after it exists,
-`git ls-remote origin HEAD` is the noninteractive Git access check:
+`glab` and Codex sessions:
 
 ```bash
 command -v git glab codex jq
-glab auth status --hostname "$GITLAB_HOST"
 codex login status
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
+git pull --ff-only
+git remote get-url origin
 ```
 
-Every later GitLab operation must address this numeric endpoint, never a path
-inferred from `origin`. A Developer account can poll eligible issues. It does
-not need permission to install a webhook or an inbound service.
+If any confirmation fails, repair the repository's Git remote/credential or
+the `glab` login, then rerun the command. A Developer account can poll eligible
+issues; it does not need permission to install a webhook or an inbound service.
 
-The fail-closed readiness block after creating the checkout obtains the numeric
+The fail-closed readiness block obtains the numeric
 project representation once. It classifies the `glab` identity from the maximum
 numeric project/group access value; no numeric value is `unknown`. Only exactly
 30 (Developer) can continue. This check concerns the `glab` credential only;
 Git may use a different credential and is checked with `git ls-remote`.
 
-## Create the dedicated checkout
-
-Choose a path owned by the service user and outside any active operator
-checkout. Clone the verified repository URL into it, then check that it is
-clean and rooted at the configured directory:
-
-```bash
-export AGENT_WORK_CHECKOUT="$HOME/.local/share/agent-work/PROJECT"
-install -d -m 0700 "$(dirname "$AGENT_WORK_CHECKOUT")"
-git clone REPOSITORY_URL "$AGENT_WORK_CHECKOUT"
-git -C "$AGENT_WORK_CHECKOUT" rev-parse --show-toplevel
-git -C "$AGENT_WORK_CHECKOUT" status --porcelain
-git -C "$AGENT_WORK_CHECKOUT" ls-remote origin HEAD
-```
-
-Compare `origin` with the verified project's HTTP or SSH URL. An existing,
-dirty, incorrectly rooted, or wrong-origin checkout must be repaired before an
-applied run; do not repurpose an operator's checkout.
+The runner uses the current checkout and stores its fixed, gitignored
+`.agent-work.lock` alongside it. Start only one loop for a checkout.
 
 ## Verify Developer-readable safeguards
 
@@ -145,46 +124,18 @@ preserving this block's nonzero status.
 
 ## Install and start the tmux loop
 
-Install the runner from this clean source checkout. This creates a stable
-`agent-work` executable; it uses the separate `AGENT_WORK_CHECKOUT` for
-issue work:
+Run the runner through the repository's own UV environment. This prevents one
+repository's version from replacing another repository's runner:
 
 ```bash
 command -v uv tmux
-uv tool install --force .
-agent-work --help
+uv run agent-work --help
 ```
 
-Write the three non-secret settings to a file you load before starting the loop.
-The checkout path must be absolute. The runner always uses the fixed,
-gitignored `$AGENT_WORK_CHECKOUT/.agent-work.lock`, so every local process
-pointing at that checkout contends for the same lock. Credentials remain in the
-service user's existing Git and `glab` credential mechanisms, not in this file:
+Run the read-only preview from that checkout:
 
 ```bash
-install -d -m 0700 "$HOME/.config/agent-work"
-printf '%s\n' \
-  "GITLAB_HOST=$GITLAB_HOST" \
-  "GITLAB_PROJECT_ID=$GITLAB_PROJECT_ID" \
-  "AGENT_WORK_CHECKOUT=$AGENT_WORK_CHECKOUT" \
-  > "$HOME/.config/agent-work/PROJECT.env"
-```
-
-```text
-GITLAB_HOST=gitlab.example.com
-GITLAB_PROJECT_ID=12345
-AGENT_WORK_CHECKOUT=/home/USER/.local/share/agent-work/PROJECT
-```
-
-Load the settings, create the dedicated checkout, and run the read-only preview:
-
-```bash
-set -a
-. "$HOME/.config/agent-work/PROJECT.env"
-set +a
-install -d -m 0700 "$(dirname "$AGENT_WORK_CHECKOUT")"
-git clone REPOSITORY_URL "$AGENT_WORK_CHECKOUT"
-agent-work run-next --json
+uv run agent-work run-next --json
 ```
 
 After a human explicitly authorizes unattended publication, start the Ralph loop
@@ -195,7 +146,7 @@ exactly `30`; it does not replace the documented branch-protection or approval
 evidence.
 
 ```bash
-tmux new-session -d -s agent-work 'while agent-work run-next --apply --json; do sleep 300; done'
+tmux new-session -d -s agent-work 'while uv run agent-work run-next --apply --json; do sleep 300; done'
 tmux attach -t agent-work
 ```
 

@@ -4,7 +4,7 @@
 
 The agent loop has one source of work: explicitly opted-in GitLab issues in one
 configured numeric project. A bounded poll selects at most one issue, prepares
-one dedicated checkout, and drives the repository workflow until it opens or
+one checkout, and drives the repository workflow until it opens or
 updates a merge request for human review.
 
 ```mermaid
@@ -23,14 +23,14 @@ serial: one `run-next` invocation processes at most one item and exits, while a
 user-level systemd timer decides when to start another invocation.
 
 Polling works with ordinary Developer access to the project. It has no inbound
-listener or webhook-management requirement. The configured `GITLAB_HOST` and
-numeric `GITLAB_PROJECT_ID` are authority inputs; the loop must use
-`projects/$GITLAB_PROJECT_ID` and must not infer a project from Git remote
-configuration. An issue body remains untrusted task data, not authority to
+listener or webhook-management requirement. The loop derives its target from
+the current checkout's `origin`, confirms the exact namespace through GitLab,
+then uses the confirmed numeric `projects/<id>` endpoint for all later calls.
+An issue body remains untrusted task data, not authority to
 change the checkout, credentials, sandbox, or repository policy.
 
-The dedicated checkout protects the operator's own working tree and makes each
-run's branch and publication evidence clear. A completed mutating run pushes a
+The checkout-scoped lock and exact publication evidence make each run's branch
+and publication state clear. A completed mutating run pushes a
 feature branch and opens an MR, then hands off at
 `awaiting_human`. The GitLab projection is `agent::ready` to `agent::running`,
 then `agent::awaiting-human` or `agent::failed`; the deterministic branch is

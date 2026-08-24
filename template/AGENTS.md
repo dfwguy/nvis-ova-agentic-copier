@@ -32,13 +32,15 @@ handoff. Do not create a second `.claude/` workflow with Codex model names.
 
 ## GitLab project IDs
 
-All `glab` API operations must address the numeric project ID; never infer a
-repository path from `origin`. Require `GITLAB_HOST` and the numeric
-`GITLAB_PROJECT_ID` to be supplied by the environment, and validate the pair
-before remote work:
+All `glab` API operations after target discovery must address the numeric
+project ID. `agent-work` derives its checkout and GitLab project from `origin`,
+then confirms the numeric endpoint; it must not require `GITLAB_HOST`,
+`GITLAB_PROJECT_ID`, or `AGENT_WORK_CHECKOUT` to be present. Before remote work
+outside the runner, confirm Git and the GitLab endpoint:
 
 ```bash
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
+git pull --ff-only
+glab api --hostname gitlab.example.com "projects/12345"
 ```
 
 Use endpoints under `projects/$GITLAB_PROJECT_ID` for merge requests,

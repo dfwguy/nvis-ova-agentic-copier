@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, cast
+from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
@@ -63,7 +64,7 @@ def run_subprocess(
 
 
 def load_environment_config(environment: Mapping[str, str]) -> AgentWorkConfig:
-    """Validate the three non-secret environment settings used by the runner."""
+    """Validate explicit configuration for callers that already have it."""
     try:
         project_id = int(environment["GITLAB_PROJECT_ID"])
         return AgentWorkConfig(
@@ -76,6 +77,105 @@ def load_environment_config(environment: Mapping[str, str]) -> AgentWorkConfig:
             "GITLAB_HOST, numeric GITLAB_PROJECT_ID, and AGENT_WORK_CHECKOUT "
             "are required"
         ) from error
+
+
+def _repository_location(origin: str) -> tuple[str, str]:
+    """Return the GitLab hostname and namespace path from one origin URL."""
+    normalized = origin.strip().removesuffix(".git")
+    parsed = urlparse(normalized)
+    if parsed.hostname and parsed.path.strip("/"):
+        return parsed.hostname, parsed.path.strip("/")
+    scp_style = re.fullmatch(r"(?:[^@]+@)?(?P<host>[^:]+):(?P<path>.+)", normalized)
+    if scp_style is not None:
+        return scp_style["host"], scp_style["path"].strip("/")
+    raise AdapterError("checkout origin is not a usable GitLab repository URL")
+
+
+def _confirmed_command(
+    run_command: CommandRunner, command: tuple[str, ...], failure: str
+) -> str:
+    """Run a non-secret confirmation and name its failed boundary."""
+    result = run_command(command)
+    if result.returncode != 0:
+        raise AdapterError(failure)
+    return result.stdout.strip()
+
+
+def _discover_project(
+    *, host: str, path: str, run_command: CommandRunner
+) -> tuple[int, dict[str, object]]:
+    """Resolve an exact repository path, then confirm it by numeric project ID."""
+    name = path.rsplit("/", maxsplit=1)[-1]
+    search_payload = _confirmed_command(
+        run_command,
+        (
+            "glab",
+            "api",
+            "--hostname",
+            host,
+            "-X",
+            "GET",
+            f"projects?search={name}&simple=true&per_page=100",
+        ),
+        "GitLab project lookup failed",
+    )
+    try:
+        candidates = json.loads(search_payload)
+    except json.JSONDecodeError as error:
+        raise AdapterError("GitLab returned invalid project lookup data") from error
+    if not isinstance(candidates, list):
+        raise AdapterError("GitLab returned invalid project lookup data")
+    candidate = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and item.get("path_with_namespace") == path
+        ),
+        None,
+    )
+    if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), int):
+        raise AdapterError("checkout origin project is not accessible through GitLab")
+    project_id = candidate["id"]
+    numeric_payload = _confirmed_command(
+        run_command,
+        ("glab", "api", "--hostname", host, "-X", "GET", f"projects/{project_id}"),
+        "GitLab numeric project confirmation failed",
+    )
+    try:
+        project = json.loads(numeric_payload)
+    except json.JSONDecodeError as error:
+        raise AdapterError("GitLab returned invalid project metadata") from error
+    if not isinstance(project, dict) or project.get("id") != project_id:
+        raise AdapterError("GitLab numeric project confirmation did not match origin")
+    return project_id, project
+
+
+def discover_checkout_config(
+    *, current_directory: Path, run_command: CommandRunner
+) -> AgentWorkConfig:
+    """Confirm the current checkout and derive its GitLab target without env vars."""
+    checkout = Path(
+        _confirmed_command(
+            run_command,
+            ("git", "-C", str(current_directory), "rev-parse", "--show-toplevel"),
+            "current directory is not inside a Git checkout",
+        )
+    ).resolve()
+    _confirmed_command(
+        run_command,
+        ("git", "-C", str(checkout), "pull", "--ff-only"),
+        "git pull --ff-only failed",
+    )
+    origin = _confirmed_command(
+        run_command,
+        ("git", "-C", str(checkout), "remote", "get-url", "origin"),
+        "checkout origin could not be read",
+    )
+    host, path = _repository_location(origin)
+    project_id, _project = _discover_project(
+        host=host, path=path, run_command=run_command
+    )
+    return AgentWorkConfig(host=host, project_id=project_id, checkout=checkout)
 
 
 class GitLabGateway:
@@ -286,7 +386,7 @@ class CommandRunner(Protocol):
 
 
 class ServiceCheckout:
-    """Git operations in one runner-owned dedicated checkout."""
+    """Git operations in the runner's confirmed checkout."""
 
     def __init__(self, config: AgentWorkConfig, run_command: CommandRunner) -> None:
         self._config = config
@@ -294,24 +394,24 @@ class ServiceCheckout:
 
     @property
     def path(self) -> Path:
-        """Return the configured dedicated checkout path."""
+        """Return the confirmed checkout path."""
         return self._config.checkout
 
     def _run(self, *arguments: str, accepted: tuple[int, ...] = (0,)) -> str:
         result = self._run_command(("git", "-C", str(self.path), *arguments))
         if result.returncode not in accepted:
-            raise AdapterError("dedicated checkout validation failed")
+            raise AdapterError("checkout validation failed")
         return result.stdout.strip()
 
     def applied_preflight(self, project: GitLabProject) -> None:
         """Require a clean bound checkout and fast-forward its default branch."""
         if not self.path.is_dir():
-            raise AdapterError("the dedicated checkout does not exist")
+            raise AdapterError("the checkout does not exist")
         top_level = Path(self._run("rev-parse", "--show-toplevel")).resolve()
         if top_level != self.path.resolve():
             raise AdapterError("the configured path is not the checkout root")
         if self._run("status", "--porcelain"):
-            raise AdapterError("the dedicated checkout is dirty")
+            raise AdapterError("the checkout is dirty")
         origins = {
             url.rstrip("/")
             for url in (project.http_url_to_repo, project.ssh_url_to_repo)
@@ -328,7 +428,7 @@ class ServiceCheckout:
         self._run("switch", project.default_branch)
         self._run("merge", "--ff-only", f"origin/{project.default_branch}")
         if self._run("status", "--porcelain"):
-            raise AdapterError("the refreshed dedicated checkout is dirty")
+            raise AdapterError("the refreshed checkout is dirty")
 
     def ensure_branch_available(self, branch: str) -> None:
         """Reject a conflicting deterministic branch before issue claim."""
@@ -447,9 +547,13 @@ class ProjectLock:
 def build_default_dependencies(
     environment: Mapping[str, str] = os.environ,
     run_command: CommandRunner = run_subprocess,
+    current_directory: Path | None = None,
 ) -> RunNextDependencies:
-    """Wire the real boundaries once at the CLI edge."""
-    config = load_environment_config(environment)
+    """Wire the real boundaries from the current checkout once at the CLI edge."""
+    del environment
+    config = discover_checkout_config(
+        current_directory=current_directory or Path.cwd(), run_command=run_command
+    )
     return RunNextDependencies(
         gitlab=GitLabGateway(config, run_command),
         checkout=ServiceCheckout(config, run_command),
