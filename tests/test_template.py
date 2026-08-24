@@ -1236,8 +1236,6 @@ def test_root_and_template_ship_identical_gitlab_issue_templates(
         "src/agent_work/cli.py",
         ".agents/skills/work-item-runner/SKILL.md",
         ".agents/skills/setup-agent-loop/SKILL.md",
-        "systemd/agent-work@.service",
-        "systemd/agent-work@.timer",
     ),
 )
 def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
@@ -2332,20 +2330,13 @@ def test_legacy_local_queue_contracts_and_commands_are_absent(
         assert all(not (root / path).exists() for path in forbidden)
 
 
-def test_systemd_surface_is_one_oneshot_service_and_one_timer(
+def test_serial_runner_has_no_systemd_surface(
     generated_project: Path, project_root: Path
 ) -> None:
-    """Repetition belongs to systemd and one service run remains bounded."""
+    """A user-owned tmux session starts the serial runner instead of systemd."""
     for root in (project_root, project_root / "template", generated_project):
-        units = sorted(path.name for path in (root / "systemd").iterdir())
-        assert units == ["agent-work@.service", "agent-work@.timer"]
-        service = (root / "systemd" / "agent-work@.service").read_text()
-        timer = (root / "systemd" / "agent-work@.timer").read_text()
-        assert "Type=oneshot" in service
-        assert "agent-work run-next --apply --json" in service
-        assert "ProtectSystem=full" in service
-        assert "ProtectSystem=strict" not in service
-        assert "Unit=agent-work@%i.service" in timer
+        systemd_directory = root / "systemd"
+        assert not systemd_directory.exists() or not any(systemd_directory.iterdir())
 
 
 def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:

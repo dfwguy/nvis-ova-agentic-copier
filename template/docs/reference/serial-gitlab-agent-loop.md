@@ -28,7 +28,7 @@ task data.
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one explicitly opted-in issue per invocation. |
 | Workspace | A dedicated agent checkout, not the operator's checkout. |
-| Concurrency | Serial; a timer must not overlap invocations. |
+| Concurrency | Serial; start one tmux loop for the project. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
 | `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
@@ -42,24 +42,21 @@ branch, and the MR SHA equals both local and remote branch tips. GitLab must
 also report that the MR closes the selected issue, which the prompt requires as
 `Closes #IID`. A missing or mismatched publication becomes `agent::failed`.
 
-The runner uses one nonblocking local project lock; contention exits `75`. It
-is deliberately single-host and not a distributed lock or a GitLab
-compare-and-set claim. Do not run another host or timer instance for the same
-project. A preexisting or concurrent label transition can therefore make a pass
-fail closed rather than safely claim work across hosts.
+The `agent::running` label is the GitLab lock. After adding it, the runner
+refetches all running issues and starts work only when its selected issue is
+the sole lock. Do not start another tmux loop for the same project.
 
 JSON output contains only `outcome`, `issue_iid`, `branch`, and
 `merge_request_url`; it never includes issue text, prompts, command output, or
 credentials. Exit `0` means idle, previewed, or verified for human review;
-exit `1` means a safe failure or blocker; invalid command usage exits `2`; and
-local lock contention exits `75` without mutation.
+exit `1` means a safe failure or blocker; invalid command usage exits `2`.
 
 ## Unattended publication gate
 
-Do not enable the systemd timer for `--apply` until all of these are true:
+Do not start the tmux Ralph loop for `--apply` until all of these are true:
 
 - A human has explicitly authorized unattended publication for the repository.
-- The timer uses a constrained service identity and dedicated checkout.
+- The loop uses a constrained identity and dedicated checkout.
 - The identity used by `glab` has effective API access exactly Developer
   (`30`) in the configured project.
 - The effective default-branch endpoint reports the requested branch name as
@@ -100,8 +97,7 @@ The `glab` credential used for API access/MR creation and the Git credential
 used for publication may differ; validate each identity and its access
 separately.
 
-The shipped service and timer are templates. They are installed and enabled
-only by an operator who has satisfied this gate.
+The loop is started only by an operator who has satisfied this gate.
 
 ## Deferred capabilities
 

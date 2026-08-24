@@ -143,24 +143,31 @@ workflow and runtime never approve or merge. The parentheses isolate the strict
 shell options, function, and failure exit from the operator's shell while
 preserving this block's nonzero status.
 
-## Install the command and user units
+## Install and start the tmux loop
 
-Install `agent-work` at the stable user path used by the service, then install
-the one templated oneshot service and its one timer:
+Install the runner from this clean source checkout. This creates a stable
+`agent-work` executable; it uses the separate `AGENT_WORK_CHECKOUT` for
+issue work:
 
 ```bash
-command -v uv
+command -v uv tmux
 uv tool install --force .
-command -v agent-work
-install -d -m 0700 "$HOME/.config/systemd/user" "$HOME/.config/agent-work" "$HOME/.local/state/agent-work"
-install -m 0644 systemd/agent-work@.service systemd/agent-work@.timer "$HOME/.config/systemd/user/"
-install -m 0600 /dev/null "$HOME/.config/agent-work/PROJECT.env"
-systemctl --user daemon-reload
+agent-work --help
 ```
 
-Write exactly these four non-secret settings to `PROJECT.env`. The checkout and
-lock-file paths must be absolute. Credentials remain in the service user's
-existing Git and `glab` credential mechanisms, not in this file:
+Write the four non-secret settings to a file you load before starting the loop.
+The checkout and lock-file paths must be absolute. Credentials remain in the
+service user's existing Git and `glab` credential mechanisms, not in this file:
+
+```bash
+install -d -m 0700 "$HOME/.config/agent-work" "$(dirname "$AGENT_WORK_LOCK_FILE")"
+printf '%s\n' \
+  "GITLAB_HOST=$GITLAB_HOST" \
+  "GITLAB_PROJECT_ID=$GITLAB_PROJECT_ID" \
+  "AGENT_WORK_CHECKOUT=$AGENT_WORK_CHECKOUT" \
+  "AGENT_WORK_LOCK_FILE=$AGENT_WORK_LOCK_FILE" \
+  > "$HOME/.config/agent-work/PROJECT.env"
+```
 
 ```text
 GITLAB_HOST=gitlab.example.com
@@ -169,72 +176,37 @@ AGENT_WORK_CHECKOUT=/home/USER/.local/share/agent-work/PROJECT
 AGENT_WORK_LOCK_FILE=/home/USER/.local/state/agent-work/PROJECT.lock
 ```
 
-## Run the preview smoke test
-
-Load the non-secret instance settings and run the read-only default. It either
-reports `idle`, a ready item, or an already-running item; it does not change
-GitLab, Git, or invoke Codex:
+Load the settings, create the dedicated checkout, and run the read-only preview:
 
 ```bash
 set -a
 . "$HOME/.config/agent-work/PROJECT.env"
 set +a
+install -d -m 0700 "$(dirname "$AGENT_WORK_CHECKOUT")" "$(dirname "$AGENT_WORK_LOCK_FILE")"
+git clone REPOSITORY_URL "$AGENT_WORK_CHECKOUT"
 agent-work run-next --json
 ```
 
-An applied pass uses the deterministic feature branch `agent/issue-<IID>` and changes
-labels from `agent::ready` to `agent::running`. It reaches
-`agent::awaiting-human` only after verifying an exact same-project MR. Its
-machine outcome is `awaiting_human`: source
-and target project IDs, deterministic source branch, default target branch,
-and MR SHA must match both local and remote branch tips, and GitLab must report
-that the MR closes the issue (`Closes #IID`). Missing or mismatched evidence
-ends at `agent::failed`.
+After a human explicitly authorizes unattended publication, start the Ralph loop
+in one lingering tmux session:
 
-## Authorize and enable applied operation
-
-Before enabling the timer, obtain explicit unattended-publication authorization
-for this repository and confirm the constrained service identity. If the
-effective `glab` access level checked above is exactly Developer (`30`), that
-one-time authorization is sufficient to enable this unattended publication
-path. The Developer-readable safeguards above replace the inaccessible
-Maintainer-only `/approvals` audit and recurring attestation. They do not prove
-self-approval or per-MR approval-rule override policy; those settings require a
-Maintainer. The loop can push and open an MR, but never approves or merges it.
-
-Developer access is a readiness signal, not proof of all resulting controls.
-Developers may approve in GitLab, and project protections control push, merge, and self-approval. Keep the service identity constrained and verify that the
-Git credential used for publication is the intended identity; it can differ
-from the `glab` credential used to create the MR. The loop never approves or merges.
-
-Then enable exactly one timer instance and inspect it:
+Use this path only when the readiness check reports effective Developer access
+exactly `30`; it does not replace the documented branch-protection or approval
+evidence.
 
 ```bash
-systemctl --user enable --now agent-work@PROJECT.timer
-systemctl --user status agent-work@PROJECT.timer
-systemctl --user list-timers 'agent-work@*'
-journalctl --user-unit agent-work@PROJECT.service --since '30 minutes ago'
+tmux new-session -d -s agent-work 'while agent-work run-next --apply --json; do sleep 300; done'
+tmux attach -t agent-work
 ```
 
-Each invocation is bounded and serial. If its local project lock is busy, the
-command exits `75`; let the next timer event retry rather than starting another
-worker. This is deliberately a single-host local lock, not a distributed lock
-or GitLab compare-and-set claim: do not run another host or timer instance for
-the same project.
+Each pass checks GitLab for `agent::running`, claims one `agent::ready`
+issue with that label, and refetches the running list. It begins work only when
+the selected issue is the sole running lock. Published work becomes
+`agent::awaiting-human`; failures become `agent::failed`. The loop never
+approves or merges an MR.
 
-## Pause or repair the loop
-
-Disable the timer before changing the service checkout, environment file,
-credentials, or GitLab labels:
+Stop the loop with `Ctrl-C`, or from another terminal:
 
 ```bash
-systemctl --user disable --now agent-work@PROJECT.timer
-systemctl --user reset-failed agent-work@PROJECT.service
+tmux kill-session -t agent-work
 ```
-
-Resolve an `agent::failed` or stranded `agent::running` issue under human
-direction, confirm the checkout is clean and on the verified project, rerun the
-preview, and enable the timer again only after the publication gate remains
-satisfied. No legacy SQLite queue, lease, or state migration is needed: this
-loop's durable work and handoff are the GitLab issue and MR labels. For command
-and boundary details, see the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).

@@ -15,7 +15,7 @@ from agent_work.models import (
     GitPublicationEvidence,
     MergeRequestEvidence,
 )
-from agent_work.serial import RunNextDependencies, run_next
+from agent_work.serial import RunNextDependencies, RunNextError, run_next
 
 
 def _issue(*, iid: int, labels: tuple[str, ...] = ("agent::ready",)) -> GitLabIssue:
@@ -82,6 +82,7 @@ class _GitLab:
 
     def mark_running(self, issue: GitLabIssue) -> None:
         self.events.append(("running", issue.iid))
+        self.running = (issue,)
 
     def mark_awaiting_human(self, issue: GitLabIssue) -> None:
         self.events.append(("awaiting_human", issue.iid))
@@ -203,6 +204,27 @@ def test_preview_reports_ready_work_without_claiming_or_invoking() -> None:
     assert report.issue_iid == issue.iid
     assert gitlab.events == []
     assert checkout.events == []
+    assert invoke.calls == []
+
+
+def test_applied_claim_requires_the_selected_issue_to_be_the_only_gitlab_lock() -> None:
+    issue = _issue(iid=123)
+
+    class _ConflictingGitLab(_GitLab):
+        def mark_running(self, issue: GitLabIssue) -> None:
+            super().mark_running(issue)
+            self.running = (issue, _issue(iid=124, labels=("agent::running",)))
+
+    gitlab, checkout, invoke, lock = (
+        _ConflictingGitLab(ready=(issue,)),
+        _Checkout(),
+        _Invoke(),
+        _Lock(),
+    )
+
+    with pytest.raises(RunNextError, match="lock is not uniquely held"):
+        run_next(_deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30)
+
     assert invoke.calls == []
 
 
