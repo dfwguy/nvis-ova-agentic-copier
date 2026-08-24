@@ -41,7 +41,7 @@ pytest:
     - size/medium
   before_script:
     - !reference [.base_uv, before_script]
-    - apt-get update -qq && apt-get install -y --no-install-recommends git
+    - apt-get update -qq && apt-get install -y --no-install-recommends git jq
   script:
     - uv run tox --version
     - echo "Running tox with coverage"

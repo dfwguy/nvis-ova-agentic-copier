@@ -87,6 +87,29 @@ def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
     assert "apt-get install -y --no-install-recommends shellcheck" in ci_config
 
 
+def test_pytest_ci_installs_jq_for_executable_preflight_tests(
+    generated_project: Path,
+    project_root: Path,
+) -> None:
+    """Root and generated pytest jobs provide the jq executable tests require."""
+    for ci_path in (
+        project_root / ".gitlab-ci.yml",
+        project_root / "template" / ".gitlab-ci.yml",
+        generated_project / ".gitlab-ci.yml",
+    ):
+        ci_config = ci_path.read_text()
+        pytest_job = re.search(
+            r"^pytest:\n(?P<body>(?:^[ \t].*\n?)*)",
+            ci_config,
+            flags=re.MULTILINE,
+        )
+
+        assert pytest_job is not None
+        assert "apt-get install -y --no-install-recommends git jq" in pytest_job.group(
+            "body"
+        )
+
+
 def test_root_ci_shellcheck_excludes_generated_environments(project_root: Path) -> None:
     """Test that the root CI ShellCheck job skips generated tool environments."""
     ci_config = (project_root / ".gitlab-ci.yml").read_text()
