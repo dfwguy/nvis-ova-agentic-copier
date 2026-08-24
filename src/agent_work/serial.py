@@ -225,6 +225,9 @@ def run_next(
         branch = _branch(issue)
         dependencies.checkout.ensure_branch_available(branch)
         dependencies.gitlab.mark_running(issue)
+        claimed = dependencies.gitlab.list_running()
+        if len(claimed) != 1 or claimed[0].iid != issue.iid:
+            raise RunNextError("GitLab lock is not uniquely held by the selected issue")
         try:
             checkout = dependencies.checkout.prepare_branch(
                 branch, project.default_branch

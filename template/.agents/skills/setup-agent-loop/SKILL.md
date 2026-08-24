@@ -95,11 +95,9 @@ before checking repository safeguards.
 3. Create a clean dedicated checkout that is not an operator's active checkout.
    Its `origin` must match the verified project, and `git -C
    "$AGENT_WORK_CHECKOUT" ls-remote origin HEAD` must succeed without prompts.
-4. Check `uv`, install `agent-work` with `uv tool install --force .`, then
-   verify it with `command -v agent-work`. Install the one
-   `agent-work@.service` and one `agent-work@.timer` user unit; write the four
-   non-secret values to a mode-`0600` instance environment file; then run
-   `agent-work run-next --json` as a preview smoke test.
+4. Check `uv` and `tmux`, install `agent-work` with `uv tool install --force .`,
+   then run `agent-work run-next --json` as a preview smoke test. Start the
+   applied Ralph loop only in one explicitly authorized tmux session.
 5. Do not make a second project request or query membership. The step 1
    preflight uses local `jq` to classify effective API access as the
    `max` of `.permissions.project_access.access_level` and
@@ -140,8 +138,8 @@ before checking repository safeguards.
    control pushes, merges, and self-approval. Git and `glab` credentials may
    differ. Preserve the one-time authorization, constrained identity,
    dedicated checkout and origin checks, and preview; never approve or merge.
-9. Enable one instance timer and check its status and journal. To repair or
-   pause, disable the timer first; no legacy SQLite state migration is needed.
+9. Stop the tmux session before changing the checkout, credentials, or GitLab
+   labels; no legacy SQLite state migration is needed.
 
 The loop projects `agent::ready` to `agent::running`, then to
 `agent::awaiting-human` only after exact same-project MR evidence, matching

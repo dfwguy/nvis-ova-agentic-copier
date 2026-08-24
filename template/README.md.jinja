@@ -10,14 +10,14 @@ project instead of inferring it from `origin`. A Developer account can poll
 eligible issues, so no webhook or inbound service is required:
 
 ```bash
+uv tool install --force .
 agent-work run-next --json
-agent-work run-next --apply --json
 ```
 
 An applied run uses a dedicated agent checkout, opens one MR, and
-stops at `awaiting_human`. It never approves or merges. Enable the supplied
-user-systemd timer only after a human explicitly authorizes unattended
-publication and the service identity is constrained. For a constrained
+stops at `awaiting_human`. It never approves or merges. Run the Ralph loop in
+one lingering tmux session only after a human explicitly authorizes
+publication. For a constrained
 identity with effective API access exactly `30` (Developer), the
 Developer-readable readiness preflight uses the authoritative effective
 default-branch response to require no Developer push, no Developer merge, and
