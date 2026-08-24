@@ -5,12 +5,97 @@ import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
+
+
+def test_filesystem_intake_schema_is_canonical_and_template_parity_is_exact(
+    project_root: Path, template_dir: Path
+) -> None:
+    """Filesystem producers get exactly one versioned schema in both deliverables."""
+    schema_path = ".agents/contracts/work-item-filesystem-v1.schema.json"
+    root_schema = project_root / schema_path
+    template_schema = template_dir / schema_path
+
+    assert root_schema.is_file()
+    assert template_schema.is_file()
+    assert root_schema.read_bytes() == template_schema.read_bytes()
+
+    schema = json.loads(root_schema.read_text())
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "schema_version",
+        "source_id",
+        "repository",
+        "title",
+        "body",
+        "acceptance_criteria",
+    }
+    assert schema["properties"]["schema_version"] == {"type": "integer", "const": 1}
+    assert schema["properties"]["source_id"]["maxLength"] == 128
+    assert schema["properties"]["repository"]["maxLength"] == 128
+    assert schema["properties"]["title"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+    }
+    assert schema["properties"]["body"] == {"type": "string", "maxLength": 65536}
+    criteria = schema["properties"]["acceptance_criteria"]
+    assert criteria["type"] == "array"
+    assert criteria["uniqueItems"] is True
+    assert criteria["maxItems"] == 64
+    assert criteria["items"] == {"type": "string", "minLength": 1, "maxLength": 2048}
+
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    valid_document = {
+        "schema_version": 1,
+        "source_id": "nightly-import",
+        "repository": "copier",
+        "title": "Bounded filesystem request",
+        "body": "Keep this producer-owned payload untrusted.",
+        "acceptance_criteria": ["Publish one verified merge request."],
+    }
+    assert list(validator.iter_errors(valid_document)) == []
+    assert list(validator.iter_errors(valid_document | {"schema_version": 1.0})) == []
+
+    invalid_documents: list[Mapping[str, object]] = [
+        {key: value for key, value in valid_document.items() if key != required_field}
+        for required_field in schema["required"]
+    ]
+    invalid_documents.extend(
+        (
+            valid_document | {"unexpected": True},
+            valid_document | {"schema_version": "1"},
+            valid_document | {"schema_version": True},
+            valid_document | {"schema_version": 1.5},
+            valid_document | {"source_id": "unsafe/alias"},
+            valid_document | {"source_id": 1},
+            valid_document | {"repository": "unsafe alias"},
+            valid_document | {"repository": None},
+            valid_document | {"source_id": "x" * 129},
+            valid_document | {"repository": "x" * 129},
+            valid_document | {"title": ""},
+            valid_document | {"title": "x" * 513},
+            valid_document | {"title": 1},
+            valid_document | {"body": "x" * 65_537},
+            valid_document | {"body": None},
+            valid_document | {"acceptance_criteria": []},
+            valid_document | {"acceptance_criteria": "one criterion"},
+            valid_document | {"acceptance_criteria": ["same", "same"]},
+            valid_document | {"acceptance_criteria": ["one criterion", 1]},
+            valid_document | {"acceptance_criteria": ["x" * 2049]},
+            valid_document
+            | {"acceptance_criteria": [str(index) for index in range(65)]},
+        )
+    )
+    assert all(list(validator.iter_errors(document)) for document in invalid_documents)
 
 
 def test_generated_project_structure(generated_project: Path) -> None:

@@ -1,4 +1,4 @@
-"""Pure orchestration for one bounded, manually selected issue run."""
+"""Shared orchestration for one bounded, manually selected work-item run."""
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -51,7 +51,7 @@ class CodexRequest:
 
 @dataclass(frozen=True)
 class RunDependencies:
-    """All impure boundaries required by ``run_issue``."""
+    """All impure boundaries required by a normalized work-item run."""
 
     load_config: Callable[[], GitLabConfig]
     fetch_issue: Callable[[GitLabConfig, int], GitLabIssue]
@@ -202,7 +202,7 @@ def run_issue(
     timeout_seconds: int,
     dependencies: RunDependencies,
 ) -> RunReport:
-    """Preview or execute exactly one selected, opted-in GitLab issue."""
+    """Preview or execute exactly one selected, opted-in GitLab work item."""
     config = dependencies.load_config()
     selected_issue = dependencies.fetch_issue(config, issue_iid)
     if selected_issue.iid != issue_iid:
@@ -275,52 +275,18 @@ def run_issue(
                     reason="claim projected",
                 )
                 post_claim_status = "running"
-                worktree = dependencies.create_worktree(work_item)
-                request = CodexRequest(
-                    worktree=worktree,
-                    prompt=render_issue_prompt(
-                        work_item=work_item,
-                        schema_name=dependencies.schema_path().name,
-                    ),
-                    schema_path=dependencies.schema_path(),
-                    timeout_seconds=timeout_seconds,
-                )
-                raw_document = dependencies.invoke_codex(request)
-                if not isinstance(raw_document, dict) or not all(
-                    isinstance(key, str) for key in raw_document
-                ):
-                    raise RunFailure("Codex did not return an object result")
-                document = cast(dict[str, object], raw_document)
-                result = validate_agent_result(
-                    document,
-                    work_item_id=work_item.work_item_id,
-                    run_id=work_item.run_id,
-                    mode=mode,
-                    schema=dependencies.load_result_schema(),
-                )
-                if result.outcome != "awaiting_human":
-                    raise RunFailure(
-                        "Phase 1 requires a validated awaiting_human handoff"
-                    )
-                if (
-                    result.branch != work_item.branch
-                    or result.branch_tip is None
-                    or result.merge_request_url is None
-                ):
-                    raise RunFailure("published handoff artifacts are invalid")
-                if dependencies.read_worktree_head(worktree) != result.branch_tip:
-                    raise RunFailure("retained worktree head does not match result")
-                dependencies.verify_publication(result, worktree)
-                dependencies.write_canonical_result(
-                    work_item.run_id, _mutable_document(result.document)
-                )
-                _audit_transition(
-                    dependencies=dependencies,
+                result = _run_claimed_work_item(
                     work_item=work_item,
-                    from_status="running",
-                    to_status="awaiting_human",
-                    reason="publication verified",
-                    result=result,
+                    timeout_seconds=timeout_seconds,
+                    dependencies=dependencies,
+                    on_terminal=lambda value: _audit_transition(
+                        dependencies=dependencies,
+                        work_item=work_item,
+                        from_status="running",
+                        to_status="awaiting_human",
+                        reason="publication verified",
+                        result=value,
+                    ),
                 )
                 post_claim_status = "awaiting_human"
                 try:
@@ -353,6 +319,104 @@ def run_issue(
     if result is None:
         raise RunFailure("agent-work run failed")
     return RunReport(preview=False, branch=work_item.branch, result=result)
+
+
+def run_normalized(
+    *, work_item: WorkItem, timeout_seconds: int, dependencies: RunDependencies
+) -> dict[str, object]:
+    """Run one already-claimed source-neutral item through the shared engine."""
+    config = dependencies.load_config()
+    current_status = "discovered"
+    auditing = False
+    audit_failed = False
+
+    def transition(
+        to_status: str, reason: str, result: AgentResult | None = None
+    ) -> None:
+        """Record one legal transition only after its source status is known durable."""
+        nonlocal audit_failed, auditing, current_status
+        auditing = True
+        try:
+            _audit_transition(
+                dependencies=dependencies,
+                work_item=work_item,
+                from_status=current_status,
+                to_status=to_status,
+                reason=reason,
+                result=result,
+            )
+        except (OSError, RuntimeError, ValueError):
+            audit_failed = True
+            raise
+        finally:
+            auditing = False
+        current_status = to_status
+
+    try:
+        dependencies.preflight_repository(config, work_item)
+        transition("validated", "filesystem item validated")
+        transition("queued", "bounded run selected")
+        transition("claimed", "filesystem claim acquired")
+        transition("running", "normalized runner started")
+        result = _run_claimed_work_item(
+            work_item=work_item,
+            timeout_seconds=timeout_seconds,
+            dependencies=dependencies,
+            on_terminal=lambda value: transition(
+                "awaiting_human", "publication verified", value
+            ),
+        )
+        return _mutable_document(result.document)
+    except (OSError, RuntimeError, ResultValidationError, ValueError):
+        if not auditing and not audit_failed:
+            try:
+                transition("dead_letter", "normalized runner failed")
+            except (OSError, RuntimeError, ValueError):
+                pass
+        raise
+
+
+def _run_claimed_work_item(
+    *,
+    work_item: WorkItem,
+    timeout_seconds: int,
+    dependencies: RunDependencies,
+    on_terminal: Callable[[AgentResult], None],
+) -> AgentResult:
+    """Run the shared Codex, verification, persistence, and terminal-audit path."""
+    worktree = dependencies.create_worktree(work_item)
+    request = CodexRequest(
+        worktree=worktree,
+        prompt=render_issue_prompt(
+            work_item=work_item, schema_name=dependencies.schema_path().name
+        ),
+        schema_path=dependencies.schema_path(),
+        timeout_seconds=timeout_seconds,
+    )
+    raw_document = dependencies.invoke_codex(request)
+    if not isinstance(raw_document, dict) or not all(
+        isinstance(key, str) for key in raw_document
+    ):
+        raise RunFailure("Codex did not return an object result")
+    result = validate_agent_result(
+        cast(dict[str, object], raw_document),
+        work_item_id=work_item.work_item_id,
+        run_id=work_item.run_id,
+        mode=work_item.mode,
+        schema=dependencies.load_result_schema(),
+    )
+    if result.outcome != "awaiting_human" or result.branch != work_item.branch:
+        raise RunFailure("a validated awaiting_human handoff is required")
+    if result.branch_tip is None or result.merge_request_url is None:
+        raise RunFailure("published handoff artifacts are invalid")
+    if dependencies.read_worktree_head(worktree) != result.branch_tip:
+        raise RunFailure("retained worktree head does not match result")
+    dependencies.verify_publication(result, worktree)
+    dependencies.write_canonical_result(
+        work_item.run_id, _mutable_document(result.document)
+    )
+    on_terminal(result)
+    return result
 
 
 def _mutable_document(document: Mapping[str, object]) -> dict[str, object]:

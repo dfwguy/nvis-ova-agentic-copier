@@ -242,6 +242,7 @@ def test_root_and_rendered_template_declare_the_same_agent_work_cli(
         "__init__.py",
         "adapters.py",
         "cli.py",
+        "filesystem.py",
         "models.py",
         "prompt.py",
         "result.py",

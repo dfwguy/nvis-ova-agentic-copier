@@ -4,9 +4,23 @@ import hashlib
 import json
 from dataclasses import FrozenInstanceError, dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def validate_alias(value: str) -> str:
+    """Validate one portable, bounded producer or repository alias."""
+    if (
+        not value
+        or len(value) > 128
+        or not all(
+            character.isascii() and (character.isalnum() or character in "._-")
+            for character in value
+        )
+    ):
+        raise ValueError("alias contains unsafe characters")
+    return value
 
 
 class GitLabConfig(BaseModel):
@@ -23,6 +37,53 @@ class GitLabConfig(BaseModel):
         """Require a bare, non-empty GitLab hostname."""
         if not value or "://" in value or "/" in value:
             raise ValueError("host must be a bare hostname")
+        return value
+
+
+class FilesystemEnvelope(BaseModel):
+    """The deliberately small, frozen v1 producer file contract."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1]
+    source_id: str = Field(min_length=1, max_length=128)
+    repository: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=512)
+    body: str = Field(max_length=65_536)
+    acceptance_criteria: tuple[str, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version(cls, value: object) -> int | float:
+        """Accept JSON numeric one while rejecting Boolean and nonnumeric lookalikes."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != 1:
+            raise ValueError("schema_version must be the numeric value 1")
+        return value
+
+    @field_validator("source_id", "repository")
+    @classmethod
+    def validate_alias(cls, value: str) -> str:
+        """Allow only portable producer and repository aliases."""
+        return validate_alias(value)
+
+    @field_validator("acceptance_criteria", mode="before")
+    @classmethod
+    def criteria_as_tuple(cls, value: object) -> tuple[str, ...]:
+        """Accept JSON arrays while retaining immutable internal values."""
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError("acceptance criteria must be strings")
+        return tuple(cast(str, item) for item in value)
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def validate_criteria(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require unique, bounded non-empty acceptance criteria."""
+        if any(not criterion or len(criterion) > 2048 for criterion in value):
+            raise ValueError("acceptance criteria must be bounded non-empty strings")
+        if len(set(value)) != len(value):
+            raise ValueError("acceptance criteria must be unique")
         return value
 
 
@@ -106,7 +167,7 @@ class WorkItem:
     schema_version: int
     work_item_id: str
     run_id: str
-    source_type: Literal["gitlab"]
+    source_type: Literal["gitlab", "filesystem"]
     source_id: str
     source_revision: str
     repository: str
@@ -120,7 +181,7 @@ class WorkItem:
     created_at: str
     updated_at: str
     branch: str
-    issue: GitLabIssue
+    issue: GitLabIssue | None
     task_content_digest: str
 
     @classmethod
@@ -168,4 +229,40 @@ class WorkItem:
             branch=f"agent/issue-{issue.iid}",
             issue=issue,
             task_content_digest=hashlib.sha256(digest_input).hexdigest(),
+        )
+
+    @classmethod
+    def from_file(
+        cls,
+        *,
+        envelope: FilesystemEnvelope,
+        content_sha256: str,
+        run_id: str,
+        mode: Literal["inspect", "publish"],
+    ) -> "WorkItem":
+        """Create a source-neutral work item from exact producer bytes."""
+        if len(content_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in content_sha256
+        ):
+            raise ValueError("content_sha256 must be a lowercase SHA-256 digest")
+        return cls(
+            schema_version=1,
+            work_item_id=f"filesystem:{content_sha256}",
+            run_id=run_id,
+            source_type="filesystem",
+            source_id=envelope.source_id,
+            source_revision=content_sha256,
+            repository=envelope.repository,
+            title=envelope.title,
+            body=envelope.body,
+            acceptance_criteria=envelope.acceptance_criteria,
+            deduplication_key=content_sha256,
+            status="discovered",
+            mode=mode,
+            attempt_count=1,
+            created_at=content_sha256,
+            updated_at=content_sha256,
+            branch=f"agent/file-{content_sha256[:16]}",
+            issue=None,
+            task_content_digest=content_sha256,
         )

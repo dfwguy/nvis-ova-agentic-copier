@@ -30,6 +30,19 @@ human review and merge. See the generated
 [how-to](template/docs/how-to/run-one-gitlab-issue.md) and the
 repository [skill](.agents/skills/work-item-runner/SKILL.md).
 
+## Run one filesystem request
+
+Generated projects can also process one trusted producer-delivered JSON request
+from a filesystem inbox. Configure `AGENT_WORK_REPOSITORIES_FILE` with the
+trusted repository alias allowlist, then preview before allowing publication:
+
+```bash
+agent-work run-file --path ITEM.json --inbox-root ABS_ROOT --repository ALIAS --mode publish [--apply] [--json]
+```
+
+See the generated [how-to](docs/how-to/run-one-filesystem-request.md) for the
+inbox lifecycle and safe application.
+
 ## What you get
 
 Running this template produces a Python project that is ready to develop in immediately:
