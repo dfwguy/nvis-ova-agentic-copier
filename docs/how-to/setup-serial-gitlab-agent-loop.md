@@ -9,7 +9,8 @@ unattended publication until the explicit gate below is complete.
 ## Check prerequisites and confirm the current checkout
 
 Run the loop from the repository it should operate on. No GitLab-target or
-checkout environment variables are required. The runner itself confirms Git
+checkout environment variables, including `AGENT_WORK_CHECKOUT`, are required.
+The runner itself confirms Git
 access with `git pull --ff-only`, derives the GitLab host and project path from
 `origin`, resolves that exact path through the GitLab API, and confirms the
 numeric project endpoint. Do not print, export, or put tokens in this setup.
@@ -146,7 +147,7 @@ exactly `30`; it does not replace the documented branch-protection or approval
 evidence.
 
 ```bash
-tmux new-session -d -s agent-work 'while uv run agent-work run-next --apply --json; do sleep 300; done'
+tmux new-session -d -s agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure\n" "$(date -Is)" >&2; fi; exit "$status"; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done'
 tmux attach -t agent-work
 ```
 
@@ -154,7 +155,10 @@ Each pass checks GitLab for `agent::running`, claims one eligible open issue,
 and refetches the running list. It begins work only when
 the selected issue is the sole running lock. Published work becomes
 `agent::awaiting-human`; failures become `agent::failed`. The loop never
-approves or merges an MR.
+approves or merges an MR. Every pass prints its start, exit status, and waiting
+state, so the attached pane remains informative between polls. If another local
+process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
+that error and stops instead of quietly retrying against the held lock.
 
 Stop the loop with `Ctrl-C`, or from another terminal:
 

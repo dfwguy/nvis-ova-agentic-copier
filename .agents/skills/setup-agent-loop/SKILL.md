@@ -89,24 +89,25 @@ before checking repository safeguards.
    fi
    printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval audit and attestation not required for this readiness policy.'
    ```
-2. Require absolute `AGENT_WORK_CHECKOUT` in addition to the validated
-   host/project settings. The local lock is always the fixed, gitignored
-   `$AGENT_WORK_CHECKOUT/.agent-work.lock`; it is not configurable. Use only
-   numeric-project endpoints, never `origin` inference.
-3. Create a clean dedicated checkout that is not an operator's active checkout.
-   Its `origin` must match the verified project, and `git -C
-   "$AGENT_WORK_CHECKOUT" ls-remote origin HEAD` must succeed without prompts.
-4. Check `uv` and `tmux`, install `agent-work` with `uv tool install --force .`,
-   then run `agent-work run-next --json` as a preview smoke test. Start the
-   applied Ralph loop only in one explicitly authorized tmux session.
-5. Do not make a second project request or query membership. The step 1
+2. Create a clean dedicated checkout that is not an operator's active checkout.
+   Run the runner from that checkout. It derives the checkout and GitLab project
+   from the current directory and `origin`; `AGENT_WORK_CHECKOUT` is unused.
+   The local lock is always the fixed, gitignored
+   `<checkout>/.agent-work.lock`; it is not configurable.
+3. Check `uv` and `tmux`, then run `uv run agent-work run-next --json` from the
+   dedicated checkout as a preview smoke test. Do not use a separately installed
+   bare `agent-work` executable, which can be stale. Start the applied Ralph loop
+   only in one explicitly authorized tmux session using the documented status-rich
+   wrapper: it prints each pass start, outcome, and wait state, then stops on any
+   nonzero exit rather than leaving an attached pane blank or silently retrying.
+4. Do not make a second project request or query membership. The step 1
    preflight uses local `jq` to classify effective API access as the
    `max` of `.permissions.project_access.access_level` and
    `.permissions.group_access.access_level`, ignoring missing values. Missing
    or nonnumeric access is `unknown`. Only exactly 30 is permitted. An
    `unknown` result, an access level less than 30, or 40 or greater must block
    `--apply`.
-6. An access level of exactly 30 is the Developer readiness fast path. Obtain
+5. An access level of exactly 30 is the Developer readiness fast path. Obtain
    the one-time unattended-publication authorization and use the constrained
    service identity. The encoded
    `repository/branches/$default_branch_uri` endpoint checked in step 1 is
@@ -129,9 +130,9 @@ before checking repository safeguards.
    For exactly 30, skip only the Maintainer-only GET `/approvals` audit and
    recurring Maintainer attestation; keep every other identity, publication,
    checkout, origin, and preview check.
-7. For 40 or greater, use a constrained Developer credential before retrying;
+6. For 40 or greater, use a constrained Developer credential before retrying;
    the executable readiness path blocks privileged values.
-8. This role classification is readiness, not hard proof of repository policy.
+7. This role classification is readiness, not hard proof of repository policy.
    Developer access cannot prove self-approval prevention or per-MR approval
    rule overrides, so this readiness selection skips those Maintainer-only
    checks and relies on workflow, settings, and runtime never-approve/merge
@@ -139,7 +140,7 @@ before checking repository safeguards.
    control pushes, merges, and self-approval. Git and `glab` credentials may
    differ. Preserve the one-time authorization, constrained identity,
    dedicated checkout and origin checks, and preview; never approve or merge.
-9. Stop the tmux session before changing the checkout, credentials, or GitLab
+8. Stop the tmux session before changing the checkout, credentials, or GitLab
    labels; no legacy SQLite state migration is needed.
 
 The loop projects an eligible open issue to `agent::running`, then to

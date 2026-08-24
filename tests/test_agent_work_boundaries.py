@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,6 +18,7 @@ from agent_work.adapters import (
     ProjectLock,
     ServiceCheckout,
     build_default_dependencies,
+    discover_checkout_config,
 )
 from agent_work.cli import build_parser, main
 from agent_work.models import AgentWorkConfig, GitLabIssue, RunReport
@@ -112,6 +114,32 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
             {},
         ),
     ]
+
+
+def test_checkout_derivation_ignores_the_removed_checkout_environment_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    monkeypatch.setenv("AGENT_WORK_CHECKOUT", "/obsolete/configuration")
+    project = {
+        "id": 310967,
+        "path_with_namespace": "group/project",
+        "default_branch": "main",
+        "web_url": "https://gitlab.example.com/group/project",
+    }
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, json.dumps([project]), ""),
+            CommandResult(0, json.dumps(project), ""),
+        )
+    )
+
+    config = discover_checkout_config(current_directory=tmp_path, run_command=commands)
+
+    assert config.checkout == checkout
 
 
 @pytest.mark.parametrize(
@@ -341,10 +369,18 @@ class _UnusedDependency:
 
 def test_cli_has_one_safe_by_default_command_and_safe_json_output() -> None:
     reports: list[dict[str, Any]] = []
+    progress: list[str] = []
 
-    def run(_dependencies: object, *, apply: bool, timeout_seconds: int) -> RunReport:
+    def run(
+        _dependencies: object,
+        *,
+        apply: bool,
+        timeout_seconds: int,
+        report_progress: Callable[[str], None],
+    ) -> RunReport:
         assert not apply
         assert timeout_seconds == 1800
+        report_progress("Issue #12 is ready on agent/issue-12.")
         return RunReport(outcome="preview_ready", issue_iid=12, branch="agent/issue-12")
 
     dependencies = cast(RunNextDependencies, _UnusedDependency())
@@ -354,6 +390,7 @@ def test_cli_has_one_safe_by_default_command_and_safe_json_output() -> None:
         dependencies_factory=lambda: dependencies,
         run=run,
         write_stdout=lambda value: reports.append(json.loads(value)),
+        write_stderr=progress.append,
     )
 
     assert exit_code == 0
@@ -364,6 +401,48 @@ def test_cli_has_one_safe_by_default_command_and_safe_json_output() -> None:
             "merge_request_url": None,
             "outcome": "preview_ready",
         }
+    ]
+    assert progress == [
+        "Checking for next work item...",
+        "Issue #12 is ready on agent/issue-12.",
+    ]
+
+
+def test_cli_reports_progress_before_starting_a_non_json_run() -> None:
+    events: list[str] = []
+    dependencies = cast(RunNextDependencies, _UnusedDependency())
+
+    def dependencies_factory() -> RunNextDependencies:
+        events.append("dependencies")
+        return dependencies
+
+    def run(
+        _dependencies: object,
+        *,
+        apply: bool,
+        timeout_seconds: int,
+        report_progress: Callable[[str], None],
+    ) -> RunReport:
+        del apply, timeout_seconds
+        report_progress("No eligible work items found.")
+        events.append("run")
+        return RunReport(outcome="idle")
+
+    exit_code = main(
+        ["run-next"],
+        dependencies_factory=dependencies_factory,
+        run=run,
+        write_stdout=lambda message: events.append(f"stdout:{message}"),
+        write_stderr=lambda message: events.append(f"stderr:{message}"),
+    )
+
+    assert exit_code == 0
+    assert events == [
+        "stderr:Checking for next work item...",
+        "dependencies",
+        "stderr:No eligible work items found.",
+        "run",
+        "stdout:idle",
     ]
 
 
@@ -383,8 +462,14 @@ def test_cli_help_exposes_only_the_serial_run_next_command() -> None:
 
 
 def test_cli_returns_temporary_failure_when_the_project_lock_is_busy() -> None:
-    def run(_dependencies: object, *, apply: bool, timeout_seconds: int) -> RunReport:
-        del apply, timeout_seconds
+    def run(
+        _dependencies: object,
+        *,
+        apply: bool,
+        timeout_seconds: int,
+        report_progress: Callable[[str], None],
+    ) -> RunReport:
+        del apply, timeout_seconds, report_progress
         raise LockBusy("another run owns the project lock")
 
     errors: list[str] = []
@@ -397,4 +482,7 @@ def test_cli_returns_temporary_failure_when_the_project_lock_is_busy() -> None:
     )
 
     assert exit_code == 75
-    assert errors == ["another run owns the project lock"]
+    assert errors == [
+        "Checking for next work item...",
+        "another run owns the project lock",
+    ]

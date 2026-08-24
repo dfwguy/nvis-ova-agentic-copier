@@ -140,15 +140,22 @@ class _Invoke:
     """Agent boundary fake that records whether work was actually invoked."""
 
     def __init__(
-        self, returncode: int = 0, *, error: RuntimeError | None = None
+        self,
+        returncode: int = 0,
+        *,
+        error: RuntimeError | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self.returncode = returncode
         self.error = error
+        self.events = events
         self.calls: list[tuple[Path, int]] = []
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> int:
         assert prompt
         self.calls.append((checkout, timeout))
+        if self.events is not None:
+            self.events.append("invoke")
         if self.error is not None:
             raise self.error
         return self.returncode
@@ -239,8 +246,13 @@ def test_preview_reports_running_work_without_recovery_or_invocation() -> None:
         _Lock(),
     )
 
+    progress: list[str] = []
+
     report = run_next(
-        _deps(gitlab, checkout, invoke, lock), apply=False, timeout_seconds=30
+        _deps(gitlab, checkout, invoke, lock),
+        apply=False,
+        timeout_seconds=30,
+        report_progress=progress.append,
     )
 
     assert report.outcome == "preview_running"
@@ -249,6 +261,7 @@ def test_preview_reports_running_work_without_recovery_or_invocation() -> None:
     assert checkout.events == []
     assert invoke.calls == []
     assert lock.entered == 0
+    assert progress == ["Issue #123 is already running on agent/issue-123."]
 
 
 def test_applied_run_selects_only_the_first_ready_issue() -> None:
@@ -271,15 +284,19 @@ def test_applied_run_selects_only_the_first_ready_issue() -> None:
 
 def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> None:
     issue = _issue(iid=123)
+    progress: list[str] = []
     gitlab, checkout, invoke, lock = (
         _GitLab(eligible=(issue,), publication=_publication(issue)),
         _Checkout(),
-        _Invoke(),
+        _Invoke(events=progress),
         _Lock(),
     )
 
     report = run_next(
-        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=45
+        _deps(gitlab, checkout, invoke, lock),
+        apply=True,
+        timeout_seconds=45,
+        report_progress=progress.append,
     )
 
     assert report.outcome == "awaiting_human"
@@ -288,6 +305,11 @@ def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> N
     assert gitlab.events == [("running", issue.iid), ("awaiting_human", issue.iid)]
     assert invoke.calls == [(checkout.path, 45)]
     assert lock.entered == 1
+    assert progress == [
+        "Claiming issue #123 on agent/issue-123.",
+        "Starting agent for issue #123 on agent/issue-123.",
+        "invoke",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -316,6 +338,7 @@ def test_applied_issue_fails_when_publication_is_missing_or_does_not_close_issue
 
 def test_stranded_single_running_issue_is_failed_without_another_invocation() -> None:
     issue = _issue(iid=123, labels=("agent::running",))
+    progress: list[str] = []
     gitlab, checkout, invoke, lock = (
         _GitLab(running=(issue,)),
         _Checkout(),
@@ -324,13 +347,17 @@ def test_stranded_single_running_issue_is_failed_without_another_invocation() ->
     )
 
     report = run_next(
-        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+        _deps(gitlab, checkout, invoke, lock),
+        apply=True,
+        timeout_seconds=30,
+        report_progress=progress.append,
     )
 
     assert report.outcome == "failed"
     assert report.issue_iid == issue.iid
     assert gitlab.events == [("failed", issue.iid)]
     assert invoke.calls == []
+    assert progress == ["Reconciling running issue #123 on agent/issue-123."]
 
 
 def test_stranded_running_issue_recovers_exact_mr_without_another_invocation() -> None:

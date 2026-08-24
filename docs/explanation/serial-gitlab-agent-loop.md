@@ -39,8 +39,11 @@ MR, branch, default-target, local/remote tip, and `Closes #IID` verification.
 The loop never approves or merges that MR.
 
 Serial is a deliberate local safety boundary, not distributed coordination. A
-nonblocking local project lock returns exit `75` when another local run holds
-it. There is no GitLab compare-and-set claim, so a second host or timer can
+nonblocking local project lock is an explicit temporary failure: `run-next`
+prints the held-lock error and returns exit `75` when another local run holds
+it. The tmux wrapper reports every pass and its next poll rather than leaving
+an attached pane blank, and it stops on exit `75` rather than retrying a known
+held lock. There is no GitLab compare-and-set claim, so a second host or timer can
 race label changes; operators must run exactly one timer instance per project.
 
 Unattended publication is an explicit, one-time operational decision, not an
