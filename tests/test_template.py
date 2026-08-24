@@ -1229,6 +1229,1067 @@ def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
     assert root_file.read_bytes() == generated_file.read_bytes()
 
 
+def test_setup_loop_skill_classifies_effective_developer_access_without_attestation(
+    generated_project: Path, project_root: Path
+) -> None:
+    """The setup skill has one constrained-Developer fast path in every output."""
+    relative_path = ".agents/skills/setup-agent-loop/SKILL.md"
+    root_skill = (project_root / relative_path).read_text()
+
+    assert root_skill == (project_root / "template" / relative_path).read_text()
+    assert root_skill == (generated_project / relative_path).read_text()
+
+    assert re.search(
+        r'project_json\s*=\s*"?\$\(\s*glab api --hostname "\$GITLAB_HOST" '
+        r'"projects/\$GITLAB_PROJECT_ID"\s*\)"?',
+        root_skill,
+    )
+    assert "jq" in root_skill
+    assert ".permissions.project_access.access_level" in root_skill
+    assert ".permissions.group_access.access_level" in root_skill
+    assert "max" in root_skill
+
+    for requirement in (
+        "exactly 30",
+        "Developer",
+        "less than 30",
+        "unknown",
+        "block `--apply`",
+        "40 or greater",
+        "constrained Developer credential",
+    ):
+        assert requirement in root_skill
+
+    assert "Developer `403`" not in root_skill
+    assert "human Maintainer attestation" not in root_skill
+    assert "members/all" not in root_skill
+    assert "--jq" not in root_skill
+    assert "privileged path" not in root_skill
+
+
+def test_setup_loop_skill_preflights_developer_readable_repository_safeguards(
+    project_root: Path,
+) -> None:
+    """Developer readiness proves observable safeguards before applied work."""
+    skill = (project_root / ".agents/skills/setup-agent-loop/SKILL.md").read_text()
+
+    effective_access_marker = "exactly 30"
+    assert effective_access_marker in skill
+
+    for requirement in (
+        "jq -e",
+        "default_branch",
+        "default_branch_uri",
+        "projects/$GITLAB_PROJECT_ID/repository/branches/$default_branch_uri",
+        "developers_can_push",
+        "developers_can_merge",
+        "can_push",
+        "protected",
+        "approval_rules",
+        "at least one",
+        "projects/$GITLAB_PROJECT_ID/approval_rules",
+        "applies_to_all_protected_branches",
+        "no protected branches",
+        "/approvals",
+        "recurring Maintainer attestation",
+        "actionable",
+        "missing evidence",
+        "block `--apply`",
+    ):
+        assert requirement in skill
+
+    assert re.search(
+        r"skip only.*?/approvals.*?recurring Maintainer attestation",
+        skill,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert skill.index(effective_access_marker) < skill.index("repository/branches")
+    assert skill.index(effective_access_marker) < skill.index("approval_rules")
+    assert "repository/files/CONTRIBUTING.md/raw" not in skill
+    assert "author/committers cannot self-approve" not in skill
+
+
+def test_agents_define_the_developer_readable_preflight_exception(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Every project copy preserves the narrow exception to Maintainer-only nag."""
+    root_agents = (project_root / "AGENTS.md").read_text()
+
+    assert root_agents == (project_root / "template" / "AGENTS.md").read_text()
+    assert root_agents == (generated_project / "AGENTS.md").read_text()
+
+    for requirement in (
+        "Developer-readable",
+        "exactly `30`",
+        "branch protection",
+        "approval_rules",
+        "default branch",
+        "exception",
+        "Maintainer-only",
+        "/approvals",
+        "recurring Maintainer attestation",
+        "Developer role alone does not prove",
+        "self-approval",
+        "override",
+    ):
+        assert requirement in root_agents
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+    ),
+)
+def test_setup_preflight_url_encodes_default_branch_before_api_paths(
+    generated_project: Path,
+    project_root: Path,
+    relative_path: str,
+) -> None:
+    """A default branch name cannot change a numeric-project API path or query."""
+    root_document = (project_root / relative_path).read_text()
+
+    assert root_document == (project_root / "template" / relative_path).read_text()
+    assert root_document == (generated_project / relative_path).read_text()
+
+    effective_branch_path_variables = re.findall(
+        r"repository/branches/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?",
+        root_document,
+    )
+    assert "ref=$default_branch" not in root_document
+    assert effective_branch_path_variables
+
+    encoded_branch = re.search(
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:uri|encoded)[A-Za-z0-9_]*)"
+        r"\s*=\s*\"?\$\(.*?jq.*?@uri.*?\)\"?",
+        root_document,
+        flags=re.DOTALL,
+    )
+    assert encoded_branch is not None
+
+    encoded_name = encoded_branch.group("name")
+    assert encoded_branch.start() < root_document.index("repository/branches/")
+    assert all(name == encoded_name for name in effective_branch_path_variables)
+
+
+def _bash_block_after(skill: str, anchor: str) -> str:
+    """Extract one Bash product snippet after its stable setup-skill anchor."""
+    block = re.search(
+        rf"{re.escape(anchor)}.*?^[ \t]*```bash\n(?P<script>.*?)\n^[ \t]*```",
+        skill,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    assert block is not None, anchor
+    return block.group("script")
+
+
+_READINESS_SURFACES = (
+    pytest.param(
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "1. Establish and validate a bare `GITLAB_HOST`",
+        id="setup-skill",
+    ),
+    pytest.param(
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+        "## Verify Developer-readable safeguards",
+        id="how-to",
+    ),
+)
+
+
+def _readiness_snippet(
+    generated_project: Path,
+    project_root: Path,
+    relative_path: str,
+    anchor: str,
+) -> str:
+    """Load one parity-checked, executable readiness fence from the product."""
+    document = (project_root / relative_path).read_text()
+
+    assert document == (project_root / "template" / relative_path).read_text()
+    assert document == (generated_project / relative_path).read_text()
+    return _bash_block_after(document, anchor)
+
+
+def _run_setup_skill_snippet(
+    snippet: str,
+    *,
+    project_json: str,
+    gitlab_host: str | None = "gitlab.example.test",
+    gitlab_project_id: str | None = "123",
+    effective_branch_json: str = (
+        '{"name":"release/a","default":true,"protected":true,'
+        '"developers_can_push":false,"developers_can_merge":false,'
+        '"can_push":false}'
+    ),
+    approval_rules_json: str = '[{"approvals_required":1}]',
+) -> subprocess.CompletedProcess[str]:
+    """Execute a documented snippet with hermetic GitLab and Git boundaries."""
+    runner = f"""
+glab() {{
+  case "${{1:-}}" in
+    auth)
+      test "${{2:-}}" = status
+      ;;
+    api)
+      request="${{@: -1}}"
+      case "$request" in
+        */approvals*)
+          printf '%s\\n' 'unexpected Maintainer-only /approvals request' >&2
+          return 91
+          ;;
+        projects/123/repository/branches/release%2Fa)
+          printf '%s\\n' "$EFFECTIVE_BRANCH_JSON"
+          ;;
+        */repository/branches/*)
+          printf 'unexpected effective default-branch endpoint: %s\\n' "$request" >&2
+          return 95
+          ;;
+        */approval_rules)
+          printf '%s\\n' "$APPROVAL_RULES_JSON"
+          ;;
+        projects/*)
+          printf '%s\\n' "$PROJECT_JSON"
+          ;;
+        *)
+          printf 'unexpected GitLab endpoint: %s\\n' "$request" >&2
+          return 92
+          ;;
+      esac
+      ;;
+    *)
+      printf 'unexpected glab command: %s\\n' "$*" >&2
+      return 93
+      ;;
+  esac
+}}
+
+codex() {{ :; }}
+
+git() {{ return 94; }}
+
+project_json="$PROJECT_JSON"
+{snippet}
+printf 'effective_access=%s\\n' "${{effective_access:-not-computed}}"
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "AGENT_WORK_CHECKOUT": "/work/agent-checkout",
+            "APPROVAL_RULES_JSON": approval_rules_json,
+            "PROJECT_JSON": project_json,
+            "EFFECTIVE_BRANCH_JSON": effective_branch_json,
+        },
+    )
+    if gitlab_host is None:
+        environment.pop("GITLAB_HOST", None)
+    else:
+        environment["GITLAB_HOST"] = gitlab_host
+    if gitlab_project_id is None:
+        environment.pop("GITLAB_PROJECT_ID", None)
+    else:
+        environment["GITLAB_PROJECT_ID"] = gitlab_project_id
+    return subprocess.run(
+        ["bash", "-Eeuo", "pipefail", "-c", runner],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+    )
+
+
+def _project_access_json(project_access: object, group_access: object) -> str:
+    """Build the project response supplied to the extracted access snippet."""
+    return json.dumps(
+        {
+            "default_branch": "release/a",
+            "permissions": {
+                "group_access": {"access_level": group_access},
+                "project_access": {"access_level": project_access},
+            },
+        },
+    )
+
+
+def test_setup_skill_bash_fence_is_explicitly_fail_closed(
+    project_root: Path,
+) -> None:
+    """The complete executable readiness fence owns strict failure handling."""
+    skill = (project_root / ".agents/skills/setup-agent-loop/SKILL.md").read_text()
+    snippet = _bash_block_after(skill, "1. Establish and validate a bare `GITLAB_HOST`")
+
+    assert snippet.lstrip().startswith("set -Eeuo pipefail") or (
+        "if !" in snippet and "exit 1" in snippet
+    )
+    assert "missing evidence" in snippet
+    assert "block --apply" in snippet
+
+
+@pytest.mark.parametrize(
+    ("gitlab_host", "gitlab_project_id", "expected"),
+    (
+        (None, "123", "GITLAB_HOST must be a bare hostname"),
+        ("gitlab.example.test", None, "GITLAB_PROJECT_ID must be numeric"),
+    ),
+)
+def test_setup_skill_preflight_reports_unset_target_variables(
+    generated_project: Path,
+    project_root: Path,
+    gitlab_host: str | None,
+    gitlab_project_id: str | None,
+    expected: str,
+) -> None:
+    """Strict mode reports actionable missing evidence for an unset target."""
+    snippet = _readiness_snippet(
+        generated_project,
+        project_root,
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "1. Establish and validate a bare `GITLAB_HOST`",
+    )
+
+    result = _run_setup_skill_snippet(
+        snippet,
+        project_json=_developer_project_json(),
+        gitlab_host=gitlab_host,
+        gitlab_project_id=gitlab_project_id,
+    )
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert "missing evidence" in result.stderr
+    assert "block --apply" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("project_access", "group_access"),
+    ((30, 30), (30, 20), (20, 30), (None, 30), (30, None)),
+)
+@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+def test_readiness_snippet_allows_only_effective_developer_access(
+    generated_project: Path,
+    project_root: Path,
+    project_access: int | None,
+    group_access: int | None,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    """Every published readiness fence permits only effective Developer access."""
+    readiness_snippet = _readiness_snippet(
+        generated_project,
+        project_root,
+        relative_path,
+        anchor,
+    )
+
+    result = _run_setup_skill_snippet(
+        readiness_snippet,
+        project_json=_project_access_json(project_access, group_access),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("project_access", "group_access"),
+    (
+        (20, 20),
+        (None, None),
+        ("30", None),
+        (None, "30"),
+        ("30", "30"),
+        (31, 30),
+        (30, 31),
+        (40, 30),
+        (30, 40),
+        (50, 30),
+        (30, 50),
+    ),
+)
+@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+def test_readiness_snippet_fails_closed_for_every_other_level(
+    generated_project: Path,
+    project_root: Path,
+    project_access: object,
+    group_access: object,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    """Every published fence blocks unknown, low, and privileged access."""
+    readiness_snippet = _readiness_snippet(
+        generated_project,
+        project_root,
+        relative_path,
+        anchor,
+    )
+
+    result = _run_setup_skill_snippet(
+        readiness_snippet,
+        project_json=_project_access_json(project_access, group_access),
+    )
+
+    assert result.returncode != 0
+    assert "block --apply" in f"{result.stdout}\n{result.stderr}".lower()
+
+
+def _effective_branch_json(
+    *,
+    omit: tuple[str, ...] = (),
+    field_values: dict[str, object] | None = None,
+    **overrides: object,
+) -> str:
+    """Build one authoritative effective-default-branch API response."""
+    branch: dict[str, object] = {
+        "name": "release/a",
+        "default": True,
+        "protected": True,
+        "developers_can_push": False,
+        "developers_can_merge": False,
+        "can_push": False,
+    }
+    branch.update(field_values or {})
+    branch.update(overrides)
+    for field in omit:
+        branch.pop(field)
+    return json.dumps(branch)
+
+
+def _approval_rules_json(*rules: dict[str, object]) -> str:
+    """Build the approval-rules response used by the preflight snippet."""
+    return json.dumps(list(rules))
+
+
+def _developer_project_json() -> str:
+    """Build a project response that selects the Developer readiness path."""
+    return json.dumps(
+        {
+            "default_branch": "release/a",
+            "permissions": {
+                "group_access": {"access_level": 20},
+                "project_access": {"access_level": 30},
+            },
+        },
+    )
+
+
+def test_how_to_approval_predicate_explicitly_requires_a_numeric_count(
+    generated_project: Path, project_root: Path
+) -> None:
+    """The rendered jq guard must not rely on comparison type errors for safety."""
+    relative_path = "docs/how-to/setup-serial-gitlab-agent-loop.md"
+    how_to = (project_root / relative_path).read_text()
+
+    assert how_to == (project_root / "template" / relative_path).read_text()
+    assert how_to == (generated_project / relative_path).read_text()
+    assert re.search(
+        r"approvals_required[^\n]*?type\s*==\s*\"number\"",
+        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+    )
+
+
+def _approval_predicate_from(readiness_block: str) -> str:
+    """Extract the approval-rule jq program from a guarded readiness block."""
+    approval_check = readiness_block[readiness_block.index("approval_rules_json") :]
+    predicate = re.search(
+        r"jq -e(?: --arg default_branch \"\$default_branch\")? '\n"
+        r"(?P<predicate>.*?)\n\s*'",
+        approval_check,
+        flags=re.DOTALL,
+    )
+    assert predicate is not None
+    return predicate.group("predicate")
+
+
+def _approval_predicate_succeeds(predicate: str, approval_rules: str) -> bool:
+    """Evaluate an extracted jq approval predicate without any GitLab request."""
+    result = subprocess.run(
+        ["jq", "-e", "--arg", "default_branch", "release/a", predicate],
+        capture_output=True,
+        check=False,
+        input=approval_rules,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("approval_rules", "expected"),
+    (
+        pytest.param(
+            _approval_rules_json({"approvals_required": 1}),
+            True,
+            id="omitted-scope-is-global",
+        ),
+        pytest.param(
+            _approval_rules_json({"approvals_required": 1, "protected_branches": []}),
+            True,
+            id="empty-scope-is-global",
+        ),
+        pytest.param(
+            _approval_rules_json(
+                {
+                    "applies_to_all_protected_branches": True,
+                    "approvals_required": 1,
+                },
+            ),
+            True,
+            id="applies-to-all-is-global",
+        ),
+        pytest.param(
+            _approval_rules_json({"approvals_required": 1, "protected_branches": None}),
+            False,
+            id="null-scope-is-not-global",
+        ),
+        pytest.param(
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": "not-an-array"},
+            ),
+            False,
+            id="string-scope-is-not-global",
+        ),
+        pytest.param(
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": {"name": "release/a"}},
+            ),
+            False,
+            id="object-scope-is-not-global",
+        ),
+        pytest.param(
+            _approval_rules_json({"approvals_required": 1, "protected_branches": 0}),
+            False,
+            id="numeric-scope-is-not-global",
+        ),
+        pytest.param(
+            _approval_rules_json(
+                {
+                    "approvals_required": 1,
+                    "protected_branches": [{"name": "release/a"}],
+                },
+            ),
+            False,
+            id="default-branch-scoped-rule-is-not-global",
+        ),
+    ),
+)
+def test_how_to_approval_predicate_matches_skill_scope_semantics(
+    generated_project: Path,
+    project_root: Path,
+    approval_rules: str,
+    expected: bool,
+) -> None:
+    """The how-to and skill accept only unambiguous global approval rules."""
+    how_to_path = "docs/how-to/setup-serial-gitlab-agent-loop.md"
+    skill_path = ".agents/skills/setup-agent-loop/SKILL.md"
+    how_to = (project_root / how_to_path).read_text()
+    skill = (project_root / skill_path).read_text()
+
+    assert how_to == (project_root / "template" / how_to_path).read_text()
+    assert how_to == (generated_project / how_to_path).read_text()
+    assert skill == (project_root / "template" / skill_path).read_text()
+    assert skill == (generated_project / skill_path).read_text()
+
+    how_to_result = _approval_predicate_succeeds(
+        _approval_predicate_from(
+            _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        ),
+        approval_rules,
+    )
+    skill_result = _approval_predicate_succeeds(
+        _approval_predicate_from(
+            _bash_block_after(skill, "1. Establish and validate a bare `GITLAB_HOST`")
+        ),
+        approval_rules,
+    )
+
+    assert how_to_result is expected
+    assert skill_result is expected
+
+
+@pytest.mark.parametrize(
+    "approval_rules",
+    (
+        _approval_rules_json({"approvals_required": 1}),
+        _approval_rules_json(
+            {"approvals_required": 1, "protected_branches": []},
+        ),
+        _approval_rules_json(
+            {
+                "applies_to_all_protected_branches": True,
+                "approvals_required": 1,
+            },
+        ),
+    ),
+)
+def test_how_to_preflight_accepts_numeric_approval_counts(
+    generated_project: Path, project_root: Path, approval_rules: str
+) -> None:
+    """The how-to permits a numeric approval count for global rules only."""
+    relative_path = "docs/how-to/setup-serial-gitlab-agent-loop.md"
+    how_to = (project_root / relative_path).read_text()
+
+    assert how_to == (project_root / "template" / relative_path).read_text()
+    assert how_to == (generated_project / relative_path).read_text()
+
+    result = _run_setup_skill_snippet(
+        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        approval_rules_json=approval_rules,
+        project_json=_developer_project_json(),
+        effective_branch_json=_effective_branch_json(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unexpected Maintainer-only /approvals request" not in result.stderr
+    assert (
+        "Effective API access: Developer (30); Maintainer-only approval audit "
+        "and attestation not required for this readiness policy." in result.stdout
+    )
+
+
+@pytest.mark.parametrize(
+    "protected_branches_scope",
+    (None, "not-an-array", {"name": "release/a"}, 0, [{"name": "release/a"}]),
+)
+def test_how_to_preflight_blocks_non_global_approval_rule_scopes(
+    generated_project: Path, project_root: Path, protected_branches_scope: object
+) -> None:
+    """Malformed or branch-scoped approval rules never prove global coverage."""
+    relative_path = "docs/how-to/setup-serial-gitlab-agent-loop.md"
+    how_to = (project_root / relative_path).read_text()
+
+    assert how_to == (project_root / "template" / relative_path).read_text()
+    assert how_to == (generated_project / relative_path).read_text()
+
+    result = _run_setup_skill_snippet(
+        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        approval_rules_json=_approval_rules_json(
+            {
+                "approvals_required": 1,
+                "protected_branches": protected_branches_scope,
+            },
+        ),
+        project_json=_developer_project_json(),
+        effective_branch_json=_effective_branch_json(),
+    )
+
+    assert result.returncode not in (0, 91), result.stderr
+    assert "missing evidence" in result.stderr
+    assert "BLOCK --apply" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "approval_rules",
+    tuple(
+        _approval_rules_json(
+            {"approvals_required": value, "protected_branches": scope},
+        )
+        for value in ("0", "1", "not-a-number")
+        for scope in ([],)
+    ),
+)
+def test_how_to_preflight_blocks_string_approval_counts(
+    generated_project: Path, project_root: Path, approval_rules: str
+) -> None:
+    """The how-to approval predicate rejects string values regardless of scope."""
+    relative_path = "docs/how-to/setup-serial-gitlab-agent-loop.md"
+    how_to = (project_root / relative_path).read_text()
+
+    assert how_to == (project_root / "template" / relative_path).read_text()
+    assert how_to == (generated_project / relative_path).read_text()
+
+    result = _run_setup_skill_snippet(
+        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        approval_rules_json=approval_rules,
+        project_json=_developer_project_json(),
+        effective_branch_json=_effective_branch_json(),
+    )
+
+    assert result.returncode not in (0, 91), result.stderr
+    assert "missing evidence" in result.stderr
+    assert "BLOCK --apply" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("effective_branch", "approval_rules"),
+    (
+        pytest.param(
+            _effective_branch_json(),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="global-rule-without-protected-branches",
+        ),
+        pytest.param(
+            _effective_branch_json(),
+            _approval_rules_json({"approvals_required": 1}),
+            id="global-rule-omits-protected-branches",
+        ),
+        pytest.param(
+            _effective_branch_json(),
+            _approval_rules_json(
+                {
+                    "applies_to_all_protected_branches": True,
+                    "approvals_required": 1,
+                },
+            ),
+            id="rule-applies-to-all-protected-branches",
+        ),
+    ),
+)
+@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+def test_readiness_snippet_accepts_complete_evidence(
+    generated_project: Path,
+    project_root: Path,
+    effective_branch: str,
+    approval_rules: str,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    """Complete evidence passes through every Developer-readable preflight."""
+    readiness_snippet = _readiness_snippet(
+        generated_project,
+        project_root,
+        relative_path,
+        anchor,
+    )
+
+    result = _run_setup_skill_snippet(
+        readiness_snippet,
+        approval_rules_json=approval_rules,
+        project_json=_developer_project_json(),
+        effective_branch_json=effective_branch,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unexpected Maintainer-only /approvals request" not in result.stderr
+    assert (
+        "Effective API access: Developer (30); Maintainer-only approval audit "
+        "and attestation not required for this readiness policy." in result.stdout
+    )
+
+
+@pytest.mark.parametrize(
+    ("effective_branch", "approval_rules"),
+    (
+        pytest.param(
+            _effective_branch_json(name="main"),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-branch-name-wrong",
+        ),
+        pytest.param(
+            _effective_branch_json(omit=("name",)),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-branch-name-missing",
+        ),
+        pytest.param(
+            _effective_branch_json(name=30),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-branch-name-malformed",
+        ),
+        pytest.param(
+            _effective_branch_json(default=False),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-signal-wrong",
+        ),
+        pytest.param(
+            _effective_branch_json(omit=("default",)),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-signal-missing",
+        ),
+        pytest.param(
+            _effective_branch_json(default="true"),
+            _approval_rules_json(
+                {"approvals_required": 1, "protected_branches": []},
+            ),
+            id="default-signal-malformed",
+        ),
+        *(
+            pytest.param(
+                _effective_branch_json(field_values={field: wrong}),
+                _approval_rules_json(
+                    {"approvals_required": 1, "protected_branches": []},
+                ),
+                id=f"{field}-wrong",
+            )
+            for field, wrong in (
+                ("protected", False),
+                ("developers_can_push", True),
+                ("developers_can_merge", True),
+                ("can_push", True),
+            )
+        ),
+        *(
+            pytest.param(
+                _effective_branch_json(omit=(field,)),
+                _approval_rules_json(
+                    {"approvals_required": 1, "protected_branches": []},
+                ),
+                id=f"{field}-missing",
+            )
+            for field in (
+                "protected",
+                "developers_can_push",
+                "developers_can_merge",
+                "can_push",
+            )
+        ),
+        *(
+            pytest.param(
+                _effective_branch_json(field_values={field: "false"}),
+                _approval_rules_json(
+                    {"approvals_required": 1, "protected_branches": []},
+                ),
+                id=f"{field}-malformed",
+            )
+            for field in (
+                "protected",
+                "developers_can_push",
+                "developers_can_merge",
+                "can_push",
+            )
+        ),
+        pytest.param(
+            _effective_branch_json(),
+            _approval_rules_json({"approvals_required": 0, "protected_branches": []}),
+            id="no-approval-rule",
+        ),
+        pytest.param(
+            _effective_branch_json(),
+            _approval_rules_json(
+                {
+                    "approvals_required": 1,
+                    "protected_branches": [{"name": "release/a"}],
+                },
+            ),
+            id="rule-scoped-to-default-branch-is-not-global",
+        ),
+    ),
+)
+@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+def test_readiness_snippet_reports_and_blocks_bad_evidence(
+    generated_project: Path,
+    project_root: Path,
+    effective_branch: str,
+    approval_rules: str,
+    relative_path: str,
+    anchor: str,
+) -> None:
+    """Every bad safeguard is reported and blocked by every readiness fence."""
+    readiness_snippet = _readiness_snippet(
+        generated_project,
+        project_root,
+        relative_path,
+        anchor,
+    )
+
+    result = _run_setup_skill_snippet(
+        readiness_snippet,
+        approval_rules_json=approval_rules,
+        project_json=_developer_project_json(),
+        effective_branch_json=effective_branch,
+    )
+
+    assert result.returncode not in (0, 91), result.stderr
+    outcome = f"{result.stdout}\n{result.stderr}".lower()
+    assert "missing evidence" in outcome
+    assert "block --apply" in outcome
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+        "docs/reference/serial-gitlab-agent-loop.md",
+        "docs/explanation/serial-gitlab-agent-loop.md",
+    ),
+)
+def test_developer_readiness_docs_state_the_unverifiable_self_approval_boundary(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """The Developer-readable policy does not pretend to prove hidden controls."""
+    root_document = (project_root / relative_path).read_text()
+
+    assert root_document == (project_root / "template" / relative_path).read_text()
+    assert root_document == (generated_project / relative_path).read_text()
+
+    for requirement in ("Developer", "self-approval", "override"):
+        assert requirement in root_document
+    assert re.search(
+        r"Developer.*?(?:cannot|does not).*?prove",
+        root_document,
+        flags=re.DOTALL,
+    )
+    assert "does not check" in root_document or "skips" in root_document
+    assert "CONTRIBUTING.md" not in root_document
+
+
+def test_agent_controls_prohibit_approval_and_merge_in_every_project_copy(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Policy controls and runtime both exclude approval and merge operations."""
+    expected_denials = {
+        "Bash(glab mr approve*)",
+        "Bash(glab mr revoke*)",
+        "Bash(glab api*merge_requests*approve*)",
+        "Bash(glab api*merge_requests*merge*)",
+    }
+
+    for root in (project_root, project_root / "template", generated_project):
+        settings = json.loads((root / ".claude" / "settings.json").read_text())
+        denials = set(settings["permissions"]["deny"])
+        runtime = "\n".join(
+            path.read_text() for path in (root / "src" / "agent_work").glob("*.py")
+        )
+
+        assert expected_denials.issubset(denials)
+        assert "mr approve" not in runtime
+        assert "merge_requests/{mr_iid}/approve" not in runtime
+        assert "merge_requests/{mr_iid}/merge" not in runtime
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+        "docs/reference/serial-gitlab-agent-loop.md",
+        "docs/explanation/serial-gitlab-agent-loop.md",
+    ),
+)
+def test_setup_loop_docs_have_root_template_and_generated_parity(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """Every rendered copy retains its category's operator documentation."""
+    root_document = (project_root / relative_path).read_text()
+
+    assert root_document == (project_root / "template" / relative_path).read_text()
+    assert root_document == (generated_project / relative_path).read_text()
+
+    assert "awaiting" in root_document
+    assert re.search(r"never\s+approves\s+or\s+merges", root_document)
+
+    assert "Developer `403`" not in root_document
+    assert "human Maintainer attestation" not in root_document
+    assert "members/all" not in root_document
+    assert "--jq" not in root_document
+
+
+def test_setup_loop_how_to_extracts_effective_access_from_the_project_response(
+    project_root: Path,
+) -> None:
+    """The how-to gives operators an executable constrained-Developer check."""
+    how_to = (
+        project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
+    ).read_text()
+
+    for requirement in (
+        "project_json",
+        ".permissions.project_access.access_level",
+        ".permissions.group_access.access_level",
+        "max",
+        "unknown",
+        "constrained Developer credential",
+        "40 or greater",
+    ):
+        assert requirement in how_to
+    assert "exactly" in how_to and "`30`" in how_to
+    assert "less than" in how_to and "BLOCK --apply" in how_to
+
+
+def test_setup_loop_reference_normatively_classifies_access_levels(
+    project_root: Path,
+) -> None:
+    """The reference distinguishes the Developer fast path from privileged use."""
+    reference = (
+        project_root / "docs" / "reference" / "serial-gitlab-agent-loop.md"
+    ).read_text()
+
+    assert "unknown" in reference
+    assert re.search(r"constrained Developer\s+credential", reference)
+    assert re.search(r"`?40`?\s+or greater", reference)
+    assert "exactly" in reference and "`30`" in reference
+    assert "less than" in reference and "`--apply`" in reference
+    assert "`40`" in reference
+    assert "Developer `403`" not in reference
+    assert "human Maintainer attestation" not in reference
+
+
+def test_setup_loop_explanation_preserves_developer_access_caveats(
+    project_root: Path,
+) -> None:
+    """The explanation makes clear that access level is not policy proof."""
+    explanation = (
+        project_root / "docs" / "explanation" / "serial-gitlab-agent-loop.md"
+    ).read_text()
+
+    assert "Developers may" in explanation
+    assert "approve" in explanation
+    assert "project" in explanation
+    assert "self-approv" in explanation
+    assert "constrained Developer credential" in explanation
+    assert "40 or greater" in explanation
+    assert "block `--apply`" in explanation
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "AGENTS.md",
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+        "docs/reference/serial-gitlab-agent-loop.md",
+        "docs/explanation/serial-gitlab-agent-loop.md",
+    ),
+)
+def test_developer_readiness_never_treats_privileged_access_as_an_alternative_path(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """Policy and docs block 40+ and require the constrained identity instead."""
+    root_document = (project_root / relative_path).read_text()
+
+    assert root_document == (project_root / "template" / relative_path).read_text()
+    assert root_document == (generated_project / relative_path).read_text()
+    assert "privileged path" not in root_document
+
+    if relative_path != "AGENTS.md":
+        assert re.search(r"`?40`?\s+or greater", root_document)
+        assert re.search(r"constrained Developer\s+credential", root_document)
+        assert re.search(r"(?:block `--apply`|BLOCK --apply)", root_document)
+
+
+def test_readmes_describe_developer_access_as_a_caveat_not_proof(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Landing-page guidance does not mistake Developer access for a safeguard."""
+    readmes = (
+        (project_root / "README.md").read_text(),
+        (project_root / "template" / "README.md.jinja").read_text(),
+        (generated_project / "README.md").read_text(),
+    )
+
+    for readme in readmes:
+        for requirement in (
+            "awaiting_human",
+            "never approves or merges",
+        ):
+            assert requirement in readme
+        assert "Developer" in readme
+        assert "approv" in readme
+        assert "project" in readme
+        assert "self-approv" in readme
+        assert "Developer `403`" not in readme
+        assert "Maintainer has verified" not in readme
+
+
 def test_legacy_local_queue_contracts_and_commands_are_absent(
     generated_project: Path, project_root: Path
 ) -> None:

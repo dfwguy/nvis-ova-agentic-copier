@@ -43,11 +43,43 @@ nonblocking local project lock returns exit `75` when another local run holds
 it. There is no GitLab compare-and-set claim, so a second host or timer can
 race label changes; operators must run exactly one timer instance per project.
 
-Unattended publication is an explicit operational decision, not an effect of
-installing a timer. It requires a constrained service identity and confirmed
-independent MR approval safeguards. A Developer account may receive `403` for
-the Maintainer-only safeguard settings; that result is inconclusive, so a human
-Maintainer must attest to the required protections before the timer is enabled.
+Unattended publication is an explicit, one-time operational decision, not an
+effect of installing a timer. Its least-privilege readiness signal is that the
+`glab` identity has effective API access exactly Developer (`30`) in the
+configured project. That value is
+`max(project_access_level, group_access_level)` from the project API response,
+with nonnumeric values ignored. If neither access value is numeric, the
+classification is `unknown`; that result, a value less than 30, and 40 or
+greater must block `--apply`. Exactly 30 is the only accepted Developer
+readiness value. A Maintainer-or-higher identity (40 or greater) is deliberately
+not substituted for the constrained path; use a constrained Developer credential
+instead.
+
+The fast path avoids only the inaccessible Maintainer-only `/approvals` audit
+and recurring attestation; it does not infer that a role proves all policy.
+Instead, it uses safeguards a Developer can read: the numeric API's
+effective branch endpoint must report the exact default branch as default and
+protected, with `developers_can_push`, `developers_can_merge`, and `can_push`
+all false. Unlike a collection of protection rules, that result represents the
+effective behavior after GitLab applies wildcard or multiple rules. An
+`approval_rules` rule must require at least one approval and be global: it must
+apply to all protected branches or omit `protected_branches` or provide a typed
+empty `protected_branches` array. Branch-scoped rules are not evidence for this
+workflow.
+
+This is intentionally narrower than a full policy audit. A Developer cannot
+read or prove author/committer self-approval or per-MR approval-rule-override
+settings, which require Maintainer policy. The selected readiness policy skips
+those inaccessible checks rather than treating a repository document as live
+evidence. Its runtime boundary remains independent: the loop never approves or
+merges, even where GitLab might permit a Developer to approve.
+
+This is a readiness signal, not a proof that every GitLab control is safe.
+Developers may approve, and project protections control push, merge, and self-approval.
+The loop's own boundary is narrower and remains enforceable by its workflow:
+it only publishes feature branches and never approves or merges an MR. Also,
+`glab` and Git can select different credentials, so API/MR identity and Git
+publication identity must each be intentionally constrained and checked.
 
 Filesystem intake, webhooks, durable local queues, retry/reconciliation
 machinery, multiple workers, and automatic approval or merge are intentionally

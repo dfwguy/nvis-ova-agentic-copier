@@ -27,8 +27,20 @@ agent-work run-next --apply --json
 An applied run uses a dedicated agent checkout, opens one MR, and
 stops at `awaiting_human`. It never approves or merges. Enable the supplied
 user-systemd timer only after a human explicitly authorizes unattended
-publication, the service identity is constrained, and a Maintainer has verified
-independent approval safeguards (a Developer `403` is inconclusive). See the
+publication and the service identity is constrained. For a constrained
+identity with effective API access exactly `30` (Developer), the
+Developer-readable readiness preflight uses the authoritative effective
+default-branch response to require no Developer push, no Developer merge, and
+`can_push: false`; it also requires an unambiguously global approval rule with
+at least one required approval. When that evidence matches, it skips only the
+Maintainer-only `/approvals` audit and recurring Maintainer attestation.
+Developer access cannot prove self-approval prevention or per-MR
+approval-rule overrides; those checks are intentionally Maintainer-only.
+Workflow, project settings, and the runtime never-approve/merge guardrail keep
+the agent from approving or merging. This is not a hard same-user security
+boundary: inaccessible, absent, or mismatched evidence blocks `--apply`. Git
+and `glab` credentials may differ.
+See the
 generated [how-to](template/docs/how-to/setup-serial-gitlab-agent-loop.md),
 [reference](template/docs/reference/serial-gitlab-agent-loop.md), and
 repository [setup skill](.agents/skills/setup-agent-loop/SKILL.md).
