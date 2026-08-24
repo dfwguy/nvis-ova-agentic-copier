@@ -14,7 +14,7 @@ copier template. Choose the page that matches what you need now.
 - **How-to:** [Validate template changes](how-to/validate-template-changes.md)
   — run the same quality checks that protect this template's pipeline.
 - **How-to:** [Set up the serial GitLab agent loop](how-to/setup-serial-gitlab-agent-loop.md)
-  — configure one project, a dedicated checkout, and the guarded user timer.
+  — configure one project checkout and the guarded user timer.
 - **Reference:** [Template contract](reference/template-contract.md) — look up
   inputs, generated files, tasks, and supported tooling.
 - **Reference:** [Serial GitLab agent loop](reference/serial-gitlab-agent-loop.md)
@@ -26,6 +26,6 @@ copier template. Choose the page that matches what you need now.
 - **Explanation:** [Why coding standards exist](explanation/coding-standards.md)
   — understand the rationale for the development rules.
 - **Explanation:** [Why the agent loop is serial and GitLab-native](explanation/serial-gitlab-agent-loop.md)
-  — understand polling, dedicated checkouts, and the human publication gate.
+  — understand polling, checkout-scoped locking, and the human publication gate.
 - **Process:** [Diátaxis documentation process](diataxis.md) — maintain these
   categories and this index.

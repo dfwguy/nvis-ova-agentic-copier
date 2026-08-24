@@ -56,14 +56,14 @@ class GitLabQueue(Protocol):
 
 
 class ServiceCheckout(Protocol):
-    """Dedicated-checkout Git operations used by the policy."""
+    """Confirmed-checkout Git operations used by the policy."""
 
     @property
     def path(self) -> Path:
-        """Return the dedicated checkout path."""
+        """Return the confirmed checkout path."""
 
     def applied_preflight(self, project: GitLabProject) -> None:
-        """Verify and refresh the clean dedicated checkout."""
+        """Verify and refresh the clean confirmed checkout."""
 
     def ensure_branch_available(self, branch: str) -> None:
         """Reject a conflicting deterministic branch before issue claim."""

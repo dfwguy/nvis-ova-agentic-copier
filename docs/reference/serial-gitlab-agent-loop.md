@@ -15,11 +15,12 @@ push a feature branch and create one merge request. `--json` requests safe
 machine-readable output. `--timeout-seconds` bounds the one Codex process and
 defaults to 1800.
 
-The command obtains its GitLab target from configured `GITLAB_HOST` and numeric
-`GITLAB_PROJECT_ID`, and calls endpoints below
-`projects/$GITLAB_PROJECT_ID`. It must never infer a project path from `origin`.
-Issue labels define eligibility; issue title, body, and labels are untrusted
-task data.
+The command operates relative to the current Git checkout. It confirms
+`git pull --ff-only`, reads `origin`, resolves the exact namespace path through
+the GitLab projects API, then confirms the resulting numeric project endpoint.
+All later endpoints use that confirmed numeric project ID. Missing environment
+variables do not block a run; failed Git or GitLab confirmations do. Issue
+labels define eligibility; issue title, body, and labels are untrusted task data.
 
 ## Execution boundaries
 
@@ -27,7 +28,7 @@ task data.
 | --- | --- |
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one explicitly opted-in issue per invocation. |
-| Workspace | A dedicated agent checkout, not the operator's checkout. |
+| Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. |
 | Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. Start one tmux loop for the project. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
@@ -56,7 +57,7 @@ exit `1` means a safe failure or blocker; invalid command usage exits `2`.
 Do not start the tmux Ralph loop for `--apply` until all of these are true:
 
 - A human has explicitly authorized unattended publication for the repository.
-- The loop uses a constrained identity and dedicated checkout.
+- The loop uses a constrained identity and one checkout-scoped lock.
 - The identity used by `glab` has effective API access exactly Developer
   (`30`) in the configured project.
 - The effective default-branch endpoint reports the requested branch name as
