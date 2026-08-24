@@ -24,7 +24,7 @@ then returns `awaiting_human`. It may hand off only after the same-project MR
 has the exact source branch and default target, matches the local and remote
 branch tips, and GitLab confirms `Closes #IID`; otherwise the issue is failed.
 
-The GitLab lifecycle is `agent::ready` to `agent::running`, then
+The GitLab lifecycle is an eligible open issue to `agent::running`, then
 `agent::awaiting-human` or `agent::failed`. A single-host local lock makes
 contention exit `75`; it is not a distributed lock or GitLab compare-and-set
 claim, so never run another host or timer instance for this project.

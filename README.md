@@ -7,7 +7,7 @@ If you're starting a new Python project on the team, this is the starting point.
 ## Start the GitLab issue loop
 
 After the repository safeguards are ready, install the runner and start its
-single tmux Ralph loop. Each issue labelled `agent::ready` becomes a branch and
+single tmux Ralph loop. Each open issue becomes a branch and
 human-gated merge request; the loop never approves or merges it.
 
 ```bash
@@ -31,7 +31,7 @@ and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
 
 ## Serial GitLab agent loop
 
-Generated projects use GitLab-only polling for one opted-in issue at a time.
+Generated projects use GitLab-only polling for one open issue at a time.
 The runner derives its checkout and GitLab project from the current repository,
 then confirms both Git and GitLab access before work begins. A Developer account
 can poll eligible issues, so no webhook or inbound service is required:

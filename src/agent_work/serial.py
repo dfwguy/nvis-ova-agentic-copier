@@ -16,8 +16,8 @@ from .models import (
     RunReport,
 )
 
-READY = "agent::ready"
 RUNNING = "agent::running"
+EXCLUDED_FROM_SELECTION = frozenset({RUNNING, "agent::awaiting-human", "agent::failed"})
 
 
 class RunNextError(RuntimeError):
@@ -30,8 +30,8 @@ class GitLabQueue(Protocol):
     def verify_project(self) -> GitLabProject:
         """Return verified configured-project metadata."""
 
-    def list_ready(self) -> tuple[GitLabIssue, ...]:
-        """Return eligible ready issues from oldest to newest."""
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        """Return eligible open issues from oldest to newest."""
 
     def list_running(self) -> tuple[GitLabIssue, ...]:
         """Return all issues currently projected as running."""
@@ -120,12 +120,11 @@ human review. Do not emit a custom result document.
 """
 
 
-def _is_ready(issue: GitLabIssue) -> bool:
+def _is_eligible(issue: GitLabIssue) -> bool:
     return (
         issue.state == "opened"
         and not issue.confidential
-        and READY in issue.labels
-        and RUNNING not in issue.labels
+        and EXCLUDED_FROM_SELECTION.isdisjoint(issue.labels)
     )
 
 
@@ -190,10 +189,10 @@ def _preview(dependencies: RunNextDependencies) -> RunReport:
             issue_iid=issue.iid,
             branch=_branch(issue),
         )
-    ready = dependencies.gitlab.list_ready()
-    if not ready:
+    eligible = dependencies.gitlab.list_eligible()
+    if not eligible:
         return RunReport(outcome="idle")
-    issue = ready[0]
+    issue = eligible[0]
     return RunReport(
         outcome="preview_ready", issue_iid=issue.iid, branch=_branch(issue)
     )
@@ -214,12 +213,12 @@ def run_next(
         if running:
             return _finish_from_evidence(dependencies, running[0], project)
 
-        ready = dependencies.gitlab.list_ready()
-        if not ready:
+        eligible = dependencies.gitlab.list_eligible()
+        if not eligible:
             return RunReport(outcome="idle")
-        issue = dependencies.gitlab.fetch_issue(ready[0].iid)
-        if not _is_ready(issue):
-            raise RunNextError("the selected issue is no longer ready")
+        issue = dependencies.gitlab.fetch_issue(eligible[0].iid)
+        if not _is_eligible(issue):
+            raise RunNextError("the selected issue is no longer eligible")
 
         dependencies.checkout.applied_preflight(project)
         branch = _branch(issue)

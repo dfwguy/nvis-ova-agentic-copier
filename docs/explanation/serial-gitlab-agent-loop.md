@@ -2,7 +2,7 @@
 
 *Diátaxis category: Explanation.*
 
-The agent loop has one source of work: explicitly opted-in GitLab issues in one
+The agent loop has one source of work: eligible open GitLab issues in one
 configured numeric project. A bounded poll selects at most one issue, prepares
 one checkout, and drives the repository workflow until it opens or
 updates a merge request for human review.
@@ -32,7 +32,7 @@ change the checkout, credentials, sandbox, or repository policy.
 The checkout-scoped lock and exact publication evidence make each run's branch
 and publication state clear. A completed mutating run pushes a
 feature branch and opens an MR, then hands off at
-`awaiting_human`. The GitLab projection is `agent::ready` to `agent::running`,
+`awaiting_human`. The GitLab projection is an open issue to `agent::running`,
 then `agent::awaiting-human` or `agent::failed`; the deterministic branch is
 `agent/issue-<IID>`. The runner accepts a handoff only after exact same-project
 MR, branch, default-target, local/remote tip, and `Closes #IID` verification.

@@ -150,8 +150,8 @@ tmux new-session -d -s agent-work 'while uv run agent-work run-next --apply --js
 tmux attach -t agent-work
 ```
 
-Each pass checks GitLab for `agent::running`, claims one `agent::ready`
-issue with that label, and refetches the running list. It begins work only when
+Each pass checks GitLab for `agent::running`, claims one eligible open issue,
+and refetches the running list. It begins work only when
 the selected issue is the sole running lock. Published work becomes
 `agent::awaiting-human`; failures become `agent::failed`. The loop never
 approves or merges an MR.
