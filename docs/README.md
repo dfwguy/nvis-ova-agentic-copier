@@ -15,10 +15,14 @@ copier template. Choose the page that matches what you need now.
   — run the same quality checks that protect this template's pipeline.
 - **How-to:** [Run one GitLab issue](how-to/run-one-gitlab-issue.md) — preview
   or manually publish work for one explicitly selected, ready issue.
+- **How-to:** [Run one filesystem request](how-to/run-one-filesystem-request.md)
+  — preview or publish one trusted producer-delivered inbox request.
 - **Reference:** [Template contract](reference/template-contract.md) — look up
   inputs, generated files, tasks, and supported tooling.
 - **Reference:** [Phase 1 `run-issue`](reference/phase-1-run-issue.md) — look
   up the bounded runner's CLI, output, exits, and side effects.
+- **Reference:** [Phase 2 `run-file`](reference/phase-2-run-file.md) — look up
+  filesystem-envelope, atomic-handoff, output, and exit contracts.
 - **Explanation:** [Template and generated project](explanation/template-and-generated-project.md)
   — understand the boundary between the template and its output.
 - **Explanation:** [Why Diátaxis](explanation/why-diataxis.md) — understand
@@ -27,5 +31,7 @@ copier template. Choose the page that matches what you need now.
   — understand the rationale for the development rules.
 - **Explanation:** [Why the Phase 1 runner is bounded](explanation/bounded-phase-1-runner.md)
   — understand its trust, workspace, and human-handoff boundaries.
+- **Explanation:** [Why the Phase 2 filesystem intake is bounded](explanation/bounded-phase-2-filesystem-intake.md)
+  — understand the inbox trust, deduplication, and atomic lifecycle boundaries.
 - **Process:** [Diátaxis documentation process](diataxis.md) — maintain these
   categories and this index.

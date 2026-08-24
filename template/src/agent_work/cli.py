@@ -1,4 +1,4 @@
-"""The ``agent-work`` command-line entry point."""
+"""The ``agent-work`` command-line entry point for bounded work items."""
 
 import argparse
 import hashlib
@@ -7,7 +7,7 @@ import os
 import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -23,9 +23,18 @@ from .adapters import (
     load_json_schema,
     run_subprocess,
 )
-from .models import GitLabConfig, GitLabIssue, GitLabProject, WorkItem
+from .filesystem import (
+    FileIntake,
+    FileIntakeFailure,
+    FileIntakeReport,
+    FilesystemDependencies,
+    LocalInboxOperations,
+    RepositoryTarget,
+    durable_finalize_bundle,
+)
+from .models import GitLabConfig, GitLabIssue, GitLabProject, WorkItem, validate_alias
 from .result import AgentResult
-from .runner import RunDependencies, RunFailure, RunReport
+from .runner import RunDependencies, RunFailure, RunReport, run_normalized
 from .runner import run_issue as run_one_issue
 
 
@@ -87,6 +96,7 @@ def build_default_dependencies(
     run_command: Callable[..., CommandResult] = run_subprocess,
     environment: Mapping[str, str] = os.environ,
     run_store: RunStore | None = None,
+    config_override: GitLabConfig | None = None,
 ) -> RunDependencies:
     """Wire real subprocess and local-state adapters while retaining DI in the runner."""
     source_root: Path | None = None
@@ -132,7 +142,7 @@ def build_default_dependencies(
         """Capture validated non-secret configuration once for the entire run."""
         nonlocal cached_config
         if cached_config is None:
-            cached_config = load_environment_config(environment)
+            cached_config = config_override or load_environment_config(environment)
         return cached_config
 
     def project_metadata(config_value: GitLabConfig) -> GitLabProject:
@@ -161,13 +171,13 @@ def build_default_dependencies(
         source, _ = topology()
         branch = work_item.branch
         provenance = local_store().read_workspace_provenance(work_item.work_item_id)
-        iid = _positive(branch.rsplit("-", maxsplit=1)[1])
+        workspace_key = branch.removeprefix("agent/").replace("/", "-")
         project = project_metadata(config())
         default_branch = project.default_branch
         origin_url = project.http_url_to_repo
         namespace = f"{config().host}-{config().project_id}".replace("/", "_")
         workspace_root = local_store().root / "workspaces" / namespace
-        workspace = workspace_root / f"issue-{iid}"
+        workspace = workspace_root / workspace_key
         expected_provenance = {
             "work_item_id": work_item.work_item_id,
             "task_content_digest": work_item.task_content_digest,
@@ -182,7 +192,8 @@ def build_default_dependencies(
                 "unmanifested deterministic workspace cannot be adopted"
             )
         workspace = WorktreeGateway(source, run_command).create_or_reuse(
-            issue_iid=iid,
+            workspace_key=workspace_key,
+            branch=branch,
             default_branch=default_branch,
             origin_url=origin_url,
             workspace_root=workspace_root,
@@ -222,6 +233,8 @@ def build_default_dependencies(
 
     def claim(work_item: WorkItem) -> None:
         issue = work_item.issue
+        if issue is None:
+            raise AdapterFailure("GitLab claim requires a GitLab work item")
         GitLabGateway(config(), run_command).claim_running(
             issue_iid=issue.iid, run_id=work_item.run_id
         )
@@ -366,22 +379,199 @@ def build_default_dependencies(
     )
 
 
+def _load_repositories(environment: Mapping[str, str]) -> dict[str, RepositoryTarget]:
+    """Load the non-secret, explicitly configured repository allowlist."""
+    filename = environment.get("AGENT_WORK_REPOSITORIES_FILE")
+    if not filename:
+        raise AdapterFailure("AGENT_WORK_REPOSITORIES_FILE is required")
+    allowlist = Path(filename)
+    if not _safe_absolute_regular_file(allowlist):
+        raise AdapterFailure("repository allowlist is invalid")
+    try:
+        document = json.loads(allowlist.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AdapterFailure("repository allowlist could not be read") from error
+    if not isinstance(document, dict):
+        raise AdapterFailure("repository allowlist is invalid")
+    targets: dict[str, RepositoryTarget] = {}
+    for alias, value in document.items():
+        if (
+            not isinstance(alias, str)
+            or not isinstance(value, dict)
+            or set(value) != {"checkout", "host", "project_id"}
+        ):
+            raise AdapterFailure("repository allowlist is invalid")
+        try:
+            validate_alias(alias)
+        except ValueError as error:
+            raise AdapterFailure("repository allowlist is invalid") from error
+        checkout, host, project_id = (
+            value.get("checkout"),
+            value.get("host"),
+            value.get("project_id"),
+        )
+        checkout_path = Path(checkout) if isinstance(checkout, str) else None
+        if (
+            checkout_path is None
+            or not _safe_absolute_directory(checkout_path)
+            or not isinstance(host, str)
+            or not isinstance(project_id, int)
+            or isinstance(project_id, bool)
+            or project_id <= 0
+        ):
+            raise AdapterFailure("repository allowlist is invalid")
+        try:
+            GitLabConfig(host=host, project_id=project_id)
+        except ValueError as error:
+            raise AdapterFailure("repository allowlist is invalid") from error
+        targets[alias] = RepositoryTarget(
+            alias=alias, checkout=checkout_path, host=host, project_id=project_id
+        )
+    return targets
+
+
+def _safe_absolute_regular_file(path: Path) -> bool:
+    """Validate a trusted config file without traversing symlink components."""
+    return _safe_absolute_path(path) and path.is_file() and path.stat().st_nlink == 1
+
+
+def _safe_absolute_directory(path: Path) -> bool:
+    """Validate an absolute normalized checkout with no symlink component."""
+    return _safe_absolute_path(path) and path.is_dir()
+
+
+def _safe_absolute_path(path: Path) -> bool:
+    """Reject relative, non-normalized, and symlink-bearing trusted paths."""
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        return False
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return False
+    return True
+
+
+def build_default_file_runner(
+    *,
+    environment: Mapping[str, str] = os.environ,
+    run_dependencies_factory: Callable[[RepositoryTarget], RunDependencies]
+    | None = None,
+) -> Callable[..., object]:
+    """Wire filesystem intake to the existing normalized publication engine."""
+    targets = _load_repositories(environment)
+    dependencies_by_target: dict[RepositoryTarget, RunDependencies] = {}
+
+    def dependencies_for(target: RepositoryTarget) -> RunDependencies:
+        """Create one source-neutral dependency set per allowlisted checkout."""
+        if target not in dependencies_by_target:
+            dependencies_by_target[target] = (
+                run_dependencies_factory(target)
+                if run_dependencies_factory is not None
+                else build_default_dependencies(
+                    repository=target.checkout,
+                    environment=environment,
+                    config_override=GitLabConfig(
+                        host=target.host, project_id=target.project_id
+                    ),
+                )
+            )
+        return dependencies_by_target[target]
+
+    @contextmanager
+    def inbox_lock(root: Path) -> Iterator[None]:
+        """Exclude competing consumers of this one inbox state machine."""
+        lock_path = root / ".intake.lock"
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            yield
+        finally:
+            os.close(descriptor)
+            lock_path.unlink(missing_ok=True)
+
+    def finalize(
+        *,
+        destination: Path,
+        request: bytes,
+        intake_result: Mapping[str, object],
+        agent_result: Mapping[str, object],
+    ) -> None:
+        durable_finalize_bundle(
+            destination=destination,
+            request=request,
+            intake_result=intake_result,
+            agent_result=agent_result,
+        )
+
+    def execute(
+        item: WorkItem, target: RepositoryTarget, timeout: int
+    ) -> Mapping[str, object]:
+        dependencies = dependencies_for(target)
+        with dependencies.repository_lock(item.work_item_id):
+            return run_normalized(
+                work_item=item, timeout_seconds=timeout, dependencies=dependencies
+            )
+
+    intake = FileIntake(
+        FilesystemDependencies(
+            resolve_repository=targets.get,
+            repository_lock=lambda _target: nullcontext(),
+            run_normalized=execute,
+            finalize_bundle=finalize,
+            new_run_id=lambda: uuid.uuid4().hex,
+            inbox=LocalInboxOperations(),
+            inbox_lock=inbox_lock,
+        )
+    )
+    return intake.run
+
+
 def main(
     arguments: Sequence[str] | None = None,
     *,
     run_issue: Callable[..., object] | None = None,
+    run_file: Callable[..., object] | None = None,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
-    """Parse one Phase 1 command and emit a single report or safe error."""
+    """Parse one bounded work-item command and emit one report or safe error."""
     parser = argparse.ArgumentParser(prog="agent-work")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    command = subparsers.add_parser("run-issue")
-    command.add_argument("issue_iid", type=_positive)
-    command.add_argument("--mode", choices=("publish",), required=True)
-    command.add_argument("--apply", action="store_true")
-    command.add_argument("--json", action="store_true")
-    command.add_argument("--timeout-seconds", type=_positive, default=900)
+    issue_command = subparsers.add_parser("run-issue")
+    issue_command.add_argument("issue_iid", type=_positive)
+    issue_command.add_argument("--mode", choices=("publish",), required=True)
+    issue_command.add_argument("--apply", action="store_true")
+    issue_command.add_argument("--json", action="store_true")
+    issue_command.add_argument("--timeout-seconds", type=_positive, default=900)
+    file_command = subparsers.add_parser(
+        "run-file",
+        help="controlled filesystem intake for one producer request",
+        description="Process one bounded filesystem intake request.",
+    )
+    file_command.add_argument(
+        "--path", required=True, help="JSON basename in the inbox directory"
+    )
+    file_command.add_argument(
+        "--inbox-root", type=Path, required=True, help="absolute inbox layout root"
+    )
+    file_command.add_argument(
+        "--repository", required=True, help="allowlisted repository alias"
+    )
+    file_command.add_argument(
+        "--mode", choices=("publish",), required=True, help="publish mode"
+    )
+    file_command.add_argument(
+        "--apply",
+        action="store_true",
+        help="enables mutation; default is a read-only preview",
+    )
+    file_command.add_argument("--json", action="store_true", help="emit a JSON report")
+    file_command.add_argument(
+        "--timeout-seconds",
+        type=_positive,
+        default=900,
+        help="bounded workflow timeout in seconds (default: 900)",
+    )
     try:
         parsed = parser.parse_args(arguments)
     except SystemExit as error:
@@ -389,26 +579,56 @@ def main(
             return 0
         write_stderr("invalid command usage")
         return 2
-    runner = run_issue or (
-        lambda **kwargs: run_one_issue(
-            dependencies=build_default_dependencies(repository=Path.cwd()), **kwargs
-        ).as_dict()
-    )
-    try:
-        report = runner(
-            issue_iid=parsed.issue_iid,
-            mode=parsed.mode,
-            apply=parsed.apply,
-            timeout_seconds=parsed.timeout_seconds,
+    if parsed.command == "run-file":
+        file_path = Path(parsed.path)
+        if (
+            file_path.is_absolute()
+            or len(file_path.parts) != 1
+            or file_path.suffix != ".json"
+            or not parsed.inbox_root.is_absolute()
+        ):
+            write_stderr("invalid command usage")
+            return 2
+        try:
+            runner = run_file or build_default_file_runner()
+        except (AdapterFailure, OSError):
+            write_stderr("agent-work run failed")
+            return 1
+        kwargs = {
+            "path": file_path,
+            "inbox_root": parsed.inbox_root,
+            "repository": parsed.repository,
+            "mode": parsed.mode,
+            "apply": parsed.apply,
+            "timeout_seconds": parsed.timeout_seconds,
+        }
+    else:
+        runner = run_issue or (
+            lambda **kwargs: run_one_issue(
+                dependencies=build_default_dependencies(repository=Path.cwd()), **kwargs
+            ).as_dict()
         )
-    except RunFailure as error:
+        kwargs = {
+            "issue_iid": parsed.issue_iid,
+            "mode": parsed.mode,
+            "apply": parsed.apply,
+            "timeout_seconds": parsed.timeout_seconds,
+        }
+    try:
+        report = runner(**kwargs)
+    except (RunFailure, FileIntakeFailure) as error:
         write_stderr(str(error))
         return 1
     except (AdapterFailure, OSError):
         write_stderr("agent-work run failed")
         return 1
+    except RuntimeError:
+        write_stderr("agent-work run failed")
+        return 1
     if isinstance(report, RunReport):
         serialized: Mapping[str, object] = report.as_dict()
+    elif isinstance(report, FileIntakeReport):
+        serialized = report.as_dict()
     elif isinstance(report, Mapping):
         if not all(isinstance(key, str) for key in report):
             write_stderr("agent-work run failed")
@@ -422,5 +642,14 @@ def main(
     if parsed.json:
         write_stdout(json.dumps(serialized, sort_keys=True))
     else:
-        write_stdout(f"Run report: {serialized.get('branch', 'unknown')}")
+        if parsed.command == "run-file":
+            write_stdout(
+                "File intake: "
+                f"{serialized.get('outcome', 'unknown')} "
+                f"{serialized.get('sha256', 'unknown')}"
+            )
+        else:
+            write_stdout(f"Run report: {serialized.get('branch', 'unknown')}")
+    if parsed.command == "run-file" and serialized.get("outcome") == "quarantined":
+        return 1
     return 0

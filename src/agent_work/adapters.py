@@ -374,7 +374,7 @@ class GitLabGateway:
 
 @dataclass(frozen=True)
 class WorktreeGateway:
-    """Safe deterministic worktree creation for one issue branch."""
+    """Safe deterministic worktree creation for one normalized work-item branch."""
 
     repository: Path
     run_command: CommandRunner
@@ -382,12 +382,14 @@ class WorktreeGateway:
     def create_or_reuse(
         self,
         *,
-        issue_iid: int,
+        issue_iid: int | None = None,
+        workspace_key: str | None = None,
+        branch: str | None = None,
         default_branch: str = "main",
         origin_url: str | None = None,
         workspace_root: Path | None = None,
     ) -> Path:
-        """Create a retained, fully independent clone for one issue branch."""
+        """Create a retained, fully independent clone for one work-item branch."""
         if origin_url is None:
             source_origin = self.run_command(
                 ("git", "-C", str(self.repository), "remote", "get-url", "origin")
@@ -399,8 +401,11 @@ class WorktreeGateway:
             clone_origin = origin_url
         key = hashlib.sha256(clone_origin.encode()).hexdigest()[:16]
         root = workspace_root or self.repository.parent / "agent-workspaces" / key
-        workspace = root / f"issue-{issue_iid}"
-        branch = f"agent/issue-{issue_iid}"
+        if issue_iid is None and (workspace_key is None or branch is None):
+            raise AdapterFailure("workspace identity is required")
+        key_name = workspace_key or f"issue-{issue_iid}"
+        selected_branch = branch or f"agent/issue-{issue_iid}"
+        workspace = root / key_name
         if (
             root.is_symlink()
             or workspace.is_symlink()
@@ -416,7 +421,7 @@ class WorktreeGateway:
             raise AdapterFailure("independent workspace path must not be a symlink")
         root.chmod(0o700)
         if (workspace / ".git").is_dir():
-            self._verify_workspace(workspace, clone_origin, branch)
+            self._verify_workspace(workspace, clone_origin, selected_branch)
             return workspace
         created = self.run_command(
             ("git", "clone", "--no-checkout", clone_origin, str(workspace))
@@ -430,7 +435,7 @@ class WorktreeGateway:
                 str(workspace),
                 "checkout",
                 "-b",
-                branch,
+                selected_branch,
                 f"origin/{default_branch}",
             )
         )
