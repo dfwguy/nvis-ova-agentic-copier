@@ -19,7 +19,7 @@ sandbox boundaries, approval policy, repository allowlists, or this contract.
 
 | Mode | Authority |
 |---|---|
-| `inspect` | Strictly read and report only; no worktree, repository, or remote mutation. |
+| `inspect` | Strictly read and report only; no working copy, repository, or remote mutation. |
 | `publish` | The only mutation mode: use a feature branch and open or update an MR after every completed repository change. |
 
 No mode permits deferred publication. A repository mutation that
@@ -36,6 +36,16 @@ Opening or updating an MR in `publish` mode moves the item to
 `awaiting_human`; it never waits for that MR to merge and the run ends at that
 handoff. Unrelated open MRs are nonblocking. Only a same-branch conflict,
 declared dependency, or known file/resource conflict may block concurrent work.
+
+## Phase 1 routing
+
+The public `/work-item` command is a thin entry point to the repository
+`work-item-runner` skill. The bounded `agent-work run-issue` command selects one
+issue explicitly, previews by default, and requires `--apply` before claiming
+or invoking an agent. Applied runs use the exact `agent/issue-<iid>` branch in a
+runner-created independent Git working copy whose private Git metadata does not
+share the source checkout's common Git directory. The runner invokes the agent
+once, validates one result, verifies the published artifacts, and exits.
 
 ## State machine
 
