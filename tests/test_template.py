@@ -403,6 +403,18 @@ def test_claude_git_flow_present(generated_project: Path) -> None:
     assert "git checkout main" in content
 
 
+def test_claude_git_flow_verifies_git_and_gitlab_access(
+    generated_project: Path,
+) -> None:
+    """Test that the generated workflow verifies both remote access paths."""
+    content = (generated_project / ".claude" / "git-flow.md").read_text()
+
+    assert "## Git and GitLab access preflight" in content
+    assert "git pull --ff-only" in content
+    assert 'glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"' in content
+    assert "Do not change a working remote or credential configuration" in content
+
+
 def test_yamllint_helper_present(generated_project: Path) -> None:
     """Test that the yamllint helper script is included."""
     helper = generated_project / "tests" / "helpers" / "yamllint_to_json.py"

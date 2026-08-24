@@ -6,12 +6,34 @@ Every change in this repo — full TDD workflow or one-off trivial edit — foll
 
 Every remote `glab` operation uses the numeric project ID. Require
 `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID` from the environment; never
-derive a project path from the Git remote. Validate them once before the first
-remote call:
+derive a project path from the Git remote.
+
+## Git and GitLab access preflight
+
+Before branching from `main` or publishing, prove the two independent access
+paths with read-only commands. This works whether credentials come from
+directory-scoped environment variables (for example, `GITLAB_TOKEN`), a
+stored `glab` login, an SSH agent, or an existing Git credential helper. Do
+not print, inspect, or copy secret environment-variable values.
+
+First require a non-empty `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID`.
+Then, from a clean `main`, run:
 
 ```bash
+git pull --ff-only
 glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
 ```
+
+`git pull --ff-only` verifies the configured Git remote, network route, and
+Git credential, while the `glab` request verifies API authentication and that
+the supplied host/project pair is accessible. Neither command assumes a
+sandbox proxy. Do not change a working remote or credential configuration just
+because it differs from another developer's VM.
+
+If either command fails, stop before creating a branch or publishing. Report
+which command failed and its non-secret error, then have the user repair the
+appropriate Git route/credential or GitLab API configuration. Do not infer
+that a successful `glab` call also authorizes Git, or vice versa.
 
 ## Step 1: Start a feature branch from clean `main`
 
@@ -39,33 +61,27 @@ git rev-parse --abbrev-ref HEAD
 
 ### Pre-flight checks (only when starting from `main`)
 
-**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the four checks:
+**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining three checks:
 
-1. **Pull latest `main`**:
-   ```bash
-   git pull --ff-only
-   ```
-   Non-fast-forward failure means local `main` has diverged — stop and surface the state to the user. Do not force-update or rebase silently.
-
-2. **Local tests**:
+1. **Local tests**:
    ```bash
    uv run pytest
    ```
    Fast smoke test. The full `tox` matrix still runs at `/tdd-finalizer` time.
 
-3. **GitLab pipeline health on `main`**:
+2. **GitLab pipeline health on `main`**:
    ```bash
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=1"
    ```
    Treat `failed` / `canceled` on the latest pipeline as a failing check.
 
-4. **Outstanding merge requests**:
+3. **Outstanding merge requests**:
    ```bash
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&per_page=100"
    ```
    Any open MR in the repo (regardless of author) counts as outstanding.
 
-**All four clean** → derive a kebab-case slug (≤40 chars) from the task description and create the branch:
+**All checks clean** → derive a kebab-case slug (≤40 chars) from the task description and create the branch:
 
 ```bash
 git checkout -b claude/<slug>
@@ -75,7 +91,9 @@ git checkout -b claude/<slug>
 
 If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
 
-`git pull` and the `glab` reads need network; they run in-sandbox over HTTPS via the sandbox proxy, so no `dangerouslyDisableSandbox` is needed (see `CLAUDE.md` → "Git Remote"). The other commands are local-only and sandbox-safe.
+`git pull` and the `glab` reads need network. Use the environment's normal
+working route: the sandbox proxy where it exists, or the VM's configured
+network path otherwise. The other commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
@@ -86,7 +104,8 @@ Either path lands at a local commit on the feature branch. **Both paths then pro
 
 ## Step 3: Publish (push + MR)
 
-Run from the main thread, **in-sandbox** — the HTTPS remote (see `CLAUDE.md` → "Git Remote") routes through the sandbox's HTTPS proxy, so `dangerouslyDisableSandbox` is not used. One user approval per remote-touching command.
+Run from the main thread using the same verified Git and GitLab access path as
+the preflight. One user approval per remote-touching command.
 
 1. **Sanity-check branch** (in-sandbox):
    ```bash
@@ -160,7 +179,8 @@ After Step 3 reports the MR, **remain on the feature branch** and tell the user 
    ```
    Use `-D`, not the "safe" `-d`. Because the MR merged with squash enabled, the branch's commits were collapsed into a *new* commit on `main` and are never ancestors of it, so `git branch -d` would refuse ("not fully merged") even though the work fully landed. The safety check therefore lives **earlier**: only reach this step once Steps 4.1–4.2 confirmed the project-ID MR query reports `merged` and `main` is green. If you have **not** confirmed the merge, do not `-D` — investigate first, since for a genuinely unmerged branch `-D` would discard work.
 
-Local git is sandbox-safe; the `glab` reads and `git pull` run in-sandbox over the HTTPS proxy (see `CLAUDE.md` → "Git Remote").
+Local git is sandbox-safe; use the environment's verified network path for
+`glab` reads and `git pull`.
 
 Skip the wait only if the user explicitly says to — e.g. "open the MR and move on" or "stay on the branch and keep iterating." Honor the override, but state what you're skipping.
 
