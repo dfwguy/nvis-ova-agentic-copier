@@ -156,7 +156,16 @@ Every change — TDD or trivial — wraps in the same lifecycle, documented in [
 1. **Branch** — from a clean, up-to-date `main` (a clean working tree is required to start), the main agent creates `claude/<slug>` from the task description.
 2. **Work** — either the TDD agents (below) or, for ≤~10-line trivial edits, a direct edit + commit.
 3. **Publish** — before branching or publishing, the workflow proves both access paths with `git pull --ff-only` and a `glab api` query against the numeric `GITLAB_PROJECT_ID`. This supports either directory-scoped environment credentials or an existing VM Git/`glab` setup; it does not replace a working remote just to match a proxy environment. Then it uses `git push` and the project-ID API to create an MR (or just `git push` if one exists). Branch protection makes the MR mandatory — there is no direct-to-`main` path, even for a one-line fix.
-4. **Stay until it merges** — do **not** return to `main` when the MR opens. Remain on the branch until a human reviewer merges the MR **and** the post-merge pipeline on `main` is green (AI never approves or merges), then `git checkout main` + `git pull` and delete the merged local branch.
+4. **Hand off** — report the published work as `awaiting_human` and release the
+   active checkout without waiting for merge. Human approval, merge, and a
+   green post-merge pipeline still determine when the change is fully landed,
+   but they do not block unrelated work. Preserve the feature branch for
+   review feedback and delete it only after merge is confirmed.
+
+Read-only inspection is the sole exception to this lifecycle. Every repository
+mutation must finish by publishing its feature branch and opening or updating
+an MR. A commit, authentication, push, or MR-creation failure is a blocker,
+not a completed outcome.
 
 The TDD agents below own the middle "work" phase only.
 
@@ -215,7 +224,7 @@ flowchart TD
 | `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
 | `/cli-syntax-judge` | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
 | `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a documented project-specific deviation | Edit files, run tooling, or review non-layout quality |
-| `/tdd-finalizer`  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); stay on the branch until it merges) | Fix issues — rejects and routes back        |
+| `/tdd-finalizer`  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); hand off without waiting for merge) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
 

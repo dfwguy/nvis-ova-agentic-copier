@@ -6,8 +6,11 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
+import pytest
 import yaml
+from jsonschema import Draft202012Validator, FormatChecker
 
 
 def test_generated_project_structure(generated_project: Path) -> None:
@@ -457,6 +460,61 @@ def test_setup_repo_command_present(generated_project: Path) -> None:
     )
 
 
+def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> None:
+    """Test that lock-down setup cannot strand CONTRIBUTING.md on local main."""
+    content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()
+    mr_lookup = (
+        'glab api --hostname "$GITLAB_HOST" '
+        '"projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&'
+        'source_branch=claude/setup-repo"'
+    )
+    mr_create = (
+        'glab api --hostname "$GITLAB_HOST" -X POST '
+        '"projects/$GITLAB_PROJECT_ID/merge_requests"'
+    )
+    required_handoff = (
+        'setup_branch="claude/setup-repo"',
+        "clean default branch",
+        "create or reuse",
+        "git add CONTRIBUTING.md",
+        "git commit",
+        "git push --set-upstream origin HEAD",
+        "projects/$GITLAB_PROJECT_ID/merge_requests",
+        "source_branch",
+        "branch tip",
+        "awaiting_human",
+        "without waiting for merge",
+        "Create only when the lookup has no open MR",
+        "refs/heads/$setup_branch",
+        "refs/remotes/origin/$setup_branch",
+        "Historical merged or closed setup MRs",
+        "settings-only result",
+        "release the clean checkout",
+    )
+
+    for requirement in required_handoff:
+        assert requirement in content
+    assert content.index('setup_branch="claude/setup-repo"') < content.index(
+        "Write `CONTRIBUTING.md`"
+    )
+    assert content.index("git add CONTRIBUTING.md") < content.index(
+        "git push --set-upstream origin HEAD"
+    )
+    assert content.index("git push --set-upstream origin HEAD") < content.index(
+        mr_lookup
+    )
+    assert content.index(mr_lookup) < content.index(mr_create)
+    assert content.index("refs/heads/$setup_branch") < content.index(
+        "Protect the default branch"
+    )
+    assert content.index("refs/remotes/origin/$setup_branch") < content.index(
+        "Protect the default branch"
+    )
+    assert content.index("git push --set-upstream origin HEAD") < content.index(
+        "git checkout <default_branch>"
+    )
+
+
 def test_setup_repo_interviews_self_approval(generated_project: Path) -> None:
     """Test that /setup-repo interviews the user before blocking self-approval (single-user opt-out)."""
     content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()
@@ -480,6 +538,8 @@ def test_generated_claude_md_has_lockdown_gate(generated_project: Path) -> None:
     assert "CONTRIBUTING.md" in content
     assert "/setup-repo" in content
     assert "glab mr approve" in content
+    assert "sole bounded mutation" in content
+    assert "publishes its own merge request" in content
 
 
 def test_generated_claude_workflow_supports_bash(generated_project: Path) -> None:
@@ -945,3 +1005,506 @@ esac""",
 
     assert len(results) == len(_copier_tasks(project_root))
     assert marker.read_text().splitlines() == ["git init", "uv sync", "uv run"]
+
+
+def _workflow_paths(root: Path) -> tuple[Path, ...]:
+    """Return the maintained workflow instructions for a project root."""
+    candidates = (
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        root / "README.md",
+        *(root / ".claude").rglob("*.md"),
+        *(root / ".agents").rglob("*.md"),
+    )
+    return tuple(path for path in candidates if path.exists())
+
+
+def test_root_and_generated_workflows_do_not_defer_work_to_markdown_backlogs(
+    project_root: Path, generated_project: Path
+) -> None:
+    """Test that workflows use GitLab issues instead of TODO/FIXME files."""
+    forbidden_reference = re.compile(r"(?i)(?:todo|fixme)\.md")
+
+    for root in (project_root, project_root / "template", generated_project):
+        for backlog_name in ("TODO.md", "FIXME.md", "todo.md", "fixme.md"):
+            assert not (root / backlog_name).exists()
+        for workflow_path in _workflow_paths(root):
+            content = workflow_path.read_text()
+            assert forbidden_reference.search(content) is None, workflow_path
+
+
+def test_repository_changes_require_publication_and_treat_failures_as_blockers(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Test that no workflow permits local-only completion of repository work."""
+    forbidden_completion_policies = (
+        "local-change",
+        "local-only work",
+        "defer publishing",
+        "skip step 3 *for now*",
+    )
+    required_policy = (
+        "every repository change must publish",
+        "a publication failure is a blocker, not completion",
+    )
+
+    for root in (project_root, project_root / "template", generated_project):
+        for workflow_path in _workflow_paths(root):
+            content = workflow_path.read_text().lower()
+            assert not any(
+                policy in content for policy in forbidden_completion_policies
+            ), workflow_path
+
+        for relative_path in ("AGENTS.md", "CLAUDE.md", ".claude/git-flow.md"):
+            content = (root / relative_path).read_text().lower()
+            for policy in required_policy:
+                assert policy in content, relative_path
+
+
+@pytest.mark.parametrize(
+    "root",
+    (".", "template"),
+)
+def test_architect_records_deferred_scope_with_gitlab_feature_issues(
+    project_root: Path, root: str
+) -> None:
+    """Test that deferred design scope is captured as GitLab Feature work."""
+    command = project_root / root / ".claude" / "commands" / "architect.md"
+    content = command.read_text()
+
+    for requirement in (
+        "GitLab Feature issue",
+        "Problem",
+        "Proposed outcome",
+        "Acceptance criteria",
+        "Priority",
+        "Severity",
+        "Scope and dependencies",
+        "numeric project ID",
+        "unfiled item",
+        "never claim it was persisted",
+    ):
+        assert requirement in content
+
+
+@pytest.mark.parametrize(
+    "command_name",
+    ("judge-quality.md", "judge-test.md"),
+)
+def test_review_commands_file_minor_findings_as_gitlab_bug_issues(
+    project_root: Path, command_name: str
+) -> None:
+    """Test that approving reviews hand off Bug issues in a machine-readable form."""
+    for root in (project_root, project_root / "template"):
+        content = (root / ".claude" / "commands" / command_name).read_text()
+
+        for requirement in (
+            "Bug template",
+            "GitLab issue",
+            "S4",
+            "type::quality",
+            "numeric project ID",
+            "unfiled",
+            "Never claim it was persisted",
+            "Markdown backlog file as a fallback",
+            "Created <N> GitLab issues",
+            "No new issues",
+        ):
+            assert requirement in content
+
+
+def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
+    project_root: Path,
+) -> None:
+    """Test that work is blocked only by conflicts, not unrelated open MRs."""
+    forbidden_gates = (
+        "any open mr in the repo",
+        "mrs are outstanding",
+        "stay on the branch until",
+        "remain on the feature branch",
+        "workflow is paused pending",
+        "wait for the user to come back",
+        "do not return to `main` as soon",
+    )
+
+    for root in (project_root, project_root / "template"):
+        content = (root / ".claude" / "git-flow.md").read_text().lower()
+
+        assert not any(gate in content for gate in forbidden_gates)
+        assert "unrelated open merge requests" in content
+        assert "non-blocking" in content
+        assert "same branch" in content
+        assert "dependency" in content
+        assert "resource conflict" in content
+        assert "clean working tree" in content
+        assert "git pull --ff-only" in content
+        assert "latest pipeline" in content
+        assert "no direct-to-`main` path" in content
+        assert "ai must never approve or merge" in content
+        assert "report the result as `awaiting_human` and end the active run" in content
+        assert "release the active checkout" in content
+        assert "branch-specific continuation from `main`" in content
+        assert "source_branch=$intended_branch" in content
+        assert 'git checkout "$intended_branch"' in content
+        assert "source_branch=$(git rev-parse --abbrev-ref head)" in content
+        assert "only once the mr is merged and `main` is green" in content
+        assert content.index("only once the mr is merged and `main` is green") < (
+            content.index("git branch -d claude/<slug>")
+        )
+        assert content.index("source_branch=$intended_branch") < content.index(
+            'git checkout -b "$intended_branch"'
+        )
+
+    for workflow_path in (
+        project_root / "README.md",
+        project_root / "CLAUDE.md",
+        project_root / "template" / "CLAUDE.md",
+    ):
+        content = workflow_path.read_text().lower()
+        assert not any(gate in content for gate in forbidden_gates), workflow_path
+        assert "awaiting_human" in content
+        assert "without waiting for merge" in content
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".claude/git-flow.md",
+        ".claude/commands/setup-repo.md",
+        ".claude/commands/architect.md",
+        ".claude/commands/judge-quality.md",
+        ".claude/commands/judge-test.md",
+        ".claude/commands/tdd-finalizer.md",
+    ),
+)
+def test_root_and_template_share_the_same_phase_zero_workflow_contract(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """Test that source and generated projects retain identical workflow policy."""
+    assert (project_root / relative_path).read_bytes() == (
+        project_root / "template" / relative_path
+    ).read_bytes()
+    assert (project_root / relative_path).read_bytes() == (
+        generated_project / relative_path
+    ).read_bytes()
+
+
+def _outcome_rule(schema: dict[str, Any], outcome: str) -> dict[str, Any]:
+    """Return the conditional schema branch for one result outcome."""
+    for rule in schema["allOf"]:
+        outcome_condition = rule["if"]["properties"].get("outcome", {})
+        if outcome_condition.get("const") == outcome:
+            return rule
+    raise AssertionError(f"Missing conditional result rule for {outcome!r}")
+
+
+def test_work_item_contract_and_result_schema_are_canonical_and_enforce_invariants(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Test source and rendered state/result contracts are complete and synchronized."""
+    contract_path = ".agents/contracts/work-item-contract.md"
+    schema_path = ".agents/contracts/work-item-result-v1.schema.json"
+
+    for path in (contract_path, schema_path):
+        assert (project_root / path).exists()
+        assert (project_root / "template" / path).exists()
+        assert (project_root / path).read_bytes() == (
+            project_root / "template" / path
+        ).read_bytes()
+        assert (project_root / path).read_bytes() == (
+            generated_project / path
+        ).read_bytes()
+
+    contract = (project_root / contract_path).read_text()
+    states = (
+        "discovered",
+        "validated",
+        "queued",
+        "claimed",
+        "running",
+        "completed",
+        "awaiting_human",
+        "retry_wait",
+        "dead_letter",
+    )
+    for state in states:
+        assert state in contract
+
+    state_section = contract.split("## State machine", maxsplit=1)[1].split(
+        "## Transition audit", maxsplit=1
+    )[0]
+    transition_lines = re.findall(r"^\w+ -> .+$", state_section, flags=re.MULTILINE)
+    allowed_transitions = {
+        source: {target.strip() for target in targets.split("|")}
+        for source, targets in (line.split(" -> ") for line in transition_lines)
+    }
+    assert allowed_transitions == {
+        "discovered": {"validated", "dead_letter"},
+        "validated": {"queued"},
+        "queued": {"claimed"},
+        "claimed": {"running", "retry_wait", "dead_letter"},
+        "running": {"completed", "awaiting_human", "retry_wait", "dead_letter"},
+        "awaiting_human": {"queued", "completed", "dead_letter"},
+        "retry_wait": {"queued", "dead_letter"},
+    }
+    assert "Only `completed` and `dead_letter` are terminal" in contract
+    assert "parked and releases its claim and lease" in contract
+    for audit_field in (
+        "from_status",
+        "to_status",
+        "run_id",
+        "attempt_count",
+        "occurred_at",
+        "reason",
+    ):
+        assert f"`{audit_field}`" in contract
+    for outcome, state in (
+        ("completed", "completed"),
+        ("awaiting_human", "awaiting_human"),
+        ("retry", "retry_wait"),
+        ("dead_letter", "dead_letter"),
+    ):
+        assert f"| `{outcome}` | `{state}` |" in contract
+
+    schema = json.loads((project_root / schema_path).read_text())
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "schema_version",
+        "work_item_id",
+        "run_id",
+        "mode",
+        "outcome",
+        "summary",
+        "tests",
+        "findings",
+        "next_action",
+        "error",
+    }
+    assert schema["properties"]["schema_version"] == {"const": 1}
+    assert schema["properties"]["mode"]["enum"] == ["inspect", "publish"]
+    assert schema["properties"]["outcome"]["enum"] == [
+        "completed",
+        "awaiting_human",
+        "retry",
+        "dead_letter",
+    ]
+    assert "retryable" not in schema["properties"]
+    assert schema["properties"]["error"]["type"] == ["object", "null"]
+    for field in ("branch", "branch_tip", "merge_request_url"):
+        assert field not in schema["required"]
+        assert schema["properties"][field]["type"] == ["string", "null"]
+    assert schema["properties"]["tests"]["type"] == "array"
+    assert schema["properties"]["findings"]["type"] == "array"
+
+    retry_rule = _outcome_rule(schema, "retry")["then"]
+    assert set(retry_rule["required"]) == {"error", "next_action"}
+    assert retry_rule["properties"]["error"]["properties"]["retryable"] == {
+        "const": True
+    }
+    assert retry_rule["properties"]["next_action"]["minLength"] == 1
+
+    dead_letter_rule = _outcome_rule(schema, "dead_letter")["then"]
+    assert set(dead_letter_rule["required"]) == {"error", "next_action"}
+    assert dead_letter_rule["properties"]["error"]["properties"]["retryable"] == {
+        "const": False
+    }
+    assert dead_letter_rule["properties"]["next_action"]["minLength"] == 1
+
+    awaiting_human_rule = _outcome_rule(schema, "awaiting_human")["then"]
+    assert awaiting_human_rule["required"] == ["next_action"]
+    assert awaiting_human_rule["properties"]["next_action"]["minLength"] == 1
+
+    merge_request_rule = next(
+        rule
+        for rule in schema["allOf"]
+        if "merge_request_url" in rule["if"]["properties"]
+    )
+    assert set(merge_request_rule["then"]["required"]) == {
+        "branch",
+        "branch_tip",
+    }
+
+    _validate_representative_work_item_results(schema)
+    generated_schema = json.loads((generated_project / schema_path).read_text())
+    _validate_representative_work_item_results(generated_schema)
+
+
+def _base_work_item_result() -> dict[str, Any]:
+    """Return a minimal valid completed inspection result."""
+    return {
+        "schema_version": 1,
+        "work_item_id": "gitlab:310967:123",
+        "run_id": "run-123",
+        "mode": "inspect",
+        "outcome": "completed",
+        "summary": "Completed an inspection.",
+        "tests": [],
+        "findings": [],
+        "next_action": "",
+        "error": None,
+    }
+
+
+def _validate_representative_work_item_results(schema: dict[str, Any]) -> None:
+    """Validate representative accepted and rejected result envelopes."""
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    base = _base_work_item_result()
+    published_artifacts = {
+        "branch": "agent/issue-123",
+        "branch_tip": "0123456789abcdef0123456789abcdef01234567",
+        "merge_request_url": "https://gitlab.example.com/group/project/-/merge_requests/42",
+    }
+    human_blocker = {
+        "code": "human_input_required",
+        "message": "The acceptance criteria are ambiguous.",
+        "retryable": False,
+    }
+    valid_results = (
+        base,
+        base
+        | {
+            "outcome": "awaiting_human",
+            "error": human_blocker,
+            "next_action": "Clarify the acceptance criteria.",
+        },
+        base
+        | {
+            "mode": "publish",
+            "outcome": "awaiting_human",
+            "error": human_blocker,
+            "next_action": "Clarify the acceptance criteria.",
+        },
+        base
+        | {
+            "mode": "publish",
+            "outcome": "awaiting_human",
+            **published_artifacts,
+            "next_action": "Human review and merge",
+        },
+        base | {"mode": "publish", **published_artifacts},
+        base
+        | {
+            "mode": "publish",
+            "outcome": "retry",
+            "next_action": "Retry after backoff",
+            "error": {"code": "timeout", "message": "Timed out", "retryable": True},
+        },
+        base
+        | {
+            "mode": "publish",
+            "outcome": "dead_letter",
+            "next_action": "Inspect invalid input",
+            "error": {
+                "code": "invalid_input",
+                "message": "Input is invalid",
+                "retryable": False,
+            },
+        },
+    )
+    for result in valid_results:
+        validator.validate(result)
+
+    invalid_case_names = (
+        "extra property",
+        "local change mode",
+        "inspect branch",
+        "tip without branch",
+        "completed error",
+        "retry without error",
+        "retry marked fatal",
+        "dead letter marked retryable",
+        "awaiting human without action",
+        "inspect awaiting human without blocker",
+        "publish completed without artifacts",
+        "publish completed with partial artifacts",
+        "publish awaiting human without blocker or artifacts",
+        "publish awaiting human with partial artifacts",
+        "publish awaiting human with artifacts and blocker",
+        "invalid branch tip",
+        "invalid merge request URI",
+    )
+    invalid_results = (
+        base | {"unexpected": True},
+        base | {"mode": "local-change"},
+        base | {"mode": "inspect", "branch": "agent/forbidden"},
+        base | {"branch_tip": "0123456789abcdef0123456789abcdef01234567"},
+        base
+        | {"error": {"code": "unexpected", "message": "Unexpected", "retryable": True}},
+        base | {"outcome": "retry", "next_action": "", "error": None},
+        base
+        | {
+            "outcome": "retry",
+            "next_action": "Retry later",
+            "error": {"code": "fatal", "message": "Fatal", "retryable": False},
+        },
+        base
+        | {
+            "outcome": "dead_letter",
+            "next_action": "Inspect",
+            "error": {"code": "timeout", "message": "Timed out", "retryable": True},
+        },
+        base | {"outcome": "awaiting_human", "next_action": ""},
+        base
+        | {
+            "outcome": "awaiting_human",
+            "next_action": "Clarify the acceptance criteria.",
+        },
+        base
+        | {
+            "mode": "publish",
+        },
+        base | {"mode": "publish", "branch": "agent/issue-123"},
+        base
+        | {
+            "mode": "publish",
+            "outcome": "awaiting_human",
+            "next_action": "Human review and merge",
+        },
+        base
+        | {
+            "mode": "publish",
+            "outcome": "awaiting_human",
+            "branch": "agent/issue-123",
+            "next_action": "Human review and merge",
+        },
+        base
+        | {
+            "mode": "publish",
+            "outcome": "awaiting_human",
+            **published_artifacts,
+            "error": human_blocker,
+            "next_action": "Resolve the blocker.",
+        },
+        base
+        | {
+            "mode": "publish",
+            "branch_tip": "not-a-sha",
+            "merge_request_url": published_artifacts["merge_request_url"],
+        },
+        base
+        | {
+            "mode": "publish",
+            "branch": published_artifacts["branch"],
+            "branch_tip": published_artifacts["branch_tip"],
+            "merge_request_url": "not a URI",
+        },
+    )
+    for case, result in zip(invalid_case_names, invalid_results, strict=True):
+        assert not validator.is_valid(result), case
+
+
+def test_root_and_template_ship_identical_gitlab_issue_templates(
+    project_root: Path,
+) -> None:
+    """Test that source and generated projects use the same issue forms."""
+    for filename in ("Bug.md", "Feature.md"):
+        root_template = project_root / ".gitlab" / "issue_templates" / filename
+        generated_template = (
+            project_root / "template" / ".gitlab" / "issue_templates" / filename
+        )
+
+        assert root_template.exists()
+        assert generated_template.exists()
+        assert root_template.read_bytes() == generated_template.read_bytes()

@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @.claude/git-flow.md
 
+@.agents/contracts/work-item-contract.md
+
 ## Repo lock-down gate
 
 **Check before every response**: does `CONTRIBUTING.md` exist at the repo root?
@@ -13,10 +15,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Missing** → the GitLab repo has not been locked down (no branch protection, no MR approval rules). Until that file exists:
   1. Open the response with: `⚠ Repo not locked down — run /setup-repo to configure branch protection.`
   2. Close the response with the same line.
-  3. Do not commit, push, or open an MR. Reading code and editing files locally is fine. The first action that touches `git commit`, `git push`, or `glab mr create` must be `/setup-repo`.
+  3. Do not mutate the repository, commit, push, or open an MR. Reading code is fine. `/setup-repo` is the sole bounded mutation while this gate is active: it publishes its own merge request for `CONTRIBUTING.md` after applying the required protections and approval policy. No other repository mutation is allowed.
 - **Present** → the gate is silent; proceed normally.
 
-`/setup-repo` writes `CONTRIBUTING.md` and applies GitLab branch protection + MR approval rules in one shot. It is idempotent — re-running is a no-op.
+`/setup-repo` writes `CONTRIBUTING.md`, applies GitLab branch protection + MR approval rules, and publishes its own merge request in one bounded flow. It is idempotent — re-running safely reuses its setup branch and MR when appropriate.
 
 **Never run `glab mr approve` or `glab mr revoke`.** AI must not approve or unapprove merge requests; approval is reserved for human reviewers. `.claude/settings.json` denies these commands as a backstop.
 
@@ -154,7 +156,7 @@ New feature or non-trivial change
                           stale.
         │
         ▼
-   (Steps 3–4 of git-flow.md: push + open/update MR, then stay on the branch until it merges)
+   (Steps 3–4 of git-flow.md: push + open/update MR, then hand off as awaiting_human)
 ```
 
 ### Agent Summary
@@ -174,7 +176,7 @@ New feature or non-trivial change
 | `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
 | `/cli-syntax-judge` | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
 | `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
-| `/tdd-finalizer` | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; stay on the branch until it merges) | Fix issues — rejects and routes back |
+| `/tdd-finalizer` | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; hand off without waiting for merge) | Fix issues — rejects and routes back |
 
 Never write implementation before a failing test exists. Never merge without all validators approving.
 
@@ -199,7 +201,14 @@ configured standard to make the report green.
 
 ### Completion requires publication
 
-For any user-requested repository change, local validation is not a completion point. The main agent must continue through `.claude/git-flow.md` Step 3 and report the direct merge-request URL and branch-tip commit in its final response. It may stop before publication only when the user explicitly requests local-only work or a concrete commit, authentication, push, or MR-creation blocker prevents it; report that blocker and the required next action plainly.
+Every repository change must publish a feature branch and open or update a
+merge request. A publication failure is a blocker, not completion. For any
+user-requested repository mutation, local validation is not a completion point.
+The main agent must continue through `.claude/git-flow.md` Step 3 and report the
+direct merge-request URL and branch-tip commit in its final response. A concrete
+commit, authentication, push, or MR-creation failure is a blocker, never
+completion; report that blocker and the required next action plainly. Read-only
+inspection is the only work that does not require publication.
 
 ### Routing back on rejection
 
@@ -219,7 +228,7 @@ Both reviewers end their return note with `Created <N> GitLab issues` (or `No ne
 
 ## GitLab issues
 
-GitLab issues are the system of record for deferred work, planned work, and non-blocking quality findings. Do not create or maintain `TODO.md` or `FIXME.md`; generated projects use the templates in `.gitlab/issue_templates/` instead.
+GitLab issues are the system of record for deferred work, planned work, and non-blocking quality findings. Do not create or maintain Markdown backlog files; generated projects use the templates in `.gitlab/issue_templates/` instead.
 
 ### Templates and fields
 
