@@ -1497,7 +1497,6 @@ printf 'effective_access=%s\\n' "${{effective_access:-not-computed}}"
     environment = os.environ.copy()
     environment.update(
         {
-            "AGENT_WORK_CHECKOUT": "/work/agent-checkout",
             "APPROVAL_RULES_JSON": approval_rules_json,
             "PROJECT_JSON": project_json,
             "EFFECTIVE_BRANCH_JSON": effective_branch_json,

@@ -35,8 +35,8 @@ handoff. Do not create a second `.claude/` workflow with Codex model names.
 All `glab` API operations after target discovery must address the numeric
 project ID. `agent-work` derives its checkout and GitLab project from `origin`,
 then confirms the numeric endpoint; it must not require `GITLAB_HOST`,
-`GITLAB_PROJECT_ID`, or `AGENT_WORK_CHECKOUT` to be present. Before remote work
-outside the runner, confirm Git and the GitLab endpoint:
+`GITLAB_PROJECT_ID`, or any checkout configuration environment variable to be
+present. Before remote work outside the runner, confirm Git and the GitLab endpoint:
 
 ```bash
 git pull --ff-only

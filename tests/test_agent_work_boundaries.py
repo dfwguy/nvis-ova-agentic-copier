@@ -17,7 +17,6 @@ from agent_work.adapters import (
     ProjectLock,
     ServiceCheckout,
     build_default_dependencies,
-    load_environment_config,
 )
 from agent_work.cli import build_parser, main
 from agent_work.models import AgentWorkConfig, GitLabIssue, RunReport
@@ -37,48 +36,20 @@ class _Commands:
 
 
 def _config(tmp_path: Path) -> AgentWorkConfig:
-    return load_environment_config(
-        {
-            "GITLAB_HOST": "gitlab.example.com",
-            "GITLAB_PROJECT_ID": "310967",
-            "AGENT_WORK_CHECKOUT": str(tmp_path / "checkout"),
-        }
+    return AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=310967,
+        checkout=tmp_path / "checkout",
     )
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    (
-        ("GITLAB_PROJECT_ID", "project-path"),
-        ("AGENT_WORK_CHECKOUT", "relative/checkout"),
-    ),
-)
-def test_environment_requires_numeric_project_and_absolute_local_paths(
-    tmp_path: Path, key: str, value: str
-) -> None:
-    environment = {
-        "GITLAB_HOST": "gitlab.example.com",
-        "GITLAB_PROJECT_ID": "310967",
-        "AGENT_WORK_CHECKOUT": str(tmp_path / "checkout"),
-        key: value,
-    }
-
-    with pytest.raises(ValueError):
-        load_environment_config(environment)
-
-
-def test_environment_derives_one_fixed_lock_file_from_the_checkout(
+def test_config_derives_one_fixed_lock_file_from_the_checkout(
     tmp_path: Path,
 ) -> None:
     checkout = tmp_path / "checkout"
 
-    config = load_environment_config(
-        {
-            "GITLAB_HOST": "gitlab.example.com",
-            "GITLAB_PROJECT_ID": "310967",
-            "AGENT_WORK_CHECKOUT": str(checkout),
-            "AGENT_WORK_LOCK_FILE": str(tmp_path / "ignored-custom.lock"),
-        }
+    config = AgentWorkConfig(
+        host="gitlab.example.com", project_id=310967, checkout=checkout
     )
 
     assert config.lock_file == checkout / ".agent-work.lock"
@@ -108,7 +79,7 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
     )
 
     dependencies = build_default_dependencies(
-        environment={}, run_command=commands, current_directory=tmp_path
+        run_command=commands, current_directory=tmp_path
     )
 
     assert dependencies.checkout.path == checkout
@@ -177,7 +148,6 @@ def test_default_dependencies_name_the_failed_confirmation(
 
     with pytest.raises(AdapterError, match=message):
         build_default_dependencies(
-            environment={},
             run_command=_Commands(tuple(results)),
             current_directory=tmp_path,
         )

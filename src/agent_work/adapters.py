@@ -7,7 +7,6 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, cast
@@ -61,22 +60,6 @@ def run_subprocess(
     except (OSError, subprocess.TimeoutExpired) as error:
         raise AdapterError("a required command could not be completed") from error
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
-
-
-def load_environment_config(environment: Mapping[str, str]) -> AgentWorkConfig:
-    """Validate explicit configuration for callers that already have it."""
-    try:
-        project_id = int(environment["GITLAB_PROJECT_ID"])
-        return AgentWorkConfig(
-            host=environment["GITLAB_HOST"],
-            project_id=project_id,
-            checkout=Path(environment["AGENT_WORK_CHECKOUT"]),
-        )
-    except (KeyError, TypeError, ValidationError) as error:
-        raise ValueError(
-            "GITLAB_HOST, numeric GITLAB_PROJECT_ID, and AGENT_WORK_CHECKOUT "
-            "are required"
-        ) from error
 
 
 def _repository_location(origin: str) -> tuple[str, str]:
@@ -545,12 +528,10 @@ class ProjectLock:
 
 
 def build_default_dependencies(
-    environment: Mapping[str, str] = os.environ,
     run_command: CommandRunner = run_subprocess,
     current_directory: Path | None = None,
 ) -> RunNextDependencies:
     """Wire the real boundaries from the current checkout once at the CLI edge."""
-    del environment
     config = discover_checkout_config(
         current_directory=current_directory or Path.cwd(), run_command=run_command
     )
