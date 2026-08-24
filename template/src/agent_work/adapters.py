@@ -220,7 +220,6 @@ class GitLabGateway:
 
     def _list_issues(
         self,
-        label: str,
         *,
         state: str,
         limit: int,
@@ -230,7 +229,6 @@ class GitLabGateway:
             f"projects/{self._config.project_id}/issues",
             fields=(
                 f"state={state}",
-                f"labels={label}",
                 *filters,
                 "order_by=created_at",
                 "sort=asc",
@@ -245,27 +243,34 @@ class GitLabGateway:
         except ValidationError as error:
             raise AdapterError("GitLab returned invalid issue data") from error
 
-    def list_ready(self) -> tuple[GitLabIssue, ...]:
-        """Return public, open ready issues from oldest to newest."""
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        """Return public, open eligible issues from oldest to newest."""
         return tuple(
             issue
             for issue in self._list_issues(
-                "agent::ready",
                 state="opened",
                 limit=1,
-                filters=("confidential=false", "not[labels]=agent::running"),
+                filters=(
+                    "confidential=false",
+                    "not[labels]=agent::running,agent::awaiting-human,agent::failed",
+                ),
             )
             if issue.state == "opened"
             and not issue.confidential
-            and "agent::ready" in issue.labels
-            and "agent::running" not in issue.labels
+            and not {
+                "agent::running",
+                "agent::awaiting-human",
+                "agent::failed",
+            }.intersection(issue.labels)
         )
 
     def list_running(self) -> tuple[GitLabIssue, ...]:
         """Return open or closed issues carrying the running projection."""
         return tuple(
             issue
-            for issue in self._list_issues("agent::running", state="all", limit=2)
+            for issue in self._list_issues(
+                state="all", limit=2, filters=("labels=agent::running",)
+            )
             if "agent::running" in issue.labels
         )
 
@@ -297,11 +302,11 @@ class GitLabGateway:
             raise AdapterError("GitLab did not apply the requested issue labels")
 
     def mark_running(self, issue: GitLabIssue) -> None:
-        """Move a ready issue to the running projection."""
+        """Move an eligible issue to the running projection."""
         self._transition(
             issue,
             add="agent::running",
-            remove=("agent::ready", "agent::awaiting-human", "agent::failed"),
+            remove=("agent::awaiting-human", "agent::failed"),
         )
 
     def mark_awaiting_human(self, issue: GitLabIssue) -> None:
@@ -309,15 +314,15 @@ class GitLabGateway:
         self._transition(
             issue,
             add="agent::awaiting-human",
-            remove=("agent::running", "agent::ready", "agent::failed"),
+            remove=("agent::running", "agent::failed"),
         )
 
     def mark_failed(self, issue: GitLabIssue) -> None:
-        """Move a running or ready issue to the failed projection."""
+        """Move a running or eligible issue to the failed projection."""
         self._transition(
             issue,
             add="agent::failed",
-            remove=("agent::running", "agent::ready", "agent::awaiting-human"),
+            remove=("agent::running", "agent::awaiting-human"),
         )
 
     def publication(self, branch: str) -> MergeRequestEvidence | None:

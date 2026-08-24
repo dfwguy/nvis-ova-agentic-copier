@@ -18,7 +18,7 @@ from agent_work.models import (
 from agent_work.serial import RunNextDependencies, RunNextError, run_next
 
 
-def _issue(*, iid: int, labels: tuple[str, ...] = ("agent::ready",)) -> GitLabIssue:
+def _issue(*, iid: int, labels: tuple[str, ...] = ()) -> GitLabIssue:
     """Return one eligible issue without an HTTP boundary."""
     return GitLabIssue(
         iid=iid,
@@ -52,12 +52,12 @@ class _GitLab:
     def __init__(
         self,
         *,
-        ready: tuple[GitLabIssue, ...] = (),
+        eligible: tuple[GitLabIssue, ...] = (),
         running: tuple[GitLabIssue, ...] = (),
         publication: MergeRequestEvidence | None = None,
         closes_issue: bool = True,
     ) -> None:
-        self.ready = ready
+        self.eligible = eligible
         self.running = running
         self._publication = publication
         self._closes_issue = closes_issue
@@ -71,14 +71,16 @@ class _GitLab:
             web_url="https://gitlab.example.com/group/project",
         )
 
-    def list_ready(self) -> tuple[GitLabIssue, ...]:
-        return self.ready
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        return self.eligible
 
     def list_running(self) -> tuple[GitLabIssue, ...]:
         return self.running
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
-        return next(issue for issue in (*self.ready, *self.running) if issue.iid == iid)
+        return next(
+            issue for issue in (*self.eligible, *self.running) if issue.iid == iid
+        )
 
     def mark_running(self, issue: GitLabIssue) -> None:
         self.events.append(("running", issue.iid))
@@ -190,7 +192,7 @@ def test_preview_is_read_only_and_reports_idle_without_ready_or_running_work() -
 def test_preview_reports_ready_work_without_claiming_or_invoking() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,)),
+        _GitLab(eligible=(issue,)),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -216,7 +218,7 @@ def test_applied_claim_requires_the_selected_issue_to_be_the_only_gitlab_lock() 
             self.running = (issue, _issue(iid=124, labels=("agent::running",)))
 
     gitlab, checkout, invoke, lock = (
-        _ConflictingGitLab(ready=(issue,)),
+        _ConflictingGitLab(eligible=(issue,)),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -252,7 +254,7 @@ def test_preview_reports_running_work_without_recovery_or_invocation() -> None:
 def test_applied_run_selects_only_the_first_ready_issue() -> None:
     first, second = _issue(iid=12), _issue(iid=13)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(first, second), publication=_publication(first)),
+        _GitLab(eligible=(first, second), publication=_publication(first)),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -270,7 +272,7 @@ def test_applied_run_selects_only_the_first_ready_issue() -> None:
 def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,), publication=_publication(issue)),
+        _GitLab(eligible=(issue,), publication=_publication(issue)),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -297,7 +299,7 @@ def test_applied_issue_fails_when_publication_is_missing_or_does_not_close_issue
     issue = _issue(iid=123)
     evidence = _publication(issue) if has_publication else None
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,), publication=evidence, closes_issue=closes_issue),
+        _GitLab(eligible=(issue,), publication=evidence, closes_issue=closes_issue),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -366,7 +368,7 @@ def test_publication_must_match_project_branch_target_state_and_tip(
     issue = _issue(iid=123)
     evidence = _publication(issue).model_copy(update=updates)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,), publication=evidence),
+        _GitLab(eligible=(issue,), publication=evidence),
         _Checkout(sha=checkout_sha),
         _Invoke(),
         _Lock(),
@@ -399,7 +401,7 @@ def test_multiple_running_issues_fail_closed_without_mutation_or_invocation() ->
 def test_nonzero_agent_exit_still_parks_a_verified_publication() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,), publication=_publication(issue)),
+        _GitLab(eligible=(issue,), publication=_publication(issue)),
         _Checkout(),
         _Invoke(returncode=1),
         _Lock(),
@@ -417,7 +419,7 @@ def test_nonzero_agent_exit_still_parks_a_verified_publication() -> None:
 def test_agent_timeout_still_parks_a_verified_publication() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,), publication=_publication(issue)),
+        _GitLab(eligible=(issue,), publication=_publication(issue)),
         _Checkout(),
         _Invoke(error=AdapterError("a required command could not be completed")),
         _Lock(),
@@ -435,7 +437,7 @@ def test_agent_timeout_still_parks_a_verified_publication() -> None:
 def test_branch_conflict_is_rejected_before_the_issue_is_claimed() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
-        _GitLab(ready=(issue,)),
+        _GitLab(eligible=(issue,)),
         _Checkout(branch_error=AdapterError("branch conflict")),
         _Invoke(),
         _Lock(),

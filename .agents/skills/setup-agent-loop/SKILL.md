@@ -142,7 +142,7 @@ before checking repository safeguards.
 9. Stop the tmux session before changing the checkout, credentials, or GitLab
    labels; no legacy SQLite state migration is needed.
 
-The loop projects `agent::ready` to `agent::running`, then to
+The loop projects an eligible open issue to `agent::running`, then to
 `agent::awaiting-human` only after exact same-project MR evidence, matching
 local/remote branch tips, default target, and `Closes #IID`; otherwise it uses
 `agent::failed`. Branches are deterministic: `agent/issue-<IID>`. The local

@@ -162,7 +162,7 @@ def test_gitlab_selection_uses_only_the_numeric_project_endpoint(
                 "iid": 3,
                 "title": "Oldest public issue",
                 "description": None,
-                "labels": ["agent::ready"],
+                "labels": [],
                 "state": "opened",
                 "confidential": False,
                 "created_at": "2026-08-01T00:00:00Z",
@@ -171,41 +171,40 @@ def test_gitlab_selection_uses_only_the_numeric_project_endpoint(
     )
     commands = _Commands((CommandResult(0, payload, ""),))
 
-    issues = GitLabGateway(_config(tmp_path), commands).list_ready()
+    issues = GitLabGateway(_config(tmp_path), commands).list_eligible()
 
     assert [issue.iid for issue in issues] == [3]
     command, _ = commands.calls[0]
     assert "projects/310967/issues" in command
-    assert "labels=agent::ready" in command
     assert "state=opened" in command
     assert "confidential=false" in command
-    assert "not[labels]=agent::running" in command
+    assert "not[labels]=agent::running,agent::awaiting-human,agent::failed" in command
     assert "per_page=1" in command
     assert "order_by=created_at" in command
     assert "sort=asc" in command
     assert not any("group/project" in argument for argument in command)
 
 
-def test_gitlab_ready_selection_filters_eligibility_in_one_bounded_query(
+def test_gitlab_open_selection_filters_eligibility_in_one_bounded_query(
     tmp_path: Path,
 ) -> None:
     eligible = {
         "iid": 101,
         "title": "Eligible issue",
         "description": "",
-        "labels": ["agent::ready"],
+        "labels": [],
         "state": "opened",
         "confidential": False,
     }
     commands = _Commands((CommandResult(0, json.dumps([eligible]), ""),))
 
-    issues = GitLabGateway(_config(tmp_path), commands).list_ready()
+    issues = GitLabGateway(_config(tmp_path), commands).list_eligible()
 
     assert [issue.iid for issue in issues] == [101]
     assert len(commands.calls) == 1
     command = commands.calls[0][0]
     assert "confidential=false" in command
-    assert "not[labels]=agent::running" in command
+    assert "not[labels]=agent::running,agent::awaiting-human,agent::failed" in command
     assert "per_page=1" in command
 
 
@@ -236,7 +235,7 @@ def test_gitlab_rejects_malformed_issue_text_as_a_safe_adapter_error(
                 "iid": 3,
                 "title": "Issue",
                 "description": 42,
-                "labels": ["agent::ready"],
+                "labels": [],
                 "state": "opened",
                 "confidential": False,
             }
@@ -245,7 +244,7 @@ def test_gitlab_rejects_malformed_issue_text_as_a_safe_adapter_error(
     commands = _Commands((CommandResult(0, payload, ""),))
 
     with pytest.raises(AdapterError, match="invalid issue data"):
-        GitLabGateway(_config(tmp_path), commands).list_ready()
+        GitLabGateway(_config(tmp_path), commands).list_eligible()
 
 
 def test_gitlab_label_transition_uses_explicit_add_remove_sets_and_refetches(
@@ -267,7 +266,7 @@ def test_gitlab_label_transition_uses_explicit_add_remove_sets_and_refetches(
     issue = GitLabIssue(
         iid=3,
         title="Issue",
-        labels=("agent::ready",),
+        labels=(),
         state="opened",
         confidential=False,
     )
@@ -277,7 +276,7 @@ def test_gitlab_label_transition_uses_explicit_add_remove_sets_and_refetches(
     update, _ = commands.calls[0]
     assert "projects/310967/issues/3" in update
     assert "add_labels=agent::running" in update
-    assert "remove_labels=agent::ready,agent::awaiting-human,agent::failed" in update
+    assert "remove_labels=agent::awaiting-human,agent::failed" in update
     fetch, _ = commands.calls[1]
     assert "projects/310967/issues/3" in fetch
 

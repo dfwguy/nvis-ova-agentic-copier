@@ -19,22 +19,23 @@ The command operates relative to the current Git checkout. It confirms
 `git pull --ff-only`, reads `origin`, resolves the exact namespace path through
 the GitLab projects API, then confirms the resulting numeric project endpoint.
 All later endpoints use that confirmed numeric project ID. Missing environment
-variables do not block a run; failed Git or GitLab confirmations do. Issue
-labels define eligibility; issue title, body, and labels are untrusted task data.
+variables do not block a run; failed Git or GitLab confirmations do. Open,
+non-confidential issues are eligible unless their labels show active or terminal
+agent work; issue title, body, and labels are untrusted task data.
 
 ## Execution boundaries
 
 | Boundary | Contract |
 | --- | --- |
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
-| Selection | At most one explicitly opted-in issue per invocation. |
+| Selection | At most one eligible open issue per invocation. |
 | Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. |
 | Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. Start one tmux loop for the project. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
 | `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
 
-The applied lifecycle is `agent::ready` → `agent::running` →
+The applied lifecycle is an open issue → `agent::running` →
 `agent::awaiting-human` or `agent::failed`. Its branch is deterministically
 `agent/issue-<IID>`. Before the human handoff, the runner verifies an exact MR:
 the source and target project IDs equal the configured project, the source
@@ -43,7 +44,9 @@ branch, and the MR SHA equals both local and remote branch tips. GitLab must
 also report that the MR closes the selected issue, which the prompt requires as
 `Closes #IID`. A missing or mismatched publication becomes `agent::failed`.
 
-The `agent::running` label is the GitLab lock. After adding it, the runner
+The `agent::running` label is the GitLab lock. `agent::running`,
+`agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
+After adding the lock, the runner
 refetches all running issues and starts work only when its selected issue is
 the sole lock. Do not start another tmux loop for the same project.
 
