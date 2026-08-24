@@ -60,6 +60,7 @@ coverage.xml
 local_settings.py
 instance/
 .webassets-cache
+.agent-work.lock
 
 # Distribution / packaging
 .Python

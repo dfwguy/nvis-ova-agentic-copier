@@ -155,17 +155,18 @@ uv tool install --force .
 agent-work --help
 ```
 
-Write the four non-secret settings to a file you load before starting the loop.
-The checkout and lock-file paths must be absolute. Credentials remain in the
+Write the three non-secret settings to a file you load before starting the loop.
+The checkout path must be absolute. The runner always uses the fixed,
+gitignored `$AGENT_WORK_CHECKOUT/.agent-work.lock`, so every local process
+pointing at that checkout contends for the same lock. Credentials remain in the
 service user's existing Git and `glab` credential mechanisms, not in this file:
 
 ```bash
-install -d -m 0700 "$HOME/.config/agent-work" "$(dirname "$AGENT_WORK_LOCK_FILE")"
+install -d -m 0700 "$HOME/.config/agent-work"
 printf '%s\n' \
   "GITLAB_HOST=$GITLAB_HOST" \
   "GITLAB_PROJECT_ID=$GITLAB_PROJECT_ID" \
   "AGENT_WORK_CHECKOUT=$AGENT_WORK_CHECKOUT" \
-  "AGENT_WORK_LOCK_FILE=$AGENT_WORK_LOCK_FILE" \
   > "$HOME/.config/agent-work/PROJECT.env"
 ```
 
@@ -173,7 +174,6 @@ printf '%s\n' \
 GITLAB_HOST=gitlab.example.com
 GITLAB_PROJECT_ID=12345
 AGENT_WORK_CHECKOUT=/home/USER/.local/share/agent-work/PROJECT
-AGENT_WORK_LOCK_FILE=/home/USER/.local/state/agent-work/PROJECT.lock
 ```
 
 Load the settings, create the dedicated checkout, and run the read-only preview:
@@ -182,7 +182,7 @@ Load the settings, create the dedicated checkout, and run the read-only preview:
 set -a
 . "$HOME/.config/agent-work/PROJECT.env"
 set +a
-install -d -m 0700 "$(dirname "$AGENT_WORK_CHECKOUT")" "$(dirname "$AGENT_WORK_LOCK_FILE")"
+install -d -m 0700 "$(dirname "$AGENT_WORK_CHECKOUT")"
 git clone REPOSITORY_URL "$AGENT_WORK_CHECKOUT"
 agent-work run-next --json
 ```
