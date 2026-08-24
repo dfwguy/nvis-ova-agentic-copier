@@ -61,13 +61,31 @@ Developer role alone does not prove these controls, self-approval prevention,
 or per-MR approval-rule overrides. This readiness selection intentionally
 skips those Maintainer-only checks and relies on workflow, settings, and
 runtime never-approve/merge guardrails; it is not a hard same-user security
-boundary. If the Developer-readable evidence is absent, inaccessible, or
-mismatched, block `--apply` and have a Maintainer correct the safeguards, then
-repeat the preflight.
+boundary. An inaccessible Maintainer-only audit blocks only the unattended
+agent-loop `--apply` readiness decision. It does **not** mean a Developer
+cannot publish a feature branch or create a merge request. Do not mistake that
+audit boundary for Git push or MR-create permission.
+
+When normal repository work is complete, a Developer must still continue with
+the publication handoff: create or reuse the task feature branch, commit,
+push, and attempt to open or update the merge request. Use the numeric project
+ID for every `glab api` MR operation; use the configured Git remote only for
+`git push`. A real push or MR API authentication failure is the publication
+blocker—not the unavailable Maintainer-only loop-readiness audit.
 
 ## Mandatory publication handoff
 
 Every repository change must publish a feature branch and open or update a
 merge request. A publication failure is a blocker, not completion.
 
-For every user-requested repository mutation, do not stop at local edits, validation, or a local commit. The main agent must complete `.claude/git-flow.md` Step 3: publish the feature branch and open or update its merge request. The final response must include the direct MR URL and branch tip. Authentication, push, or MR-creation failure is a blocker, never completion: state the exact blocker and next action without implying that unpublished work is complete. Read-only inspection is the only work that does not require publication.
+For every user-requested repository mutation, do not stop at local edits,
+validation, or a local commit. The main agent must always create or reuse a
+feature branch, commit, push, and attempt to open or update its MR through
+`.claude/git-flow.md` Step 3. Create or update the MR with
+`projects/$GITLAB_PROJECT_ID` (or the established project path only when an
+API client does not support numeric IDs); never skip the attempt because an
+unrelated readiness audit is unavailable. The final response must include the
+direct MR URL and branch tip. A real authentication, push, or MR-creation
+failure is a blocker, never completion: state the exact blocker and next
+action without implying that unpublished work is complete. Read-only
+inspection is the only work that does not require publication.

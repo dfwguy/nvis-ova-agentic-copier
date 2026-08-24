@@ -5,11 +5,23 @@ merge request. A publication failure is a blocker, not completion.
 
 Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
+**Do not confuse a readiness or policy audit with publication permission.** A
+Developer may be unable to read Maintainer-only policy settings and still be
+able to push a feature branch and create an MR. After normal work completes,
+always attempt the full branch → commit → push → MR handoff. Only an actual
+Git push or MR-creation failure blocks publication.
+
 ## GitLab target
 
 Every remote `glab` operation uses the numeric project ID. Require
 `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID` from the environment; never
 derive a project path from the Git remote.
+
+For the MR handoff, use the numeric API endpoint
+`projects/$GITLAB_PROJECT_ID/merge_requests`. If the available API client
+cannot address a numeric project ID, use its already-configured project path;
+either way, attempt MR creation after the push rather than stopping on an
+unrelated preflight result.
 
 ## Git and GitLab access preflight
 

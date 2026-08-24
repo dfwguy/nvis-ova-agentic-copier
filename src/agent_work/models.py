@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+PROJECT_LOCK_FILENAME = ".agent-work.lock"
+
 
 class AgentWorkConfig(BaseModel):
     """Non-secret runner configuration supplied by the environment."""
@@ -17,7 +19,6 @@ class AgentWorkConfig(BaseModel):
     host: str
     project_id: int = Field(gt=0)
     checkout: Path
-    lock_file: Path
 
     @field_validator("host")
     @classmethod
@@ -27,13 +28,18 @@ class AgentWorkConfig(BaseModel):
             raise ValueError("GITLAB_HOST must be a bare hostname")
         return value
 
-    @field_validator("checkout", "lock_file")
+    @field_validator("checkout")
     @classmethod
     def validate_absolute_path(cls, value: Path) -> Path:
-        """Keep the service checkout and lock targets explicit."""
+        """Keep the service checkout target explicit."""
         if not value.is_absolute():
             raise ValueError("runner paths must be absolute")
         return value
+
+    @property
+    def lock_file(self) -> Path:
+        """Use one fixed, checkout-scoped lock shared by every local runner."""
+        return self.checkout / PROJECT_LOCK_FILENAME
 
 
 class GitLabIssue(BaseModel):

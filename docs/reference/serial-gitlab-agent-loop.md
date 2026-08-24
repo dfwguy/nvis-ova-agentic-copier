@@ -28,7 +28,7 @@ task data.
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one explicitly opted-in issue per invocation. |
 | Workspace | A dedicated agent checkout, not the operator's checkout. |
-| Concurrency | Serial; start one tmux loop for the project. |
+| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. Start one tmux loop for the project. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
 | `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |

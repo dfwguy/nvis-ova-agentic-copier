@@ -63,19 +63,18 @@ def run_subprocess(
 
 
 def load_environment_config(environment: Mapping[str, str]) -> AgentWorkConfig:
-    """Validate the four non-secret environment settings used by the runner."""
+    """Validate the three non-secret environment settings used by the runner."""
     try:
         project_id = int(environment["GITLAB_PROJECT_ID"])
         return AgentWorkConfig(
             host=environment["GITLAB_HOST"],
             project_id=project_id,
             checkout=Path(environment["AGENT_WORK_CHECKOUT"]),
-            lock_file=Path(environment["AGENT_WORK_LOCK_FILE"]),
         )
     except (KeyError, TypeError, ValidationError) as error:
         raise ValueError(
-            "GITLAB_HOST, numeric GITLAB_PROJECT_ID, AGENT_WORK_CHECKOUT, and "
-            "AGENT_WORK_LOCK_FILE are required"
+            "GITLAB_HOST, numeric GITLAB_PROJECT_ID, and AGENT_WORK_CHECKOUT "
+            "are required"
         ) from error
 
 

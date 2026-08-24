@@ -41,7 +41,6 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
             "GITLAB_HOST": "gitlab.example.com",
             "GITLAB_PROJECT_ID": "310967",
             "AGENT_WORK_CHECKOUT": str(tmp_path / "checkout"),
-            "AGENT_WORK_LOCK_FILE": str(tmp_path / "agent-work.lock"),
         }
     )
 
@@ -51,7 +50,6 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
     (
         ("GITLAB_PROJECT_ID", "project-path"),
         ("AGENT_WORK_CHECKOUT", "relative/checkout"),
-        ("AGENT_WORK_LOCK_FILE", "relative.lock"),
     ),
 )
 def test_environment_requires_numeric_project_and_absolute_local_paths(
@@ -61,12 +59,28 @@ def test_environment_requires_numeric_project_and_absolute_local_paths(
         "GITLAB_HOST": "gitlab.example.com",
         "GITLAB_PROJECT_ID": "310967",
         "AGENT_WORK_CHECKOUT": str(tmp_path / "checkout"),
-        "AGENT_WORK_LOCK_FILE": str(tmp_path / "agent-work.lock"),
         key: value,
     }
 
     with pytest.raises(ValueError):
         load_environment_config(environment)
+
+
+def test_environment_derives_one_fixed_lock_file_from_the_checkout(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+
+    config = load_environment_config(
+        {
+            "GITLAB_HOST": "gitlab.example.com",
+            "GITLAB_PROJECT_ID": "310967",
+            "AGENT_WORK_CHECKOUT": str(checkout),
+            "AGENT_WORK_LOCK_FILE": str(tmp_path / "ignored-custom.lock"),
+        }
+    )
+
+    assert config.lock_file == checkout / ".agent-work.lock"
 
 
 def test_gitlab_selection_uses_only_the_numeric_project_endpoint(
