@@ -4,6 +4,22 @@ A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python pr
 
 If you're starting a new Python project on the team, this is the starting point. It saves you a day of boilerplate setup and gives you a TDD-enforced workflow with quality and CI gates pre-configured.
 
+## Start the GitLab issue loop
+
+After the repository safeguards are ready, install the runner and start its
+single tmux Ralph loop. Each issue labelled `agent::ready` becomes a branch and
+human-gated merge request; the loop never approves or merges it.
+
+```bash
+uv tool install --force .
+agent-work run-next --json
+tmux new-session -d -s agent-work 'while agent-work run-next --apply --json; do sleep 300; done'
+tmux attach -t agent-work
+```
+
+Set the GitLab target and dedicated-checkout variables first; the complete
+commands are in the [serial loop how-to](docs/how-to/setup-serial-gitlab-agent-loop.md).
+
 ## Documentation
 
 The [documentation index](docs/README.md) organizes deeper material using

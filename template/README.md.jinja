@@ -2,6 +2,22 @@
 
 {{ description }}
 
+## Start the GitLab issue loop
+
+After the repository safeguards are ready, install the runner and start its
+single tmux Ralph loop. Each issue labelled `agent::ready` becomes a branch and
+human-gated merge request; the loop never approves or merges it.
+
+```bash
+uv tool install --force .
+agent-work run-next --json
+tmux new-session -d -s agent-work 'while agent-work run-next --apply --json; do sleep 300; done'
+tmux attach -t agent-work
+```
+
+Set the GitLab target and dedicated-checkout variables first; the complete
+commands are in [`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md).
+
 ## Serial GitLab agent loop
 
 This project uses GitLab-only polling for one opted-in issue at a time. Set

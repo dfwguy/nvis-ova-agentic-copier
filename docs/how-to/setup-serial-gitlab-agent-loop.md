@@ -159,6 +159,16 @@ Write the four non-secret settings to a file you load before starting the loop.
 The checkout and lock-file paths must be absolute. Credentials remain in the
 service user's existing Git and `glab` credential mechanisms, not in this file:
 
+```bash
+install -d -m 0700 "$HOME/.config/agent-work" "$(dirname "$AGENT_WORK_LOCK_FILE")"
+printf '%s\n' \
+  "GITLAB_HOST=$GITLAB_HOST" \
+  "GITLAB_PROJECT_ID=$GITLAB_PROJECT_ID" \
+  "AGENT_WORK_CHECKOUT=$AGENT_WORK_CHECKOUT" \
+  "AGENT_WORK_LOCK_FILE=$AGENT_WORK_LOCK_FILE" \
+  > "$HOME/.config/agent-work/PROJECT.env"
+```
+
 ```text
 GITLAB_HOST=gitlab.example.com
 GITLAB_PROJECT_ID=12345
