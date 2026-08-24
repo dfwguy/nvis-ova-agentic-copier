@@ -1,0 +1,23 @@
+[Unit]
+Description=Run one serial GitLab agent-loop item for %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-work/%i.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+UMask=0077
+TimeoutStartSec=1900
+MemoryMax=2G
+CPUQuota=100%
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ExecStart=/usr/bin/env agent-work run-next --apply --json

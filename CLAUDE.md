@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @.claude/git-flow.md
 
-@.agents/contracts/work-item-contract.md
-
 ## Repo lock-down gate
 
 **Check before every response**: does `CONTRIBUTING.md` exist at the repo root?

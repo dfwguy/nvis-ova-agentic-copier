@@ -12,36 +12,26 @@ how-to guides, a template reference, and explanations of the template design
 and [why it uses Diátaxis](docs/explanation/why-diataxis.md), as well as
 [why its coding standards exist](docs/explanation/coding-standards.md).
 
-## Run one GitLab issue
+## Serial GitLab agent loop
 
-Generated projects include the `agent-work` CLI and `work-item-runner` skill
-for one human-selected GitLab issue. Set `GITLAB_HOST` and a numeric
-`GITLAB_PROJECT_ID`, then preview safely before allowing publication:
-
-```bash
-agent-work run-issue 123 --mode publish --json
-agent-work run-issue 123 --mode publish --apply --json
-```
-
-The selected issue must be open, non-confidential, and labelled
-`agent::ready`. An applied run opens or updates an MR, retains its independent
-Git working copy with private metadata, reports `awaiting_human`, and stops for
-human review and merge. See the generated
-[how-to](template/docs/how-to/run-one-gitlab-issue.md) and the
-repository [skill](.agents/skills/work-item-runner/SKILL.md).
-
-## Run one filesystem request
-
-Generated projects can also process one trusted producer-delivered JSON request
-from a filesystem inbox. Configure `AGENT_WORK_REPOSITORIES_FILE` with the
-trusted repository alias allowlist, then preview before allowing publication:
+Generated projects use GitLab-only polling for one opted-in issue at a time.
+Set `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID`; the loop addresses the
+configured numeric project rather than inferring it from `origin`. A Developer
+account can poll eligible issues, so no webhook or inbound service is required:
 
 ```bash
-agent-work run-file --path ITEM.json --inbox-root ABS_ROOT --repository ALIAS --mode publish [--apply] [--json]
+agent-work run-next --json
+agent-work run-next --apply --json
 ```
 
-See the generated [how-to](docs/how-to/run-one-filesystem-request.md) for the
-inbox lifecycle and safe application.
+An applied run uses a dedicated agent checkout, opens one MR, and
+stops at `awaiting_human`. It never approves or merges. Enable the supplied
+user-systemd timer only after a human explicitly authorizes unattended
+publication, the service identity is constrained, and a Maintainer has verified
+independent approval safeguards (a Developer `403` is inconclusive). See the
+generated [how-to](template/docs/how-to/setup-serial-gitlab-agent-loop.md),
+[reference](template/docs/reference/serial-gitlab-agent-loop.md), and
+repository [setup skill](.agents/skills/setup-agent-loop/SKILL.md).
 
 ## What you get
 
