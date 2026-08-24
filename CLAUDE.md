@@ -36,11 +36,14 @@ https://example.com/path
 
 Add any label as plain prose *before* the block, not inside it.
 
-## Git Remote (HTTPS over the sandbox proxy)
+## Git and GitLab connectivity
 
-The Claude Code sandbox proxies HTTPS to allow-listed domains (including `gitlab-master.nvidia.com`) but blocks raw TCP/UDP, so an SSH `origin` can't be used in-sandbox — it fails on a blocked connection (`Permission denied (publickey)` / no route), **not** on DNS: the hostname resolves fine. Configure this repo's `origin` to use HTTPS, with `glab` providing the credential, so the full git-flow (pull, push, `glab mr ...`) runs in-sandbox without `dangerouslyDisableSandbox`.
+The Git flow supports both managed environments that route HTTPS through a
+sandbox proxy and regular VMs with their own working Git and GitLab setup.
+Do not normalize every clone to one transport or credential mechanism.
 
-One-time setup per clone:
+In a managed sandbox where raw SSH is blocked, configure HTTPS with `glab` as
+the Git credential helper:
 
 ```bash
 glab auth status                          # read-only; verifies glab is logged in to gitlab-master.nvidia.com
@@ -49,14 +52,23 @@ git config credential.https://gitlab-master.nvidia.com.helper '!glab auth git-cr
 git config push.default simple            # bare `git push` pushes only the current branch, never main
 ```
 
-After this, `git pull`, `git push`, `glab mr create`, and `glab mr list` all work in-sandbox.
+On a regular VM, retain a working HTTPS or SSH `origin` and the established
+credential mechanism (for example, an SSH agent, a Git credential manager, a
+stored `glab` login, or a directory-scoped token). Do not replace it merely to
+match the sandbox instructions. Environment-provided credentials must be kept
+secret: never print, inspect, or copy their values.
+
+Before branching from `main` or publishing, `.claude/git-flow.md` requires a
+read-only `git pull --ff-only` and a `glab api` query against the numeric
+project ID. Those checks prove Git and GitLab API access separately; success
+for one does not prove the other.
 
 Two things worth knowing:
 
 - **`push.default simple` matters.** Under git's old `matching` mode a bare `git push` also tries to push `main`, which branch protection rejects — noisy and confusing. `simple` (git's modern default, set explicitly here) pushes only the current branch.
 - **The credential helper must live in the config *file*.** The `!glab auth git-credential` shell-escape only works when persisted with `git config`. Injecting it per-command via `git -c …helper=…` or `GIT_CONFIG_*` does **not** work — git reads `!glab` as a literal helper name (`git: 'credential-!glab' is not a git command`).
 
-> **If you hit a read-only sandbox mount:** some sandbox configurations bind-mount `.git/config` and `$HOME` (`~/.gitconfig`, `~/.config/glab-cli/`) read-only, so `git config` / `glab mr create` writes fail with `Device or resource busy` or `read-only file system`. This repo's environment does **not** — those paths are writable and `glab mr create` works in-sandbox — but if you do hit that error, run that one command unsandboxed. A harmless `.gitmodules: Permission denied` warning on fetch/pull can be ignored.
+> **If you hit a read-only sandbox mount:** some sandbox configurations bind-mount `.git/config` and `$HOME` (`~/.gitconfig`, `~/.config/glab-cli/`) read-only, so `git config` / `glab mr create` writes fail with `Device or resource busy` or `read-only file system`. If that happens, use the VM's approved route for that command. A harmless `.gitmodules: Permission denied` warning on fetch/pull can be ignored.
 
 ## Language-Specific Conventions
 
