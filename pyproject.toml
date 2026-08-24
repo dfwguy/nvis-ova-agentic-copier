@@ -56,6 +56,7 @@ deps = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "jsonschema[format]>=4.23.0",
 ]
 commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage.xml", "--cov-report=html", "--junitxml=test-results.xml"]]
 
@@ -69,6 +70,7 @@ deps = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "jsonschema[format]>=4.23.0",
 ]
 commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage.xml", "--cov-report=html", "--junitxml=test-results.xml"]]
 
@@ -81,6 +83,7 @@ test = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "jsonschema[format]>=4.23.0",
 ]
 dev = [
     {include-group = "test"},

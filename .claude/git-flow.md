@@ -1,6 +1,9 @@
 # Git Flow
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, open or update a merge request via `glab`, then stay on the branch and return to `main` only once the MR has merged and the post-merge pipeline is green. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
+Every repository change must publish a feature branch and open or update a
+merge request. A publication failure is a blocker, not completion.
+
+Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
 ## GitLab target
 
@@ -32,12 +35,20 @@ because it differs from another developer's VM.
 
 If either command fails, stop before creating a branch or publishing. Report
 which command failed and its non-secret error, then have the user repair the
-appropriate Git route/credential or GitLab API configuration. Do not infer
-that a successful `glab` call also authorizes Git, or vice versa.
+appropriate Git route/credential or GitLab API configuration. This is a
+blocker, never a completed outcome. Do not infer that a successful
+`glab` call also authorizes Git, or vice versa.
 
 ## Step 1: Start a feature branch from clean `main`
 
 > **This step runs first in *every* session that will make a change — a full TDD feature or a one-line trivial edit alike. It is not part of the TDD workflow; it gates it.** The most common and most damaging mistake is to skip it because "I'm already on a branch that looks right" and append to a branch whose work has already merged — that re-creates the deleted remote branch, re-introduces merged commits, and produces merge conflicts. Always verify the starting point *mechanically* (below); never infer it from the branch name.
+
+Derive the task's kebab-case slug (≤40 characters) and intended branch before
+checking the current checkout:
+
+```bash
+intended_branch="claude/<slug>"
+```
 
 Run from the main thread with Bash:
 
@@ -61,7 +72,7 @@ git rev-parse --abbrev-ref HEAD
 
 ### Pre-flight checks (only when starting from `main`)
 
-**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining three checks:
+**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining checks:
 
 1. **Local tests**:
    ```bash
@@ -75,19 +86,39 @@ git rev-parse --abbrev-ref HEAD
    ```
    Treat `failed` / `canceled` on the latest pipeline as a failing check.
 
-3. **Outstanding merge requests**:
+3. **Open merge request awareness**:
    ```bash
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&per_page=100"
    ```
-   Any open MR in the repo (regardless of author) counts as outstanding.
+   Unrelated open merge requests are **non-blocking**. Do not stop merely
+   because this query returns an MR. Stop only for a concrete dependency on
+   unmerged work, the same branch belonging to another run, or a known file or
+   resource conflict. A continuation of an existing MR reuses its branch as
+   described above.
 
-**All checks clean** → derive a kebab-case slug (≤40 chars) from the task description and create the branch:
+4. **Branch-specific continuation from `main`**:
+   ```bash
+   git fetch origin --prune
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=$intended_branch"
+   git show-ref --verify --quiet "refs/heads/$intended_branch"
+   ```
+   An open MR for the same task is a follow-up iteration, not new work. Check
+   out the existing local branch with `git checkout "$intended_branch"`; if
+   only its remote-tracking branch exists, use
+   `git checkout --track "origin/$intended_branch"`. Then append the review
+   fix and update the existing MR through Step 3b. If that branch or MR belongs
+   to another work item, stop for a same-branch conflict. If a local or remote
+   branch exists without an open MR, verify mechanically whether it is
+   genuinely unfinished current-task work before reusing it; never overwrite
+   it or create a duplicate branch.
+
+**All blocking checks clean and no current-task branch exists** → create the intended branch:
 
 ```bash
-git checkout -b claude/<slug>
+git checkout -b "$intended_branch"
 ```
 
-**Any check fails or MRs are outstanding** → stop and ask the user to approve before continuing. Summarize what failed (test names, pipeline ID + URL, MR titles + URLs) so the decision is informed. Do not attempt to fix failures or close MRs as part of pre-flight — that's a separate task the user must direct.
+**A blocking check fails** → stop and ask the user to approve before continuing. Summarize what failed (test names, pipeline ID + URL, dependency, same-branch ownership, or resource conflict) so the decision is informed. Do not attempt to fix failures or close MRs as part of pre-flight — that's a separate task the user must direct. An unrelated open MR is not a failed check.
 
 If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
 
@@ -119,7 +150,7 @@ the preflight. One user approval per remote-touching command.
    ```
    - `[]` → no MR yet, go to 3a.
    - Non-empty → MR exists, go to 3b.
-   - `glab` unauthenticated or errors for tooling reasons → surface the error and stop. Do not retry blindly.
+   - `glab` unauthenticated or errors for tooling reasons → surface the error and stop. This is a blocker, never a completed outcome. Do not retry blindly.
 
 3a. **No existing MR — push + create by project ID** (one approval per remote command):
    - `title`: `git log -1 --format=%s` (the commit subject)
@@ -145,46 +176,65 @@ the preflight. One user approval per remote-touching command.
    ```
    GitLab updates the existing MR with the new commits. Do not create a duplicate MR.
 
-4. **Report** to the user: the `web_url` from the API response (or the existing-MR lookup), the current local commit hash, and a one-line summary. Because the MR uses `squash=true`, GitLab collapses the branch into a **single new commit on `main` with a different hash** when it merges — so the hash you report now is the local branch tip, *not* the SHA that will land. Don't present it as the final merged hash; the canonical post-merge SHA only exists after Step 4 (read it then with `git log -1 --format=%H` on the updated `main` if the user needs it).
+If `git push` or merge-request creation fails, stop and report the non-secret
+error and required next action. The failure blocks the work; do not call local
+edits or a local commit complete.
 
-## Step 4: Stay on the branch until the MR merges (then return to `main`)
+4. **Report** to the user: the `web_url` from the API response (or the existing-MR lookup), the current local commit hash, and a one-line summary. Because the MR uses `squash=true`, GitLab collapses the branch into a **single new commit on `main` with a different hash** when it merges — so the hash you report now is the local branch tip, *not* the SHA that will land. Do not present it as the final merged hash; the canonical post-merge SHA is available only after later reconciliation.
 
-Do **not** return to `main` as soon as the MR is opened. The work is not done when the MR exists — it is done when a human reviewer has merged it and the resulting pipeline on `main` is green. AI must never approve or merge the MR itself (see `CLAUDE.md` → "Repo lock-down gate"), so "landing" always depends on a human.
+## Step 4: Hand off without waiting for merge
 
-After Step 3 reports the MR, **remain on the feature branch** and tell the user the workflow is paused pending (a) human review + merge of the MR, and (b) a green post-merge pipeline. Then:
+After Step 3, report the result as `awaiting_human` and end the active run. AI must never approve or merge the MR itself
+(see `CLAUDE.md` → "Repo lock-down gate"), so human review and merge still determine whether the change lands.
+They do not prevent another unrelated work item from starting.
 
-1. **Do not busy-poll the remote.** Report and wait for the user to come back (e.g. "it's merged" or "continue"). When the user prompts you — or asks you to check — verify the MR state in-sandbox:
+1. **Release the active checkout.** In a normal interactive checkout, first
+   confirm a clean working tree, then return to an up-to-date `main`:
    ```bash
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=$(git rev-parse --abbrev-ref HEAD)"
+   git status
+   git checkout main
+   git pull --ff-only
    ```
-   While it is still `opened`, there is nothing to return to — stay on the branch. Follow-up iterations (review feedback, fixes) append commits to this same branch and update the same MR per Step 1 / Step 3b.
+   Never stash or discard changes silently. An isolated work-item runner may
+   retain the feature worktree for review feedback while another worktree
+   starts unrelated work from refreshed `main`.
 
-2. **Confirm tests are green after the merge.** Once the MR is `merged`, check the pipeline on the default branch:
+2. **Retain the feature branch for feedback.** Do not delete it merely because
+   an MR exists. Review fixes return to the same branch and update the same MR
+   through Step 3b. Unrelated open merge requests remain non-blocking unless
+   there is a same-branch conflict, declared dependency, or concrete resource
+   conflict.
+
+3. **Reconcile later without busy-polling.** When the user asks for status, or
+   a bounded reconciliation job revisits the item, query its branch-specific
+   MR and then the latest default-branch pipeline if it merged:
    ```bash
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=<feature-branch>"
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=1"
    ```
-   Treat anything other than a passing latest pipeline as "not landed yet" — surface the failing jobs to the user and stay engaged. Do not walk away from a red `main` you just merged into.
+   An open MR remains `awaiting_human`. A merged MR is not declared fully
+   landed until the latest `main` pipeline passes. A failed post-merge pipeline
+   is reported for remediation, but it does not block unrelated work.
 
-3. **Only once the MR is merged AND `main` is green**, switch back so the next piece of work starts from a clean, up-to-date `main`:
+4. **Clean up only after merge confirmation.** Only once the MR is merged and `main` is green may reconciliation update `main` and remove the local branch:
    ```bash
-   git status            # confirm clean working tree
    git checkout main
-   git pull --ff-only    # pick up the just-merged commit (the squashed SHA, not your branch tip)
+   git pull --ff-only
+   git branch -D claude/<slug>
+   git fetch --prune
    ```
-
-4. **Tidy up** so the next start is clean (and Step 1's "clean starting point" checks pass without leftovers):
-   ```bash
-   git branch -D claude/<slug>   # delete the local branch (the remote copy was auto-removed by --remove-source-branch)
-   git fetch --prune             # drop stale remote-tracking refs for branches deleted on the remote
-   ```
-   Use `-D`, not the "safe" `-d`. Because the MR merged with squash enabled, the branch's commits were collapsed into a *new* commit on `main` and are never ancestors of it, so `git branch -d` would refuse ("not fully merged") even though the work fully landed. The safety check therefore lives **earlier**: only reach this step once Steps 4.1–4.2 confirmed the project-ID MR query reports `merged` and `main` is green. If you have **not** confirmed the merge, do not `-D` — investigate first, since for a genuinely unmerged branch `-D` would discard work.
+   Use `-D`, not `-d`, because squash merge creates a different commit on
+   `main`. Never run the destructive branch deletion before the numeric-project
+   MR query confirms `merged`; a closed or open MR may still contain work that
+   must be preserved.
 
 Local git is sandbox-safe; use the environment's verified network path for
 `glab` reads and `git pull`.
 
-Skip the wait only if the user explicitly says to — e.g. "open the MR and move on" or "stay on the branch and keep iterating." Honor the override, but state what you're skipping.
-
 ## When the lifecycle does not apply
 
-- Read-only sessions (the user is asking questions, not asking for changes).
-- Explicit user override to **defer publishing** ("don't push yet", "let me iterate locally first") — honor it, but mention that the change still needs an MR to land on `main` (branch protection makes this non-optional). The user can ask to skip Step 3 *for now*; they cannot ask to bypass the MR entirely.
+Only strictly read-only inspection (the user is asking questions and no
+repository state changes) is outside this lifecycle. Every repository mutation
+must use a feature branch and finish Step 3 by opening or updating an MR. A
+commit, authentication, push, or MR-creation failure blocks the work; it is
+never a completed outcome.
