@@ -5,97 +5,10 @@ import os
 import re
 import subprocess
 import tomllib
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
-from jsonschema import Draft202012Validator, FormatChecker
-
-
-def test_filesystem_intake_schema_is_canonical_and_template_parity_is_exact(
-    project_root: Path, template_dir: Path
-) -> None:
-    """Filesystem producers get exactly one versioned schema in both deliverables."""
-    schema_path = ".agents/contracts/work-item-filesystem-v1.schema.json"
-    root_schema = project_root / schema_path
-    template_schema = template_dir / schema_path
-
-    assert root_schema.is_file()
-    assert template_schema.is_file()
-    assert root_schema.read_bytes() == template_schema.read_bytes()
-
-    schema = json.loads(root_schema.read_text())
-    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-    assert schema["type"] == "object"
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {
-        "schema_version",
-        "source_id",
-        "repository",
-        "title",
-        "body",
-        "acceptance_criteria",
-    }
-    assert schema["properties"]["schema_version"] == {"type": "integer", "const": 1}
-    assert schema["properties"]["source_id"]["maxLength"] == 128
-    assert schema["properties"]["repository"]["maxLength"] == 128
-    assert schema["properties"]["title"] == {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 512,
-    }
-    assert schema["properties"]["body"] == {"type": "string", "maxLength": 65536}
-    criteria = schema["properties"]["acceptance_criteria"]
-    assert criteria["type"] == "array"
-    assert criteria["uniqueItems"] is True
-    assert criteria["maxItems"] == 64
-    assert criteria["items"] == {"type": "string", "minLength": 1, "maxLength": 2048}
-
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
-    valid_document = {
-        "schema_version": 1,
-        "source_id": "nightly-import",
-        "repository": "copier",
-        "title": "Bounded filesystem request",
-        "body": "Keep this producer-owned payload untrusted.",
-        "acceptance_criteria": ["Publish one verified merge request."],
-    }
-    assert list(validator.iter_errors(valid_document)) == []
-    assert list(validator.iter_errors(valid_document | {"schema_version": 1.0})) == []
-
-    invalid_documents: list[Mapping[str, object]] = [
-        {key: value for key, value in valid_document.items() if key != required_field}
-        for required_field in schema["required"]
-    ]
-    invalid_documents.extend(
-        (
-            valid_document | {"unexpected": True},
-            valid_document | {"schema_version": "1"},
-            valid_document | {"schema_version": True},
-            valid_document | {"schema_version": 1.5},
-            valid_document | {"source_id": "unsafe/alias"},
-            valid_document | {"source_id": 1},
-            valid_document | {"repository": "unsafe alias"},
-            valid_document | {"repository": None},
-            valid_document | {"source_id": "x" * 129},
-            valid_document | {"repository": "x" * 129},
-            valid_document | {"title": ""},
-            valid_document | {"title": "x" * 513},
-            valid_document | {"title": 1},
-            valid_document | {"body": "x" * 65_537},
-            valid_document | {"body": None},
-            valid_document | {"acceptance_criteria": []},
-            valid_document | {"acceptance_criteria": "one criterion"},
-            valid_document | {"acceptance_criteria": ["same", "same"]},
-            valid_document | {"acceptance_criteria": ["one criterion", 1]},
-            valid_document | {"acceptance_criteria": ["x" * 2049]},
-            valid_document
-            | {"acceptance_criteria": [str(index) for index in range(65)]},
-        )
-    )
-    assert all(list(validator.iter_errors(document)) for document in invalid_documents)
 
 
 def test_generated_project_structure(generated_project: Path) -> None:
@@ -1275,312 +1188,6 @@ def test_root_and_template_share_the_same_phase_zero_workflow_contract(
     ).read_bytes()
 
 
-def _outcome_rule(schema: dict[str, Any], outcome: str) -> dict[str, Any]:
-    """Return the conditional schema branch for one result outcome."""
-    for rule in schema["allOf"]:
-        outcome_condition = rule["if"]["properties"].get("outcome", {})
-        if outcome_condition.get("const") == outcome:
-            return rule
-    raise AssertionError(f"Missing conditional result rule for {outcome!r}")
-
-
-def test_work_item_contract_and_result_schema_are_canonical_and_enforce_invariants(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Test source and rendered state/result contracts are complete and synchronized."""
-    contract_path = ".agents/contracts/work-item-contract.md"
-    schema_path = ".agents/contracts/work-item-result-v1.schema.json"
-
-    for path in (contract_path, schema_path):
-        assert (project_root / path).exists()
-        assert (project_root / "template" / path).exists()
-        assert (project_root / path).read_bytes() == (
-            project_root / "template" / path
-        ).read_bytes()
-        assert (project_root / path).read_bytes() == (
-            generated_project / path
-        ).read_bytes()
-
-    contract = (project_root / contract_path).read_text()
-    states = (
-        "discovered",
-        "validated",
-        "queued",
-        "claimed",
-        "running",
-        "completed",
-        "awaiting_human",
-        "retry_wait",
-        "dead_letter",
-    )
-    for state in states:
-        assert state in contract
-
-    state_section = contract.split("## State machine", maxsplit=1)[1].split(
-        "## Transition audit", maxsplit=1
-    )[0]
-    transition_lines = re.findall(r"^\w+ -> .+$", state_section, flags=re.MULTILINE)
-    allowed_transitions = {
-        source: {target.strip() for target in targets.split("|")}
-        for source, targets in (line.split(" -> ") for line in transition_lines)
-    }
-    assert allowed_transitions == {
-        "discovered": {"validated", "dead_letter"},
-        "validated": {"queued"},
-        "queued": {"claimed"},
-        "claimed": {"running", "retry_wait", "dead_letter"},
-        "running": {"completed", "awaiting_human", "retry_wait", "dead_letter"},
-        "awaiting_human": {"queued", "completed", "dead_letter"},
-        "retry_wait": {"queued", "dead_letter"},
-    }
-    assert "Only `completed` and `dead_letter` are terminal" in contract
-    assert "parked and releases its claim and lease" in contract
-    for audit_field in (
-        "from_status",
-        "to_status",
-        "run_id",
-        "attempt_count",
-        "occurred_at",
-        "reason",
-    ):
-        assert f"`{audit_field}`" in contract
-    for outcome, state in (
-        ("completed", "completed"),
-        ("awaiting_human", "awaiting_human"),
-        ("retry", "retry_wait"),
-        ("dead_letter", "dead_letter"),
-    ):
-        assert f"| `{outcome}` | `{state}` |" in contract
-
-    schema = json.loads((project_root / schema_path).read_text())
-    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-    assert schema["type"] == "object"
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {
-        "schema_version",
-        "work_item_id",
-        "run_id",
-        "mode",
-        "outcome",
-        "summary",
-        "tests",
-        "findings",
-        "next_action",
-        "error",
-    }
-    assert schema["properties"]["schema_version"] == {"const": 1}
-    assert schema["properties"]["mode"]["enum"] == ["inspect", "publish"]
-    assert schema["properties"]["outcome"]["enum"] == [
-        "completed",
-        "awaiting_human",
-        "retry",
-        "dead_letter",
-    ]
-    assert "retryable" not in schema["properties"]
-    assert schema["properties"]["error"]["type"] == ["object", "null"]
-    for field in ("branch", "branch_tip", "merge_request_url"):
-        assert field not in schema["required"]
-        assert schema["properties"][field]["type"] == ["string", "null"]
-    assert schema["properties"]["tests"]["type"] == "array"
-    assert schema["properties"]["findings"]["type"] == "array"
-
-    retry_rule = _outcome_rule(schema, "retry")["then"]
-    assert set(retry_rule["required"]) == {"error", "next_action"}
-    assert retry_rule["properties"]["error"]["properties"]["retryable"] == {
-        "const": True
-    }
-    assert retry_rule["properties"]["next_action"]["minLength"] == 1
-
-    dead_letter_rule = _outcome_rule(schema, "dead_letter")["then"]
-    assert set(dead_letter_rule["required"]) == {"error", "next_action"}
-    assert dead_letter_rule["properties"]["error"]["properties"]["retryable"] == {
-        "const": False
-    }
-    assert dead_letter_rule["properties"]["next_action"]["minLength"] == 1
-
-    awaiting_human_rule = _outcome_rule(schema, "awaiting_human")["then"]
-    assert awaiting_human_rule["required"] == ["next_action"]
-    assert awaiting_human_rule["properties"]["next_action"]["minLength"] == 1
-
-    merge_request_rule = next(
-        rule
-        for rule in schema["allOf"]
-        if "merge_request_url" in rule["if"]["properties"]
-    )
-    assert set(merge_request_rule["then"]["required"]) == {
-        "branch",
-        "branch_tip",
-    }
-
-    _validate_representative_work_item_results(schema)
-    generated_schema = json.loads((generated_project / schema_path).read_text())
-    _validate_representative_work_item_results(generated_schema)
-
-
-def _base_work_item_result() -> dict[str, Any]:
-    """Return a minimal valid completed inspection result."""
-    return {
-        "schema_version": 1,
-        "work_item_id": "gitlab:310967:123",
-        "run_id": "run-123",
-        "mode": "inspect",
-        "outcome": "completed",
-        "summary": "Completed an inspection.",
-        "tests": [],
-        "findings": [],
-        "next_action": "",
-        "error": None,
-    }
-
-
-def _validate_representative_work_item_results(schema: dict[str, Any]) -> None:
-    """Validate representative accepted and rejected result envelopes."""
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
-    base = _base_work_item_result()
-    published_artifacts = {
-        "branch": "agent/issue-123",
-        "branch_tip": "0123456789abcdef0123456789abcdef01234567",
-        "merge_request_url": "https://gitlab.example.com/group/project/-/merge_requests/42",
-    }
-    human_blocker = {
-        "code": "human_input_required",
-        "message": "The acceptance criteria are ambiguous.",
-        "retryable": False,
-    }
-    valid_results = (
-        base,
-        base
-        | {
-            "outcome": "awaiting_human",
-            "error": human_blocker,
-            "next_action": "Clarify the acceptance criteria.",
-        },
-        base
-        | {
-            "mode": "publish",
-            "outcome": "awaiting_human",
-            "error": human_blocker,
-            "next_action": "Clarify the acceptance criteria.",
-        },
-        base
-        | {
-            "mode": "publish",
-            "outcome": "awaiting_human",
-            **published_artifacts,
-            "next_action": "Human review and merge",
-        },
-        base | {"mode": "publish", **published_artifacts},
-        base
-        | {
-            "mode": "publish",
-            "outcome": "retry",
-            "next_action": "Retry after backoff",
-            "error": {"code": "timeout", "message": "Timed out", "retryable": True},
-        },
-        base
-        | {
-            "mode": "publish",
-            "outcome": "dead_letter",
-            "next_action": "Inspect invalid input",
-            "error": {
-                "code": "invalid_input",
-                "message": "Input is invalid",
-                "retryable": False,
-            },
-        },
-    )
-    for result in valid_results:
-        validator.validate(result)
-
-    invalid_case_names = (
-        "extra property",
-        "local change mode",
-        "inspect branch",
-        "tip without branch",
-        "completed error",
-        "retry without error",
-        "retry marked fatal",
-        "dead letter marked retryable",
-        "awaiting human without action",
-        "inspect awaiting human without blocker",
-        "publish completed without artifacts",
-        "publish completed with partial artifacts",
-        "publish awaiting human without blocker or artifacts",
-        "publish awaiting human with partial artifacts",
-        "publish awaiting human with artifacts and blocker",
-        "invalid branch tip",
-        "invalid merge request URI",
-    )
-    invalid_results = (
-        base | {"unexpected": True},
-        base | {"mode": "local-change"},
-        base | {"mode": "inspect", "branch": "agent/forbidden"},
-        base | {"branch_tip": "0123456789abcdef0123456789abcdef01234567"},
-        base
-        | {"error": {"code": "unexpected", "message": "Unexpected", "retryable": True}},
-        base | {"outcome": "retry", "next_action": "", "error": None},
-        base
-        | {
-            "outcome": "retry",
-            "next_action": "Retry later",
-            "error": {"code": "fatal", "message": "Fatal", "retryable": False},
-        },
-        base
-        | {
-            "outcome": "dead_letter",
-            "next_action": "Inspect",
-            "error": {"code": "timeout", "message": "Timed out", "retryable": True},
-        },
-        base | {"outcome": "awaiting_human", "next_action": ""},
-        base
-        | {
-            "outcome": "awaiting_human",
-            "next_action": "Clarify the acceptance criteria.",
-        },
-        base
-        | {
-            "mode": "publish",
-        },
-        base | {"mode": "publish", "branch": "agent/issue-123"},
-        base
-        | {
-            "mode": "publish",
-            "outcome": "awaiting_human",
-            "next_action": "Human review and merge",
-        },
-        base
-        | {
-            "mode": "publish",
-            "outcome": "awaiting_human",
-            "branch": "agent/issue-123",
-            "next_action": "Human review and merge",
-        },
-        base
-        | {
-            "mode": "publish",
-            "outcome": "awaiting_human",
-            **published_artifacts,
-            "error": human_blocker,
-            "next_action": "Resolve the blocker.",
-        },
-        base
-        | {
-            "mode": "publish",
-            "branch_tip": "not-a-sha",
-            "merge_request_url": published_artifacts["merge_request_url"],
-        },
-        base
-        | {
-            "mode": "publish",
-            "branch": published_artifacts["branch"],
-            "branch_tip": published_artifacts["branch_tip"],
-            "merge_request_url": "not a URI",
-        },
-    )
-    for case, result in zip(invalid_case_names, invalid_results, strict=True):
-        assert not validator.is_valid(result), case
-
-
 def test_root_and_template_ship_identical_gitlab_issue_templates(
     project_root: Path,
 ) -> None:
@@ -1594,3 +1201,74 @@ def test_root_and_template_ship_identical_gitlab_issue_templates(
         assert root_template.exists()
         assert generated_template.exists()
         assert root_template.read_bytes() == generated_template.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "src/agent_work/__init__.py",
+        "src/agent_work/models.py",
+        "src/agent_work/serial.py",
+        "src/agent_work/adapters.py",
+        "src/agent_work/cli.py",
+        ".agents/skills/work-item-runner/SKILL.md",
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "systemd/agent-work@.service",
+        "systemd/agent-work@.timer",
+    ),
+)
+def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """The Copier source and output ship one identical serial runner contract."""
+    root_file = project_root / relative_path
+    template_file = project_root / "template" / relative_path
+    generated_file = generated_project / relative_path
+
+    assert root_file.read_bytes() == template_file.read_bytes()
+    assert root_file.read_bytes() == generated_file.read_bytes()
+
+
+def test_legacy_local_queue_contracts_and_commands_are_absent(
+    generated_project: Path, project_root: Path
+) -> None:
+    """The simplified runner does not retain a second durable work system."""
+    forbidden = (
+        ".agents/contracts/work-item-contract.md",
+        ".agents/contracts/work-item-result-v1.schema.json",
+        ".agents/contracts/work-item-filesystem-v1.schema.json",
+        ".claude/commands/work-item.md",
+        "src/agent_work/filesystem.py",
+        "src/agent_work/prompt.py",
+        "src/agent_work/result.py",
+        "src/agent_work/runner.py",
+    )
+
+    for root in (project_root, project_root / "template", generated_project):
+        assert all(not (root / path).exists() for path in forbidden)
+
+
+def test_systemd_surface_is_one_oneshot_service_and_one_timer(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Repetition belongs to systemd and one service run remains bounded."""
+    for root in (project_root, project_root / "template", generated_project):
+        units = sorted(path.name for path in (root / "systemd").iterdir())
+        assert units == ["agent-work@.service", "agent-work@.timer"]
+        service = (root / "systemd" / "agent-work@.service").read_text()
+        timer = (root / "systemd" / "agent-work@.timer").read_text()
+        assert "Type=oneshot" in service
+        assert "agent-work run-next --apply --json" in service
+        assert "ProtectSystem=full" in service
+        assert "ProtectSystem=strict" not in service
+        assert "Unit=agent-work@%i.service" in timer
+
+
+def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:
+    """The serial wrapper can verify MRs but cannot approve or merge them."""
+    runtime = "\n".join(
+        path.read_text() for path in (project_root / "src" / "agent_work").glob("*.py")
+    )
+    assert "mr approve" not in runtime
+    assert "merge_requests/{mr_iid}/approve" not in runtime
+    assert "merge_requests/{mr_iid}/merge" not in runtime

@@ -50,12 +50,11 @@ checking the current checkout:
 intended_branch="claude/<slug>"
 ```
 
-The `agent/issue-<iid>` form is reserved for the verified `work-item-runner`
-Phase 1 flow: a project-scoped independent Git working copy. Its starting
-point is the configured default branch. A runner child must mechanically
-verify that it is in that independent clone, then continue its already-selected
-workflow without recursively invoking `agent-work run-issue` or creating an
-ordinary branch:
+The `agent/issue-<iid>` form is reserved for the serial `work-item-runner` in
+its configured dedicated checkout. Its starting point is the configured
+default branch. A runner child must mechanically verify that checkout, then
+continue its already-selected workflow without recursively invoking
+`agent-work` or creating another branch:
 
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
@@ -66,10 +65,10 @@ configured_default_branch="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLA
 git merge-base --is-ancestor "origin/$configured_default_branch" HEAD
 ```
 
-Only the runner uses this verified path. An ordinary checkout that finds an
-`agent/issue-<iid>` branch must refuse it rather than create, reuse, or publish
-that reserved form. The runner retains its working copy at `awaiting_human` for
-review and follow-up.
+Only the serial runner uses this verified path. An ordinary checkout that
+finds an `agent/issue-<iid>` branch must refuse it rather than create, reuse, or
+publish that reserved form. The branch and its merge request remain available
+at `awaiting_human`; GitLab is the durable handoff record.
 
 Run from the main thread with Bash:
 
@@ -78,10 +77,10 @@ git rev-parse --abbrev-ref HEAD
 ```
 
 - **On a mechanically verified runner `agent/issue-<iid>` branch** → use the
-  checks above to prove the independent `.git` directory, configured project
+  checks above to prove the dedicated `.git` directory, configured project
   origin, and configured default branch. Then continue the runner-selected
-  workflow on this branch. `agent-work run-issue` is the parent invocation that
-  selected it; never invoke that command recursively from the runner child.
+  workflow on this branch. `agent-work run-next --apply` is the parent
+  invocation that selected it; never invoke `agent-work` recursively.
 
 - **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
    ```bash
@@ -222,9 +221,9 @@ They do not prevent another unrelated work item from starting.
    git checkout main
    git pull --ff-only
    ```
-   Never stash or discard changes silently. An isolated work-item runner may
-   retain the feature worktree for review feedback while another worktree
-   starts unrelated work from refreshed `main`.
+   Never stash or discard changes silently. The serial runner keeps the issue
+   branch and MR for review; its next bounded invocation refreshes the same
+   dedicated checkout from `main` before selecting another issue.
 
 2. **Retain the feature branch for feedback.** Do not delete it merely because
    an MR exists. Review fixes return to the same branch and update the same MR

@@ -3,7 +3,7 @@
 A [copier](https://copier.readthedocs.io/) template for generating new Python projects. Running `copier copy` against this repo scaffolds a complete Python project with UV, ruff, pytest, pre-commit, and GitLab CI/CD pre-configured.
 
 Key distinction: the `template/` directory is the **template output**, not the
-source being developed here. The bounded runner itself is importable production
+source being developed here. The serial runner itself is importable production
 code in `src/agent_work/`; the Copier contract tests live in `tests/`.
 
 ## Architecture
@@ -42,8 +42,8 @@ This repository is a Copier template, whose generated-project payload is under
   Python entry points use
   `[project.scripts]`, and generated Bash projects add a single `bin/<tool>`
   only when they introduce a Bash application.
-- **Rationale:** the root runner validates the Copier payload's bounded
-  work-item workflow while the repository continues to produce project files.
+- **Rationale:** the root runner validates the Copier payload's serial GitLab
+  issue workflow while the repository continues to produce project files.
 
 ## File Sync Notes
 

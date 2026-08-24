@@ -1,87 +1,44 @@
-"""Concrete, injectable adapters for subprocess, GitLab, worktrees, and state."""
+"""Concrete GitLab, Git, Codex, environment, and lock boundaries."""
+
+from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
+import re
 import subprocess
-import tempfile
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Protocol, cast
 
 from pydantic import ValidationError
 
 from .models import (
-    GitLabConfig,
+    AgentWorkConfig,
     GitLabIssue,
-    GitLabMergeRequest,
-    GitLabPipeline,
     GitLabProject,
+    GitPublicationEvidence,
+    MergeRequestEvidence,
 )
-from .runner import CodexRequest
+from .serial import RunNextDependencies
 
 
-class AdapterFailure(RuntimeError):
-    """A safe adapter failure that deliberately omits child-process output."""
+class AdapterError(RuntimeError):
+    """A safe boundary failure that omits child-process output."""
+
+
+class LockBusy(AdapterError):
+    """Another local process owns the project runner lock."""
 
 
 @dataclass(frozen=True)
 class CommandResult:
-    """The non-secret outcome of a subprocess boundary."""
+    """The captured result of one argv subprocess call."""
 
     returncode: int
     stdout: str
     stderr: str
-
-
-CommandRunner = Callable[..., CommandResult]
-
-
-def _atomic_durable_write(path: Path, content: str, mode: int) -> None:
-    """Durably replace a private state file through a same-directory temp file."""
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except OSError as error:
-        Path(temporary).unlink(missing_ok=True)
-        raise AdapterFailure("durable state write failed") from error
-
-
-def _atomic_durable_create(path: Path, content: str, mode: int) -> None:
-    """Durably create a private state file without replacing a competitor."""
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.link(temporary, path)
-        Path(temporary).unlink()
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except FileExistsError as error:
-        Path(temporary).unlink(missing_ok=True)
-        raise AdapterFailure("create-only state record already exists") from error
-    except OSError as error:
-        Path(temporary).unlink(missing_ok=True)
-        raise AdapterFailure("durable state create failed") from error
 
 
 def run_subprocess(
@@ -90,7 +47,7 @@ def run_subprocess(
     stdin: str | None = None,
     timeout_seconds: int | None = None,
 ) -> CommandResult:
-    """Run an argv command without a shell and retain output at this boundary."""
+    """Run one command without a shell and retain output at the boundary."""
     try:
         completed = subprocess.run(
             command,
@@ -101,561 +58,402 @@ def run_subprocess(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise AdapterFailure("command could not be completed") from error
+        raise AdapterError("a required command could not be completed") from error
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def load_environment_config(environment: Mapping[str, str]) -> GitLabConfig:
-    """Read only non-secret GitLab configuration from an injected environment."""
+def load_environment_config(environment: Mapping[str, str]) -> AgentWorkConfig:
+    """Validate the four non-secret environment settings used by the runner."""
     try:
-        return GitLabConfig(
+        project_id = int(environment["GITLAB_PROJECT_ID"])
+        return AgentWorkConfig(
             host=environment["GITLAB_HOST"],
-            project_id=int(environment["GITLAB_PROJECT_ID"]),
+            project_id=project_id,
+            checkout=Path(environment["AGENT_WORK_CHECKOUT"]),
+            lock_file=Path(environment["AGENT_WORK_LOCK_FILE"]),
         )
-    except (KeyError, TypeError, ValueError) as error:
-        raise AdapterFailure(
-            "GITLAB_HOST and a positive numeric GITLAB_PROJECT_ID are required"
+    except (KeyError, TypeError, ValidationError) as error:
+        raise ValueError(
+            "GITLAB_HOST, numeric GITLAB_PROJECT_ID, AGENT_WORK_CHECKOUT, and "
+            "AGENT_WORK_LOCK_FILE are required"
         ) from error
 
 
-def load_json_schema(path: Path) -> Mapping[str, object]:
-    """Read one trusted local JSON schema through an explicit filesystem boundary."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise AdapterFailure("result schema could not be loaded") from error
-    if not isinstance(document, dict):
-        raise AdapterFailure("result schema must be a JSON object")
-    return document
-
-
-@dataclass(frozen=True)
 class GitLabGateway:
-    """GitLab numeric-project API gateway."""
+    """Use only numeric-project GitLab API endpoints."""
 
-    config: GitLabConfig
-    run_command: CommandRunner
+    def __init__(self, config: AgentWorkConfig, run_command: CommandRunner) -> None:
+        self._config = config
+        self._run_command = run_command
 
-    def _call(self, command: tuple[str, ...]) -> dict[str, Any]:
-        response = self.run_command(command)
+    def _call(
+        self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
+    ) -> object:
+        command = (
+            "glab",
+            "api",
+            "--hostname",
+            self._config.host,
+            "-X",
+            method,
+            endpoint,
+            *(argument for field in fields for argument in ("-f", field)),
+        )
+        response = self._run_command(command)
         if response.returncode != 0:
-            raise AdapterFailure("GitLab request failed")
+            raise AdapterError("GitLab API request failed")
         try:
-            decoded = json.loads(response.stdout)
+            return cast(object, json.loads(response.stdout))
         except json.JSONDecodeError as error:
-            raise AdapterFailure("GitLab returned invalid JSON") from error
-        return decoded if isinstance(decoded, dict) else {"items": decoded}
+            raise AdapterError("GitLab returned invalid JSON") from error
+
+    @staticmethod
+    def _mapping(payload: object, label: str) -> dict[str, object]:
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
+            raise AdapterError(f"GitLab returned invalid {label}")
+        return cast(dict[str, object], payload)
+
+    @staticmethod
+    def _items(payload: object, label: str) -> tuple[dict[str, object], ...]:
+        if not isinstance(payload, list):
+            raise AdapterError(f"GitLab returned invalid {label}")
+        return tuple(GitLabGateway._mapping(item, label) for item in payload)
 
     def verify_project(self) -> GitLabProject:
-        """Verify and return the configured numeric project metadata."""
+        """Bind the configured host and numeric ID to project metadata."""
+        payload = self._mapping(
+            self._call(f"projects/{self._config.project_id}"), "project metadata"
+        )
         try:
-            return GitLabProject.model_validate(
-                self._call(
-                    (
-                        "glab",
-                        "api",
-                        "--hostname",
-                        self.config.host,
-                        f"projects/{self.config.project_id}",
-                    )
-                )
+            project = GitLabProject.model_validate(
+                payload | {"host": self._config.host}
             )
         except ValidationError as error:
-            raise AdapterFailure("GitLab returned invalid project metadata") from error
+            raise AdapterError("GitLab returned invalid project metadata") from error
+        if project.id != self._config.project_id:
+            raise AdapterError("GitLab returned a different project")
+        return project
 
-    def fetch_issue(self, issue_iid: int) -> GitLabIssue:
-        """Read and validate one issue from the configured project."""
+    def _list_issues(
+        self,
+        label: str,
+        *,
+        state: str,
+        limit: int,
+        filters: tuple[str, ...] = (),
+    ) -> tuple[GitLabIssue, ...]:
         payload = self._call(
-            (
-                "glab",
-                "api",
-                "--hostname",
-                self.config.host,
-                f"projects/{self.config.project_id}/issues/{issue_iid}",
-            )
+            f"projects/{self._config.project_id}/issues",
+            fields=(
+                f"state={state}",
+                f"labels={label}",
+                *filters,
+                "order_by=created_at",
+                "sort=asc",
+                f"per_page={limit}",
+            ),
         )
-        if "state" not in payload or "confidential" not in payload:
-            raise AdapterFailure("GitLab returned an invalid issue")
+        try:
+            return tuple(
+                GitLabIssue.model_validate(item)
+                for item in self._items(payload, "issue list")
+            )
+        except ValidationError as error:
+            raise AdapterError("GitLab returned invalid issue data") from error
+
+    def list_ready(self) -> tuple[GitLabIssue, ...]:
+        """Return public, open ready issues from oldest to newest."""
+        return tuple(
+            issue
+            for issue in self._list_issues(
+                "agent::ready",
+                state="opened",
+                limit=1,
+                filters=("confidential=false", "not[labels]=agent::running"),
+            )
+            if issue.state == "opened"
+            and not issue.confidential
+            and "agent::ready" in issue.labels
+            and "agent::running" not in issue.labels
+        )
+
+    def list_running(self) -> tuple[GitLabIssue, ...]:
+        """Return open or closed issues carrying the running projection."""
+        return tuple(
+            issue
+            for issue in self._list_issues("agent::running", state="all", limit=2)
+            if "agent::running" in issue.labels
+        )
+
+    def fetch_issue(self, iid: int) -> GitLabIssue:
+        """Refetch and validate one configured-project issue."""
+        payload = self._mapping(
+            self._call(f"projects/{self._config.project_id}/issues/{iid}"), "issue"
+        )
         try:
             issue = GitLabIssue.model_validate(payload)
         except ValidationError as error:
-            raise AdapterFailure("GitLab returned an invalid issue") from error
-        if issue.iid != issue_iid:
-            raise AdapterFailure("GitLab returned a different issue than requested")
+            raise AdapterError("GitLab returned invalid issue data") from error
+        if issue.iid != iid:
+            raise AdapterError("GitLab returned a different issue")
         return issue
 
-    def project_awaiting_human(self, *, issue_iid: int, run_id: str) -> None:
-        """Project a verified handoff as labels and a concise observable comment."""
-        base = ("glab", "api", "--hostname", self.config.host)
-        self._call(
-            base
-            + (
-                "-X",
-                "PUT",
-                f"projects/{self.config.project_id}/issues/{issue_iid}",
-                "-f",
-                "add_labels=agent::awaiting-human",
-                "-f",
-                "remove_labels=agent::running,agent::ready",
-            )
-        )
-        self._call(
-            base
-            + (
-                "-X",
-                "POST",
-                f"projects/{self.config.project_id}/issues/{issue_iid}/notes",
-                "-f",
-                f"body=Run {run_id} reached awaiting_human.",
-            )
-        )
-
-    def claim_running(self, *, issue_iid: int, run_id: str) -> None:
-        """Project the selected ready issue as running before invocation."""
-        base = ("glab", "api", "--hostname", self.config.host)
-        self._call(
-            base
-            + (
-                "-X",
-                "PUT",
-                f"projects/{self.config.project_id}/issues/{issue_iid}",
-                "-f",
-                "add_labels=agent::running",
-                "-f",
-                "remove_labels=agent::ready",
-            )
-        )
-        self._call(
-            base
-            + (
-                "-X",
-                "POST",
-                f"projects/{self.config.project_id}/issues/{issue_iid}/notes",
-                "-f",
-                f"body=Run {run_id} started.",
-            )
-        )
-
-    def project_failed(self, *, issue_iid: int, run_id: str) -> None:
-        """Project a bounded-run failure without exposing private diagnostics."""
-        base = ("glab", "api", "--hostname", self.config.host)
-        self._call(
-            base
-            + (
-                "-X",
-                "PUT",
-                f"projects/{self.config.project_id}/issues/{issue_iid}",
-                "-f",
-                "add_labels=agent::failed",
-                "-f",
-                "remove_labels=agent::running,agent::awaiting-human",
-            )
-        )
-        self._call(
-            base
-            + (
-                "-X",
-                "POST",
-                f"projects/{self.config.project_id}/issues/{issue_iid}/notes",
-                "-f",
-                f"body=Run {run_id} failed; inspect local runner state.",
-            )
-        )
-
-    def verify_merge_request(
-        self,
-        *,
-        branch: str,
-        branch_tip: str,
-        merge_request_url: str,
-        target_branch: str,
-        source_project_id: int,
-        target_project_id: int,
+    def _transition(
+        self, issue: GitLabIssue, *, add: str, remove: tuple[str, ...]
     ) -> None:
-        """Ensure reported artifacts match an open MR in this numeric project."""
-        response = self._call(
-            (
-                "glab",
-                "api",
-                "--hostname",
-                self.config.host,
-                "-X",
-                "GET",
-                f"projects/{self.config.project_id}/merge_requests?state=opened",
-                "-f",
-                f"source_branch={branch}",
-            )
+        self._call(
+            f"projects/{self._config.project_id}/issues/{issue.iid}",
+            method="PUT",
+            fields=(f"add_labels={add}", f"remove_labels={','.join(remove)}"),
         )
-        candidates = self._merge_request_items(response)
-        if not any(
-            item.web_url == merge_request_url
-            and item.source_branch == branch
-            and item.sha == branch_tip
-            and item.state == "opened"
-            and item.target_branch == target_branch
-            and item.source_project_id == source_project_id
-            and item.target_project_id == target_project_id
-            for item in candidates
+        refreshed = self.fetch_issue(issue.iid)
+        if add not in refreshed.labels or any(
+            label in refreshed.labels for label in remove
         ):
-            raise AdapterFailure("reported merge request could not be verified")
+            raise AdapterError("GitLab did not apply the requested issue labels")
 
-    def latest_pipeline_is_healthy(self, *, target_branch: str) -> None:
-        """Reject a failed or canceled latest configured-default pipeline."""
-        response = self._call(
-            (
-                "glab",
-                "api",
-                "--hostname",
-                self.config.host,
-                f"projects/{self.config.project_id}/pipelines?ref={target_branch}&per_page=1",
-            )
+    def mark_running(self, issue: GitLabIssue) -> None:
+        """Move a ready issue to the running projection."""
+        self._transition(
+            issue,
+            add="agent::running",
+            remove=("agent::ready", "agent::awaiting-human", "agent::failed"),
         )
-        pipelines = self._pipeline_items(response)
-        if not (pipelines and pipelines[0].status == "success"):
-            raise AdapterFailure("the latest default-branch pipeline is unhealthy")
 
-    def find_open_merge_request(
-        self,
-        *,
-        branch: str,
-        target_branch: str,
-    ) -> GitLabMergeRequest | None:
-        """Return the exact open same-project merge request, if present."""
-        response = self._call(
-            (
-                "glab",
-                "api",
-                "--hostname",
-                self.config.host,
-                "-X",
-                "GET",
-                f"projects/{self.config.project_id}/merge_requests?state=opened",
-                "-f",
-                f"source_branch={branch}",
-            )
+    def mark_awaiting_human(self, issue: GitLabIssue) -> None:
+        """Move a running issue to the human-review projection."""
+        self._transition(
+            issue,
+            add="agent::awaiting-human",
+            remove=("agent::running", "agent::ready", "agent::failed"),
         )
-        for candidate in self._merge_request_items(response):
-            if (
-                candidate.state == "opened"
-                and candidate.source_branch == branch
-                and candidate.target_branch == target_branch
-                and candidate.source_project_id == self.config.project_id
-                and candidate.target_project_id == self.config.project_id
-            ):
-                return candidate
-        return None
 
-    @staticmethod
-    def _pipeline_items(response: Mapping[str, Any]) -> tuple[GitLabPipeline, ...]:
-        """Validate every external pipeline item before applying policy."""
-        items = response.get("items", [])
-        if not isinstance(items, list):
-            raise AdapterFailure("GitLab returned invalid pipeline data")
+    def mark_failed(self, issue: GitLabIssue) -> None:
+        """Move a running or ready issue to the failed projection."""
+        self._transition(
+            issue,
+            add="agent::failed",
+            remove=("agent::running", "agent::ready", "agent::awaiting-human"),
+        )
+
+    def publication(self, branch: str) -> MergeRequestEvidence | None:
+        """Return the newest MR whose reported source branch is exact."""
+        payload = self._call(
+            f"projects/{self._config.project_id}/merge_requests",
+            fields=("state=all", f"source_branch={branch}", "per_page=20"),
+        )
         try:
-            return tuple(GitLabPipeline.model_validate(item) for item in items)
+            candidates = tuple(
+                MergeRequestEvidence.model_validate(item)
+                for item in self._items(payload, "merge request list")
+            )
         except ValidationError as error:
-            raise AdapterFailure("GitLab returned invalid pipeline data") from error
-
-    @staticmethod
-    def _merge_request_items(
-        response: Mapping[str, Any],
-    ) -> tuple[GitLabMergeRequest, ...]:
-        """Validate every external merge-request item before matching evidence."""
-        raw_items = response.get("items", [response])
-        if not isinstance(raw_items, list):
-            raise AdapterFailure("GitLab returned invalid merge-request data")
-        try:
-            return tuple(GitLabMergeRequest.model_validate(item) for item in raw_items)
-        except ValidationError as error:
-            raise AdapterFailure(
-                "GitLab returned invalid merge-request data"
-            ) from error
-
-
-@dataclass(frozen=True)
-class WorktreeGateway:
-    """Safe deterministic worktree creation for one normalized work-item branch."""
-
-    repository: Path
-    run_command: CommandRunner
-
-    def create_or_reuse(
-        self,
-        *,
-        issue_iid: int | None = None,
-        workspace_key: str | None = None,
-        branch: str | None = None,
-        default_branch: str = "main",
-        origin_url: str | None = None,
-        workspace_root: Path | None = None,
-    ) -> Path:
-        """Create a retained, fully independent clone for one work-item branch."""
-        if origin_url is None:
-            source_origin = self.run_command(
-                ("git", "-C", str(self.repository), "remote", "get-url", "origin")
-            )
-            if source_origin.returncode != 0 or not source_origin.stdout.strip():
-                raise AdapterFailure("source origin could not be determined")
-            clone_origin = source_origin.stdout.strip()
-        else:
-            clone_origin = origin_url
-        key = hashlib.sha256(clone_origin.encode()).hexdigest()[:16]
-        root = workspace_root or self.repository.parent / "agent-workspaces" / key
-        if issue_iid is None and (workspace_key is None or branch is None):
-            raise AdapterFailure("workspace identity is required")
-        key_name = workspace_key or f"issue-{issue_iid}"
-        selected_branch = branch or f"agent/issue-{issue_iid}"
-        workspace = root / key_name
-        if (
-            root.is_symlink()
-            or workspace.is_symlink()
-            or (workspace / ".git").is_symlink()
-        ):
-            raise AdapterFailure("independent workspace path must not be a symlink")
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if (
-            root.is_symlink()
-            or workspace.is_symlink()
-            or (workspace / ".git").is_symlink()
-        ):
-            raise AdapterFailure("independent workspace path must not be a symlink")
-        root.chmod(0o700)
-        if (workspace / ".git").is_dir():
-            self._verify_workspace(workspace, clone_origin, selected_branch)
-            return workspace
-        created = self.run_command(
-            ("git", "clone", "--no-checkout", clone_origin, str(workspace))
-        )
-        if created.returncode != 0 or not (workspace / ".git").is_dir():
-            raise AdapterFailure("independent workspace could not be created")
-        checkout = self.run_command(
+            raise AdapterError("GitLab returned invalid merge request data") from error
+        return next(
             (
-                "git",
-                "-C",
-                str(workspace),
-                "checkout",
-                "-b",
-                selected_branch,
-                f"origin/{default_branch}",
-            )
+                candidate
+                for candidate in candidates
+                if candidate.source_branch == branch
+            ),
+            None,
         )
-        if checkout.returncode != 0:
-            raise AdapterFailure("independent workspace could not be initialized")
-        return workspace
 
-    def _verify_workspace(self, workspace: Path, origin: str, branch: str) -> None:
-        """Prove a retained clone has the expected origin, branch, and readable HEAD."""
-        remote = self.run_command(
-            ("git", "-C", str(workspace), "remote", "get-url", "origin")
+    def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
+        """Ask GitLab whether the merge request closes this project issue."""
+        payload = self._call(
+            f"projects/{self._config.project_id}/merge_requests/{mr_iid}/closes_issues"
         )
-        checked_branch = self.run_command(
-            ("git", "-C", str(workspace), "branch", "--show-current")
+        return any(
+            item.get("iid") == issue_iid
+            and item.get("project_id") == self._config.project_id
+            for item in self._items(payload, "closing issue list")
         )
-        head = self.run_command(("git", "-C", str(workspace), "rev-parse", "HEAD"))
-        if (
-            remote.returncode != 0
-            or remote.stdout.strip() != origin
-            or checked_branch.returncode != 0
-            or checked_branch.stdout.strip() != branch
-            or head.returncode != 0
-            or not head.stdout.strip()
+
+
+class CommandRunner(Protocol):
+    """Structural callable annotation for subprocess injection."""
+
+    def __call__(
+        self,
+        command: tuple[str, ...],
+        *,
+        stdin: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> CommandResult:
+        """Run one argv command."""
+        ...
+
+
+class ServiceCheckout:
+    """Git operations in one runner-owned dedicated checkout."""
+
+    def __init__(self, config: AgentWorkConfig, run_command: CommandRunner) -> None:
+        self._config = config
+        self._run_command = run_command
+
+    @property
+    def path(self) -> Path:
+        """Return the configured dedicated checkout path."""
+        return self._config.checkout
+
+    def _run(self, *arguments: str, accepted: tuple[int, ...] = (0,)) -> str:
+        result = self._run_command(("git", "-C", str(self.path), *arguments))
+        if result.returncode not in accepted:
+            raise AdapterError("dedicated checkout validation failed")
+        return result.stdout.strip()
+
+    def applied_preflight(self, project: GitLabProject) -> None:
+        """Require a clean bound checkout and fast-forward its default branch."""
+        if not self.path.is_dir():
+            raise AdapterError("the dedicated checkout does not exist")
+        top_level = Path(self._run("rev-parse", "--show-toplevel")).resolve()
+        if top_level != self.path.resolve():
+            raise AdapterError("the configured path is not the checkout root")
+        if self._run("status", "--porcelain"):
+            raise AdapterError("the dedicated checkout is dirty")
+        origins = {
+            url.rstrip("/")
+            for url in (project.http_url_to_repo, project.ssh_url_to_repo)
+            if url
+        }
+        if self._run("remote", "get-url", "origin").rstrip("/") not in origins:
+            raise AdapterError("checkout origin does not match the configured project")
+        self._run(
+            "fetch",
+            "origin",
+            f"refs/heads/{project.default_branch}:"
+            f"refs/remotes/origin/{project.default_branch}",
+        )
+        self._run("switch", project.default_branch)
+        self._run("merge", "--ff-only", f"origin/{project.default_branch}")
+        if self._run("status", "--porcelain"):
+            raise AdapterError("the refreshed dedicated checkout is dirty")
+
+    def ensure_branch_available(self, branch: str) -> None:
+        """Reject a conflicting deterministic branch before issue claim."""
+        if re.fullmatch(r"agent/issue-[1-9][0-9]*", branch) is None:
+            raise AdapterError("issue branch name is invalid")
+        local = self._run(
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch}",
+            accepted=(0, 1),
+        )
+        remote = self._run(
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            f"refs/heads/{branch}",
+            accepted=(0, 2),
+        )
+        if local or remote:
+            raise AdapterError("the deterministic issue branch already exists")
+
+    def prepare_branch(self, branch: str, default_branch: str) -> Path:
+        """Create one branch already checked for conflicts before issue claim."""
+        if re.fullmatch(r"agent/issue-[1-9][0-9]*", branch) is None:
+            raise AdapterError("issue branch name is invalid")
+        self._run("switch", "-c", branch, f"origin/{default_branch}")
+        return self.path
+
+    def publication_tip(self, branch: str) -> GitPublicationEvidence:
+        """Read the exact local and remote tips for one issue branch."""
+        local_sha = self._run("rev-parse", f"refs/heads/{branch}")
+        remote_line = self._run(
+            "ls-remote", "--exit-code", "--heads", "origin", f"refs/heads/{branch}"
+        )
+        remote_parts = remote_line.split()
+        if len(remote_parts) != 2:
+            raise AdapterError("the remote issue branch tip is invalid")
+        remote_sha = remote_parts[0]
+        if not all(
+            re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (local_sha, remote_sha)
         ):
-            raise AdapterFailure("retained workspace provenance could not be verified")
+            raise AdapterError("the issue branch tip is invalid")
+        return GitPublicationEvidence(local_sha=local_sha, remote_sha=remote_sha)
 
 
-@dataclass(frozen=True)
-class LocalRunStore:
-    """Private local lock, append-only journal, and result-file storage."""
-
-    root: Path
-    atomic_write: Callable[[Path, str, int], None] = _atomic_durable_write
-
-    def _create_only(self, path: Path, content: str, mode: int) -> None:
-        """Create one record atomically through the real or injected write boundary."""
-        if self.atomic_write is _atomic_durable_write:
-            _atomic_durable_create(path, content, mode)
-            return
-        try:
-            self.atomic_write(path, content, mode)
-        except FileExistsError as error:
-            raise AdapterFailure("create-only state record already exists") from error
-
-    @classmethod
-    def for_git_common_dir(cls, common_dir: Path) -> "LocalRunStore":
-        """Create state rooted in the private common-Git runner directory."""
-        return cls(root=common_dir / "agent-work")
-
-    def _ensure_safe_root(self) -> None:
-        if self.root.is_symlink():
-            raise AdapterFailure("runner state path must not be a symlink")
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.root.is_symlink():
-            raise AdapterFailure("runner state path must not be a symlink")
-
-    @staticmethod
-    def _reject_symlink(path: Path, *, message: str) -> None:
-        """Reject an attacker-controlled state child before opening it."""
-        if path.is_symlink():
-            raise AdapterFailure(message)
-
-    @contextmanager
-    def lock(self, *, blocking: bool = True) -> Iterator[None]:
-        """Hold an exclusive local process lock for one run."""
-        self._ensure_safe_root()
-        lock_path = self.root / "lock"
-        self._reject_symlink(
-            lock_path, message="runner lock path must not be a symlink"
-        )
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-            try:
-                fcntl.flock(handle.fileno(), operation)
-            except BlockingIOError as error:
-                raise AdapterFailure("another runner holds the local lock") from error
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def append_transition(self, transition: Mapping[str, object]) -> None:
-        """Append one immutable audit record to the local JSONL journal."""
-        self._ensure_safe_root()
-        journal_path = self.root / "journal.jsonl"
-        self._reject_symlink(
-            journal_path, message="runner journal path must not be a symlink"
-        )
-        content = json.dumps(transition, sort_keys=True) + "\n"
-        previous = (
-            journal_path.read_text(encoding="utf-8") if journal_path.exists() else ""
-        )
-        self.atomic_write(journal_path, previous + content, 0o600)
-
-    def write_canonical_result(self, run_id: str, result: Mapping[str, object]) -> Path:
-        """Write a private result document for the selected run."""
-        path = self._result_path(run_id)
-        if path.exists() or path.is_symlink():
-            raise AdapterFailure("canonical result already exists")
-        content = json.dumps(result, sort_keys=True)
-        self._create_only(path, content, 0o600)
-        return path
-
-    def write_recovery_record(self, run_id: str, record: Mapping[str, object]) -> Path:
-        """Persist a separate private recovery record."""
-        self._ensure_safe_root()
-        directory = self.root / "recovery"
-        self._reject_symlink(
-            directory, message="runner recovery path must not be a symlink"
-        )
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = directory / f"{run_id}.json"
-        if path.exists() or path.is_symlink():
-            raise AdapterFailure("recovery record already exists")
-        content = json.dumps(record, sort_keys=True)
-        self._create_only(path, content, 0o600)
-        return path
-
-    def write_workspace_provenance(
-        self, work_item_id: str, provenance: Mapping[str, object]
-    ) -> Path:
-        """Persist the runner-authored workspace manifest."""
-        self._ensure_safe_root()
-        directory = self.root / "workspaces"
-        self._reject_symlink(
-            directory, message="runner workspace manifest path must not be a symlink"
-        )
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._reject_symlink(
-            directory, message="runner workspace manifest path must not be a symlink"
-        )
-        name = hashlib.sha256(work_item_id.encode()).hexdigest() + ".json"
-        path = directory / name
-        if path.exists() or path.is_symlink():
-            raise AdapterFailure("workspace provenance already exists")
-        content = json.dumps(provenance, sort_keys=True)
-        self._create_only(path, content, 0o600)
-        return path
-
-    def read_workspace_provenance(
-        self, work_item_id: str
-    ) -> Mapping[str, object] | None:
-        """Read a runner-authored workspace manifest if it exists."""
-        self._ensure_safe_root()
-        self._reject_symlink(
-            self.root / "workspaces",
-            message="runner workspace manifest path must not be a symlink",
-        )
-        path = (
-            self.root
-            / "workspaces"
-            / (hashlib.sha256(work_item_id.encode()).hexdigest() + ".json")
-        )
-        if not path.exists():
-            return None
-        if path.is_symlink():
-            raise AdapterFailure("workspace provenance path must not be a symlink")
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise AdapterFailure("workspace provenance could not be read") from error
-        if not isinstance(record, dict):
-            raise AdapterFailure("workspace provenance is invalid")
-        return record
-
-    def _result_path(self, run_id: str) -> Path:
-        """Prepare a private result location before the Codex process starts."""
-        self._ensure_safe_root()
-        results = self.root / "results"
-        self._reject_symlink(
-            results, message="runner results path must not be a symlink"
-        )
-        results.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._reject_symlink(
-            results, message="runner results path must not be a symlink"
-        )
-        if Path(run_id).name != run_id:
-            raise AdapterFailure("result run identifier must be a file name")
-        path = results / f"{run_id}.json"
-        self._reject_symlink(path, message="runner result path must not be a symlink")
-        return path
-
-
-@dataclass(frozen=True)
 class CodexInvoker:
-    """Bounded Codex process adapter that extracts only its final JSON message."""
+    """Invoke Codex once in noninteractive ephemeral mode."""
 
-    run_command: CommandRunner
+    def __init__(self, run_command: CommandRunner) -> None:
+        self._run_command = run_command
 
-    def __call__(self, request: CodexRequest) -> dict[str, object]:
-        """Invoke Codex once and parse its last agent-message JSON document."""
-        response = self.run_command(
-            request.command,
-            stdin=request.stdin,
-            timeout_seconds=request.timeout_seconds,
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> int:
+        """Run one Codex process and return its status for later verification."""
+        result = self._run_command(
+            (
+                "codex",
+                "exec",
+                "-C",
+                str(checkout),
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "--ephemeral",
+                "--color",
+                "never",
+                "-",
+            ),
+            stdin=prompt,
+            timeout_seconds=timeout,
         )
-        if response.returncode != 0:
-            raise AdapterFailure("Codex invocation failed")
+        return result.returncode
+
+
+class ProjectLock:
+    """One project-scoped nonblocking advisory file lock."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: IO[str] | None = None
+
+    def __enter__(self) -> None:
+        """Acquire the lock or report a temporary contention failure."""
+        descriptor: int | None = None
+        handle: IO[str] | None = None
         try:
-            events = [
-                json.loads(line)
-                for line in response.stdout.splitlines()
-                if line.strip()
-            ]
-            messages = [
-                item["text"]
-                for event in events
-                if isinstance(event, dict)
-                and isinstance((item := event.get("item")), dict)
-                and item.get("type") == "agent_message"
-            ]
-            if any(
-                not isinstance(event, dict)
-                or ("item" in event and not isinstance(event["item"], dict))
-                for event in events
-            ) or not all(isinstance(message, str) for message in messages):
-                raise TypeError("Codex emitted an invalid JSONL event")
-            document = json.loads(messages[-1])
-        except (IndexError, KeyError, TypeError, json.JSONDecodeError) as error:
-            raise AdapterFailure("Codex did not return a structured result") from error
-        if not isinstance(document, dict):
-            raise AdapterFailure("Codex did not return an object result")
-        return document
+            descriptor = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+            descriptor = None
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            if handle is not None:
+                handle.close()
+            elif descriptor is not None:
+                os.close(descriptor)
+            raise LockBusy("another run owns the project lock") from error
+        except OSError as error:
+            if handle is not None:
+                handle.close()
+            elif descriptor is not None:
+                os.close(descriptor)
+            raise AdapterError("the project lock could not be acquired") from error
+        self._handle = handle
+
+    def __exit__(self, *_args: object) -> bool:
+        """Release the advisory lock."""
+        if self._handle is not None:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            self._handle.close()
+            self._handle = None
+        return False
+
+
+def build_default_dependencies(
+    environment: Mapping[str, str] = os.environ,
+    run_command: CommandRunner = run_subprocess,
+) -> RunNextDependencies:
+    """Wire the real boundaries once at the CLI edge."""
+    config = load_environment_config(environment)
+    return RunNextDependencies(
+        gitlab=GitLabGateway(config, run_command),
+        checkout=ServiceCheckout(config, run_command),
+        invoke=CodexInvoker(run_command),
+        lock=lambda: ProjectLock(config.lock_file),
+    )
