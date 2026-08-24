@@ -40,10 +40,22 @@ flowchart LR
   tips, the default target, and `Closes #IID`; otherwise the issue is failed.
   The agent never approves or merges.
 - Unattended publication is off until a human explicitly authorizes it for a
-  constrained service identity. Before enabling the timer, verify independent
-  merge-request approval safeguards. If a Developer credential receives `403`
-  while inspecting those Maintainer-only settings, obtain and retain a human
-  Maintainer attestation instead of treating the check as passed.
+  constrained service identity. Reuse the project response and calculate
+  effective access as the maximum project/group access level: exactly `30`
+  (Developer) is the readiness fast path, while lower or unknown access blocks
+  `--apply`; `40` or greater must use a constrained Developer credential
+  before retrying. At exactly `30`, first verify the
+  Developer-readable effective default-branch response (protected, no
+  Developer/direct push or merge), plus an approval rule requiring at least
+  one approval that is unambiguously global. Only then skip the Maintainer-only
+  `/approvals` read and recurring Maintainer attestation.
+  Missing evidence blocks `--apply`; a Maintainer must correct the reported
+  safeguard and the preflight must be repeated. The Developer role cannot
+  prove self-approval prevention or per-MR rule overrides, so this selection
+  relies on workflow/settings/runtime never-approve/merge guardrails rather
+  than claiming a hard same-user security boundary. Developers may approve
+  MRs, and project settings control pushes, merges, and self-approval; Git and
+  `glab` credentials may differ.
 
 ## Delivery
 
@@ -52,8 +64,8 @@ flowchart LR
 2. Configure one dedicated checkout, a numeric project ID, and a constrained
    service identity.
 3. Install the single user oneshot service and timer. Leave its timer disabled
-   until the unattended-publication authorization and approval-safeguard
-   attestation are complete.
+   until the unattended-publication authorization and Developer-readable
+   safeguard preflight are complete.
 4. Enable the timer only for the authorized repository. Human reviewers retain
    approval and merge ownership for every resulting merge request.
 

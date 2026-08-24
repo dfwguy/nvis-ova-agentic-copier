@@ -23,7 +23,7 @@ Check the preinstalled Git, `glab`, and Codex tools, then verify the existing
 `git ls-remote origin HEAD` is the noninteractive Git access check:
 
 ```bash
-command -v git glab codex
+command -v git glab codex jq
 glab auth status --hostname "$GITLAB_HOST"
 codex login status
 glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
@@ -32,6 +32,12 @@ glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
 Every later GitLab operation must address this numeric endpoint, never a path
 inferred from `origin`. A Developer account can poll eligible issues. It does
 not need permission to install a webhook or an inbound service.
+
+The fail-closed readiness block after creating the checkout obtains the numeric
+project representation once. It classifies the `glab` identity from the maximum
+numeric project/group access value; no numeric value is `unknown`. Only exactly
+30 (Developer) can continue. This check concerns the `glab` credential only;
+Git may use a different credential and is checked with `git ls-remote`.
 
 ## Create the dedicated checkout
 
@@ -51,6 +57,91 @@ git -C "$AGENT_WORK_CHECKOUT" ls-remote origin HEAD
 Compare `origin` with the verified project's HTTP or SSH URL. An existing,
 dirty, incorrectly rooted, or wrong-origin checkout must be repaired before an
 applied run; do not repurpose an operator's checkout.
+
+## Verify Developer-readable safeguards
+
+Before enabling `--apply`, paste this one guarded block. It exits nonzero and
+prints actionable missing evidence whenever applied operation must be blocked:
+
+```bash
+(
+set -Eeuo pipefail
+
+block_apply() {
+  printf 'BLOCK --apply: %s\n' "$*" >&2
+  exit 1
+}
+
+project_json="$(glab api --hostname "$GITLAB_HOST" \
+  "projects/$GITLAB_PROJECT_ID")" \
+  || block_apply 'missing evidence: cannot read the configured numeric project'
+effective_access="$(jq -r '
+  [
+    .permissions.project_access.access_level,
+    .permissions.group_access.access_level
+  ]
+  | map(select(type == "number"))
+  | if length == 0 then "unknown" else max | tostring end
+' <<<"$project_json")" \
+  || block_apply 'missing evidence: cannot classify effective project/group access'
+case "$effective_access" in
+  30) ;;
+  unknown)
+    block_apply 'missing evidence: effective access is unknown; use a constrained Developer credential' ;;
+  [0-9]|[12][0-9])
+    block_apply 'effective access is less than 30; grant the constrained identity Developer access' ;;
+  4[0-9]|[5-9][0-9]|[1-9][0-9][0-9]*)
+    block_apply 'effective access is 40 or greater; switch to a constrained Developer credential' ;;
+  *)
+    block_apply 'effective access is not exactly 30; use the constrained Developer readiness path' ;;
+esac
+
+default_branch="$(jq -er '.default_branch | strings | select(length > 0)' \
+  <<<"$project_json")" \
+  || block_apply 'missing evidence: project has no readable default branch'
+default_branch_uri="$(jq -rn --arg value "$default_branch" '$value | @uri')" \
+  || block_apply 'missing evidence: cannot encode the default branch for the API'
+effective_branch_json="$(glab api --hostname "$GITLAB_HOST" \
+  "projects/$GITLAB_PROJECT_ID/repository/branches/$default_branch_uri")" \
+  || block_apply 'missing evidence: cannot read the effective default-branch settings'
+jq -e --arg default_branch "$default_branch" '
+  .name == $default_branch
+  and .default == true
+  and .protected == true
+  and .developers_can_push == false
+  and .developers_can_merge == false
+  and .can_push == false
+' <<<"$effective_branch_json" >/dev/null \
+  || block_apply 'missing evidence: effective default branch must be protected, non-pushable, and non-mergeable for Developers'
+
+approval_rules_json="$(glab api --hostname "$GITLAB_HOST" \
+  "projects/$GITLAB_PROJECT_ID/approval_rules")" \
+  || block_apply 'missing evidence: cannot read approval_rules'
+jq -e '
+  type == "array"
+  and any(
+    .[]?;
+    ((.approvals_required? // 0) | type == "number" and . >= 1)
+    and (
+      (has("protected_branches") | not)
+      or ((.protected_branches | type == "array") and (.protected_branches | length == 0))
+      or (.applies_to_all_protected_branches == true)
+    )
+  )
+' <<<"$approval_rules_json" >/dev/null \
+  || block_apply 'missing evidence: require >=1 approval from a global/applies-all approval rule'
+printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval audit and attestation not required for this readiness policy.'
+)
+```
+
+The selected Developer readiness policy deliberately skips only the
+Maintainer-only `/approvals` audit and recurring Maintainer attestation. A
+Developer cannot read or prove GitLab's author/committer self-approval or
+per-MR approval-rule-override settings; those remain Maintainer policy. This is
+not a role-only claim: the observable checks above must pass, while the
+workflow and runtime never approve or merge. The parentheses isolate the strict
+shell options, function, and failure exit from the operator's shell while
+preserving this block's nonzero status.
 
 ## Install the command and user units
 
@@ -91,9 +182,10 @@ set +a
 agent-work run-next --json
 ```
 
-An applied pass uses the deterministic branch `agent/issue-<IID>` and changes
+An applied pass uses the deterministic feature branch `agent/issue-<IID>` and changes
 labels from `agent::ready` to `agent::running`. It reaches
-`agent::awaiting-human` only after verifying an exact same-project MR: source
+`agent::awaiting-human` only after verifying an exact same-project MR. Its
+machine outcome is `awaiting_human`: source
 and target project IDs, deterministic source branch, default target branch,
 and MR SHA must match both local and remote branch tips, and GitLab must report
 that the MR closes the issue (`Closes #IID`). Missing or mismatched evidence
@@ -102,12 +194,18 @@ ends at `agent::failed`.
 ## Authorize and enable applied operation
 
 Before enabling the timer, obtain explicit unattended-publication authorization
-for this repository and confirm the constrained service identity. Verify the
-independent MR safeguards: at least one approval, no author self-approval, and
-no per-MR approval-rule overrides. These settings need Maintainer access. A
-Developer `403` is inconclusive; require a human Maintainer attestation before
-continuing. The loop can push and open an MR, but never approves or
-merges it.
+for this repository and confirm the constrained service identity. If the
+effective `glab` access level checked above is exactly Developer (`30`), that
+one-time authorization is sufficient to enable this unattended publication
+path. The Developer-readable safeguards above replace the inaccessible
+Maintainer-only `/approvals` audit and recurring attestation. They do not prove
+self-approval or per-MR approval-rule override policy; those settings require a
+Maintainer. The loop can push and open an MR, but never approves or merges it.
+
+Developer access is a readiness signal, not proof of all resulting controls.
+Developers may approve in GitLab, and project protections control push, merge, and self-approval. Keep the service identity constrained and verify that the
+Git credential used for publication is the intended identity; it can differ
+from the `glab` credential used to create the MR. The loop never approves or merges.
 
 Then enable exactly one timer instance and inspect it:
 

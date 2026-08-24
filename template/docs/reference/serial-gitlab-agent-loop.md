@@ -31,6 +31,7 @@ task data.
 | Concurrency | Serial; a timer must not overlap invocations. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
+| `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
 
 The applied lifecycle is `agent::ready` → `agent::running` →
 `agent::awaiting-human` or `agent::failed`. Its branch is deterministically
@@ -59,10 +60,45 @@ Do not enable the systemd timer for `--apply` until all of these are true:
 
 - A human has explicitly authorized unattended publication for the repository.
 - The timer uses a constrained service identity and dedicated checkout.
-- Independent merge-request approval safeguards have been verified.
-- If a Developer token receives `403` while reading Maintainer-only safeguard
-  settings, a human Maintainer has supplied an attestation; `403` is not a
-  successful verification.
+- The identity used by `glab` has effective API access exactly Developer
+  (`30`) in the configured project.
+- The effective default-branch endpoint reports the requested branch name as
+  default and protected, with `developers_can_push`, `developers_can_merge`,
+  and `can_push` all false.
+- `approval_rules` has an at-least-one-approval global rule: its
+  `protected_branches` value is omitted or a typed empty array, or
+  `applies_to_all_protected_branches` is true. A branch-scoped rule does not
+  satisfy this gate.
+
+The effective access classification is a one-time readiness gate for this
+constrained path. It must accept exactly 30 as Developer and reject `unknown`,
+a value less than 30, and `40` or greater; rejected access must block `--apply`.
+An access level of `40` or greater must switch to a constrained Developer
+credential; it does not satisfy this gate by being more permissive. Any other
+access value is rejected, which preserves the exactly-30 contract.
+
+For the Developer fast path, the authoritative endpoint is
+`projects/$GITLAB_PROJECT_ID/repository/branches/$default_branch_uri`, where
+`default_branch_uri` is the `jq @uri` encoding of the configured default branch.
+It must report the exact branch name, `default` and `protected` as true, and
+`developers_can_push`, `developers_can_merge`, and `can_push` as false. This
+observes the effective branch behavior, including settings derived from wildcard
+or multiple protection rules. `approval_rules` must contain a numeric
+at-least-one-approval global rule; branch-scoped rules are not evidence for
+this gate. These are required observable safeguards, not a claim that the
+Developer role alone proves project policy.
+
+The selected readiness policy intentionally skips only the Maintainer-only
+`/approvals` audit and recurring Maintainer attestation. A Developer cannot
+read or prove author/committer self-approval or per-MR approval-rule-override
+settings; those require Maintainer policy. The agent contract nevertheless
+remains that it never approves or merges.
+
+Developer access is not proof that the agent cannot push to `main`, merge, or
+self-approve: Developers may approve, while project protections control push, merge, and self-approval. The agent contract remains that it never approves or merges.
+The `glab` credential used for API access/MR creation and the Git credential
+used for publication may differ; validate each identity and its access
+separately.
 
 The shipped service and timer are templates. They are installed and enabled
 only by an operator who has satisfied this gate.

@@ -45,6 +45,26 @@ Use endpoints under `projects/$GITLAB_PROJECT_ID` for merge requests,
 pipelines, branch protection, and approval rules. For MR creation, push with
 Git first, then call `POST projects/$GITLAB_PROJECT_ID/merge_requests`.
 
+## Developer-readable loop readiness exception
+
+For a constrained identity with effective API access exactly `30`, the
+Developer-readable preflight is the narrow exception to Maintainer-only
+approval nagging. It must verify default branch protection (no direct push,
+Developer merge, and no push) through the authoritative effective default
+branch response, plus an `approval_rules` rule requiring at least one approval
+that is unambiguously global. This exception skips only the Maintainer-only
+`/approvals` audit and recurring Maintainer attestation; it does not waive
+one-time authorization, constrained identity, checkout/origin, preview,
+publication identity, or the prohibition on approving or merging.
+
+Developer role alone does not prove these controls, self-approval prevention,
+or per-MR approval-rule overrides. This readiness selection intentionally
+skips those Maintainer-only checks and relies on workflow, settings, and
+runtime never-approve/merge guardrails; it is not a hard same-user security
+boundary. If the Developer-readable evidence is absent, inaccessible, or
+mismatched, block `--apply` and have a Maintainer correct the safeguards, then
+repeat the preflight.
+
 ## Mandatory publication handoff
 
 Every repository change must publish a feature branch and open or update a
