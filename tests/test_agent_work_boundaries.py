@@ -144,9 +144,14 @@ def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
         )
     )
 
-    config = discover_checkout_config(current_directory=tmp_path, run_command=commands)
+    config = discover_checkout_config(
+        current_directory=tmp_path,
+        environment={"AGENT_WORK_LOG_TAG": "project-agent-work"},
+        run_command=commands,
+    )
 
     assert config.checkout == checkout
+    assert config.journal_tag == "project-agent-work"
 
 
 def test_checkout_derivation_refuses_to_launch_from_a_feature_branch(
@@ -407,7 +412,14 @@ def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
         confidential=False,
     )
 
-    GitLabGateway(_config(tmp_path), commands).comment_failed(
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=310967,
+        checkout=tmp_path / "checkout",
+        journal_tag="project-agent-work",
+    )
+
+    GitLabGateway(config, commands).comment_failed(
         issue, "Codex exited with status 7; no exact published MR evidence"
     )
 
@@ -422,6 +434,10 @@ def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
     )
     assert "projects/310967/issues/3/notes" in command
     assert any("agent::failed" in argument for argument in command)
+    assert any(
+        "journalctl --user -t project-agent-work --since today" in argument
+        for argument in command
+    )
 
 
 @pytest.mark.parametrize(

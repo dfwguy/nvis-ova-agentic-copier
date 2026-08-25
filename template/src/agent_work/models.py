@@ -21,6 +21,7 @@ class AgentWorkConfig(BaseModel):
     host: str
     project_id: int = Field(gt=0)
     checkout: Path
+    journal_tag: str = Field(default="agent-work", min_length=1)
 
     @field_validator("host")
     @classmethod

@@ -48,8 +48,9 @@ branch is the deterministic branch, the target is the configured default
 branch, and the MR SHA equals both local and remote branch tips. GitLab must
 also report that the MR closes the selected issue, which the prompt requires as
 `Closes #IID`. A missing or mismatched publication becomes `agent::failed`.
-The runner posts its safe failure reason as an issue comment; redacted worker
-diagnostics stay in the operator's private log.
+The runner posts its safe failure reason as an issue comment together with the
+configured journal command. On the timer host, this identifies its private log;
+redacted worker diagnostics do not appear in the issue.
 
 Each pass also checks open `agent::awaiting-human` handoffs. If GitLab reports
 that an otherwise exact MR has merge conflicts, the runner moves that issue
