@@ -89,6 +89,22 @@ class GitLabProject(BaseModel):
     ssh_url_to_repo: str = ""
 
 
+class PipelineEvidence(BaseModel):
+    """The latest default-branch pipeline state needed for remediation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    status: str = Field(min_length=1)
+    sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    web_url: str = Field(min_length=1)
+
+    @property
+    def needs_remediation(self) -> bool:
+        """Return whether this terminal pipeline state requires a repair."""
+        return self.status in {"failed", "canceled"}
+
+
 class MergeRequestEvidence(BaseModel):
     """The GitLab fields needed to verify one publication."""
 

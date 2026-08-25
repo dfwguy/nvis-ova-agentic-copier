@@ -25,7 +25,9 @@ from agent_work.models import (
     AgentInvocation,
     AgentWorkConfig,
     GitLabIssue,
+    GitLabProject,
     MergeRequestDraft,
+    PipelineEvidence,
     RunReport,
 )
 from agent_work.serial import BranchConflict, RunNextDependencies
@@ -301,6 +303,41 @@ def test_gitlab_running_selection_includes_closed_issues(tmp_path: Path) -> None
     assert [issue.iid for issue in issues] == [3]
     assert "state=all" in commands.calls[0][0]
     assert "per_page=2" in commands.calls[0][0]
+
+
+def test_gitlab_reads_the_latest_default_branch_pipeline_by_numeric_project_id(
+    tmp_path: Path,
+) -> None:
+    payload = json.dumps(
+        [
+            {
+                "id": 42,
+                "status": "failed",
+                "sha": "a" * 40,
+                "web_url": "https://gitlab.example.com/group/project/-/pipelines/42",
+            }
+        ]
+    )
+    commands = _Commands((CommandResult(0, payload, ""),))
+    pipeline = GitLabGateway(_config(tmp_path), commands).latest_default_pipeline(
+        GitLabProject(
+            id=310967,
+            host="gitlab.example.com",
+            default_branch="main",
+            web_url="https://gitlab.example.com/group/project",
+        )
+    )
+
+    assert pipeline == PipelineEvidence(
+        id=42,
+        status="failed",
+        sha="a" * 40,
+        web_url="https://gitlab.example.com/group/project/-/pipelines/42",
+    )
+    command = commands.calls[0][0]
+    assert "projects/310967/pipelines" in command
+    assert "ref=main" in command
+    assert "per_page=1" in command
 
 
 def test_gitlab_rejects_malformed_issue_text_as_a_safe_adapter_error(

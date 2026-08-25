@@ -16,6 +16,7 @@ from agent_work.models import (
     GitPublicationEvidence,
     MergeRequestDraft,
     MergeRequestEvidence,
+    PipelineEvidence,
 )
 from agent_work.serial import (
     BranchConflict,
@@ -64,12 +65,14 @@ class _GitLab:
         awaiting_human: tuple[GitLabIssue, ...] = (),
         publication: MergeRequestEvidence | None = None,
         closes_issue: bool = True,
+        pipeline: PipelineEvidence | None = None,
     ) -> None:
         self.eligible = eligible
         self.running = running
         self.awaiting_human = awaiting_human
         self._publication = publication
         self._closes_issue = closes_issue
+        self._pipeline = pipeline
         self.events: list[tuple[str, int]] = []
         self.failure_comments: list[tuple[int, str]] = []
 
@@ -89,6 +92,12 @@ class _GitLab:
 
     def list_awaiting_human(self) -> tuple[GitLabIssue, ...]:
         return self.awaiting_human
+
+    def latest_default_pipeline(
+        self, project: GitLabProject
+    ) -> PipelineEvidence | None:
+        del project
+        return self._pipeline
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         return next(
@@ -189,11 +198,11 @@ class _Invoke:
         self.returncode = returncode
         self.error = error
         self.events = events
-        self.calls: list[tuple[Path, int]] = []
+        self.calls: list[tuple[Path, str, int]] = []
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> AgentInvocation:
         assert prompt
-        self.calls.append((checkout, timeout))
+        self.calls.append((checkout, prompt, timeout))
         if self.events is not None:
             self.events.append("invoke")
         if self.error is not None:
@@ -217,6 +226,15 @@ def _publication(issue: GitLabIssue) -> MergeRequestEvidence:
         source_branch=f"agent/issue-{issue.iid}",
         target_branch="main",
         sha="a" * 40,
+    )
+
+
+def _failed_pipeline() -> PipelineEvidence:
+    return PipelineEvidence(
+        id=42,
+        status="failed",
+        sha="b" * 40,
+        web_url="https://gitlab.example.com/group/project/-/pipelines/42",
     )
 
 
@@ -328,6 +346,26 @@ def test_applied_run_selects_only_the_first_ready_issue() -> None:
     assert len(invoke.calls) == 1
 
 
+def test_applied_run_directs_the_worker_to_repair_a_failed_default_pipeline() -> None:
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(
+            eligible=(issue,),
+            publication=_publication(issue),
+            pipeline=_failed_pipeline(),
+        ),
+        _Checkout(),
+        _Invoke(),
+        _Lock(),
+    )
+
+    run_next(_deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30)
+
+    assert "Pipeline remediation:" in invoke.calls[0][1]
+    assert "pipeline 42" in invoke.calls[0][1]
+    assert "failed" in invoke.calls[0][1]
+
+
 def test_failed_applied_issue_reports_agent_exit_and_diagnostics() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
@@ -368,7 +406,9 @@ def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> N
     assert report.issue_iid == issue.iid
     assert report.merge_request_url == _publication(issue).web_url
     assert gitlab.events == [("running", issue.iid), ("awaiting_human", issue.iid)]
-    assert invoke.calls == [(checkout.path, 45)]
+    assert len(invoke.calls) == 1
+    assert invoke.calls[0][0] == checkout.path
+    assert invoke.calls[0][2] == 45
     assert lock.entered == 1
     assert progress == [
         "Claiming issue #123 on agent/issue-123.",
@@ -472,7 +512,9 @@ def test_applied_run_reclaims_a_conflicted_human_review_mr_for_remediation() -> 
         "publish",
         "publication_tip",
     ]
-    assert invoke.calls == [(checkout.path, 30)]
+    assert len(invoke.calls) == 1
+    assert invoke.calls[0][0] == checkout.path
+    assert invoke.calls[0][2] == 30
 
 
 def test_conflicted_handoff_fails_when_its_branch_cannot_be_restored() -> None:
