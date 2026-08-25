@@ -1,4 +1,4 @@
-"""Concrete GitLab, Git, Codex, environment, and lock boundaries."""
+"""Concrete GitLab, Git, agent, environment, and lock boundaries."""
 
 from __future__ import annotations
 
@@ -612,8 +612,8 @@ class ServiceCheckout:
         self._run("push", "--set-upstream", "origin", branch)
 
 
-class CodexInvoker:
-    """Invoke Codex once in noninteractive ephemeral mode."""
+class AgentInvoker:
+    """Invoke one configured supported coding agent noninteractively."""
 
     def __init__(
         self,
@@ -625,10 +625,30 @@ class CodexInvoker:
         self._environment = os.environ if environment is None else environment
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> AgentInvocation:
-        """Run one Codex process and return its status for later verification."""
+        """Run one configured agent process and return its status."""
+        agent = self._environment.get("AGENT_WORK_AGENT", "codex")
+        executable = self._environment.get("AGENT_WORK_AGENT_PATH", agent)
+        command, stdin = _agent_command(agent, executable, checkout, prompt)
         result = self._run_command(
+            command,
+            stdin=stdin,
+            timeout_seconds=timeout,
+        )
+        return AgentInvocation(
+            returncode=result.returncode,
+            stdout=_redact_diagnostic(result.stdout, self._environment),
+            stderr=_redact_diagnostic(result.stderr, self._environment),
+        )
+
+
+def _agent_command(
+    agent: str, executable: str, checkout: Path, prompt: str
+) -> tuple[tuple[str, ...], str | None]:
+    """Build one supported noninteractive agent command without a shell."""
+    if agent == "codex":
+        return (
             (
-                "codex",
+                executable,
                 "exec",
                 "-C",
                 str(checkout),
@@ -641,14 +661,29 @@ class CodexInvoker:
                 "never",
                 "-",
             ),
-            stdin=prompt,
-            timeout_seconds=timeout,
+            prompt,
         )
-        return AgentInvocation(
-            returncode=result.returncode,
-            stdout=_redact_diagnostic(result.stdout, self._environment),
-            stderr=_redact_diagnostic(result.stderr, self._environment),
+    if agent == "claude":
+        return (
+            (
+                executable,
+                "--print",
+                "--output-format",
+                "text",
+                "--no-session-persistence",
+                "--permission-mode",
+                "acceptEdits",
+                "--",
+                prompt,
+            ),
+            None,
         )
+    if agent == "pi":
+        return (
+            (executable, "--print", "--mode", "text", "--no-session", prompt),
+            None,
+        )
+    raise AdapterError("AGENT_WORK_AGENT must be one of: codex, claude, pi")
 
 
 def _redact_diagnostic(output: str, environment: Mapping[str, str]) -> str:
@@ -714,6 +749,6 @@ def build_default_dependencies(
     return RunNextDependencies(
         gitlab=GitLabGateway(config, run_command),
         checkout=ServiceCheckout(config, run_command),
-        invoke=CodexInvoker(run_command),
+        invoke=AgentInvoker(run_command),
         lock=lambda: ProjectLock(config.lock_file),
     )

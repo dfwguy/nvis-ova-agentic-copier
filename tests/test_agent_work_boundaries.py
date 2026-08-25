@@ -11,7 +11,7 @@ import pytest
 
 from agent_work.adapters import (
     AdapterError,
-    CodexInvoker,
+    AgentInvoker,
     CommandResult,
     GitLabGateway,
     LockBusy,
@@ -424,24 +424,16 @@ def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
     assert any("agent::failed" in argument for argument in command)
 
 
-def test_codex_is_invoked_once_noninteractively_with_prompt_on_stdin(
-    tmp_path: Path,
-) -> None:
-    commands = _Commands((CommandResult(7, "ignored", "ignored"),))
-    checkout = tmp_path / "checkout"
-
-    invocation = CodexInvoker(commands).invoke(checkout, "untrusted prompt", 45)
-
-    assert invocation == AgentInvocation(
-        returncode=7, stdout="ignored", stderr="ignored"
-    )
-    assert commands.calls == [
-        (
+@pytest.mark.parametrize(
+    ("agent", "command", "stdin"),
+    (
+        pytest.param(
+            "codex",
             (
                 "codex",
                 "exec",
                 "-C",
-                str(checkout),
+                "{checkout}",
                 "--sandbox",
                 "workspace-write",
                 "-c",
@@ -451,23 +443,98 @@ def test_codex_is_invoked_once_noninteractively_with_prompt_on_stdin(
                 "never",
                 "-",
             ),
-            {"stdin": "untrusted prompt", "timeout_seconds": 45},
+            "untrusted prompt",
+            id="codex",
+        ),
+        pytest.param(
+            "claude",
+            (
+                "claude",
+                "--print",
+                "--output-format",
+                "text",
+                "--no-session-persistence",
+                "--permission-mode",
+                "acceptEdits",
+                "--",
+                "untrusted prompt",
+            ),
+            None,
+            id="claude",
+        ),
+        pytest.param(
+            "pi",
+            (
+                "pi",
+                "--print",
+                "--mode",
+                "text",
+                "--no-session",
+                "untrusted prompt",
+            ),
+            None,
+            id="pi",
+        ),
+    ),
+)
+def test_supported_agent_is_invoked_once_noninteractively(
+    tmp_path: Path, agent: str, command: tuple[str, ...], stdin: str | None
+) -> None:
+    commands = _Commands((CommandResult(7, "ignored", "ignored"),))
+    checkout = tmp_path / "checkout"
+
+    invocation = AgentInvoker(commands, environment={"AGENT_WORK_AGENT": agent}).invoke(
+        checkout, "untrusted prompt", 45
+    )
+
+    assert invocation == AgentInvocation(
+        returncode=7, stdout="ignored", stderr="ignored"
+    )
+    assert commands.calls == [
+        (
+            tuple(part.replace("{checkout}", str(checkout)) for part in command),
+            {"stdin": stdin, "timeout_seconds": 45},
         )
     ]
 
 
-def test_codex_invocation_redacts_known_secret_values_from_diagnostics(
+def test_agent_invocation_redacts_known_secret_values_from_diagnostics(
     tmp_path: Path,
 ) -> None:
     commands = _Commands(
         (CommandResult(1, "token=top-secret-value", "fatal: top-secret-value"),)
     )
 
-    invocation = CodexInvoker(
+    invocation = AgentInvoker(
         commands, environment={"GITLAB_TOKEN": "top-secret-value"}
     ).invoke(tmp_path, "prompt", 45)
 
     assert invocation.diagnostic == "token=[REDACTED]\nfatal: [REDACTED]"
+
+
+def test_agent_invocation_rejects_an_unknown_agent(tmp_path: Path) -> None:
+    commands = _Commands(())
+
+    with pytest.raises(AdapterError, match="AGENT_WORK_AGENT"):
+        AgentInvoker(commands, environment={"AGENT_WORK_AGENT": "unsupported"}).invoke(
+            tmp_path, "prompt", 45
+        )
+
+
+def test_agent_invocation_uses_the_configured_absolute_executable(
+    tmp_path: Path,
+) -> None:
+    commands = _Commands((CommandResult(0, "", ""),))
+
+    AgentInvoker(
+        commands,
+        environment={
+            "AGENT_WORK_AGENT": "claude",
+            "AGENT_WORK_AGENT_PATH": "/opt/claude/bin/claude",
+        },
+    ).invoke(tmp_path, "prompt", 45)
+
+    assert commands.calls[0][0][0] == "/opt/claude/bin/claude"
 
 
 def test_worker_merge_request_draft_requires_one_valid_delimited_json_object() -> None:
@@ -642,8 +709,8 @@ def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> N
         outcome="failed",
         issue_iid=3,
         branch="agent/issue-3",
-        failure_reason="Codex exited with status 7; no exact published MR evidence",
-        agent_diagnostic="Codex could not publish the branch",
+        failure_reason="Agent exited with status 7; no exact published MR evidence",
+        agent_diagnostic="Agent could not publish the branch",
     )
 
     exit_code = main(
@@ -657,8 +724,8 @@ def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> N
     assert exit_code == 1
     assert errors == [
         "Checking for next work item...",
-        "Failure: Codex exited with status 7; no exact published MR evidence",
-        "Codex diagnostic (redacted):\nCodex could not publish the branch",
+        "Failure: Agent exited with status 7; no exact published MR evidence",
+        "Agent diagnostic (redacted):\nAgent could not publish the branch",
     ]
     assert reports == [
         {

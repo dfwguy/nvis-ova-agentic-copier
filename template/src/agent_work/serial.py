@@ -257,7 +257,7 @@ def _finish_from_evidence(
                 if invocation.returncode is None
                 else (f"exited with status {invocation.returncode}")
             )
-            failure_reason = f"Codex {status}; {failure_reason}"
+            failure_reason = f"Agent {status}; {failure_reason}"
         _mark_failed(dependencies, issue, failure_reason)
         return RunReport(
             outcome="failed",
@@ -293,7 +293,7 @@ def _publish_worker_result(
 ) -> None:
     """Publish a successful worker's change through trusted runner boundaries."""
     if invocation.returncode != 0:
-        raise RunNextError(f"Codex exited with status {invocation.returncode}")
+        raise RunNextError(f"Agent exited with status {invocation.returncode}")
     draft = invocation.merge_request_draft()
     dependencies.checkout.publish(_branch(issue), draft)
     dependencies.gitlab.create_merge_request(issue, project, draft)
