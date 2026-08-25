@@ -21,7 +21,7 @@ You run in parallel with `judge-quality` and `judge-cicd` after both `tdd-judge`
 
 Every finding **must** be classified as one of:
 
-- **Major** — a defect in the tests introduced by this change that lets a wrong implementation pass, violates a hard testing convention, or makes the suite flaky/order-dependent. Blocks the merge and routes back to `/tdd-red`.
+- **Major** — a defect in the tests introduced by this change that lets a wrong implementation pass, violates a hard testing convention, or makes the suite flaky/order-dependent. Blocks the merge and routes back to the Test Writer.
 - **Minor** — style/clarity nits in the tests: naming, duplicated setup that could be a fixture, a missing edge case that is nice-to-have. Caused or kept by this change but not blocking.
 - **Existing** — a test-quality issue in surrounding test code that this change did **not** introduce. Note it for visibility; never block on it.
 
@@ -71,7 +71,7 @@ For each section, give a section verdict (**Pass** or the highest severity prese
 
 End with an **Overall verdict** line that is one of:
 - `Overall: Approve` — no findings, or only Minor / Existing.
-- `Overall: Reject` — at least one Major finding. Reject means route back to `/tdd-red`.
+- `Overall: Reject` — at least one Major finding. Reject means route back to the Test Writer.
 
 The orchestrator parses these lines literally — keep the format consistent. The `Overall:` line is what decides routing.
 
@@ -81,3 +81,7 @@ The orchestrator parses these lines literally — keep the format consistent. Th
 - If a finding can only be confirmed by running the tests, classify it as **Minor** with a "needs verification" note rather than rejecting.
 - Tests are your scope. Flag production-code issues only insofar as they *force* bad tests (e.g. a missing injection point); leave general production-code quality to `judge-quality`.
 - Do not approve tests with any **Major** finding. Minor and Existing findings never cause a rejection — they are deferred to the user at the end of the workflow.
+- For each Minor, the main agent files a GitLab issue from the Bug template,
+  normally `S4` with `type::quality`, using the numeric project ID. If filing
+  is unavailable, report it as unfiled; Never claim it was persisted or use a
+  Markdown backlog file as a fallback. End the handoff with `Created <N> GitLab issues` or `No new issues`.

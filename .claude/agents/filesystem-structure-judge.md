@@ -45,7 +45,7 @@ code, tests, and entry points; do not modify files or run tooling.
 Return `Overall: Approve` only if all applicable layouts are standard or have
 specific, accurate documented deviations. Otherwise return `Overall: Reject`,
 identify the blocking path and missing or inaccurate project-file record, and
-route to `/tdd-green`.
+route to the Implementer.
 
 ## Constraints
 

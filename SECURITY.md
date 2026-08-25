@@ -33,7 +33,7 @@ security bulletin as appropriate.
 
 NVIS-OVA Agentic Copier is a **Copier template** — a CLI scaffolding tool that generates
 new Python projects pre-configured with UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI,
-and a multi-agent Claude Code workflow (`CLAUDE.md`, `.claude/agents/`, `.claude/commands/`).
+and a multi-agent Claude Code workflow (`CLAUDE.md`, `.claude/agents/`, `.agents/skills/`).
 
 This software operates at the **CLI / Developer Tooling** level. Its primary security
 responsibility is to ensure that the scaffolded project structure, AI agent definitions, and
@@ -50,7 +50,7 @@ locally on developer workstations and interacts with GitLab via the `glab` CLI.
 - **AI agent control boundary**: `.claude/settings.json` restricts which shell commands the
   Claude Code AI agent may execute, including a deny list blocking `glab mr approve*` and
   `glab mr revoke*` to prevent AI from approving its own merge requests.
-- **GitLab API boundary**: The `/setup-repo` slash command calls `glab api` to configure
+- **GitLab API boundary**: The repository setup procedure calls `glab api` to configure
   branch protection and approval rules on `gitlab-master.nvidia.com`.
 
 ### Threat Model
@@ -93,7 +93,7 @@ The following scenarios represent the primary security concerns for this project
 
 - **GitLab branch protection is enforced externally.** The AI agent workflow assumes
   `main` is protected (push blocked, MR approval required) via GitLab project settings.
-  Until `/setup-repo` has been run and `CONTRIBUTING.md` exists, this protection is not
+  Until the repository setup procedure has been run and `CONTRIBUTING.md` exists, this protection is not
   guaranteed.
 - **The developer workstation is trusted.** `copier copy --trust` and pre-commit hooks
   execute code on the local machine. No sandbox or verification layer protects the
@@ -101,7 +101,7 @@ The following scenarios represent the primary security concerns for this project
 - **Local development tools are uncompromised.** The toolchain assumes the
   packages resolved through the project's dependency metadata and lockfile have
   not been tampered with.
-- **`glab` OAuth session integrity.** The `/setup-repo` command and AI agent git flow
+- **`glab` OAuth session integrity.** The repository setup procedure and AI agent git flow
   assume the `glab` OAuth token is valid and uncompromised. A stolen token grants full
   GitLab API access at the authenticated user's permission level.
 - **AI agent prompts and subagent inputs are not adversarially crafted.** The deny list

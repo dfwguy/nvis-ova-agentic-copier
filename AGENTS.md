@@ -15,7 +15,7 @@ requirements here.
 
 Claude Code, Codex, and Pi must follow the same repository workflow,
 validation gates, and human approval boundary. Claude Code reads the
-`.claude/` agents and slash commands directly. Codex and Pi treat those files
+`.claude/` agent definitions directly. Codex and Pi treat those files
 as the canonical workflow description and use their equivalent native
 delegation mechanisms when available.
 
@@ -36,7 +36,7 @@ enabling that tier.
 
 ## Codex workflow
 
-The `.claude/` agents and slash commands are Claude Code configuration. Codex
+The `.claude/` agent definitions are Claude Code configuration. Codex
 does not execute their front matter; it follows the shared workflow and
 conventions they describe, then uses native Codex subagents when delegation is
 useful.

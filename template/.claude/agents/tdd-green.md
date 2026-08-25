@@ -32,7 +32,7 @@ You are the **Implementer** agent. Write the minimum code needed to pass the fai
    uv run pytest -v --junitxml=test-results.xml
    ```
    This shared, gitignored JUnit artifact includes per-test `time` values for
-   `/nonfunctional-review`; do not delete or replace it before that review.
+   the Non-functional Reviewer; do not delete or replace it before that review.
    For Bash, run the selected shell test command, `bash -n`, and ShellCheck.
 4. **All tests must pass.** If previously passing tests now fail, you introduced a regression — fix it before continuing.
 5. **Stop here.** No refactoring yet. Hand off to the Non-functional Reviewer

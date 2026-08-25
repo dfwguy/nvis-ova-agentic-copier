@@ -18,7 +18,7 @@ You update `README.md` only. The Diátaxis Writer owns documentation in `docs/`;
 A change needs README updates when it adds, removes, or modifies any of:
 - CLI flags or subcommands
 - Standalone scripts (anything with a shebang or entry point)
-- Slash commands or agent definitions exposed to users
+- agent roles or agent definitions exposed to users
 - `uv run` invocations users would type
 - Installation, setup, or configuration steps
 - Environment variables or config-file keys users set

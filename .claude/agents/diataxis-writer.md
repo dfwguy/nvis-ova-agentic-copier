@@ -9,7 +9,7 @@ model: sonnet
 
 ## Role
 
-You write task documentation in `docs/` while `/tdd-red` writes failing tests.
+You write task documentation in `docs/` while the Test Writer writes failing tests.
 You do not modify code, tests, agent definitions, or `README.md`.
 
 ## Diátaxis categories
