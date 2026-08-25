@@ -22,6 +22,7 @@ from agent_work.serial import (
     BranchConflict,
     RunNextDependencies,
     RunNextError,
+    _prompt,
     run_next,
 )
 
@@ -143,12 +144,14 @@ class _Checkout:
         sha: str = "a" * 40,
         branch_error: RuntimeError | None = None,
         resume_error: RuntimeError | None = None,
+        baseline_error: RuntimeError | None = None,
     ) -> None:
         self.path = Path("/trusted/checkout")
         self.events: list[str] = []
         self.sha = sha
         self.branch_error = branch_error
         self.resume_error = resume_error
+        self.baseline_error = baseline_error
 
     def preview_preflight(self, *_args: object) -> None:
         self.events.append("preview_preflight")
@@ -180,8 +183,15 @@ class _Checkout:
         self.events.append("publication_tip")
         return GitPublicationEvidence(local_sha=self.sha, remote_sha=self.sha)
 
-    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
-        del branch, draft
+    def worker_baseline(self, branch: str) -> str:
+        del branch
+        self.events.append("worker_baseline")
+        if self.baseline_error is not None:
+            raise self.baseline_error
+        return self.sha
+
+    def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
+        del branch, draft, baseline
         self.events.append("publish")
 
 
@@ -366,6 +376,18 @@ def test_applied_run_directs_the_worker_to_repair_a_failed_default_pipeline() ->
     assert "failed" in invoke.calls[0][1]
 
 
+def test_worker_prompt_defines_the_trusted_runner_worker_mode() -> None:
+    """Worker edits stay uncommitted for trusted runner publication."""
+    issue = _issue(iid=123)
+    project = _GitLab().verify_project()
+
+    prompt = _prompt(issue, project, "agent/issue-123")
+
+    assert "worker exception takes precedence over" in prompt
+    assert "leave only uncommitted working-tree" in prompt
+    assert "and alone stages, commits, pushes, and opens the merge request" in prompt
+
+
 def test_failed_applied_issue_reports_agent_exit_and_diagnostics() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
@@ -509,6 +531,7 @@ def test_applied_run_reclaims_a_conflicted_human_review_mr_for_remediation() -> 
     assert checkout.events == [
         "applied_preflight",
         "resume_branch",
+        "worker_baseline",
         "publish",
         "publication_tip",
     ]
@@ -536,6 +559,34 @@ def test_conflicted_handoff_fails_when_its_branch_cannot_be_restored() -> None:
         == "checkout preparation failed: checkout validation failed"
     )
     assert gitlab.events == [("running", issue.iid), ("failed", issue.iid)]
+    assert invoke.calls == []
+
+
+def test_applied_issue_fails_when_the_worker_baseline_cannot_be_captured() -> None:
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(eligible=(issue,)),
+        _Checkout(baseline_error=AdapterError("checkout validation failed")),
+        _Invoke(),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "failed"
+    assert (
+        report.failure_reason
+        == "checkout preparation failed: checkout validation failed"
+    )
+    assert gitlab.events == [("running", issue.iid), ("failed", issue.iid)]
+    assert checkout.events == [
+        "applied_preflight",
+        "ensure_branch_available",
+        "prepare_branch",
+        "worker_baseline",
+    ]
     assert invoke.calls == []
 
 

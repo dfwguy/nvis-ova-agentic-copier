@@ -21,6 +21,24 @@ run_logged() {
   return "${statuses[0]}"
 }
 
+return_checkout_to_main() {
+  log "returning dedicated checkout to main"
+  if run_logged git switch main; then
+    :
+  else
+    status=$?
+    log "stopped: could not switch to main (exit $status)"
+    return "$status"
+  fi
+  if run_logged git pull --ff-only; then
+    :
+  else
+    status=$?
+    log "stopped: could not fast-forward main (exit $status)"
+    return "$status"
+  fi
+}
+
 if [[ -z "${AGENT_WORK_CHECKOUT:-}" ]]; then
   log "stopped: AGENT_WORK_CHECKOUT is not set"
   exit 2
@@ -62,28 +80,22 @@ if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
 else
   runner=("$AGENT_WORK_UV")
 fi
+pass_status=0
 if run_logged "${runner[@]}" run agent-work run-next --apply --json; then
   :
 else
-  status=$?
-  log "stopped: pass exited $status"
-  exit "$status"
+  pass_status=$?
+  log "pass failed (exit $pass_status); attempting checkout recovery"
 fi
 
-log "pass completed; returning dedicated checkout to main"
-if run_logged git switch main; then
+if return_checkout_to_main; then
   :
 else
-  status=$?
-  log "stopped: could not switch to main (exit $status)"
-  exit "$status"
+  cleanup_status=$?
+  exit "$cleanup_status"
 fi
-if run_logged git pull --ff-only; then
-  :
-else
-  status=$?
-  log "stopped: could not fast-forward main (exit $status)"
-  exit "$status"
+if (( pass_status != 0 )); then
+  exit "$pass_status"
 fi
 
 log "pass completed; next timer activation follows the configured interval"

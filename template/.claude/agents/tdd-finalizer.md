@@ -1,6 +1,6 @@
 ---
 name: tdd-finalizer
-description: Final gate — runs applicable Python/Bash validation, then commits locally; the orchestrator pushes and opens the MR afterward.
+description: Final gate — runs applicable Python/Bash validation; trusted runner workers leave publication to their parent.
 tools: Read, Grep, Glob, Bash
 model: haiku
 ---
@@ -58,15 +58,21 @@ Always, after `nonfunctional-review`, `tdd-judge`, and `diataxis-judge` approve,
    to `diataxis-writer`; do not update it yourself. This index check always
    applies.
 
-6. **Stage and commit**:
+6. **Stage and commit** (ordinary workflows only):
    ```
    git add -A
    git commit
    ```
 
+   In the serial `agent-work` trusted-runner worker mode, do **not** stage or
+   commit. Return the validation result and merge-request draft to the worker
+   orchestrator; its trusted parent owns staging, committing, pushing, and MR
+   creation.
+
 7. **Verdict**: Approve only when all applicable language gates, non-test
    pre-commit hooks, and Python tox (when Python changed) exit cleanly, README
-   is in sync, and the commit succeeds. If rejecting, include the first
+   is in sync, and the ordinary-workflow commit succeeds. In trusted-runner
+   worker mode, approve after validation without a commit. If rejecting, include the first
    blocking failure's hook name, file, and error output — and name which agent
    should pick it up (`tdd-document` for missing doc updates, Implementer for
    everything else).
