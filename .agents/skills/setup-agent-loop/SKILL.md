@@ -94,12 +94,16 @@ before checking repository safeguards.
    from the current directory and `origin`.
    The local lock is always the fixed, gitignored
    `<checkout>/.agent-work.lock`; it is not configurable.
-3. Check `uv` and `tmux`, then run `uv run agent-work run-next --json` from the
+3. Check `uv`, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
    dedicated checkout as a preview smoke test. Do not use a separately installed
-   bare `agent-work` executable, which can be stale. Start the applied Ralph loop
-   only in one explicitly authorized tmux session using the documented status-rich
-   wrapper: it prints each pass start, outcome, and wait state, then stops on any
-   nonzero exit rather than leaving an attached pane blank or silently retrying.
+   bare `agent-work` executable, which can be stale. Install and enable the
+   documented project-named user-level timer only after explicit authorization.
+   Its service wrapper uses `logger` with the matching `<project-slug>-agent-work`
+   tag, so operators use `journalctl --user -t <project-slug>-agent-work` for pass
+   output and failures. The timer uses a stable randomized delay to spread
+   start times across repositories. Require linger
+   with `sudo loginctl enable-linger "$USER"`, then verify `Linger=yes` using
+   `loginctl show-user "$USER" --property=Linger`.
 4. Do not make a second project request or query membership. The step 1
    preflight uses local `jq` to classify effective API access as the
    `max` of `.permissions.project_access.access_level` and
@@ -140,8 +144,9 @@ before checking repository safeguards.
    control pushes, merges, and self-approval. Git and `glab` credentials may
    differ. Preserve the one-time authorization, constrained identity,
    dedicated checkout and origin checks, and preview; never approve or merge.
-8. Stop the tmux session before changing the checkout, credentials, or GitLab
-   labels; no legacy SQLite state migration is needed.
+8. Stop the user timer before changing the checkout, credentials, or GitLab
+   labels: `systemctl --user disable --now <project-slug>-agent-work.timer`. No legacy SQLite
+   state migration is needed.
 
 The loop projects an eligible open issue to `agent::running`, then to
 `agent::awaiting-human` only after exact same-project MR evidence, matching

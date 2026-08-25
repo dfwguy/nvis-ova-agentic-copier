@@ -293,6 +293,7 @@ def test_readme_rendered(generated_project: Path) -> None:
     assert "A test project" in content
     assert "{{ project_name }}" not in content
     assert "{{ description }}" not in content
+    assert 'loginctl show-user "$USER" --property=Linger' in content
 
 
 def test_claude_project_md_rendered(generated_project: Path) -> None:
@@ -574,13 +575,15 @@ def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> N
 def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
     generated_project: Path,
 ) -> None:
-    """The documented continuous loop must reset after each bounded worker pass."""
+    """The systemd pass wrapper resets its dedicated checkout after a pass."""
     content = (
         generated_project / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
     ).read_text()
+    wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
 
-    assert "git switch main && git pull --ff-only" in content
-    assert "Do not make the wrapper switch branches automatically." not in content
+    assert "Before the service exits" in content
+    assert "git switch main" in wrapper
+    assert "git pull --ff-only" in wrapper
 
 
 def test_setup_repo_interviews_self_approval(generated_project: Path) -> None:
@@ -2392,13 +2395,59 @@ def test_legacy_local_queue_contracts_and_commands_are_absent(
         assert all(not (root / path).exists() for path in forbidden)
 
 
-def test_serial_runner_has_no_systemd_surface(
+def test_serial_runner_ships_user_systemd_units_with_journal_logging(
     generated_project: Path, project_root: Path
 ) -> None:
-    """A user-owned tmux session starts the serial runner instead of systemd."""
-    for root in (project_root, project_root / "template", generated_project):
-        systemd_directory = root / "systemd"
-        assert not systemd_directory.exists() or not any(systemd_directory.iterdir())
+    """Each repository receives a distinct, jittered timer and journal tag."""
+    root_service = (
+        project_root / "systemd" / "agentic-copier-agent-work.service"
+    ).read_text()
+    root_timer = (
+        project_root / "systemd" / "agentic-copier-agent-work.timer"
+    ).read_text()
+    template_service = (
+        project_root
+        / "template"
+        / "systemd"
+        / "{{ project_slug }}-agent-work.service.jinja"
+    ).read_text()
+    template_timer = (
+        project_root
+        / "template"
+        / "systemd"
+        / "{{ project_slug }}-agent-work.timer.jinja"
+    ).read_text()
+    generated_service = (
+        generated_project / "systemd" / "my_test_project-agent-work.service"
+    ).read_text()
+    generated_timer = (
+        generated_project / "systemd" / "my_test_project-agent-work.timer"
+    ).read_text()
+    wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
+
+    assert "SyslogIdentifier=agentic-copier-agent-work" in root_service
+    assert (
+        "EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env"
+        in root_service
+    )
+    assert "Unit=agentic-copier-agent-work.service" in root_timer
+    assert (
+        "Environment=AGENT_WORK_LOG_TAG={{ project_slug }}-agent-work"
+        in template_service
+    )
+    assert "Unit={{ project_slug }}-agent-work.service" in template_timer
+    assert "SyslogIdentifier=my_test_project-agent-work" in generated_service
+    assert (
+        "EnvironmentFile=%h/.config/my_test_project-agent-work/agent-work.env"
+        in generated_service
+    )
+    assert "Unit=my_test_project-agent-work.service" in generated_timer
+    assert "OnUnitActiveSec=5min" in generated_timer
+    assert "RandomizedDelaySec=60s" in generated_timer
+    assert "FixedRandomDelay=true" in generated_timer
+    assert 'log_tag="${AGENT_WORK_LOG_TAG:-agent-work}"' in wrapper
+    assert 'logger -s -t "$log_tag"' in wrapper
+    assert "uv run agent-work run-next --apply --json" in wrapper
 
 
 def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:
