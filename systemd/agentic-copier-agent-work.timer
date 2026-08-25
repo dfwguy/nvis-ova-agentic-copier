@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule serial agent-work GitLab passes for agentic-copier
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60s
+FixedRandomDelay=true
+Persistent=true
+Unit=agentic-copier-agent-work.service
+
+[Install]
+WantedBy=timers.target

@@ -124,13 +124,13 @@ workflow and runtime never approve or merge. The parentheses isolate the strict
 shell options, function, and failure exit from the operator's shell while
 preserving this block's nonzero status.
 
-## Install and start the tmux loop
+## Install and start the systemd user timer
 
 Run the runner through the repository's own UV environment. This prevents one
 repository's version from replacing another repository's runner:
 
 ```bash
-command -v uv tmux
+command -v uv logger systemctl loginctl
 uv run agent-work --help
 ```
 
@@ -140,22 +140,33 @@ Run the read-only preview from that checkout:
 uv run agent-work run-next --json
 ```
 
-After a human explicitly authorizes unattended publication, start the Ralph loop
-in one lingering tmux session:
+After a human explicitly authorizes unattended publication, install the
+one-shot service and its five-minute timer. The service runs the repository's
+wrapper, which sends the runner output and lifecycle messages through `logger`
+with the `agent-work` tag.
 
 Use this path only when the readiness check reports effective Developer access
 exactly `30`; it does not replace the documented branch-protection or approval
 evidence.
 
 ```bash
-log_dir="$PWD/.agent-work-logs"
-mkdir -p -m 700 "$log_dir"
-log_file="$log_dir/agent-work-$(date -u +%Y%m%dT%H%M%SZ).log"
-tmux new-session -d -s agent-work
-tmux pipe-pane -t agent-work -o "cat >> '$log_file'"
-tmux send-keys -t agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; fi; break; fi; printf "[%s] agent-work: returning checkout to main\n" "$(date -Is)"; git switch main && git pull --ff-only; status=$?; if [ "$status" -ne 0 ]; then printf "[%s] agent-work: stopped after checkout reset failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; break; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done' C-m
-tmux attach -t agent-work
+unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
+install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
+install -d -m 700 "$HOME/.config/$unit_name"
+printf 'AGENT_WORK_CHECKOUT=%q\n' "$PWD" >"$HOME/.config/$unit_name/agent-work.env"
+chmod 600 "$HOME/.config/$unit_name/agent-work.env"
+sudo loginctl enable-linger "$USER"
+loginctl show-user "$USER" --property=Linger
+systemctl --user daemon-reload
+systemctl --user enable --now "$unit_name.timer"
 ```
+
+The linger check must report `Linger=yes`. Linger keeps the user service
+manager available after logout, so the timer can continue to run. Use a
+dedicated checkout, not an operator's active checkout. The rendered unit name
+is `<project-slug>-agent-work`; this repository's is
+`agentic-copier-agent-work`.
 
 Each pass checks GitLab for `agent::running` and conflicted
 `agent::awaiting-human` merge requests before it claims one eligible open
@@ -170,27 +181,36 @@ Each applied pass also checks the newest default-branch pipeline. If it is
 request instead of leaving it only reported; the runner still never approves
 or merges that MR.
 
-Each failed transition leaves the safe failure reason
-as an issue comment; worker output remains only in the private log. Every pass prints its start, worker diagnostic, exit
-status, and waiting state. The tmux shell stays open after a failure and
-`pipe-pane` appends all output to the private log path printed by the wrapper.
+Each failed transition leaves the safe failure reason as an issue comment;
+worker output is tagged in the user journal. Every pass logs its start, worker
+diagnostic, exit status, and waiting state. A runner blocker fails the service
+so its status is visible to systemd; the timer schedules the next pass normally.
 An issue-level failure that the runner has successfully marked as
-`agent::failed` exits `0`, so the loop proceeds to its next pass and can select
-another issue. Only a runner-level blocker exits nonzero and stops the loop.
+`agent::failed` exits `1`, preserving the failure for systemd and the journal.
+The timer continues to schedule future passes. Other runner-level blockers also
+exit nonzero.
 If another local
-process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
-that error and stops instead of quietly retrying against the held lock.
+process holds `.agent-work.lock`, `run-next` exits `75`; the service records
+the temporary failure and the timer remains enabled.
 
 Each successful bounded pass leaves the dedicated checkout on its deterministic
-issue branch. Before the wrapper sleeps, it switches that *dedicated* checkout
+issue branch. Before the service exits, it switches that *dedicated* checkout
 back to `main` and fast-forwards it, preserving the issue branch and its MR for
 human review. If that reset fails (for example, because the checkout is dirty),
-the wrapper stops and leaves the diagnostic visible. A direct `agent-work`
-launch from an issue branch still intentionally fails rather than silently
-changing branches.
+the service fails and records the diagnostic in the journal. A direct
+`agent-work` launch from an issue branch still intentionally fails rather than
+silently changing branches.
 
-Stop the loop with `Ctrl-C`, or from another terminal:
+Follow activity and inspect failures with `journalctl`:
 
 ```bash
-tmux kill-session -t agent-work
+journalctl --user -t "$unit_name" -f
+journalctl --user -u "$unit_name.service" --since today
+systemctl --user status "$unit_name.timer" "$unit_name.service"
+```
+
+Stop the timer from another terminal:
+
+```bash
+systemctl --user disable --now "$unit_name.timer"
 ```

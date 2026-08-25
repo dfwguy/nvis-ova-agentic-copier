@@ -654,7 +654,7 @@ def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> N
         write_stderr=errors.append,
     )
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert errors == [
         "Checking for next work item...",
         "Failure: Codex exited with status 7; no exact published MR evidence",

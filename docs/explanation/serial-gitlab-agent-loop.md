@@ -44,10 +44,16 @@ review only after it is conflict-free again.
 Serial is a deliberate local safety boundary, not distributed coordination. A
 nonblocking local project lock is an explicit temporary failure: `run-next`
 prints the held-lock error and returns exit `75` when another local run holds
-it. The tmux wrapper reports every pass and its next poll rather than leaving
-an attached pane blank, and it stops on exit `75` rather than retrying a known
-held lock. There is no GitLab compare-and-set claim, so a second host or timer can
-race label changes; operators must run exactly one timer instance per project.
+it. Each project owns a user-level `<project-slug>-agent-work.timer`, which
+starts one bounded service pass at a time. Its fixed randomized delay spreads
+the initial activation for different repositories over a 60-second window.
+The wrapper sends lifecycle and runner output through `logger` with the same
+project-specific tag, which operators can inspect with `journalctl --user -t
+<project-slug>-agent-work`. Linger keeps that user service manager available after logout, so
+operators enable it with `sudo loginctl enable-linger "$USER"` and verify
+`Linger=yes`. There is no GitLab compare-and-set claim, so a second host or
+timer can race label changes; operators must run exactly one timer instance per
+project.
 
 Unattended publication is an explicit, one-time operational decision, not an
 effect of installing a timer. Its least-privilege readiness signal is that the

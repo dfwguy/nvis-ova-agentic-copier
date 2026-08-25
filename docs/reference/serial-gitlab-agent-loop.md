@@ -34,7 +34,8 @@ agent work; issue title, body, and labels are untrusted task data.
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one eligible open issue per invocation. |
 | Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. |
-| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. A held lock is an error with temporary-failure exit `75`; start one tmux loop for the project. |
+| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. A held lock is an error with temporary-failure exit `75`; enable one `<project-slug>-agent-work.timer` for each project. |
+| Scheduling and logs | `<project-slug>-agent-work.timer` starts the one-shot service after boot and five minutes after starting a pass, including after a failed pass. `RandomizedDelaySec=60s` with `FixedRandomDelay=true` gives each project's timer a stable, per-unit startup jitter. Its wrapper tags output with `logger -t <project-slug>-agent-work`, readable with `journalctl --user -t <project-slug>-agent-work`. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
 | Human gate | The agent never approves or merges. |
 | `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
@@ -75,7 +76,7 @@ The `agent::running` label is the GitLab lock. `agent::running`,
 `agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
 After adding the lock, the runner
 refetches all running issues and starts work only when its selected issue is
-the sole lock. Do not start another tmux loop for the same project.
+the sole lock. Do not enable another user timer for the same project.
 
 If an eligible issue's deterministic branch conflicts before it is claimed,
 the runner marks that issue `agent::failed` and records the safe reason. When
@@ -85,16 +86,17 @@ failure is scoped to that issue, so later loop passes can select another item.
 
 JSON output contains only `outcome`, `issue_iid`, `branch`, and
 `merge_request_url`; it never includes issue text, prompts, command output, or
-credentials. Exit `0` means idle, previewed, verified for human review, or a
-failure already recorded against one issue. Exit `1` means a runner blocker
-that could not be safely recorded against an issue; a held local lock exits
-`75` (temporary failure); invalid command usage exits `2`. The interactive
-tmux loop must print a visible pass state before it sleeps so an attached pane
-is never blank.
+credentials. Exit `0` means idle, previewed, or verified for human review.
+Exit `1` means a runner failure, including a failure recorded against one
+issue; a held local lock exits `75` (temporary failure); invalid command usage
+exits `2`. The user service
+logs each pass state and runner diagnostic with the `agent-work` tag. Linger
+must be enabled (`sudo loginctl enable-linger "$USER"`) and verified as
+`Linger=yes` for the user timer to continue after logout.
 
 ## Unattended publication gate
 
-Do not start the tmux Ralph loop for `--apply` until all of these are true:
+Do not enable the `<project-slug>-agent-work.timer` for `--apply` until all of these are true:
 
 - A human has explicitly authorized unattended publication for the repository.
 - The loop uses a constrained identity and one checkout-scoped lock.
@@ -107,6 +109,8 @@ Do not start the tmux Ralph loop for `--apply` until all of these are true:
   `protected_branches` value is omitted or a typed empty array, or
   `applies_to_all_protected_branches` is true. A branch-scoped rule does not
   satisfy this gate.
+- User linger is enabled and `loginctl show-user "$USER" --property=Linger`
+  reports `Linger=yes`.
 
 The effective access classification is a one-time readiness gate for this
 constrained path. It must accept exactly 30 as Developer and reject `unknown`,

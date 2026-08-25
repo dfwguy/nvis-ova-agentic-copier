@@ -6,8 +6,8 @@ If you're starting a new Python project on the team, this is the starting point.
 
 ## Start the GitLab issue loop
 
-After the repository safeguards are ready, install the runner and start its
-single tmux Ralph loop. Each open issue becomes a branch and
+After the repository safeguards are ready, install the runner and enable its
+single user-level systemd timer. Each open issue becomes a branch and
 human-gated merge request; the loop never approves or merges it.
 
 ```bash
@@ -18,9 +18,18 @@ Run it from the repository it should operate on. The runner confirms that
 checkout with `git pull --ff-only`, derives the GitLab host and project from
 `origin`, and confirms that project through GitLab before it selects work. Use
 the [serial loop how-to](docs/how-to/setup-serial-gitlab-agent-loop.md)
-to start the tmux loop: it persists redacted worker diagnostics to a private
-log and leaves the pane open after failure. A held checkout lock stops the loop
-with temporary-failure exit `75`.
+to install the timer. It sends redacted worker diagnostics through `logger`,
+so they are easy to read with `journalctl --user -t agentic-copier-agent-work`.
+Enable linger
+and verify it before relying on the timer after logout:
+
+```bash
+sudo loginctl enable-linger "$USER"
+loginctl show-user "$USER" --property=Linger
+```
+
+The second command must report `Linger=yes`. A held checkout lock fails that
+pass with temporary-failure exit `75`.
 
 ## Documentation
 
@@ -42,9 +51,8 @@ uv run agent-work run-next --json
 ```
 
 An applied run uses the current repository checkout, opens one MR, and
-stops at `awaiting_human`. It never approves or merges. Run the Ralph loop in
-one lingering tmux session only after a human explicitly authorizes
-publication. For a constrained
+stops at `awaiting_human`. It never approves or merges. Enable the user-level
+systemd timer only after a human explicitly authorizes publication. For a constrained
 identity with effective API access exactly `30` (Developer), the
 Developer-readable readiness preflight uses the authoritative effective
 default-branch response to require no Developer push, no Developer merge, and
