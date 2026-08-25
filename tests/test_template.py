@@ -326,6 +326,26 @@ def test_claude_commands_present(generated_project: Path) -> None:
     assert len(command_files) > 0
 
 
+def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
+    """Test that generated projects review shared timed test results before finalization."""
+    agent = generated_project / ".claude" / "agents" / "nonfunctional-review.md"
+    command = generated_project / ".claude" / "commands" / "nonfunctional-review.md"
+    workflow = (generated_project / "CLAUDE.md").read_text()
+
+    assert agent.exists()
+    assert command.exists()
+    assert "test-results.xml" in agent.read_text()
+    assert "time" in agent.read_text()
+    assert "performance" in agent.read_text().lower()
+    assert "subagent_type: nonfunctional-review" in command.read_text()
+    assert "/nonfunctional-review" in workflow
+    assert workflow.index("/nonfunctional-review") < workflow.index("/tdd-finalizer")
+    assert (
+        "nonfunctional-review"
+        in (generated_project / ".claude" / "agents" / "tdd-finalizer.md").read_text()
+    )
+
+
 def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the Diataxis documentation gates."""
     docs_process = generated_project / "docs" / "diataxis.md"

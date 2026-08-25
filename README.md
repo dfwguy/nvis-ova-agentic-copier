@@ -239,8 +239,9 @@ flowchart TD
     architect --> writer["/diataxis-writer"]
     red --> green["/tdd-green"]
     writer --> green
-    green --> implementation["/tdd-judge"]
-    green --> documentation["/diataxis-judge"]
+    green --> nonfunctional["/nonfunctional-review"]
+    nonfunctional --> implementation["/tdd-judge"]
+    nonfunctional --> documentation["/diataxis-judge"]
     implementation --> approved[Both judges approve]
     documentation --> approved
     approved --> quality["/judge-quality"]
@@ -266,6 +267,7 @@ flowchart TD
 | `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
 | `/diataxis-writer`| Creates or updates `docs/` content as a Tutorial, How-to guide, Reference, or Explanation            | Touch code, tests, or README.md             |
 | `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
+| `/nonfunctional-review` | Reviews shared JUnit test timing output and applicable performance evidence before final validation | Rerun tests, edit code, or defer review to the end |
 | `/tdd-judge`      | Runs applicable Python/Bash lint + non-test pre-commit checks                                          | Fix issues — rejects and routes back        |
 | `/diataxis-judge` | Read-only validation that `docs/` is accurate and fits its Diátaxis category                          | Edit docs, code, tests, or README.md        |
 | `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
@@ -299,7 +301,7 @@ In a Claude Code session opened against the generated project:
 /architect add a CSV ingestion module that streams rows into the existing pipeline
 ```
 
-Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/tdd-judge` and `/diataxis-judge` run together before the remaining gates, including `/cli-syntax-judge`. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
+Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/nonfunctional-review` reads the shared `test-results.xml` JUnit output, including per-test durations, before `/tdd-judge` and `/diataxis-judge` run in parallel. This gives performance requirements evidence before finalization rather than adding an end-only check. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
 
 The same agents and commands also live in **this** repo's `.claude/`, so you can dogfood the workflow while developing the template itself.
 

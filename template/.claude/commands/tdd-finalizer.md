@@ -8,7 +8,7 @@ Task: $ARGUMENTS
 
 Required briefing:
 - The intended commit message subject + body (the subagent will create the commit).
-- Confirmation that prior gates (`tdd-judge`, `diataxis-judge`, `judge-quality`, `judge-test`, `judge-cicd`, `cli-syntax-judge`, `filesystem-structure-judge`) approved and `tdd-document` finished.
+- Confirmation that prior gates (`nonfunctional-review`, `tdd-judge`, `diataxis-judge`, `judge-quality`, `judge-test`, `judge-cicd`, `cli-syntax-judge`, `filesystem-structure-judge`) approved and `tdd-document` finished.
 - The `Created <N> GitLab issues` line from `/judge-quality` **and** `/judge-test` (or `No new issues`), plus created issue URLs and any unfiled findings, so the final report and MR can link them accurately.
 - Whether the change touched any user-facing surface (CLI flags, scripts, slash commands, setup steps, env vars). The subagent will verify `README.md` reflects it and reject back to `tdd-document` if not.
 - Do NOT pass `--no-verify` or `--no-gpg-sign`. Reject if a hook fails for a real (non-auto-fix) reason.

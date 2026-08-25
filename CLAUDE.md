@@ -136,7 +136,10 @@ New feature or non-trivial change
                        ▼
    /tdd-green          ← Implementer: minimal code to pass tests
         │
-        ├─────────────────────────┐   (run in parallel after tdd-green)
+        ▼
+ /nonfunctional-review  ← reviews shared test-results.xml timing evidence
+        │
+        ├─────────────────────────┐   (run in parallel after non-functional review)
         ▼                         ▼
    /tdd-judge              /diataxis-judge
    implementation checks    docs/ accuracy + Diátaxis fit
@@ -165,6 +168,7 @@ New feature or non-trivial change
 | `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
 | `/diataxis-writer` | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
 | `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
+| `/nonfunctional-review` | Reviews shared JUnit test output and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | `/tdd-judge` | Runs applicable Python/Bash lint and non-test pre-commit checks | Fix issues — rejects and routes back |
 | `/diataxis-judge` | Read-only validation that `docs/` is technically accurate and fits its Diátaxis category | Edit docs, code, tests, or README.md |
 | `/judge-quality` | Pure code review: design, clarity, language conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
@@ -175,7 +179,10 @@ New feature or non-trivial change
 | `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
 | `/tdd-finalizer` | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; hand off without waiting for merge) | Fix issues — rejects and routes back |
 
-Never write implementation before a failing test exists. Never merge without all validators approving.
+Never write implementation before a failing test exists. `/tdd-green` shares
+Python timings through the gitignored `test-results.xml` JUnit artifact, and
+`/nonfunctional-review` consumes it before later validation. Never merge
+without all validators approving.
 
 ### Diátaxis documentation
 
@@ -209,7 +216,7 @@ inspection is the only work that does not require publication.
 
 ### Routing back on rejection
 
-When a judge (`/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/filesystem-structure-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge (`/nonfunctional-review`, `/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/filesystem-structure-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
 ### `/judge-quality` and `/judge-test` severity model
 
