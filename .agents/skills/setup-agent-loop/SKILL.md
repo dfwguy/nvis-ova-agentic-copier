@@ -94,10 +94,13 @@ before checking repository safeguards.
    from the current directory and `origin`.
    The local lock is always the fixed, gitignored
    `<checkout>/.agent-work.lock`; it is not configurable.
-3. Check `uv`, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
+3. Check `uv`, `codex`, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
    dedicated checkout as a preview smoke test. Do not use a separately installed
    bare `agent-work` executable, which can be stale. Install and enable the
    documented project-named user-level timer only after explicit authorization.
+   Record the absolute executable paths for both `uv` and `codex` in its
+   environment file; the wrapper makes only the recorded Codex directory
+   available to the worker, rather than relying on the service manager PATH.
    Its service wrapper uses `logger` with the matching `<project-slug>-agent-work`
    tag, so operators use `journalctl --user -t <project-slug>-agent-work` for pass
    output and failures. The timer uses a stable randomized delay to spread

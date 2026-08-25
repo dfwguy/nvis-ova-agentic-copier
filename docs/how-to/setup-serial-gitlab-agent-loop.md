@@ -130,13 +130,14 @@ Run the runner through the repository's own UV environment. This prevents one
 repository's version from replacing another repository's runner:
 
 ```bash
-command -v uv logger systemctl loginctl
+command -v uv codex logger systemctl loginctl
 uv run agent-work --help
 ```
 
 The user service manager does not inherit an interactive shell's `PATH`.
-Record the absolute `uv` executable in its environment file instead of relying
-on a later command lookup.
+Record the absolute `uv` and Codex executables in its environment file instead
+of relying on a later command lookup. The wrapper adds the recorded Codex
+directory to its process `PATH` before it starts the runner.
 
 Run the read-only preview from that checkout:
 
@@ -160,10 +161,15 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   printf '%s\n' 'uv must resolve to an executable absolute path' >&2
   exit 1
 fi
+codex_path="$(command -v codex)"
+if [[ "$codex_path" != /* || ! -x "$codex_path" ]]; then
+  printf '%s\n' 'codex must resolve to an executable absolute path' >&2
+  exit 1
+fi
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\n' "$PWD" "$uv_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_CODEX=%q\n' "$PWD" "$uv_path" "$codex_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 sudo loginctl enable-linger "$USER"
 loginctl show-user "$USER" --property=Linger
@@ -186,7 +192,7 @@ the user manager socket is unavailable. Do not retry through another
 credential, host, or execution environment. Report that first non-secret
 diagnostic to the operator.
 
-### Repair an installation missing `AGENT_WORK_UV`
+### Repair an installation missing `AGENT_WORK_UV` or `AGENT_WORK_CODEX`
 
 For a timer installed by an earlier version, stop it before rewriting its
 environment file, then enable it again:
@@ -203,7 +209,12 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   printf '%s\n' 'uv must resolve to an executable absolute path' >&2
   exit 1
 fi
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\n' "$PWD" "$uv_path" >"$HOME/.config/$unit_name/agent-work.env"
+codex_path="$(command -v codex)"
+if [[ "$codex_path" != /* || ! -x "$codex_path" ]]; then
+  printf '%s\n' 'codex must resolve to an executable absolute path' >&2
+  exit 1
+fi
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_CODEX=%q\n' "$PWD" "$uv_path" "$codex_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"
@@ -249,6 +260,32 @@ journalctl --user -t "$unit_name" -f
 journalctl --user -u "$unit_name.service" --since today
 systemctl --user status "$unit_name.timer" "$unit_name.service"
 ```
+
+### Repair unavailable user-journal access
+
+The wrapper writes through `logger`, which stores the unit's messages in the
+host journal. If `journalctl --user` reports insufficient permissions, the
+timer can still be working: the account cannot read the journal files. Inspect
+the logs immediately with sudo:
+
+```bash
+sudo journalctl -t "$unit_name" --since today
+```
+
+To grant the current user lasting journal read access, ask the host
+administrator to add it to `systemd-journal`. This group can read host-wide
+journal messages, not only this unit's logs. Start a new login session after
+the change, then verify the membership and retry the normal commands:
+
+```bash
+sudo usermod -aG systemd-journal "$USER"
+# Log out and back in before continuing.
+id -nG
+journalctl --user -t "$unit_name" --since today
+```
+
+If the new group does not appear in `id -nG`, do not change journald storage
+settings; resolve the account/session membership with the host administrator.
 
 Stop the timer from another terminal:
 

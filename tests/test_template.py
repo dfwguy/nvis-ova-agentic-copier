@@ -2431,12 +2431,24 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
         in root_service
     )
     assert '"${AGENT_WORK_UV}" run agent-work run-next --apply --json' in wrapper
+    assert "AGENT_WORK_CODEX is not set" in wrapper
+    assert "AGENT_WORK_CODEX is not executable" in wrapper
+    assert 'codex_directory="$(dirname "$AGENT_WORK_CODEX")"' in wrapper
+    assert 'export PATH="$codex_directory:$PATH"' in wrapper
     assert (
         "AGENT_WORK_UV=%q"
         in (
             project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
         ).read_text()
     )
+    how_to = (
+        project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
+    ).read_text()
+    assert 'codex_path="$(command -v codex)"' in how_to
+    assert "codex must resolve to an executable absolute path" in how_to
+    assert "AGENT_WORK_CODEX=%q" in how_to
+    assert "Repair unavailable user-journal access" in how_to
+    assert "systemd-journal" in how_to
     assert (
         "Failed to connect to bus"
         in (
