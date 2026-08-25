@@ -11,12 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Check before every response**: does `CONTRIBUTING.md` exist at the repo root?
 
 - **Missing** → the GitLab repo has not been locked down (no branch protection, no MR approval rules). Until that file exists:
-  1. Open the response with: `⚠ Repo not locked down — run /setup-repo to configure branch protection.`
+  1. Open the response with: `⚠ Repo not locked down — follow .claude/repository-setup.md to configure branch protection.`
   2. Close the response with the same line.
-  3. Do not mutate the repository, commit, push, or open an MR. Reading code is fine. `/setup-repo` is the sole bounded mutation while this gate is active: it publishes its own merge request for `CONTRIBUTING.md` after applying the required protections and approval policy. No other repository mutation is allowed.
+  3. Do not mutate the repository, commit, push, or open an MR. The repository setup procedure is the sole bounded mutation while this gate is active: it publishes its own merge request for `CONTRIBUTING.md` after applying the required protections and approval policy. No other repository mutation is allowed.
 - **Present** → the gate is silent; proceed normally.
 
-`/setup-repo` writes `CONTRIBUTING.md`, applies GitLab branch protection + MR approval rules, and publishes its own merge request in one bounded flow. It is idempotent — re-running safely reuses its setup branch and MR when appropriate.
+`.claude/repository-setup.md` defines the procedure that writes `CONTRIBUTING.md`, applies GitLab branch protection + MR approval rules, and publishes its own merge request in one bounded flow. It is idempotent — re-running safely reuses its setup branch and MR when appropriate.
 
 **Never run `glab mr approve` or `glab mr revoke`.** AI must not approve or unapprove merge requests; approval is reserved for human reviewers. `.claude/settings.json` denies these commands as a backstop.
 
@@ -106,7 +106,7 @@ Language-agnostic guidance lives in `.claude/guidance/`. Read the relevant file 
 
 ## Multi-Agent Workflow
 
-All feature work routes through explicit agents invoked as slash commands (e.g. `/architect`). Definitions are in `.claude/commands/`.
+All feature work routes through explicit agent roles. Their definitions are in `.claude/agents/`.
 
 **Scope: this workflow supports Python and Bash projects.** First detect the
 language of the changed files, then run the matching gates: Python uses `uv`,
@@ -124,7 +124,7 @@ the affected language, replaced rule, actual paths, and rationale.
 
 ### Routing
 
-The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. Branch protection on `main` (configured by `/setup-repo`) enforces this: direct pushes are rejected and merging requires approval, so even a one-line edit must go through a feature branch and an MR. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
+The branch / commit / push / MR / return-to-main lifecycle is described once in `.claude/git-flow.md` (loaded above) and applies to **every** change — TDD or trivial. Branch protection on `main` (configured by the repository setup procedure) enforces this: direct pushes are rejected and merging requires approval, so even a one-line edit must go through a feature branch and an MR. The diagram below covers the in-between "do the work" phase for non-trivial changes; the surrounding lifecycle steps come from `git-flow.md`.
 
 ```text
 New feature or non-trivial change
@@ -133,34 +133,34 @@ New feature or non-trivial change
    (Step 1 of git-flow.md: ensure feature branch)
         │
         ▼
-   /architect          ← design first; skippable only for trivial single-function changes
+   Architect           ← design first; skippable only for trivial single-function changes
         │
         ▼
-   /tdd-red ──────────── /diataxis-writer
+   Test Writer ───────── Documentation Writer
    failing tests          docs/ content by Diátaxis category
         │                         │
         └──────────────┬──────────┘
                        ▼
-   /tdd-green          ← Implementer: minimal code to pass tests
+   Implementer          ← minimal code to pass tests
         │
         ▼
- /nonfunctional-review  ← reviews shared test-results.xml timing evidence
+ Non-functional Reviewer ← reviews shared test-results.xml timing evidence
         │
         ├─────────────────────────┐   (run in parallel after non-functional review)
         ▼                         ▼
-   /tdd-judge              /diataxis-judge
+   Implementation Judge     Documentation Judge
    implementation checks    docs/ accuracy + Diátaxis fit
         │                         │
         └──────────────┬──────────┘
                        ▼
         ├───────── fan out after both approve ─────────┐
         ▼                                               ▼
- /judge-quality  /judge-test  /tdd-document  /judge-cicd  /cli-syntax-judge  /filesystem-structure-judge
+ Quality Judge  Test Judge  README Reviewer  CI/CD Judge  CLI Judge  Filesystem Judge
         │                                               │
         └──────── every final gate approves ───────────┘
                                ▼
-        /tdd-finalizer  ← always runs; verifies README, runs tox once across supported versions,
-                          and commits locally. Rejects to /tdd-document if README is stale.
+        Finalizer        ← always runs; verifies README, runs tox once across supported versions,
+                          and commits locally. Rejects to the README Reviewer if README is stale.
         │
         ▼
    (Steps 3–4 of git-flow.md: push + open/update MR, then hand off as awaiting_human)
@@ -170,25 +170,25 @@ New feature or non-trivial change
 
 | Command | Role | Does not |
 |---------|------|----------|
-| `/architect` | Designs modules, data structures, dependency boundaries | Write code or tests |
-| `/remediate` | Establishes an evidence-backed standards baseline and sequences existing-repository fixes | Edit files, weaken standards, or declare skipped gates passing |
-| `/tdd-red` | Writes failing tests; stops at Red | Touch implementation |
-| `/diataxis-writer` | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
-| `/tdd-green` | Minimal implementation to reach Green | Refactor or add untested features |
-| `/nonfunctional-review` | Reviews shared JUnit test output and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
-| `/tdd-judge` | Runs applicable Python/Bash lint and non-test pre-commit checks | Fix issues — rejects and routes back |
-| `/diataxis-judge` | Read-only validation that `docs/` is technically accurate and fits its Diátaxis category | Edit docs, code, tests, or README.md |
-| `/judge-quality` | Pure code review: design, clarity, language conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
-| `/judge-test` | Pure test-quality review (Sonnet): meaningful assertions and language-appropriate test practices; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
-| `/tdd-document` | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
-| `/judge-cicd` | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
-| `/cli-syntax-judge` | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
-| `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
-| `/tdd-finalizer` | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; hand off without waiting for merge) | Fix issues — rejects and routes back |
+| Architect | Designs modules, data structures, dependency boundaries | Write code or tests |
+| Remediator | Establishes an evidence-backed standards baseline and sequences existing-repository fixes | Edit files, weaken standards, or declare skipped gates passing |
+| Test Writer | Writes failing tests; stops at Red | Touch implementation |
+| Documentation Writer | Creates or updates `docs/` pages as Tutorials, How-to guides, Reference, or Explanation | Touch code, tests, or README.md |
+| Implementer | Minimal implementation to reach Green | Refactor or add untested features |
+| Non-functional Reviewer | Reviews shared JUnit test output and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
+| Implementation Judge | Runs applicable Python/Bash lint and non-test pre-commit checks | Fix issues — rejects and routes back |
+| Documentation Judge | Read-only validation that `docs/` is technically accurate and fits its Diátaxis category | Edit docs, code, tests, or README.md |
+| Quality Judge | Pure code review: design, clarity, language conventions; tags findings **Major** / **Minor** / **Existing** | Run any tooling |
+| Test Judge | Pure test-quality review (Sonnet): meaningful assertions and language-appropriate test practices; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
+| README Reviewer | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
+| CI/CD Judge | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
+| CLI Judge | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
+| Filesystem Judge | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
+| Finalizer | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; hand off without waiting for merge) | Fix issues — rejects and routes back |
 
-Never write implementation before a failing test exists. `/tdd-green` shares
+Never write implementation before a failing test exists. The Implementer shares
 Python timings through the gitignored `test-results.xml` JUnit artifact, and
-`/nonfunctional-review` consumes it before later validation. Never merge
+the Non-functional Reviewer consumes it before later validation. Never merge
 without all validators approving.
 
 ### Diátaxis documentation
@@ -202,7 +202,7 @@ the required workflow and category guidance.
 
 ### Remediation workflow
 
-When a user says **“Make this repo meet our standards”**, run `/remediate`.
+When a user says **“Make this repo meet our standards”**, use the Remediator role.
 It treats this repository's checked-in standards as the baseline unless the
 user supplies another written standard, audits each applicable gate, and turns
 every gap into a small normal-workflow slice. Do not claim compliance merely
@@ -223,19 +223,19 @@ inspection is the only work that does not require publication.
 
 ### Routing back on rejection
 
-When a judge (`/nonfunctional-review`, `/tdd-judge`, `/diataxis-judge`, `/judge-quality`, `/judge-test`, `/judge-cicd`, `/cli-syntax-judge`, `/filesystem-structure-judge`, `/tdd-finalizer`) rejects and routes back to an earlier agent, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
+When a judge rejects and routes work back to an earlier role, proceed automatically — **do not pause to ask the user for approval**. Rejection-and-reroute is a normal part of the workflow, not a decision point. Only stop for the user when there is a genuine decision to make (ambiguous design, conflicting requirements, destructive action). A judge's structured reroute is not such a decision.
 
-### `/judge-quality` and `/judge-test` severity model
+### Quality and Test Judge severity model
 
-`/judge-quality` (production-code review) and `/judge-test` (test-quality review) both classify every finding as one of:
+The Quality Judge (production-code review) and Test Judge (test-quality review) both classify every finding as one of:
 
-- **Major** — defect in this change. Triggers `Overall: Reject`. `/judge-quality` reroutes to `/tdd-green`; `/judge-test` reroutes to `/tdd-red` (test defects belong to the Test Writer) — except a `/judge-test` Major flagging production code that *forces* internal mocking (a missing injection point), which reroutes to `/tdd-green`. Reroutes are automatic.
+- **Major** — defect in this change. Triggers `Overall: Reject`. The Quality Judge reroutes to the Implementer; the Test Judge reroutes to the Test Writer (test defects belong to the Test Writer) — except a Test Judge Major flagging production code that *forces* internal mocking (a missing injection point), which reroutes to the Implementer. Reroutes are automatic.
 - **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent creates a GitLab issue from the Bug template, records the finding, and labels it `type::quality`. Does not reroute. See "GitLab issues" below.
 - **Existing** — pre-existing issue in surrounding code or tests, not introduced by this change. Surfaced verbatim in the judge's report but not automatically filed. Never blocks.
 
-Both reviewers end their return note with `Created <N> GitLab issues` (or `No new issues`). The main agent forwards those lines to `/tdd-finalizer` so the finalizer can link the issues from the MR. Existing findings are surfaced to the user at the same point but are not automatically filed.
+Both reviewers end their return note with `Created <N> GitLab issues` (or `No new issues`). The main agent forwards those lines to the Finalizer so it can link the issues from the MR. Existing findings are surfaced to the user at the same point but are not automatically filed.
 
-`/judge-quality` owns production-code quality; `/judge-test` runs on **Sonnet** and owns test quality — meaningful assertions that would catch a wrong implementation, `pytest.mark.parametrize`, `hypothesis` for pure functions, order-independence (`pytest-randomly`), dependency-injected test doubles instead of internal-symbol patching, and test hygiene. The two reviewers do not duplicate each other.
+The Quality Judge owns production-code quality; the Test Judge runs on **Sonnet** and owns test quality — meaningful assertions that would catch a wrong implementation, `pytest.mark.parametrize`, `hypothesis` for pure functions, order-independence (`pytest-randomly`), dependency-injected test doubles instead of internal-symbol patching, and test hygiene. The two reviewers do not duplicate each other.
 
 ## GitLab issues
 

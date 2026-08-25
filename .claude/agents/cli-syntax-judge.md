@@ -44,7 +44,7 @@ For each changed CLI, check the following:
 
 Return `Overall: Approve` only when all applicable requirements pass, or when
 the change introduces no CLI surface. Otherwise return `Overall: Reject`,
-identify each blocking file and issue, and route to `/tdd-green`.
+identify each blocking file and issue, and route to the Implementer.
 
 ## Constraints
 
@@ -53,4 +53,4 @@ identify each blocking file and issue, and route to `/tdd-green`.
 - Judge the current diff and enough surrounding implementation, tests, and
   documentation to validate the interface contract.
 - Do not duplicate general Python code-quality or test-quality findings owned
-  by `/judge-quality` and `/judge-test`.
+  by the Quality Judge and the Test Judge.

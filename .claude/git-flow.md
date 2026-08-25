@@ -3,7 +3,7 @@
 Every repository change must publish a feature branch and open or update a
 merge request. A publication failure is a blocker, not completion.
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** `/setup-repo` configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
+Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** The repository setup procedure configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
 
 **Do not confuse a readiness or policy audit with publication permission.** A
 Developer may be unable to read Maintainer-only policy settings and still be
@@ -139,7 +139,7 @@ git rev-parse --abbrev-ref HEAD
    ```bash
    uv run pytest
    ```
-   Fast smoke test. The full `tox` matrix still runs at `/tdd-finalizer` time.
+   Fast smoke test. The full `tox` matrix still runs at finalization time.
 
 2. **GitLab pipeline health on `main`**:
    ```bash
@@ -189,7 +189,7 @@ network path otherwise. The other commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
-- **Non-trivial change** → route through the TDD agents (`/architect` → `/tdd-red` → `/tdd-green` → `/tdd-judge` → parallel judges → `/tdd-finalizer`). See `CLAUDE.md` → "Multi-Agent Workflow" for the routing.
+- **Non-trivial change** → route through the TDD agents (Architect → Test Writer → Implementer → Implementation Judge → parallel judges → Finalizer). See `CLAUDE.md` → "Multi-Agent Workflow" for the routing.
 - **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) → the main agent may edit + commit on the feature branch without spawning the TDD subagents. Pre-commit hooks still run at commit time, so quality gates are not bypassed.
 
 Either path lands at a local commit on the feature branch. **Both paths then proceed to Step 3 (push + MR)** — the trivial shortcut skips the TDD subagents, not the merge request.

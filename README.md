@@ -81,7 +81,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
 - **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, Bash syntax, [ShellCheck](https://www.shellcheck.net/), local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, `type_check`, and `shellcheck`. Code quality and JUnit reports are wired into GitLab's UI.
-- **Portable agentic workflow** — `AGENTS.md`, `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that route feature work through architecture, TDD, Diátaxis documentation, judges, and finalization for Claude Code, Codex, and Pi (see [Agentic workflow](#agentic-workflow) below).
+- **Portable agentic workflow** — `AGENTS.md`, `.claude/agents/`, `.agents/skills/`, `docs/`, and a `CLAUDE.md` that route feature work through architecture, TDD, Diátaxis documentation, judges, finalization, and portable validation skills for Claude Code, Codex, and Pi (see [Agentic workflow](#agentic-workflow) below).
 - **Coding conventions** baked into `CLAUDE.md`: standard Python `src/<package>/` layout, a single public Bash `bin/<tool>` CLI backed by `src/` or `lib/`, pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
@@ -169,9 +169,11 @@ setup, but must be corrected before the corresponding commit or GitLab action.
 my-project/
 ├── .claude/
 │   ├── agents/            # Claude Code agent definitions (architect, tdd-*, diataxis-*, judge-*)
-│   ├── commands/          # Slash-command wrappers for the agents above
 │   ├── project.md         # Project-specific Claude context (loaded by CLAUDE.md)
 │   └── settings.json
+├── .agents/
+│   └── skills/
+│       └── lint-and-pytest/ # Portable Python validation skill
 ├── .gitlab-ci.yml         # GitLab CI pipeline (ruff, pytest+tox, yamllint, ty)
 ├── .pre-commit-config.yaml
 ├── CLAUDE.md              # Conventions + agentic workflow instructions
@@ -190,22 +192,22 @@ my-project/
 
 ## Agentic workflow
 
-The generated project ships with a portable multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. Claude Code reads the agents under `.claude/agents/` and slash commands under `.claude/commands/`; Codex and Pi follow the same shared contract in `AGENTS.md` using equivalent native capabilities. Its model policy enables the most-capable, balanced, and fast tiers, while reserving the frontier tier (including Fable) so it cannot be selected until an inference-hub mapping is reviewed.
+The generated project ships with a portable multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. Claude Code reads the role definitions under `.claude/agents/`; Codex and Pi follow the same shared contract in `AGENTS.md` using equivalent native capabilities. The portable `lint-and-pytest` skill under `.agents/skills/` provides an explicit validation entry point. Its model policy enables the most-capable, balanced, and fast tiers, while reserving the frontier tier (including Fable) so it cannot be selected until an inference-hub mapping is reviewed.
 
 The workflow detects the changed files before validation. Python uses `uv`, `ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed changes run both applicable paths. The judges use the matching language conventions, including strict Bash scripting, quoted expansions, safe mutation defaults, and isolated shell tests.
 
-Before finalization, `/filesystem-structure-judge` verifies that Python
+Before finalization, the Filesystem Judge verifies that Python
 production code is in `src/<package>/` with tests in `tests/`, and that each
 Bash application exposes one public `bin/<tool>` CLI backed by `src/` or
 `lib/`. Any different layout must be documented in `.claude/project.md` with
 the replaced rule, paths, and rationale.
 
-CLI changes also pass `/cli-syntax-judge`, which applies the [Command Line
+CLI changes also pass the CLI Judge, which applies the [Command Line
 Interface Guidelines](https://clig.dev): one entry point, verb-based
 subcommands, `--json`/`--help`/`--apply` support, dry-run safety by default,
 non-interactive flag inputs, structured JSON output, and consistent exit codes.
 
-> Background reading: [Claude Code overview](https://docs.claude.com/en/docs/claude-code/overview), [subagents](https://docs.claude.com/en/docs/claude-code/sub-agents), [slash commands](https://docs.claude.com/en/docs/claude-code/slash-commands).
+> Background reading: [Claude Code overview](https://docs.claude.com/en/docs/claude-code/overview), [subagents](https://docs.claude.com/en/docs/claude-code/sub-agents), [agent roles](https://docs.claude.com/en/docs/claude-code/slash-commands).
 
 ### Git-flow lifecycle
 
@@ -242,23 +244,23 @@ hard to scan in prose or a text diagram.
 
 ```mermaid
 flowchart TD
-    branch[Feature branch] --> architect["/architect"]
-    architect --> red["/tdd-red"]
-    architect --> writer["/diataxis-writer"]
-    red --> green["/tdd-green"]
+    branch[Feature branch] --> architect["Architect"]
+    architect --> red["Test Writer"]
+    architect --> writer["Documentation Writer"]
+    red --> green["Implementer"]
     writer --> green
-    green --> nonfunctional["/nonfunctional-review"]
-    nonfunctional --> implementation["/tdd-judge"]
-    nonfunctional --> documentation["/diataxis-judge"]
+    green --> nonfunctional["Non-functional Reviewer"]
+    nonfunctional --> implementation["Implementation Judge"]
+    nonfunctional --> documentation["Documentation Judge"]
     implementation --> approved[Both judges approve]
     documentation --> approved
-    approved --> quality["/judge-quality"]
-    approved --> tests["/judge-test"]
-    approved --> landing["/tdd-document"]
-    approved --> cicd["/judge-cicd"]
-    approved --> cli["/cli-syntax-judge"]
-    approved --> filesystem["/filesystem-structure-judge"]
-    quality --> finalizer["/tdd-finalizer"]
+    approved --> quality["Quality Judge"]
+    approved --> tests["Test Judge"]
+    approved --> landing["README Reviewer"]
+    approved --> cicd["CI/CD Judge"]
+    approved --> cli["CLI Judge"]
+    approved --> filesystem["Filesystem Judge"]
+    quality --> finalizer["Finalizer"]
     tests --> finalizer
     landing --> finalizer
     cicd --> finalizer
@@ -271,20 +273,20 @@ flowchart TD
 
 | Command           | Role                                                                                                  | Does **not**                                |
 |-------------------|-------------------------------------------------------------------------------------------------------|---------------------------------------------|
-| `/architect`      | Designs modules, data structures, dependency boundaries                                               | Write code or tests                         |
-| `/tdd-red`        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
-| `/diataxis-writer`| Creates or updates `docs/` content as a Tutorial, How-to guide, Reference, or Explanation            | Touch code, tests, or README.md             |
-| `/tdd-green`      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
-| `/nonfunctional-review` | Reviews shared JUnit test timing output and applicable performance evidence before final validation | Rerun tests, edit code, or defer review to the end |
-| `/tdd-judge`      | Runs applicable Python/Bash lint + non-test pre-commit checks                                          | Fix issues — rejects and routes back        |
-| `/diataxis-judge` | Read-only validation that `docs/` is accurate and fits its Diátaxis category                          | Edit docs, code, tests, or README.md        |
-| `/judge-quality`  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
-| `/judge-test`     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
-| `/tdd-document`   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
-| `/judge-cicd`     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
-| `/cli-syntax-judge` | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
-| `/filesystem-structure-judge` | Verifies the Python/Bash filesystem layout or a documented project-specific deviation | Edit files, run tooling, or review non-layout quality |
-| `/tdd-finalizer`  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); hand off without waiting for merge) | Fix issues — rejects and routes back        |
+| the Architect      | Designs modules, data structures, dependency boundaries                                               | Write code or tests                         |
+| the Test Writer        | Writes failing tests; stops at Red                                                                    | Touch implementation                        |
+| the Documentation Writer| Creates or updates `docs/` content as a Tutorial, How-to guide, Reference, or Explanation            | Touch code, tests, or README.md             |
+| the Implementer      | Minimal implementation to reach Green                                                                 | Refactor or add untested features           |
+| the Non-functional Reviewer | Reviews shared JUnit test timing output and applicable performance evidence before final validation | Rerun tests, edit code, or defer review to the end |
+| the Implementation Judge      | Runs applicable Python/Bash lint + non-test pre-commit checks                                          | Fix issues — rejects and routes back        |
+| the Documentation Judge | Read-only validation that `docs/` is accurate and fits its Diátaxis category                          | Edit docs, code, tests, or README.md        |
+| the Quality Judge  | Pure code review: design, clarity, conventions; tags findings **Major** / **Minor** / **Existing**    | Run any tooling                             |
+| the Test Judge     | Pure test-quality review (Sonnet): meaningful assertions, parametrize, hypothesis, order-independence, no internal mocking; tags **Major** / **Minor** / **Existing** | Run any tooling; review production code     |
+| the README Reviewer   | Ensures `README.md` accurately orients people landing on the project                                  | Touch `docs/`, code, tests, or agent definitions |
+| the CI/CD Judge     | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via [`glab`](https://gitlab.com/gitlab-org/cli) | Edit CI config or retry pipelines           |
+| the CLI Judge | Validates CLI changes against [CLIG](https://clig.dev) and the required safety, output, and exit-code contracts | Run tooling or edit files |
+| the Filesystem Judge | Verifies the Python/Bash filesystem layout or a documented project-specific deviation | Edit files, run tooling, or review non-layout quality |
+| the Finalizer  | Verifies README sync, runs applicable Python/Bash gates, commits locally; the orchestrator then follows [`git-flow.md`](template/.claude/git-flow.md) Steps 3–4 (push + MR via [`glab`](https://gitlab.com/gitlab-org/cli); hand off without waiting for merge) | Fix issues — rejects and routes back        |
 
 **Two non-negotiable rules:**
 
@@ -293,9 +295,9 @@ flowchart TD
 
 ### Quality finding severity
 
-The two quality reviewers — `/judge-quality` (production code) and `/judge-test` (tests) — classify every finding as one of:
+The two quality reviewers — the Quality Judge (production code) and the Test Judge (tests) — classify every finding as one of:
 
-- **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes automatically: `/judge-quality` to `/tdd-green`, `/judge-test` to `/tdd-red` (test defects belong to the Test Writer).
+- **Major** — defect in this change. The judge returns `Overall: Reject` and the orchestrator reroutes automatically: the Quality Judge to the Implementer, the Test Judge to the Test Writer (test defects belong to the Test Writer).
 - **Minor** — non-blocking style or clarity nit caused or kept by this change. The main agent files it with the GitLab Bug template and links it from the merge request.
 - **Existing** — pre-existing issue in surrounding code or tests that this change did not introduce. Surfaced in the report but not automatically filed.
 
@@ -306,12 +308,12 @@ The two quality reviewers — `/judge-quality` (production code) and `/judge-tes
 In a Claude Code session opened against the generated project:
 
 ```text
-/architect add a CSV ingestion module that streams rows into the existing pipeline
+Use the Architect role to add a CSV ingestion module that streams rows into the existing pipeline
 ```
 
-Claude designs the module, then `/tdd-red` and `/diataxis-writer` run together. After implementation, `/nonfunctional-review` reads the shared `test-results.xml` JUnit output, including per-test durations, before `/tdd-judge` and `/diataxis-judge` run in parallel. This gives performance requirements evidence before finalization rather than adding an end-only check. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
+Claude designs the module, then the Test Writer and the Documentation Writer run together. After implementation, the Non-functional Reviewer reads the shared `test-results.xml` JUnit output, including per-test durations, before the Implementation Judge and the Documentation Judge run in parallel. This gives performance requirements evidence before finalization rather than adding an end-only check. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
 
-The same agents and commands also live in **this** repo's `.claude/`, so you can dogfood the workflow while developing the template itself.
+The same roles and skills also live in **this** repo's `.claude/` and `.agents/` directories, so you can dogfood the workflow while developing the template itself.
 
 ## Updating an existing project
 

@@ -25,15 +25,15 @@ when it directly helps their reader task.
 For non-trivial changes, documentation is built and checked as a first-class
 part of the TDD workflow:
 
-1. After `/architect`, run `/tdd-red` and `/diataxis-writer` in parallel. The
-   Test Writer creates and confirms failing behavior tests; the Diátaxis Writer
+1. After the Architect, run the Test Writer and the Documentation Writer in parallel. The
+   Test Writer creates and confirms failing behavior tests; the Documentation Writer
    creates or updates the affected `docs/` page in the right quadrant.
-2. `/tdd-green` implements only enough code to satisfy the Red tests.
-3. Run `/tdd-judge` and `/diataxis-judge` in parallel. The first validates the
+2. The Implementer implements only enough code to satisfy the Red tests.
+3. Run the Implementation Judge and the Documentation Judge in parallel. The first validates the
    implementation; the second verifies the documentation's Diátaxis category,
    completeness, technical accuracy, links, and consistency with the change.
 4. Continue to the quality, test, CI/CD, and landing-README gates only after
-   both judges approve. `/tdd-document` owns `README.md` only: it makes sure a
+   both judges approve. The README Reviewer owns `README.md` only: it makes sure a
    new visitor can understand and start using the project.
 
 The Diátaxis Writer edits `docs/` only. The Diátaxis Judge is read-only and

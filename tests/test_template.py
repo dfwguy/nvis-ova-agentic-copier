@@ -333,28 +333,44 @@ def test_claude_agents_present(generated_project: Path) -> None:
     assert len(agent_files) > 0
 
 
-def test_claude_commands_present(generated_project: Path) -> None:
-    """Test that Claude command definitions are included in the generated project."""
+def test_claude_commands_are_absent(generated_project: Path) -> None:
+    """Generated projects use agent roles without Claude command wrappers."""
     commands_dir = generated_project / ".claude" / "commands"
-    assert commands_dir.is_dir()
-    command_files = list(commands_dir.glob("*.md"))
-    assert len(command_files) > 0
+    assert not commands_dir.exists()
+
+
+def test_lint_and_pytest_skill_is_generated(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Generated projects ship the portable Python validation skill."""
+    skill = generated_project / ".agents" / "skills" / "lint-and-pytest" / "SKILL.md"
+    source_skill = project_root / ".agents" / "skills" / "lint-and-pytest" / "SKILL.md"
+
+    assert skill.exists()
+    assert skill.read_text() == source_skill.read_text()
+    content = skill.read_text()
+    for requirement in (
+        "uv run ruff check",
+        "uv run ruff format --check",
+        "uv run ty check",
+        "uv run pytest",
+        "uv run tox",
+        "Do not apply automatic fixes",
+    ):
+        assert requirement in content
 
 
 def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects review shared timed test results before finalization."""
     agent = generated_project / ".claude" / "agents" / "nonfunctional-review.md"
-    command = generated_project / ".claude" / "commands" / "nonfunctional-review.md"
     workflow = (generated_project / "CLAUDE.md").read_text()
 
     assert agent.exists()
-    assert command.exists()
     assert "test-results.xml" in agent.read_text()
     assert "time" in agent.read_text()
     assert "performance" in agent.read_text().lower()
-    assert "subagent_type: nonfunctional-review" in command.read_text()
-    assert "/nonfunctional-review" in workflow
-    assert workflow.index("/nonfunctional-review") < workflow.index("/tdd-finalizer")
+    assert "Non-functional Reviewer" in workflow
+    assert workflow.index("Non-functional Reviewer") < workflow.index("Finalizer")
     assert (
         "nonfunctional-review"
         in (generated_project / ".claude" / "agents" / "tdd-finalizer.md").read_text()
@@ -366,7 +382,6 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     docs_process = generated_project / "docs" / "diataxis.md"
     writer = generated_project / ".claude" / "agents" / "diataxis-writer.md"
     judge = generated_project / ".claude" / "agents" / "diataxis-judge.md"
-    command = generated_project / ".claude" / "commands" / "diataxis-writer.md"
 
     assert docs_process.exists()
     assert "Tutorials" in docs_process.read_text()
@@ -376,9 +391,8 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "include a Mermaid flowchart" in docs_process.read_text()
     assert writer.exists()
     assert judge.exists()
-    assert command.exists()
-    assert "/tdd-red" in command.read_text()
-    assert "/tdd-judge" in judge.read_text()
+    assert "Test Writer" in docs_process.read_text()
+    assert "Implementation Judge" in judge.read_text()
     assert (
         "README.md"
         in (generated_project / ".claude" / "agents" / "tdd-document.md").read_text()
@@ -391,12 +405,10 @@ def test_generated_remediation_workflow_and_documentation_index_rule(
 ) -> None:
     """Test that projects can remediate themselves and keep documentation navigable."""
     remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
-    remediation_command = generated_project / ".claude" / "commands" / "remediate.md"
     documentation_process = generated_project / "docs" / "diataxis.md"
     documentation_index = generated_project / "docs" / "README.md"
 
     assert remediation_agent.exists()
-    assert remediation_command.exists()
     assert "Make this repo meet our standards" in remediation_agent.read_text()
     assert "baseline" in remediation_agent.read_text()
     assert "Documentation index" in documentation_process.read_text()
@@ -434,23 +446,21 @@ def test_explanations_and_readme_use_mermaid_for_relationship_diagrams(
     ).read_text()
 
     assert "```mermaid\nflowchart" in readme
-    assert 'filesystem["/filesystem-structure-judge"]' in readme
+    assert 'filesystem["Filesystem Judge"]' in readme
     assert "```mermaid\nflowchart" in explanation
 
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the CLI syntax design gate."""
     agent = generated_project / ".claude" / "agents" / "cli-syntax-judge.md"
-    command = generated_project / ".claude" / "commands" / "cli-syntax-judge.md"
     workflow = (generated_project / "CLAUDE.md").read_text()
 
     assert agent.exists()
-    assert command.exists()
     assert "https://clig.dev" in agent.read_text()
     assert "--json" in agent.read_text()
     assert "--apply" in agent.read_text()
-    assert "/cli-syntax-judge" in workflow
-    assert "/architect" in workflow
+    assert "CLI Judge" in workflow
+    assert "Architect" in workflow
 
 
 def test_claude_git_flow_present(generated_project: Path) -> None:
@@ -505,9 +515,9 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
     assert "project_slug: my_test_project" in content
 
 
-def test_setup_repo_command_present(generated_project: Path) -> None:
-    """Test that the /setup-repo command is included so new projects can lock down GitLab."""
-    setup_repo = generated_project / ".claude" / "commands" / "setup-repo.md"
+def test_repository_setup_procedure_present(generated_project: Path) -> None:
+    """New projects retain a portable procedure for GitLab lock-down."""
+    setup_repo = generated_project / ".claude" / "repository-setup.md"
     assert setup_repo.exists()
     content = setup_repo.read_text()
     assert "protected_branches" in content
@@ -519,7 +529,7 @@ def test_setup_repo_command_present(generated_project: Path) -> None:
 
 def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> None:
     """Test that lock-down setup cannot strand CONTRIBUTING.md on local main."""
-    content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()
+    content = (generated_project / ".claude" / "repository-setup.md").read_text()
     mr_lookup = (
         'glab api --hostname "$GITLAB_HOST" '
         '"projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&'
@@ -586,9 +596,9 @@ def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
     assert "git pull --ff-only" in wrapper
 
 
-def test_setup_repo_interviews_self_approval(generated_project: Path) -> None:
-    """Test that /setup-repo interviews the user before blocking self-approval (single-user opt-out)."""
-    content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()
+def test_repository_setup_interviews_self_approval(generated_project: Path) -> None:
+    """The setup procedure asks about self-approval for single-user projects."""
+    content = (generated_project / ".claude" / "repository-setup.md").read_text()
     assert "AskUserQuestion" in content, (
         "setup-repo must interview the user about self-approval"
     )
@@ -607,7 +617,7 @@ def test_generated_claude_md_has_lockdown_gate(generated_project: Path) -> None:
     content = (generated_project / "CLAUDE.md").read_text()
     assert "Repo lock-down gate" in content
     assert "CONTRIBUTING.md" in content
-    assert "/setup-repo" in content
+    assert ".claude/repository-setup.md" in content
     assert "glab mr approve" in content
     assert "sole bounded mutation" in content
     assert "publishes its own merge request" in content
@@ -677,21 +687,16 @@ def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
 ) -> None:
     """Test that generated projects review layout before finalization."""
     agent = generated_project / ".claude" / "agents" / "filesystem-structure-judge.md"
-    command = (
-        generated_project / ".claude" / "commands" / "filesystem-structure-judge.md"
-    )
     workflow = (generated_project / "CLAUDE.md").read_text()
     finalizer = (
         generated_project / ".claude" / "agents" / "tdd-finalizer.md"
     ).read_text()
 
     assert agent.exists()
-    assert command.exists()
     assert "src/" in agent.read_text()
     assert "bin/" in agent.read_text()
     assert "Filesystem structure deviations" in agent.read_text()
-    assert "subagent_type: filesystem-structure-judge" in command.read_text()
-    assert "/filesystem-structure-judge" in workflow
+    assert "Filesystem Judge" in workflow
     assert "`filesystem-structure-judge` approves" in finalizer
 
 
@@ -704,12 +709,9 @@ def test_source_and_template_workflows_wire_the_filesystem_structure_judge(
         workflow = (root / "CLAUDE.md").read_text()
         finalizer = (root / ".claude" / "agents" / "tdd-finalizer.md").read_text()
         agent = root / ".claude" / "agents" / "filesystem-structure-judge.md"
-        command = root / ".claude" / "commands" / "filesystem-structure-judge.md"
 
         assert agent.exists()
-        assert command.exists()
-        assert "subagent_type: filesystem-structure-judge" in command.read_text()
-        assert "/filesystem-structure-judge" in workflow
+        assert "Filesystem Judge" in workflow
         assert "`filesystem-structure-judge` approves" in finalizer
 
 
@@ -1140,8 +1142,7 @@ def test_architect_records_deferred_scope_with_gitlab_feature_issues(
     project_root: Path, root: str
 ) -> None:
     """Test that deferred design scope is captured as GitLab Feature work."""
-    command = project_root / root / ".claude" / "commands" / "architect.md"
-    content = command.read_text()
+    content = (project_root / root / ".claude" / "agents" / "architect.md").read_text()
 
     for requirement in (
         "GitLab Feature issue",
@@ -1162,12 +1163,12 @@ def test_architect_records_deferred_scope_with_gitlab_feature_issues(
     "command_name",
     ("judge-quality.md", "judge-test.md"),
 )
-def test_review_commands_file_minor_findings_as_gitlab_bug_issues(
+def test_review_agents_file_minor_findings_as_gitlab_bug_issues(
     project_root: Path, command_name: str
 ) -> None:
     """Test that approving reviews hand off Bug issues in a machine-readable form."""
     for root in (project_root, project_root / "template"):
-        content = (root / ".claude" / "commands" / command_name).read_text()
+        content = (root / ".claude" / "agents" / command_name).read_text()
 
         for requirement in (
             "Bug template",
@@ -1241,11 +1242,11 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
     "relative_path",
     (
         ".claude/git-flow.md",
-        ".claude/commands/setup-repo.md",
-        ".claude/commands/architect.md",
-        ".claude/commands/judge-quality.md",
-        ".claude/commands/judge-test.md",
-        ".claude/commands/tdd-finalizer.md",
+        ".claude/repository-setup.md",
+        ".claude/agents/architect.md",
+        ".claude/agents/judge-quality.md",
+        ".claude/agents/judge-test.md",
+        ".claude/agents/tdd-finalizer.md",
     ),
 )
 def test_root_and_template_share_the_same_phase_zero_workflow_contract(
@@ -2384,7 +2385,7 @@ def test_legacy_local_queue_contracts_and_commands_are_absent(
         ".agents/contracts/work-item-contract.md",
         ".agents/contracts/work-item-result-v1.schema.json",
         ".agents/contracts/work-item-filesystem-v1.schema.json",
-        ".claude/commands/work-item.md",
+        ".claude/work-item.md",
         "src/agent_work/filesystem.py",
         "src/agent_work/prompt.py",
         "src/agent_work/result.py",

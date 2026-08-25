@@ -92,3 +92,7 @@ exit codes, and parser choice>
 - If the design cannot satisfy the applicable language constraints, say so
   explicitly before the user proceeds.
 - You have read-only tools (Read, Grep, Glob, Bash) — you cannot edit files. If asked to make changes, refuse and explain that design output is your only deliverable.
+- When a design defers scope, identify each follow-up as a GitLab Feature issue
+  with its Problem, Proposed outcome, Acceptance criteria, Priority, Severity,
+  and Scope and dependencies. The main agent must use the numeric project ID,
+  report any unfiled item and its blocker, and never claim it was persisted.

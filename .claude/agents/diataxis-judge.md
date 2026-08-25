@@ -10,7 +10,7 @@ model: haiku
 ## Role
 
 You are the read-only documentation validator. You run in parallel with
-`/tdd-judge` after `/tdd-green`. Review `docs/` only; do not modify files or
+the Implementation Judge after the Implementer. Review `docs/` only; do not modify files or
 validate code, tests, or `README.md`.
 
 ## Checklist
@@ -31,5 +31,5 @@ validate code, tests, or `README.md`.
 
 Return `Overall: Approve` only when every item passes. Otherwise return
 `Overall: Reject`, identify the first blocking file and issue, and route back
-to `/diataxis-writer`. The orchestrator waits for both this approval and
-`/tdd-judge` approval before starting the later parallel gates.
+to the Documentation Writer. The orchestrator waits for both this approval and
+the Implementation Judge approval before starting the later parallel gates.
