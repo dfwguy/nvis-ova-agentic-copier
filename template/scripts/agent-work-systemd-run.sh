@@ -25,11 +25,19 @@ if [[ -z "${AGENT_WORK_CHECKOUT:-}" ]]; then
   log "stopped: AGENT_WORK_CHECKOUT is not set"
   exit 2
 fi
+if [[ -z "${AGENT_WORK_UV:-}" ]]; then
+  log "stopped: AGENT_WORK_UV is not set"
+  exit 2
+fi
+if [[ ! -x "$AGENT_WORK_UV" ]]; then
+  log "stopped: AGENT_WORK_UV is not executable: $AGENT_WORK_UV"
+  exit 2
+fi
 
 cd "$AGENT_WORK_CHECKOUT"
 log "starting applied pass in $AGENT_WORK_CHECKOUT"
 
-if run_logged uv run agent-work run-next --apply --json; then
+if run_logged "${AGENT_WORK_UV}" run agent-work run-next --apply --json; then
   :
 else
   status=$?

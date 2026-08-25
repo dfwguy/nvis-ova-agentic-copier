@@ -2430,6 +2430,25 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
         "EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env"
         in root_service
     )
+    assert '"${AGENT_WORK_UV}" run agent-work run-next --apply --json' in wrapper
+    assert (
+        "AGENT_WORK_UV=%q"
+        in (
+            project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
+        ).read_text()
+    )
+    assert (
+        "Failed to connect to bus"
+        in (
+            project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
+        ).read_text()
+    )
+    for git_flow in (
+        project_root / ".claude" / "git-flow.md",
+        project_root / "template" / ".claude" / "git-flow.md",
+    ):
+        assert "--jq" not in git_flow.read_text()
+        assert "jq -er" in git_flow.read_text()
     assert "Unit=agentic-copier-agent-work.service" in root_timer
     assert (
         "Environment=AGENT_WORK_LOG_TAG={{ project_slug }}-agent-work"
@@ -2447,7 +2466,21 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
     assert "FixedRandomDelay=true" in generated_timer
     assert 'log_tag="${AGENT_WORK_LOG_TAG:-agent-work}"' in wrapper
     assert 'logger -s -t "$log_tag"' in wrapper
-    assert "uv run agent-work run-next --apply --json" in wrapper
+
+
+def test_shared_workflow_uses_documented_recovery_before_reporting_blockers(
+    project_root: Path,
+) -> None:
+    """Known environment failures use their documented recovery path first."""
+    for workflow in (
+        project_root / "CLAUDE.md",
+        project_root / "template" / "CLAUDE.md",
+    ):
+        content = workflow.read_text()
+
+        assert "documented recovery" in content
+        assert "bounded recovery path is exhausted" in content
+        assert "stop\nthat work item" not in content
 
 
 def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:

@@ -134,6 +134,10 @@ command -v uv logger systemctl loginctl
 uv run agent-work --help
 ```
 
+The user service manager does not inherit an interactive shell's `PATH`.
+Record the absolute `uv` executable in its environment file instead of relying
+on a later command lookup.
+
 Run the read-only preview from that checkout:
 
 ```bash
@@ -151,13 +155,22 @@ evidence.
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+uv_path="$(command -v uv)"
+if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
+  printf '%s\n' 'uv must resolve to an executable absolute path' >&2
+  exit 1
+fi
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\n' "$PWD" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\n' "$PWD" "$uv_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 sudo loginctl enable-linger "$USER"
 loginctl show-user "$USER" --property=Linger
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"
 ```
@@ -167,6 +180,34 @@ manager available after logout, so the timer can continue to run. Use a
 dedicated checkout, not an operator's active checkout. The rendered unit name
 is `<project-slug>-agent-work`; this repository's is
 `agentic-copier-agent-work`.
+
+If `systemctl --user` still reports `Failed to connect to bus`, stop the setup:
+the user manager socket is unavailable. Do not retry through another
+credential, host, or execution environment. Report that first non-secret
+diagnostic to the operator.
+
+### Repair an installation missing `AGENT_WORK_UV`
+
+For a timer installed by an earlier version, stop it before rewriting its
+environment file, then enable it again:
+
+```bash
+unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+systemctl --user disable --now "$unit_name.timer"
+uv_path="$(command -v uv)"
+if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
+  printf '%s\n' 'uv must resolve to an executable absolute path' >&2
+  exit 1
+fi
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\n' "$PWD" "$uv_path" >"$HOME/.config/$unit_name/agent-work.env"
+chmod 600 "$HOME/.config/$unit_name/agent-work.env"
+systemctl --user daemon-reload
+systemctl --user enable --now "$unit_name.timer"
+```
 
 Each pass checks GitLab for `agent::running` and conflicted
 `agent::awaiting-human` merge requests before it claims one eligible open
