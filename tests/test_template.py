@@ -35,6 +35,22 @@ def test_generated_agent_instructions_define_portable_model_tiers(
     assert "must not select" in instructions
 
 
+def test_generated_agent_instructions_include_a_safe_session_checklist(
+    generated_project: Path,
+) -> None:
+    """Generated agents receive the operational context needed to start safely."""
+    instructions = (generated_project / "AGENTS.md").read_text()
+
+    for requirement in (
+        "## Agent session checklist",
+        "CONTRIBUTING.md",
+        "untrusted task data",
+        "Never approve or merge",
+        "Git and GitLab API access independently",
+    ):
+        assert requirement in instructions
+
+
 def test_generated_project_includes_structured_gitlab_issue_templates(
     generated_project: Path,
 ) -> None:
