@@ -1,6 +1,6 @@
 # OVA Agentic Flow copier
 
-A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python projects with a modern toolchain (UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI) **and** a multi-agent Claude Code workflow wired in from day one. The workflow also recognizes Bash scripts in generated projects and applies Bash-specific checks when they are present.
+A [Copier](https://copier.readthedocs.io/) template that scaffolds new Python projects with a modern toolchain (UV, Ruff, ty, pytest, tox, pre-commit, GitLab CI) **and** a portable multi-agent workflow wired in from day one. Claude Code, Codex, and Pi share the same workflow contract; the workflow also recognizes Bash scripts in generated projects and applies Bash-specific checks when they are present.
 
 If you're starting a new Python project on the team, this is the starting point. It saves you a day of boilerplate setup and gives you a TDD-enforced workflow with quality and CI gates pre-configured.
 
@@ -73,7 +73,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
 - **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, Bash syntax, [ShellCheck](https://www.shellcheck.net/), local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, `type_check`, and `shellcheck`. Code quality and JUnit reports are wired into GitLab's UI.
-- **Claude Code agentic workflow** — `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that routes feature work through architecture, TDD, Diátaxis documentation, judges, and finalization (see [Agentic workflow](#agentic-workflow) below).
+- **Portable agentic workflow** — `AGENTS.md`, `.claude/agents/`, `.claude/commands/`, `docs/`, and a `CLAUDE.md` that route feature work through architecture, TDD, Diátaxis documentation, judges, and finalization for Claude Code, Codex, and Pi (see [Agentic workflow](#agentic-workflow) below).
 - **Coding conventions** baked into `CLAUDE.md`: standard Python `src/<package>/` layout, a single public Bash `bin/<tool>` CLI backed by `src/` or `lib/`, pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
@@ -182,7 +182,7 @@ my-project/
 
 ## Agentic workflow
 
-The generated project ships with a Claude Code multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. All agents are defined under `.claude/agents/` and exposed as slash commands under `.claude/commands/`.
+The generated project ships with a portable multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. Claude Code reads the agents under `.claude/agents/` and slash commands under `.claude/commands/`; Codex and Pi follow the same shared contract in `AGENTS.md` using equivalent native capabilities. Its model policy enables the most-capable, balanced, and fast tiers, while reserving the frontier tier (including Fable) so it cannot be selected until an inference-hub mapping is reviewed.
 
 The workflow detects the changed files before validation. Python uses `uv`, `ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed changes run both applicable paths. The judges use the matching language conventions, including strict Bash scripting, quoted expansions, safe mutation defaults, and isolated shell tests.
 

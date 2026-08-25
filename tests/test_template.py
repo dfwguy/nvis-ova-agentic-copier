@@ -21,6 +21,20 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+def test_generated_agent_instructions_define_portable_model_tiers(
+    generated_project: Path,
+) -> None:
+    """Generated instructions support the declared agent frontends and tiers."""
+    instructions = (generated_project / "AGENTS.md").read_text()
+
+    for frontend in ("Claude Code", "Codex", "Pi"):
+        assert frontend in instructions
+    for tier in ("Most capable", "Balanced", "Fast", "Frontier"):
+        assert tier in instructions
+    assert "Fable" in instructions
+    assert "must not select" in instructions
+
+
 def test_generated_project_includes_structured_gitlab_issue_templates(
     generated_project: Path,
 ) -> None:
