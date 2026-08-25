@@ -165,6 +165,9 @@ approves or merges an MR. Each failed transition leaves the safe failure reason
 as an issue comment; worker output remains only in the private log. Every pass prints its start, worker diagnostic, exit
 status, and waiting state. The tmux shell stays open after a failure and
 `pipe-pane` appends all output to the private log path printed by the wrapper.
+An issue-level failure that the runner has successfully marked as
+`agent::failed` exits `0`, so the loop proceeds to its next pass and can select
+another issue. Only a runner-level blocker exits nonzero and stops the loop.
 If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
 that error and stops instead of quietly retrying against the held lock.

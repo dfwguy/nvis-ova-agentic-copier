@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ from .models import (
     GitPublicationEvidence,
     MergeRequestEvidence,
 )
-from .serial import RunNextDependencies
+from .serial import BranchConflict, RunNextDependencies
 
 
 class AdapterError(RuntimeError):
@@ -433,7 +434,7 @@ class ServiceCheckout:
         if self._run("status", "--porcelain"):
             raise AdapterError("the refreshed checkout is dirty")
 
-    def ensure_branch_available(self, branch: str) -> None:
+    def ensure_branch_available(self, branch: str, default_branch: str) -> None:
         """Reject a conflicting deterministic branch before issue claim."""
         if re.fullmatch(r"agent/issue-[1-9][0-9]*", branch) is None:
             raise AdapterError("issue branch name is invalid")
@@ -453,7 +454,36 @@ class ServiceCheckout:
             accepted=(0, 2),
         )
         if local or remote:
-            raise AdapterError("the deterministic issue branch already exists")
+            merge_base = self._run_command(
+                (
+                    "git",
+                    "-C",
+                    str(self.path),
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{branch}",
+                    f"origin/{default_branch}",
+                )
+            )
+            if merge_base.returncode not in (0, 1):
+                raise AdapterError("checkout validation failed")
+            if local and not remote and merge_base.returncode == 0:
+                cleanup = shlex.join(
+                    (
+                        "git",
+                        "-C",
+                        str(self.path),
+                        "branch",
+                        "-d",
+                        branch,
+                    )
+                )
+                raise BranchConflict(
+                    "the deterministic issue branch already exists, is already "
+                    "merged and absent from origin; if it is no longer needed, "
+                    f"remove it with: {cleanup}"
+                )
+            raise BranchConflict("the deterministic issue branch already exists")
 
     def prepare_branch(self, branch: str, default_branch: str) -> Path:
         """Create one branch already checked for conflicts before issue claim."""
