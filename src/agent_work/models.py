@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 PROJECT_LOCK_FILENAME = ".agent-work.lock"
 
@@ -103,6 +105,15 @@ class MergeRequestEvidence(BaseModel):
     has_conflicts: bool = False
 
 
+class MergeRequestDraft(BaseModel):
+    """Worker-supplied metadata for trusted merge-request publication."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(min_length=1, max_length=20_000)
+
+
 @dataclass(frozen=True)
 class GitPublicationEvidence:
     """Local and remote tips for one deterministic issue branch."""
@@ -123,6 +134,22 @@ class AgentInvocation:
     def diagnostic(self) -> str:
         """Return the available redacted output in command-stream order."""
         return "\n".join(part for part in (self.stdout, self.stderr) if part)
+
+    def merge_request_draft(self) -> MergeRequestDraft:
+        """Parse the sole delimited JSON draft emitted by the worker."""
+        matches = re.findall(
+            r"<agent-work-merge-request>\s*(.*?)\s*</agent-work-merge-request>",
+            self.stdout,
+            flags=re.DOTALL,
+        )
+        if len(matches) != 1:
+            raise ValueError("worker did not return one merge-request draft")
+        try:
+            return MergeRequestDraft.model_validate(json.loads(matches[0]))
+        except (json.JSONDecodeError, ValidationError) as error:
+            raise ValueError(
+                "worker returned an invalid merge-request draft"
+            ) from error
 
 
 @dataclass(frozen=True)

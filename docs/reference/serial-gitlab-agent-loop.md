@@ -54,6 +54,13 @@ conflict-remediation pass. It returns the issue to human review only after the
 updated MR is conflict-free and all publication evidence is exact. The runner
 still never approves or merges the MR.
 
+Codex works only in the prepared branch, which the runner created from the
+default branch. It does not commit, push, or create an MR. Instead it returns a
+delimited JSON draft containing the MR title and description. The trusted
+runner validates that draft, stages and commits the working-tree changes, pushes
+the deterministic branch, appends `Closes #IID`, creates the MR through the
+numeric project endpoint, and then performs the exact-evidence check.
+
 The `agent::running` label is the GitLab lock. `agent::running`,
 `agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
 After adding the lock, the runner

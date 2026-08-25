@@ -14,6 +14,7 @@ from agent_work.models import (
     GitLabIssue,
     GitLabProject,
     GitPublicationEvidence,
+    MergeRequestDraft,
     MergeRequestEvidence,
 )
 from agent_work.serial import (
@@ -115,6 +116,14 @@ class _GitLab:
         del mr_iid, issue_iid
         return self._closes_issue
 
+    def create_merge_request(
+        self, issue: GitLabIssue, project: GitLabProject, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence:
+        del project, draft
+        self.events.append(("create_merge_request", issue.iid))
+        self._publication = _publication(issue)
+        return self._publication
+
 
 class _Checkout:
     """Semantic checkout boundary fake; it never touches a real repository."""
@@ -162,6 +171,10 @@ class _Checkout:
         self.events.append("publication_tip")
         return GitPublicationEvidence(local_sha=self.sha, remote_sha=self.sha)
 
+    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
+        del branch, draft
+        self.events.append("publish")
+
 
 class _Invoke:
     """Agent boundary fake that records whether work was actually invoked."""
@@ -185,7 +198,13 @@ class _Invoke:
             self.events.append("invoke")
         if self.error is not None:
             raise self.error
-        return AgentInvocation(returncode=self.returncode)
+        return AgentInvocation(
+            returncode=self.returncode,
+            stdout=(
+                '<agent-work-merge-request>{"title":"Worker change",'
+                '"description":"Validated change."}</agent-work-merge-request>'
+            ),
+        )
 
 
 def _publication(issue: GitLabIssue) -> MergeRequestEvidence:
@@ -358,16 +377,10 @@ def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> N
     ]
 
 
-@pytest.mark.parametrize(
-    ("has_publication", "closes_issue"), [(False, True), (True, False)]
-)
-def test_applied_issue_fails_when_publication_is_missing_or_does_not_close_issue(
-    has_publication: bool, closes_issue: bool
-) -> None:
+def test_applied_issue_fails_when_existing_publication_does_not_close_issue() -> None:
     issue = _issue(iid=123)
-    evidence = _publication(issue) if has_publication else None
     gitlab, checkout, invoke, lock = (
-        _GitLab(eligible=(issue,), publication=evidence, closes_issue=closes_issue),
+        _GitLab(eligible=(issue,), publication=_publication(issue), closes_issue=False),
         _Checkout(),
         _Invoke(),
         _Lock(),
@@ -453,7 +466,12 @@ def test_applied_run_reclaims_a_conflicted_human_review_mr_for_remediation() -> 
 
     assert report.outcome == "awaiting_human"
     assert gitlab.events == [("running", issue.iid), ("awaiting_human", issue.iid)]
-    assert checkout.events == ["applied_preflight", "resume_branch", "publication_tip"]
+    assert checkout.events == [
+        "applied_preflight",
+        "resume_branch",
+        "publish",
+        "publication_tip",
+    ]
     assert invoke.calls == [(checkout.path, 30)]
 
 
