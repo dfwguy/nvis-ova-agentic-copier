@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import (
+    AgentInvocation,
     GitLabIssue,
     GitLabProject,
     GitPublicationEvidence,
@@ -48,6 +49,9 @@ class GitLabQueue(Protocol):
     def mark_failed(self, issue: GitLabIssue) -> None:
         """Project one issue as failed."""
 
+    def comment_failed(self, issue: GitLabIssue, reason: str) -> None:
+        """Leave the safe failure reason on one failed issue."""
+
     def publication(self, branch: str) -> MergeRequestEvidence | None:
         """Return the merge request associated with a branch, if any."""
 
@@ -78,7 +82,7 @@ class ServiceCheckout(Protocol):
 class AgentInvoker(Protocol):
     """One noninteractive agent process boundary."""
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> int:
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> AgentInvocation:
         """Invoke the agent once and return its process status."""
 
 
@@ -159,6 +163,7 @@ def _finish_from_evidence(
     dependencies: RunNextDependencies,
     issue: GitLabIssue,
     project: GitLabProject,
+    invocation: AgentInvocation | None = None,
 ) -> RunReport:
     branch = _branch(issue)
     try:
@@ -170,8 +175,24 @@ def _finish_from_evidence(
     except RuntimeError:
         merge_request = None
     if merge_request is None:
-        dependencies.gitlab.mark_failed(issue)
-        return RunReport(outcome="failed", issue_iid=issue.iid, branch=branch)
+        failure_reason = "no exact published MR evidence"
+        if invocation is not None:
+            status = (
+                "failed to start"
+                if invocation.returncode is None
+                else (f"exited with status {invocation.returncode}")
+            )
+            failure_reason = f"Codex {status}; {failure_reason}"
+        _mark_failed(dependencies, issue, failure_reason)
+        return RunReport(
+            outcome="failed",
+            issue_iid=issue.iid,
+            branch=branch,
+            failure_reason=failure_reason,
+            agent_diagnostic=invocation.diagnostic
+            if invocation and invocation.diagnostic
+            else None,
+        )
     dependencies.gitlab.mark_awaiting_human(issue)
     return RunReport(
         outcome="awaiting_human",
@@ -179,6 +200,14 @@ def _finish_from_evidence(
         branch=branch,
         merge_request_url=merge_request.web_url,
     )
+
+
+def _mark_failed(
+    dependencies: RunNextDependencies, issue: GitLabIssue, reason: str
+) -> None:
+    """Project a failure and retain its safe reason in the GitLab issue."""
+    dependencies.gitlab.mark_failed(issue)
+    dependencies.gitlab.comment_failed(issue, reason)
 
 
 def _preview(
@@ -249,18 +278,25 @@ def run_next(
             checkout = dependencies.checkout.prepare_branch(
                 branch, project.default_branch
             )
-        except RuntimeError:
-            dependencies.gitlab.mark_failed(issue)
-            return RunReport(outcome="failed", issue_iid=issue.iid, branch=branch)
+        except RuntimeError as error:
+            failure_reason = f"checkout preparation failed: {error}"
+            _mark_failed(dependencies, issue, failure_reason)
+            return RunReport(
+                outcome="failed",
+                issue_iid=issue.iid,
+                branch=branch,
+                failure_reason=failure_reason,
+            )
+        invocation: AgentInvocation | None = None
         try:
             report_progress(f"Starting agent for issue #{issue.iid} on {branch}.")
-            dependencies.invoke.invoke(
+            invocation = dependencies.invoke.invoke(
                 checkout,
                 _prompt(issue, project, branch),
                 timeout_seconds,
             )
-        except RuntimeError:
+        except RuntimeError as error:
             # A timed-out or failed agent may still have published successfully.
             # GitLab and Git evidence, not process status, decide the outcome.
-            pass
-        return _finish_from_evidence(dependencies, issue, project)
+            invocation = AgentInvocation(returncode=None, stderr=str(error))
+        return _finish_from_evidence(dependencies, issue, project, invocation)

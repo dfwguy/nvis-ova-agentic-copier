@@ -21,7 +21,7 @@ from agent_work.adapters import (
     discover_checkout_config,
 )
 from agent_work.cli import build_parser, main
-from agent_work.models import AgentWorkConfig, GitLabIssue, RunReport
+from agent_work.models import AgentInvocation, AgentWorkConfig, GitLabIssue, RunReport
 from agent_work.serial import RunNextDependencies
 
 
@@ -116,11 +116,8 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
     ]
 
 
-def test_checkout_derivation_ignores_the_removed_checkout_environment_variable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
-    monkeypatch.setenv("AGENT_WORK_CHECKOUT", "/obsolete/configuration")
     project = {
         "id": 310967,
         "path_with_namespace": "group/project",
@@ -309,15 +306,46 @@ def test_gitlab_label_transition_uses_explicit_add_remove_sets_and_refetches(
     assert "projects/310967/issues/3" in fetch
 
 
+def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
+    tmp_path: Path,
+) -> None:
+    commands = _Commands((CommandResult(0, "{}", ""),))
+    issue = GitLabIssue(
+        iid=3,
+        title="Issue",
+        labels=(),
+        state="opened",
+        confidential=False,
+    )
+
+    GitLabGateway(_config(tmp_path), commands).comment_failed(
+        issue, "Codex exited with status 7; no exact published MR evidence"
+    )
+
+    command, _ = commands.calls[0]
+    assert command[:6] == (
+        "glab",
+        "api",
+        "--hostname",
+        "gitlab.example.com",
+        "-X",
+        "POST",
+    )
+    assert "projects/310967/issues/3/notes" in command
+    assert any("agent::failed" in argument for argument in command)
+
+
 def test_codex_is_invoked_once_noninteractively_with_prompt_on_stdin(
     tmp_path: Path,
 ) -> None:
     commands = _Commands((CommandResult(7, "ignored", "ignored"),))
     checkout = tmp_path / "checkout"
 
-    returncode = CodexInvoker(commands).invoke(checkout, "untrusted prompt", 45)
+    invocation = CodexInvoker(commands).invoke(checkout, "untrusted prompt", 45)
 
-    assert returncode == 7
+    assert invocation == AgentInvocation(
+        returncode=7, stdout="ignored", stderr="ignored"
+    )
     assert commands.calls == [
         (
             (
@@ -337,6 +365,20 @@ def test_codex_is_invoked_once_noninteractively_with_prompt_on_stdin(
             {"stdin": "untrusted prompt", "timeout_seconds": 45},
         )
     ]
+
+
+def test_codex_invocation_redacts_known_secret_values_from_diagnostics(
+    tmp_path: Path,
+) -> None:
+    commands = _Commands(
+        (CommandResult(1, "token=top-secret-value", "fatal: top-secret-value"),)
+    )
+
+    invocation = CodexInvoker(
+        commands, environment={"GITLAB_TOKEN": "top-secret-value"}
+    ).invoke(tmp_path, "prompt", 45)
+
+    assert invocation.diagnostic == "token=[REDACTED]\nfatal: [REDACTED]"
 
 
 def test_checkout_refuses_an_existing_deterministic_local_branch(
@@ -443,6 +485,41 @@ def test_cli_reports_progress_before_starting_a_non_json_run() -> None:
         "stderr:No eligible work items found.",
         "run",
         "stdout:idle",
+    ]
+
+
+def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> None:
+    errors: list[str] = []
+    reports: list[dict[str, object]] = []
+    report = RunReport(
+        outcome="failed",
+        issue_iid=3,
+        branch="agent/issue-3",
+        failure_reason="Codex exited with status 7; no exact published MR evidence",
+        agent_diagnostic="Codex could not publish the branch",
+    )
+
+    exit_code = main(
+        ["run-next", "--apply", "--json"],
+        dependencies_factory=lambda: cast(RunNextDependencies, _UnusedDependency()),
+        run=lambda _dependencies, **_kwargs: report,
+        write_stdout=lambda value: reports.append(json.loads(value)),
+        write_stderr=errors.append,
+    )
+
+    assert exit_code == 1
+    assert errors == [
+        "Checking for next work item...",
+        "Failure: Codex exited with status 7; no exact published MR evidence",
+        "Codex diagnostic (redacted):\nCodex could not publish the branch",
+    ]
+    assert reports == [
+        {
+            "branch": "agent/issue-3",
+            "issue_iid": 3,
+            "merge_request_url": None,
+            "outcome": "failed",
+        }
     ]
 
 

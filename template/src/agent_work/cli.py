@@ -98,6 +98,10 @@ def main(
     except (AdapterError, RunNextError, ValueError) as error:
         write_stderr(str(error))
         return 1
+    if report.failure_reason is not None:
+        write_stderr(f"Failure: {report.failure_reason}")
+    if report.agent_diagnostic is not None:
+        write_stderr(f"Codex diagnostic (redacted):\n{report.agent_diagnostic}")
     write_stdout(_render(report, as_json=parsed.json))
     return 1 if report.outcome == "failed" else 0
 
