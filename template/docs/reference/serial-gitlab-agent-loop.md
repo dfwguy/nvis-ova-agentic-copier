@@ -53,13 +53,20 @@ After adding the lock, the runner
 refetches all running issues and starts work only when its selected issue is
 the sole lock. Do not start another tmux loop for the same project.
 
+If an eligible issue's deterministic branch conflicts before it is claimed,
+the runner marks that issue `agent::failed` and records the safe reason. When
+the conflicting branch is local-only and already merged into the default
+branch, the reason also suggests the exact safe `git branch -d` command. The
+failure is scoped to that issue, so later loop passes can select another item.
+
 JSON output contains only `outcome`, `issue_iid`, `branch`, and
 `merge_request_url`; it never includes issue text, prompts, command output, or
-credentials. Exit `0` means idle, previewed, or verified for human review;
-exit `1` means a safe failure or blocker; a held local lock exits `75`
-(temporary failure); invalid command usage exits `2`. The interactive tmux loop
-must print a visible pass state before it sleeps so an attached pane is never
-blank.
+credentials. Exit `0` means idle, previewed, verified for human review, or a
+failure already recorded against one issue. Exit `1` means a runner blocker
+that could not be safely recorded against an issue; a held local lock exits
+`75` (temporary failure); invalid command usage exits `2`. The interactive
+tmux loop must print a visible pass state before it sleeps so an attached pane
+is never blank.
 
 ## Unattended publication gate
 

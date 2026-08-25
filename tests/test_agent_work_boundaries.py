@@ -22,7 +22,7 @@ from agent_work.adapters import (
 )
 from agent_work.cli import build_parser, main
 from agent_work.models import AgentInvocation, AgentWorkConfig, GitLabIssue, RunReport
-from agent_work.serial import RunNextDependencies
+from agent_work.serial import BranchConflict, RunNextDependencies
 
 
 class _Commands:
@@ -49,7 +49,6 @@ def test_config_derives_one_fixed_lock_file_from_the_checkout(
     tmp_path: Path,
 ) -> None:
     checkout = tmp_path / "checkout"
-
     config = AgentWorkConfig(
         host="gitlab.example.com", project_id=310967, checkout=checkout
     )
@@ -388,12 +387,55 @@ def test_checkout_refuses_an_existing_deterministic_local_branch(
         (
             CommandResult(0, "a" * 40, ""),
             CommandResult(2, "", ""),
+            CommandResult(1, "", ""),
         )
     )
 
-    with pytest.raises(AdapterError, match="already exists"):
+    with pytest.raises(BranchConflict, match="already exists"):
         ServiceCheckout(_config(tmp_path), commands).ensure_branch_available(
-            "agent/issue-12"
+            "agent/issue-12", "main"
+        )
+
+
+def test_checkout_suggests_deleting_a_stale_merged_local_issue_branch(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout with space"
+    config = AgentWorkConfig(
+        host="gitlab.example.com", project_id=310967, checkout=checkout
+    )
+    commands = _Commands(
+        (
+            CommandResult(0, "a" * 40, ""),
+            CommandResult(2, "", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+
+    with pytest.raises(
+        BranchConflict,
+        match=(
+            rf"already merged and absent from origin.*git -C '{checkout}' branch -d "
+            r"agent/issue-12"
+        ),
+    ):
+        ServiceCheckout(config, commands).ensure_branch_available(
+            "agent/issue-12", "main"
+        )
+
+
+def test_checkout_stops_on_a_merge_base_validation_failure(tmp_path: Path) -> None:
+    commands = _Commands(
+        (
+            CommandResult(0, "a" * 40, ""),
+            CommandResult(2, "", ""),
+            CommandResult(128, "", "fatal: bad revision"),
+        )
+    )
+
+    with pytest.raises(AdapterError, match="checkout validation failed"):
+        ServiceCheckout(_config(tmp_path), commands).ensure_branch_available(
+            "agent/issue-12", "main"
         )
 
 
@@ -507,7 +549,7 @@ def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> N
         write_stderr=errors.append,
     )
 
-    assert exit_code == 1
+    assert exit_code == 0
     assert errors == [
         "Checking for next work item...",
         "Failure: Codex exited with status 7; no exact published MR evidence",

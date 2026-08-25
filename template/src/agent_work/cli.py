@@ -103,7 +103,7 @@ def main(
     if report.agent_diagnostic is not None:
         write_stderr(f"Codex diagnostic (redacted):\n{report.agent_diagnostic}")
     write_stdout(_render(report, as_json=parsed.json))
-    return 1 if report.outcome == "failed" else 0
+    return 0
 
 
 if __name__ == "__main__":

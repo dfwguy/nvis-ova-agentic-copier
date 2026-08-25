@@ -16,7 +16,12 @@ from agent_work.models import (
     GitPublicationEvidence,
     MergeRequestEvidence,
 )
-from agent_work.serial import RunNextDependencies, RunNextError, run_next
+from agent_work.serial import (
+    BranchConflict,
+    RunNextDependencies,
+    RunNextError,
+    run_next,
+)
 
 
 def _issue(*, iid: int, labels: tuple[str, ...] = ()) -> GitLabIssue:
@@ -124,8 +129,8 @@ class _Checkout:
         del project
         self.events.append("applied_preflight")
 
-    def ensure_branch_available(self, branch: str) -> None:
-        del branch
+    def ensure_branch_available(self, branch: str, default_branch: str) -> None:
+        del branch, default_branch
         self.events.append("ensure_branch_available")
         if self.branch_error is not None:
             raise self.branch_error
@@ -485,16 +490,37 @@ def test_agent_timeout_still_parks_a_verified_publication() -> None:
     assert len(invoke.calls) == 1
 
 
-def test_branch_conflict_is_rejected_before_the_issue_is_claimed() -> None:
+def test_branch_conflict_marks_the_ready_issue_failed_without_invoking() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
         _GitLab(eligible=(issue,)),
-        _Checkout(branch_error=AdapterError("branch conflict")),
+        _Checkout(branch_error=BranchConflict("branch conflict")),
         _Invoke(),
         _Lock(),
     )
 
-    with pytest.raises(AdapterError, match="branch conflict"):
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "failed"
+    assert report.failure_reason == "branch conflict"
+    assert gitlab.events == [("failed", issue.iid)]
+    assert gitlab.failure_comments == [(issue.iid, "branch conflict")]
+    assert checkout.events == ["applied_preflight", "ensure_branch_available"]
+    assert invoke.calls == []
+
+
+def test_branch_check_boundary_failure_stops_without_marking_the_issue_failed() -> None:
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(eligible=(issue,)),
+        _Checkout(branch_error=AdapterError("checkout validation failed")),
+        _Invoke(),
+        _Lock(),
+    )
+
+    with pytest.raises(AdapterError, match="checkout validation failed"):
         run_next(_deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30)
 
     assert gitlab.events == []

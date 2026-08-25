@@ -25,6 +25,10 @@ class RunNextError(RuntimeError):
     """The runner cannot safely select or verify one item."""
 
 
+class BranchConflict(RunNextError):
+    """One issue's deterministic branch prevents safe processing."""
+
+
 class GitLabQueue(Protocol):
     """GitLab issue and merge-request operations used by the policy."""
 
@@ -69,7 +73,7 @@ class ServiceCheckout(Protocol):
     def applied_preflight(self, project: GitLabProject) -> None:
         """Verify and refresh the clean confirmed checkout."""
 
-    def ensure_branch_available(self, branch: str) -> None:
+    def ensure_branch_available(self, branch: str, default_branch: str) -> None:
         """Reject a conflicting deterministic branch before issue claim."""
 
     def prepare_branch(self, branch: str, default_branch: str) -> Path:
@@ -268,7 +272,19 @@ def run_next(
 
         dependencies.checkout.applied_preflight(project)
         branch = _branch(issue)
-        dependencies.checkout.ensure_branch_available(branch)
+        try:
+            dependencies.checkout.ensure_branch_available(
+                branch, project.default_branch
+            )
+        except BranchConflict as error:
+            failure_reason = str(error)
+            _mark_failed(dependencies, issue, failure_reason)
+            return RunReport(
+                outcome="failed",
+                issue_iid=issue.iid,
+                branch=branch,
+                failure_reason=failure_reason,
+            )
         report_progress(f"Claiming issue #{issue.iid} on {branch}.")
         dependencies.gitlab.mark_running(issue)
         claimed = dependencies.gitlab.list_running()
