@@ -121,6 +121,74 @@ def test_trusted_publish_normalizes_an_unexpected_worker_commit(
     ]
 
 
+def test_trusted_publish_commits_staged_worker_changes(tmp_path: Path) -> None:
+    """The runner publishes a normal uncommitted worker result."""
+    baseline = "a" * 40
+    commands = _Commands(
+        (
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, baseline, ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "AGENTS.md\n", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+
+    ServiceCheckout(_config(tmp_path), commands).publish(
+        "agent/issue-12",
+        MergeRequestDraft(title="Worker change", description="Validated."),
+        baseline,
+    )
+
+    assert [call[0] for call in commands.calls] == [
+        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "--abbrev-ref", "HEAD"),
+        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "HEAD"),
+        ("git", "-C", str(tmp_path / "checkout"), "add", "--all"),
+        (
+            "git",
+            "-C",
+            str(tmp_path / "checkout"),
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+        ),
+        ("git", "-C", str(tmp_path / "checkout"), "commit", "-m", "Worker change"),
+        (
+            "git",
+            "-C",
+            str(tmp_path / "checkout"),
+            "push",
+            "--set-upstream",
+            "origin",
+            "agent/issue-12",
+        ),
+    ]
+
+
+def test_trusted_publish_names_a_staged_diff_failure(tmp_path: Path) -> None:
+    """A staging validation failure identifies its safe publication boundary."""
+    baseline = "a" * 40
+    commands = _Commands(
+        (
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, baseline, ""),
+            CommandResult(0, "", ""),
+            CommandResult(128, "", "fatal: unavailable index"),
+        )
+    )
+
+    with pytest.raises(
+        AdapterError, match=r"checking staged worker changes failed \(exit 128\)"
+    ):
+        ServiceCheckout(_config(tmp_path), commands).publish(
+            "agent/issue-12",
+            MergeRequestDraft(title="Worker change", description="Validated."),
+            baseline,
+        )
+
+
 def test_trusted_publish_preserves_worker_merge_parents(tmp_path: Path) -> None:
     """A conflict-resolution merge is reauthored without flattening it."""
     baseline = "a" * 40
