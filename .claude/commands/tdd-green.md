@@ -12,4 +12,7 @@ Required briefing:
 - List any production files that may be edited and any that must stay untouched.
 - Reiterate project conventions (functional style, dependency injection, no `print`, ruff ALL).
 
-When the subagent returns, confirm all previously failing tests now pass and no existing tests regressed, then route to `/tdd-judge`.
+When the subagent returns, confirm all previously failing tests now pass, no
+existing tests regressed, and `test-results.xml` was written. Then route to
+`/nonfunctional-review`; it must consume the shared timed output before
+`/tdd-judge` and `/diataxis-judge` begin.

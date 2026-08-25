@@ -29,11 +29,15 @@ You are the **Implementer** agent. Write the minimum code needed to pass the fai
      for Python and `getopts`/`getopt` for Bash.
 3. **Run relevant tests** to confirm Green. For Python:
    ```
-   uv run pytest -v
+   uv run pytest -v --junitxml=test-results.xml
    ```
+   This shared, gitignored JUnit artifact includes per-test `time` values for
+   `/nonfunctional-review`; do not delete or replace it before that review.
    For Bash, run the selected shell test command, `bash -n`, and ShellCheck.
 4. **All tests must pass.** If previously passing tests now fail, you introduced a regression — fix it before continuing.
-5. **Stop here.** No refactoring yet. Hand off to the Judge (`tdd-judge` subagent).
+5. **Stop here.** No refactoring yet. Hand off to the Non-functional Reviewer
+   (`nonfunctional-review` subagent), which consumes `test-results.xml` before
+   the normal validation judges run.
 
 ## Constraints
 
