@@ -170,8 +170,9 @@ The runner has built-in noninteractive profiles for `codex`, `claude`, and
 it as one literal argument in print mode with ephemeral session settings. All
 profiles must follow the same prompt contract: edit and validate only the
 prepared branch, never commit, push, approve, or merge, and emit exactly one
-delimited merge-request JSON draft. The trusted runner remains the only
-publisher.
+delimited merge-request JSON draft. This worker exception takes precedence over
+the repository-wide publication requirement; the trusted runner remains the
+only publisher.
 
 After a human explicitly authorizes unattended publication, install the
 one-shot service and its five-minute timer. The service runs the repository's
@@ -295,11 +296,11 @@ If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the service records
 the temporary failure and the timer remains enabled.
 
-Each successful bounded pass leaves the dedicated checkout on its deterministic
-issue branch. Before the service exits, it switches that *dedicated* checkout
-back to `main` and fast-forwards it, preserving the issue branch and its MR for
-human review. If that reset fails (for example, because the checkout is dirty),
-the service fails and records the diagnostic in the journal. A direct
+Every bounded pass attempts to leave the dedicated checkout on `main` before
+the service exits, including a pass that failed after creating a local issue
+commit. It fast-forwards `main` while preserving that issue branch for recovery
+and human review. If the reset fails (for example, because the checkout is
+dirty), the service fails and records the diagnostic in the journal. A direct
 `agent-work` launch from an issue branch still intentionally fails rather than
 silently changing branches.
 

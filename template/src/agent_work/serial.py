@@ -100,7 +100,10 @@ class ServiceCheckout(Protocol):
     def publication_tip(self, branch: str) -> GitPublicationEvidence:
         """Return local and remote publication tips."""
 
-    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
+    def worker_baseline(self, branch: str) -> str:
+        """Return the trusted branch tip before one worker invocation."""
+
+    def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         """Commit and push worker changes from the trusted checkout."""
 
 
@@ -174,11 +177,13 @@ Body:
 {remediation}
 {pipeline_remediation}
 The runner already created `{branch}` from `{project.default_branch}`. Implement
-and validate the change there. Do not commit, push, create a merge request,
-approve, or merge. At the end, emit exactly one JSON object between
+and validate the change there. This worker exception takes precedence over
+repository-wide publication instructions: leave only uncommitted working-tree
+changes. Do not commit, push, create a merge request, approve, or merge. At the
+end, emit exactly one JSON object between
 `<agent-work-merge-request>` and `</agent-work-merge-request>`, with nonempty
 `title` and `description` strings. The trusted runner appends `Closes #{issue.iid}`
-and performs the Git and GitLab publication steps.
+and alone stages, commits, pushes, and opens the merge request.
 """
 
 
@@ -290,12 +295,13 @@ def _publish_worker_result(
     issue: GitLabIssue,
     project: GitLabProject,
     invocation: AgentInvocation,
+    baseline: str,
 ) -> None:
     """Publish a successful worker's change through trusted runner boundaries."""
     if invocation.returncode != 0:
         raise RunNextError(f"Agent exited with status {invocation.returncode}")
     draft = invocation.merge_request_draft()
-    dependencies.checkout.publish(_branch(issue), draft)
+    dependencies.checkout.publish(_branch(issue), draft, baseline)
     dependencies.gitlab.create_merge_request(issue, project, draft)
 
 
@@ -383,6 +389,17 @@ def run_next(
                     failure_reason=failure_reason,
                 )
             try:
+                baseline = dependencies.checkout.worker_baseline(branch)
+            except RuntimeError as error:
+                failure_reason = f"checkout preparation failed: {error}"
+                _mark_failed(dependencies, conflicted, failure_reason)
+                return RunReport(
+                    outcome="failed",
+                    issue_iid=conflicted.iid,
+                    branch=branch,
+                    failure_reason=failure_reason,
+                )
+            try:
                 report_progress(
                     f"Resolving merge conflicts for issue #{conflicted.iid} on {branch}."
                 )
@@ -402,7 +419,7 @@ def run_next(
             if invocation.returncode == 0:
                 try:
                     dependencies.checkout.publish(
-                        branch, invocation.merge_request_draft()
+                        branch, invocation.merge_request_draft(), baseline
                     )
                 except (RuntimeError, ValueError) as error:
                     invocation = AgentInvocation(
@@ -455,6 +472,17 @@ def run_next(
                 branch=branch,
                 failure_reason=failure_reason,
             )
+        try:
+            baseline = dependencies.checkout.worker_baseline(branch)
+        except RuntimeError as error:
+            failure_reason = f"checkout preparation failed: {error}"
+            _mark_failed(dependencies, issue, failure_reason)
+            return RunReport(
+                outcome="failed",
+                issue_iid=issue.iid,
+                branch=branch,
+                failure_reason=failure_reason,
+            )
         invocation: AgentInvocation | None = None
         try:
             report_progress(f"Starting agent for issue #{issue.iid} on {branch}.")
@@ -472,7 +500,9 @@ def run_next(
             and dependencies.gitlab.publication(branch) is None
         ):
             try:
-                _publish_worker_result(dependencies, issue, project, invocation)
+                _publish_worker_result(
+                    dependencies, issue, project, invocation, baseline
+                )
             except (RuntimeError, ValueError) as error:
                 invocation = AgentInvocation(
                     returncode=invocation.returncode,

@@ -606,10 +606,28 @@ class ServiceCheckout:
             raise AdapterError("the issue branch tip is invalid")
         return GitPublicationEvidence(local_sha=local_sha, remote_sha=remote_sha)
 
-    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
+    def worker_baseline(self, branch: str) -> str:
+        """Capture the issue-branch tip before an untrusted worker runs."""
+        if self._run("rev-parse", "--abbrev-ref", "HEAD") != branch:
+            raise AdapterError("checkout is not on the issue branch")
+        baseline = self._run("rev-parse", "HEAD")
+        if re.fullmatch(r"[0-9a-f]{40}", baseline) is None:
+            raise AdapterError("the issue branch tip is invalid")
+        return baseline
+
+    def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         """Create one commit and push it without granting Git writes to Codex."""
         if self._run("rev-parse", "--abbrev-ref", "HEAD") != branch:
             raise AdapterError("checkout is not on the issue branch")
+        if re.fullmatch(r"[0-9a-f]{40}", baseline) is None:
+            raise AdapterError("the worker baseline is invalid")
+        if self._run("rev-parse", "HEAD") != baseline:
+            history = self._run("rev-list", "--parents", "-n", "1", "HEAD").split()
+            if baseline not in history[1:]:
+                raise AdapterError("worker created unsupported commit history")
+            self._run("commit", "--amend", "--reset-author", "-m", draft.title)
+            self._run("push", "--set-upstream", "origin", branch)
+            return
         self._run("add", "--all")
         staged = self._run_command(
             ("git", "-C", str(self.path), "diff", "--cached", "--quiet")

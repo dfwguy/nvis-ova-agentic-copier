@@ -90,6 +90,13 @@ default branch. A runner child must mechanically verify that checkout, then
 continue its already-selected workflow without recursively invoking
 `agent-work` or creating another branch:
 
+The coding agent inside that runner is not the main agent for this lifecycle.
+Its runner-owned worker exception takes precedence over the publication
+requirements in this document: edit and validate only uncommitted working-tree
+changes, then return exactly one delimited merge-request draft. Do not commit,
+push, create a merge request, approve, or merge. The trusted runner alone
+performs the publication handoff after it validates that draft.
+
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
 test -d "$(git rev-parse --show-toplevel)/.git"

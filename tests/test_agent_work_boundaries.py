@@ -64,6 +64,104 @@ def test_config_derives_one_fixed_lock_file_from_the_checkout(
     assert config.lock_file == checkout / ".agent-work.lock"
 
 
+def test_trusted_publish_normalizes_an_unexpected_worker_commit(
+    tmp_path: Path,
+) -> None:
+    """The runner reauthors one direct worker commit before publication."""
+    baseline = "a" * 40
+    worker_commit = "b" * 40
+    commands = _Commands(
+        (
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, worker_commit, ""),
+            CommandResult(0, f"{worker_commit} {baseline}\n", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+
+    ServiceCheckout(_config(tmp_path), commands).publish(
+        "agent/issue-12",
+        MergeRequestDraft(title="Worker change", description="Validated."),
+        baseline,
+    )
+
+    assert [call[0] for call in commands.calls] == [
+        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "--abbrev-ref", "HEAD"),
+        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "HEAD"),
+        (
+            "git",
+            "-C",
+            str(tmp_path / "checkout"),
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            "HEAD",
+        ),
+        (
+            "git",
+            "-C",
+            str(tmp_path / "checkout"),
+            "commit",
+            "--amend",
+            "--reset-author",
+            "-m",
+            "Worker change",
+        ),
+        (
+            "git",
+            "-C",
+            str(tmp_path / "checkout"),
+            "push",
+            "--set-upstream",
+            "origin",
+            "agent/issue-12",
+        ),
+    ]
+
+
+def test_trusted_publish_preserves_worker_merge_parents(tmp_path: Path) -> None:
+    """A conflict-resolution merge is reauthored without flattening it."""
+    baseline = "a" * 40
+    merge_commit = "b" * 40
+    other_parent = "c" * 40
+    commands = _Commands(
+        (
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, merge_commit, ""),
+            CommandResult(0, f"{merge_commit} {baseline} {other_parent}\n", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+
+    ServiceCheckout(_config(tmp_path), commands).publish(
+        "agent/issue-12",
+        MergeRequestDraft(title="Resolve conflict", description="Validated."),
+        baseline,
+    )
+
+    assert (
+        "git",
+        "-C",
+        str(tmp_path / "checkout"),
+        "reset",
+        "--mixed",
+        baseline,
+    ) not in [call[0] for call in commands.calls]
+    assert (
+        "git",
+        "-C",
+        str(tmp_path / "checkout"),
+        "commit",
+        "--amend",
+        "--reset-author",
+        "-m",
+        "Resolve conflict",
+    ) in [call[0] for call in commands.calls]
+
+
 def test_default_dependencies_discover_checkout_and_project_without_environment(
     tmp_path: Path,
 ) -> None:

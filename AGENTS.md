@@ -106,6 +106,17 @@ blocker—not the unavailable Maintainer-only loop-readiness audit.
 Every repository change must publish a feature branch and open or update a
 merge request. A publication failure is a blocker, not completion.
 
+### Serial agent-work worker exception
+
+For a coding agent invoked by `agent-work run-next`, this exception takes
+precedence over repository-wide publication instructions. The worker edits and
+validates only uncommitted working-tree changes on its prepared
+`agent/issue-<IID>` branch. It must not commit, push, create a merge request,
+approve, or merge; the trusted runner alone stages, commits, pushes, and opens
+the merge request from the worker's one delimited draft. This exception applies
+only inside that runner-owned worker invocation, not to the runner or an
+ordinary user-requested repository change.
+
 For every user-requested repository mutation, do not stop at local edits,
 validation, or a local commit. The main agent must always create or reuse a
 feature branch, commit, push, and attempt to open or update its MR through

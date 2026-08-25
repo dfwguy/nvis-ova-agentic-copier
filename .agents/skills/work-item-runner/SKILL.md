@@ -17,10 +17,11 @@ only endpoints below `projects/$GITLAB_PROJECT_ID`. Never infer a project from
 `origin`.
 
 Work in the configured dedicated agent checkout, never in an operator's active
-checkout. Run the repository's normal design, test, validation, publication,
-and review workflow for this one issue. A successful mutating run pushes a
-deterministic `agent/issue-<IID>` branch and opens one merge request,
-then returns `awaiting_human`. It may hand off only after the same-project MR
+checkout. The coding agent edits and validates only uncommitted working-tree
+changes and emits one delimited merge-request draft; it must not commit, push,
+or create a merge request. The trusted runner owns publication, pushes the
+deterministic `agent/issue-<IID>` branch, and opens one merge request before
+returning `awaiting_human`. It may hand off only after the same-project MR
 has the exact source branch and default target, matches the local and remote
 branch tips, and GitLab confirms `Closes #IID`; otherwise the issue is failed.
 

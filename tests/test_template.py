@@ -591,9 +591,21 @@ def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
     ).read_text()
     wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
 
-    assert "Before the service exits" in content
+    assert "Every bounded pass attempts to leave the dedicated checkout" in content
     assert "git switch main" in wrapper
     assert "git pull --ff-only" in wrapper
+    assert "pass failed (exit $pass_status); attempting checkout recovery" in wrapper
+    assert wrapper.index("pass_status=0") < wrapper.rindex("return_checkout_to_main")
+
+
+def test_agent_work_worker_exception_overrides_generic_publication_rules(
+    generated_project: Path,
+) -> None:
+    """Generated workers do not inherit the ordinary-agent publication duty."""
+    required = "Serial agent-work worker exception"
+
+    for relative_path in ("AGENTS.md", "CLAUDE.md"):
+        assert required in (generated_project / relative_path).read_text()
 
 
 def test_repository_setup_interviews_self_approval(generated_project: Path) -> None:

@@ -67,11 +67,18 @@ Successful, running, pending, and absent pipelines do not add a remediation
 requirement.
 
 The configured coding agent works only in the prepared branch, which the runner created from the
-default branch. It does not commit, push, or create an MR. Instead it returns a
-delimited JSON draft containing the MR title and description. The trusted
-runner validates that draft, stages and commits the working-tree changes, pushes
-the deterministic branch, appends `Closes #IID`, creates the MR through the
-numeric project endpoint, and then performs the exact-evidence check.
+default branch. It leaves uncommitted working-tree changes and does not commit,
+push, or create an MR. Instead it returns a delimited JSON draft containing the
+MR title and description. The trusted runner snapshots the prepared branch
+before invoking the worker, then validates that draft, stages and commits the
+working-tree changes, pushes the deterministic branch, appends `Closes #IID`,
+creates the MR through the numeric project endpoint, and then performs the
+exact-evidence check. If a worker incorrectly creates one local commit (or a
+single merge commit whose parents include the captured tip), the runner
+reauthors and retitles that commit in place before pushing it. This preserves
+conflict-resolution ancestry; unsupported worker-created history fails closed.
+This is a recovery contract, not a
+same-user credential or filesystem security boundary.
 
 The `agent::running` label is the GitLab lock. `agent::running`,
 `agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
