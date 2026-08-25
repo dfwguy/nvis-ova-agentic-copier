@@ -2,7 +2,6 @@
 name: tdd-finalizer
 description: Final gate — runs applicable Python/Bash validation, then commits locally; the orchestrator pushes and opens the MR afterward.
 tools: Read, Grep, Glob, Bash
-model: haiku
 ---
 
 # TDD Finalizer — Language-Aware Validator

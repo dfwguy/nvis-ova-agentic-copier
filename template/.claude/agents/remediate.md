@@ -2,7 +2,6 @@
 name: remediate
 description: Standards-baseline planner — turns “make this repo meet our standards” into a bounded, verifiable remediation plan.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 # Remediation Agent

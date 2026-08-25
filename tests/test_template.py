@@ -360,6 +360,60 @@ def test_lint_and_pytest_skill_is_generated(
         assert requirement in content
 
 
+@pytest.mark.parametrize(
+    ("skill_name", "model_tier"),
+    (
+        ("architect", "most-capable"),
+        ("cli-syntax-judge", "fast"),
+        ("diataxis-judge", "fast"),
+        ("diataxis-writer", "balanced"),
+        ("filesystem-structure-judge", "fast"),
+        ("judge-cicd", "balanced"),
+        ("judge-quality", "most-capable"),
+        ("judge-test", "balanced"),
+        ("nonfunctional-review", "fast"),
+        ("remediate", "most-capable"),
+        ("tdd-document", "balanced"),
+        ("tdd-finalizer", "fast"),
+        ("tdd-green", "balanced"),
+        ("tdd-judge", "balanced"),
+        ("tdd-red", "balanced"),
+    ),
+)
+def test_workflow_roles_are_portable_directory_skills(
+    generated_project: Path, project_root: Path, skill_name: str, model_tier: str
+) -> None:
+    """Every workflow role is a shared Agent Skills directory with a tier."""
+    relative_path = f".claude/skills/{skill_name}/SKILL.md"
+    root_skill = project_root / relative_path
+    generated_skill = generated_project / relative_path
+
+    assert root_skill.exists()
+    assert root_skill.read_text() == generated_skill.read_text()
+    content = root_skill.read_text()
+    assert f"name: {skill_name}" in content
+    assert f"model-tier: {model_tier}" in content
+    assert f"agents/{skill_name}.md" in content
+    assert (
+        "\nmodel:"
+        not in (
+            generated_project / ".claude" / "agents" / f"{skill_name}.md"
+        ).read_text()
+    )
+
+
+def test_pi_loads_the_shared_project_skill_directory(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Pi uses the same project skill directories as the other frontends."""
+    relative_path = ".pi/settings.json"
+    root_settings = project_root / relative_path
+    generated_settings = generated_project / relative_path
+
+    assert root_settings.read_text() == generated_settings.read_text()
+    assert json.loads(root_settings.read_text()) == {"skills": ["../.claude/skills"]}
+
+
 def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects review shared timed test results before finalization."""
     agent = generated_project / ".claude" / "agents" / "nonfunctional-review.md"

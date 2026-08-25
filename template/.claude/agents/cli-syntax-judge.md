@@ -2,7 +2,6 @@
 name: cli-syntax-judge
 description: CLI design validator — checks changed command-line interfaces against CLIG and the project's required safety and output contracts. Runs with the final judges.
 tools: Read, Grep, Glob
-model: sonnet
 ---
 
 @.claude/lang/python.md

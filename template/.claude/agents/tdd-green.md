@@ -2,7 +2,6 @@
 name: tdd-green
 description: Implementer — writes minimal code to pass failing tests; no extras. Use after tdd-red has produced failing tests.
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: inherit
 ---
 
 # TDD Green Phase — Implementer

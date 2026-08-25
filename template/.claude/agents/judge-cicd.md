@@ -2,7 +2,6 @@
 name: judge-cicd
 description: CI/CD reviewer — verifies `.gitlab-ci.yml` stays in sync with the change, sanity-checks the pipeline shape, and uses `glab` to confirm recent pipelines are healthy. Runs after the TDD and Diátaxis judges approve.
 tools: Read, Grep, Glob, Bash
-model: sonnet
 ---
 
 # CI/CD Judge — Pipeline & Config Reviewer
