@@ -55,6 +55,28 @@ blocker, never a completed outcome. Do not infer that a successful
 
 > **This step runs first in *every* session that will make a change — a full TDD feature or a one-line trivial edit alike. It is not part of the TDD workflow; it gates it.** The most common and most damaging mistake is to skip it because "I'm already on a branch that looks right" and append to a branch whose work has already merged — that re-creates the deleted remote branch, re-introduces merged commits, and produces merge conflicts. Always verify the starting point *mechanically* (below); never infer it from the branch name.
 
+### Session boundary
+
+At the start of a session, inspect the current branch before treating it as a
+work branch. A task dispatched by the serial work-item runner is explicitly
+related to its required `agent/issue-<IID>` branch; stay on that prepared branch
+and return control to the runner when the task is done. Do not switch that
+agentic checkout to `main` at the end of the worker session.
+
+For an ordinary user session that starts away from the default branch, first
+decide whether the request is genuinely follow-up work for that branch and its
+open merge request. If it is unrelated, require a clean tree, then switch and
+refresh before beginning the new task:
+
+```bash
+git status --porcelain
+git switch main
+git pull --ff-only
+```
+
+If it is related, use the mechanical branch and merge-request checks below.
+Never use this decision to append unrelated work to a feature branch.
+
 Derive the task's kebab-case slug (≤40 characters) and intended branch before
 checking the current checkout:
 
@@ -226,16 +248,23 @@ After Step 3, report the result as `awaiting_human` and end the active run. AI m
 (see `CLAUDE.md` → "Repo lock-down gate"), so human review and merge still determine whether the change lands.
 They do not prevent another unrelated work item from starting.
 
-1. **Release the active checkout.** In a normal interactive checkout, first
-   confirm a clean working tree, then return to an up-to-date `main`:
+1. **Release the active checkout at the correct session boundary.** A serial-runner worker on an
+   `agent/issue-<IID>` branch ends immediately after returning its merge-request
+   draft; the trusted runner owns publication and preserves that branch for the
+   human handoff. In a normal user session, query the branch-specific MR first.
+   Only after GitLab confirms that it is `merged` may a clean checkout return to
+   an up-to-date `main`:
    ```bash
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=<feature-branch>"
    git status
-   git checkout main
+   git switch main
    git pull --ff-only
    ```
+   If the MR is still open or is not merged, report `awaiting_human` and end the
+   session without switching branches. Never infer that publication means merge.
    Never stash or discard changes silently. The serial runner keeps the issue
-   branch and MR for review; its next bounded invocation refreshes the same
-   dedicated checkout from `main` before selecting another issue.
+   branch and MR for review; after a human merge, an operator explicitly returns
+   its dedicated checkout to `main` before launching another bounded pass.
 
 2. **Retain the feature branch for feedback.** Do not delete it merely because
    an MR exists. Review fixes return to the same branch and update the same MR

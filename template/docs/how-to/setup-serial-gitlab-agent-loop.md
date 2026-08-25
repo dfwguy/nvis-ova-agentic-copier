@@ -174,6 +174,12 @@ If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
 that error and stops instead of quietly retrying against the held lock.
 
+After a worker has handed an issue to human review, its dedicated checkout is
+still on `agent/issue-<IID>`. The next `agent-work` launch intentionally exits
+before pulling from that branch and names the recovery: wait for the MR to be
+merged, then use `git switch main` and `git pull --ff-only` before starting the
+loop again. Do not make the wrapper switch branches automatically.
+
 Stop the loop with `Ctrl-C`, or from another terminal:
 
 ```bash

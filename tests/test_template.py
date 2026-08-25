@@ -1270,6 +1270,20 @@ def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
     assert root_file.read_bytes() == generated_file.read_bytes()
 
 
+def test_session_boundary_workflow_preserves_agentic_handoffs(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Agentic workers and user sessions have distinct main-branch exits."""
+    relative_path = ".claude/git-flow.md"
+    content = (project_root / relative_path).read_text()
+
+    assert content == (project_root / "template" / relative_path).read_text()
+    assert content == (generated_project / relative_path).read_text()
+    assert "### Session boundary" in content
+    assert "agent/issue-<IID>" in content
+    assert "If the MR is still open or is not merged" in content
+
+
 def test_setup_loop_skill_classifies_effective_developer_access_without_attestation(
     generated_project: Path, project_root: Path
 ) -> None:
