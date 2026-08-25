@@ -2,7 +2,6 @@
 name: tdd-red
 description: Test Writer — writes failing tests and confirms Red before any implementation. Use after the Architect has produced a design and before any production code is written.
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: inherit
 ---
 
 # TDD Red Phase — Test Writer

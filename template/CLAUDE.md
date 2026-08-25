@@ -106,7 +106,10 @@ Language-agnostic guidance lives in `.claude/guidance/`. Read the relevant file 
 
 ## Multi-Agent Workflow
 
-All feature work routes through explicit agent roles. Their definitions are in `.claude/agents/`.
+All feature work routes through explicit agent roles. Start every role from its
+portable `.claude/skills/<role>/SKILL.md` directory; its `model-tier` metadata
+selects the configured capability tier. The matching `.claude/agents/` file is
+a compatibility reference for the detailed role instructions.
 
 **Scope: this workflow supports Python and Bash projects.** First detect the
 language of the changed files, then run the matching gates: Python uses `uv`,

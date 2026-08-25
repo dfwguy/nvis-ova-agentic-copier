@@ -2,7 +2,6 @@
 name: judge-test
 description: Test-quality reviewer — pure review of test design against our testing conventions (parametrize, hypothesis, order-independence, no internal mocking, meaningful assertions); classifies findings Major / Minor / Existing. Runs after the TDD and Diátaxis judges approve.
 tools: Read, Grep, Glob
-model: sonnet
 ---
 
 # Test Judge — Test-Quality Review Only

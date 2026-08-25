@@ -14,10 +14,17 @@ requirements here.
 ## Agent interoperability and model tiers
 
 Claude Code, Codex, and Pi must follow the same repository workflow,
-validation gates, and human approval boundary. Claude Code reads the
-`.claude/` agent definitions directly. Codex and Pi treat those files
-as the canonical workflow description and use their equivalent native
-delegation mechanisms when available.
+validation gates, and human approval boundary. Every workflow role is a
+portable Agent Skills directory at `.claude/skills/<role>/SKILL.md`; its
+front matter declares a tool-neutral `model-tier`. Claude Code discovers this
+project skill layout directly. Codex and Pi must load the same `SKILL.md`
+before they delegate: Codex follows this `AGENTS.md` discovery contract, and
+Pi is configured through `.pi/settings.json` to load `.claude/skills`.
+
+The files in `.claude/agents/` remain compatibility references for the
+existing Claude role definitions. They are not a second workflow or source of
+model selection. A skill links to its matching reference so the role guidance
+stays available while all three frontends start from the same skill directory.
 
 Choose a model by capability tier, not by a provider-specific model name. The
 inference-hub mapping is deliberately deferred; a frontend resolves an enabled
@@ -34,15 +41,19 @@ tier through its own configured mapping.
 by default or as a fallback. Add a reviewed inference-hub mapping before
 enabling that tier.
 
-## Codex workflow
+## Frontend model resolution
 
-The `.claude/` agent definitions are Claude Code configuration. Codex
-does not execute their front matter; it follows the shared workflow and
-conventions they describe, then uses native Codex subagents when delegation is
-useful.
+Skills request a capability tier, never a provider-specific model name. The
+frontend resolves the tier as follows:
 
-Use the enabled tiers as follows for Codex subagents. These are
-capability/cost tiers, not parameter-count equivalences:
+| Frontend | Most capable | Balanced | Fast |
+|---|---|---|---|
+| Claude Code | configured most-capable tier | configured balanced tier | configured fast tier |
+| Codex | `gpt-5.6-sol` / `high` | `gpt-5.6-terra` / `medium` | `gpt-5.6-luna` / `low` |
+| Pi | configured most-capable tier | configured balanced tier | configured fast tier |
+
+For Codex, use the enabled tiers as follows. These are capability/cost tiers,
+not parameter-count equivalences:
 
 | Work | Model | Reasoning effort |
 |---|---|---|
@@ -54,7 +65,7 @@ For a non-trivial change, preserve the same sequence described in `CLAUDE.md`:
 design; tests and documentation in parallel; minimum implementation;
 validation; independent review; final validation and commit. Keep the
 main-agent model for tasks where continuity matters, such as the red/green
-handoff. Do not create a second `.claude/` workflow with Codex model names.
+handoff. Do not create a frontend-specific duplicate of the shared skills.
 
 ## GitLab project IDs
 

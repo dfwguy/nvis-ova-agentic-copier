@@ -2,7 +2,6 @@
 name: tdd-judge
 description: Validator — runs language-appropriate lint and non-test pre-commit checks; rejects and routes back. Use after tdd-green has produced a green build.
 tools: Read, Grep, Glob, Bash
-model: haiku
 ---
 
 # TDD Judge Phase — Reviewer

@@ -2,7 +2,6 @@
 name: tdd-document
 description: Landing-page documentation updater — keeps README.md accurate for project visitors. Runs after the TDD and Diátaxis judges approve.
 tools: Read, Edit, Write, Grep, Glob
-model: sonnet
 ---
 
 # TDD Document — Documentation Updater

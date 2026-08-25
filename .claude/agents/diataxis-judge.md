@@ -2,7 +2,6 @@
 name: diataxis-judge
 description: Documentation validator — verifies docs/ is accurate and follows Diátaxis. Runs in parallel with tdd-judge after tdd-green.
 tools: Read, Grep, Glob
-model: haiku
 ---
 
 # Diátaxis Judge

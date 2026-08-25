@@ -2,7 +2,6 @@
 name: architect
 description: Design phase — produces a module/function breakdown before any code is written. Use proactively at the start of non-trivial feature work or refactors.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 # Architect Agent

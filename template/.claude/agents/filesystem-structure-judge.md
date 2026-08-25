@@ -2,7 +2,6 @@
 name: filesystem-structure-judge
 description: Filesystem-layout reviewer — verifies Python and Bash code, tests, and public entry points use the project-standard layout or document a specific deviation.
 tools: Read, Grep, Glob
-model: haiku
 ---
 
 # Filesystem Structure Judge

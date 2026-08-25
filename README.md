@@ -81,7 +81,7 @@ Running this template produces a Python project that is ready to develop in imme
 - **[tox](https://tox.wiki/)** with `tox-uv`, configured to run tests against **Python 3.11 and 3.14**.
 - **[pre-commit](https://pre-commit.com/)** hooks: trailing-whitespace and TOML parsing checks, Bash syntax, [ShellCheck](https://www.shellcheck.net/), local Kingfisher secret scanning (no validation or update check), ruff (check + format), [yamllint](https://yamllint.readthedocs.io/), ty, tox.
 - **GitLab CI** ([`.gitlab-ci.yml`](template/.gitlab-ci.yml)) with jobs for `ruff_check`, `ruff_format`, `pytest` (tox), `yamllint`, `kingfisher`, `type_check`, and `shellcheck`. Code quality and JUnit reports are wired into GitLab's UI.
-- **Portable agentic workflow** — `AGENTS.md`, `.claude/agents/`, `.agents/skills/`, `docs/`, and a `CLAUDE.md` that route feature work through architecture, TDD, Diátaxis documentation, judges, finalization, and portable validation skills for Claude Code, Codex, and Pi (see [Agentic workflow](#agentic-workflow) below).
+- **Portable agentic workflow** — `AGENTS.md`, `.claude/skills/`, `.agents/skills/`, `docs/`, and a `CLAUDE.md` that route feature work through architecture, TDD, Diátaxis documentation, judges, finalization, and portable validation skills for Claude Code, Codex, and Pi (see [Agentic workflow](#agentic-workflow) below).
 - **Coding conventions** baked into `CLAUDE.md`: standard Python `src/<package>/` layout, a single public Bash `bin/<tool>` CLI backed by `src/` or `lib/`, pathlib over `os`, dataclasses, type annotations, docstrings on public APIs, functional style, `pytest.mark.parametrize` over duplication, no internal mocking, and safe-by-default state-mutating scripts (no changes without an explicit `--apply` flag).
 
 ## Prerequisites
@@ -168,9 +168,12 @@ setup, but must be corrected before the corresponding commit or GitLab action.
 ```text
 my-project/
 ├── .claude/
-│   ├── agents/            # Claude Code agent definitions (architect, tdd-*, diataxis-*, judge-*)
+│   ├── skills/            # Shared role skills: <role>/SKILL.md
+│   ├── agents/            # Compatibility references for the role instructions
 │   ├── project.md         # Project-specific Claude context (loaded by CLAUDE.md)
 │   └── settings.json
+├── .pi/
+│   └── settings.json      # Loads the shared .claude/skills directory for Pi
 ├── .agents/
 │   └── skills/
 │       └── lint-and-pytest/ # Portable Python validation skill
@@ -192,7 +195,7 @@ my-project/
 
 ## Agentic workflow
 
-The generated project ships with a portable multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. Claude Code reads the role definitions under `.claude/agents/`; Codex and Pi follow the same shared contract in `AGENTS.md` using equivalent native capabilities. The portable `lint-and-pytest` skill under `.agents/skills/` provides an explicit validation entry point. Its model policy enables the most-capable, balanced, and fast tiers, while reserving the frontier tier (including Fable) so it cannot be selected until an inference-hub mapping is reviewed.
+The generated project ships with a portable multi-agent workflow that enforces test-driven development and quality/CI gates for Python and Bash code. Every role starts from `.claude/skills/<role>/SKILL.md`, a directory-format Agent Skill with tool-neutral `model-tier` metadata. Claude Code discovers that project layout directly; Pi loads it through `.pi/settings.json`; and Codex follows the same discovery contract in `AGENTS.md`. The matching `.claude/agents/` files are compatibility references, not a separate workflow. The portable `lint-and-pytest` skill under `.agents/skills/` remains an explicit validation entry point. The model policy enables the most-capable, balanced, and fast tiers, while reserving the frontier tier (including Fable) so it cannot be selected until an inference-hub mapping is reviewed.
 
 The workflow detects the changed files before validation. Python uses `uv`, `ruff`, `ty`, `pytest`, and `tox`; Bash uses `bash -n` and ShellCheck. Mixed changes run both applicable paths. The judges use the matching language conventions, including strict Bash scripting, quoted expansions, safe mutation defaults, and isolated shell tests.
 
@@ -313,7 +316,7 @@ Use the Architect role to add a CSV ingestion module that streams rows into the 
 
 Claude designs the module, then the Test Writer and the Documentation Writer run together. After implementation, the Non-functional Reviewer reads the shared `test-results.xml` JUnit output, including per-test durations, before the Implementation Judge and the Documentation Judge run in parallel. This gives performance requirements evidence before finalization rather than adding an end-only check. When a judge rejects, the workflow reroutes automatically — no approval prompt — until the gates pass.
 
-The same roles and skills also live in **this** repo's `.claude/` and `.agents/` directories, so you can dogfood the workflow while developing the template itself.
+The same skills also live in **this** repo's `.claude/` directory, so you can dogfood the workflow while developing the template itself.
 
 ## Updating an existing project
 

@@ -2,7 +2,6 @@
 name: diataxis-writer
 description: Documentation writer — creates or updates Diátaxis documentation in docs/. Runs in parallel with tdd-red after the architect's design.
 tools: Read, Edit, Write, Grep, Glob
-model: sonnet
 ---
 
 # Diátaxis Writer

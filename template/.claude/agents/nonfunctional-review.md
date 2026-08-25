@@ -2,7 +2,6 @@
 name: nonfunctional-review
 description: Non-functional reviewer — assesses shared JUnit test results for performance evidence before final validation.
 tools: Read, Grep, Glob
-model: sonnet
 ---
 
 # Non-functional Review Agent
