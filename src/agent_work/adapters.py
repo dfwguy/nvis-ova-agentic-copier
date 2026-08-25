@@ -24,6 +24,7 @@ from .models import (
     GitPublicationEvidence,
     MergeRequestDraft,
     MergeRequestEvidence,
+    PipelineEvidence,
 )
 from .serial import BranchConflict, RunNextDependencies
 
@@ -303,6 +304,22 @@ class GitLabGateway:
             and not issue.confidential
             and "agent::awaiting-human" in issue.labels
         )
+
+    def latest_default_pipeline(
+        self, project: GitLabProject
+    ) -> PipelineEvidence | None:
+        """Return the newest default-branch pipeline, if GitLab has one."""
+        payload = self._call(
+            f"projects/{self._config.project_id}/pipelines",
+            fields=(f"ref={project.default_branch}", "per_page=1"),
+        )
+        pipelines = self._items(payload, "pipeline list")
+        if not pipelines:
+            return None
+        try:
+            return PipelineEvidence.model_validate(pipelines[0])
+        except ValidationError as error:
+            raise AdapterError("GitLab returned invalid pipeline data") from error
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         """Refetch and validate one configured-project issue."""

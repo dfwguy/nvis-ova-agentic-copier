@@ -15,6 +15,7 @@ from .models import (
     GitPublicationEvidence,
     MergeRequestDraft,
     MergeRequestEvidence,
+    PipelineEvidence,
     RunReport,
 )
 
@@ -44,6 +45,11 @@ class GitLabQueue(Protocol):
 
     def list_awaiting_human(self) -> tuple[GitLabIssue, ...]:
         """Return issues handed off for human review."""
+
+    def latest_default_pipeline(
+        self, project: GitLabProject
+    ) -> PipelineEvidence | None:
+        """Return the latest default-branch pipeline for remediation routing."""
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         """Refetch one issue before claiming it."""
@@ -129,6 +135,7 @@ def _prompt(
     branch: str,
     *,
     resolve_conflicts: bool = False,
+    pipeline: PipelineEvidence | None = None,
 ) -> str:
     remediation = ""
     if resolve_conflicts:
@@ -137,6 +144,15 @@ This is a merge-conflict remediation pass. The existing merge request is
 blocked because the target branch changed. Update the required branch with the
 current target branch and resolve the conflicts. Do not commit, push, approve,
 or merge; the trusted runner publishes the validated update.
+
+"""
+    pipeline_remediation = ""
+    if pipeline is not None and pipeline.needs_remediation:
+        pipeline_remediation = f"""Pipeline remediation: the latest `{project.default_branch}` pipeline {pipeline.id}
+is `{pipeline.status}` at {pipeline.web_url}. Diagnose and repair
+that failure in this branch. The trusted runner will create this issue's merge
+request, so its resulting MR must include the pipeline fix; do not leave the
+failed pipeline only reported.
 
 """
     return f"""Use $work-item-runner to implement GitLab issue #{issue.iid}.
@@ -156,6 +172,7 @@ Body:
 {issue.description}
 
 {remediation}
+{pipeline_remediation}
 The runner already created `{branch}` from `{project.default_branch}`. Implement
 and validate the change there. Do not commit, push, create a merge request,
 approve, or merge. At the end, emit exactly one JSON object between
@@ -332,6 +349,7 @@ def run_next(
 
     with dependencies.lock():
         project = dependencies.gitlab.verify_project()
+        pipeline = dependencies.gitlab.latest_default_pipeline(project)
         running = dependencies.gitlab.list_running()
         if len(running) > 1:
             raise RunNextError("multiple issues are marked agent::running")
@@ -370,7 +388,13 @@ def run_next(
                 )
                 invocation = dependencies.invoke.invoke(
                     checkout,
-                    _prompt(conflicted, project, branch, resolve_conflicts=True),
+                    _prompt(
+                        conflicted,
+                        project,
+                        branch,
+                        resolve_conflicts=True,
+                        pipeline=pipeline,
+                    ),
                     timeout_seconds,
                 )
             except RuntimeError as error:
@@ -436,7 +460,7 @@ def run_next(
             report_progress(f"Starting agent for issue #{issue.iid} on {branch}.")
             invocation = dependencies.invoke.invoke(
                 checkout,
-                _prompt(issue, project, branch),
+                _prompt(issue, project, branch, pipeline=pipeline),
                 timeout_seconds,
             )
         except RuntimeError as error:

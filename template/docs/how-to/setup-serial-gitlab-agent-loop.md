@@ -163,7 +163,14 @@ issue, and refetches the running list. A conflicted handoff is reclaimed on
 its existing deterministic branch for one remediation pass. It begins work only when
 the selected issue is the sole running lock. Published work becomes
 `agent::awaiting-human`; failures become `agent::failed`. The loop never
-approves or merges an MR. Each failed transition leaves the safe failure reason
+approves or merges an MR.
+
+Each applied pass also checks the newest default-branch pipeline. If it is
+`failed` or `canceled`, the worker repairs it in the selected issue's merge
+request instead of leaving it only reported; the runner still never approves
+or merges that MR.
+
+Each failed transition leaves the safe failure reason
 as an issue comment; worker output remains only in the private log. Every pass prints its start, worker diagnostic, exit
 status, and waiting state. The tmux shell stays open after a failure and
 `pipe-pane` appends all output to the private log path printed by the wrapper.

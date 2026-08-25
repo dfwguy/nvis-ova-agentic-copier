@@ -178,7 +178,7 @@ git rev-parse --abbrev-ref HEAD
 git checkout -b "$intended_branch"
 ```
 
-**A blocking check fails** → stop and ask the user to approve before continuing. Summarize what failed (test names, pipeline ID + URL, dependency, same-branch ownership, or resource conflict) so the decision is informed. Do not attempt to fix failures or close MRs as part of pre-flight — that's a separate task the user must direct. An unrelated open MR is not a failed check.
+**A blocking check fails** → summarize the failure (test names, pipeline ID + URL, dependency, same-branch ownership, or resource conflict) and remediate it before handoff. A failed or canceled latest pipeline is actionable: diagnose it, then either include its fix in the current feature MR when it is compatible with the requested work or open a dedicated pipeline-repair MR. Do not leave a failed pipeline merely reported. Other failures still require user direction when their repair would materially expand scope. An unrelated open MR is not a failed check.
 
 If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
 

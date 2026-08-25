@@ -57,6 +57,13 @@ conflict-remediation pass. It returns the issue to human review only after the
 updated MR is conflict-free and all publication evidence is exact. The runner
 still never approves or merges the MR.
 
+Before routing applied work, the runner reads the newest default-branch
+pipeline through the numeric project endpoint. When it is `failed` or
+`canceled`, the worker receives that evidence and must repair it in the
+issue's resulting MR; the failure is never left as a report-only condition.
+Successful, running, pending, and absent pipelines do not add a remediation
+requirement.
+
 Codex works only in the prepared branch, which the runner created from the
 default branch. It does not commit, push, or create an MR. Instead it returns a
 delimited JSON draft containing the MR title and description. The trusted
