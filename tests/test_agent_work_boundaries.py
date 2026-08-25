@@ -21,7 +21,13 @@ from agent_work.adapters import (
     discover_checkout_config,
 )
 from agent_work.cli import build_parser, main
-from agent_work.models import AgentInvocation, AgentWorkConfig, GitLabIssue, RunReport
+from agent_work.models import (
+    AgentInvocation,
+    AgentWorkConfig,
+    GitLabIssue,
+    MergeRequestDraft,
+    RunReport,
+)
 from agent_work.serial import BranchConflict, RunNextDependencies
 
 
@@ -378,6 +384,21 @@ def test_codex_invocation_redacts_known_secret_values_from_diagnostics(
     ).invoke(tmp_path, "prompt", 45)
 
     assert invocation.diagnostic == "token=[REDACTED]\nfatal: [REDACTED]"
+
+
+def test_worker_merge_request_draft_requires_one_valid_delimited_json_object() -> None:
+    invocation = AgentInvocation(
+        returncode=0,
+        stdout=(
+            "work complete\n<agent-work-merge-request>\n"
+            '{"title":"fix: publish safely","description":"Validated."}\n'
+            "</agent-work-merge-request>"
+        ),
+    )
+
+    assert invocation.merge_request_draft() == MergeRequestDraft(
+        title="fix: publish safely", description="Validated."
+    )
 
 
 def test_checkout_refuses_an_existing_deterministic_local_branch(

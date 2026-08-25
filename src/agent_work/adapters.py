@@ -22,6 +22,7 @@ from .models import (
     GitLabIssue,
     GitLabProject,
     GitPublicationEvidence,
+    MergeRequestDraft,
     MergeRequestEvidence,
 )
 from .serial import BranchConflict, RunNextDependencies
@@ -388,6 +389,30 @@ class GitLabGateway:
             for item in self._items(payload, "closing issue list")
         )
 
+    def create_merge_request(
+        self, issue: GitLabIssue, project: GitLabProject, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence:
+        """Create the exact same-project MR from validated worker metadata."""
+        payload = self._mapping(
+            self._call(
+                f"projects/{self._config.project_id}/merge_requests",
+                method="POST",
+                fields=(
+                    f"source_branch=agent/issue-{issue.iid}",
+                    f"target_branch={project.default_branch}",
+                    f"title={draft.title}",
+                    f"description={draft.description.rstrip()}\n\nCloses #{issue.iid}",
+                    "remove_source_branch=true",
+                    "squash=true",
+                ),
+            ),
+            "merge request",
+        )
+        try:
+            return MergeRequestEvidence.model_validate(payload)
+        except ValidationError as error:
+            raise AdapterError("GitLab returned invalid merge request data") from error
+
 
 class CommandRunner(Protocol):
     """Structural callable annotation for subprocess injection."""
@@ -541,6 +566,21 @@ class ServiceCheckout:
         ):
             raise AdapterError("the issue branch tip is invalid")
         return GitPublicationEvidence(local_sha=local_sha, remote_sha=remote_sha)
+
+    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
+        """Create one commit and push it without granting Git writes to Codex."""
+        if self._run("rev-parse", "--abbrev-ref", "HEAD") != branch:
+            raise AdapterError("checkout is not on the issue branch")
+        self._run("add", "--all")
+        staged = self._run_command(
+            ("git", "-C", str(self.path), "diff", "--cached", "--quiet")
+        )
+        if staged.returncode == 0:
+            raise AdapterError("worker made no changes to publish")
+        if staged.returncode != 1:
+            raise AdapterError("checkout validation failed")
+        self._run("commit", "-m", draft.title)
+        self._run("push", "--set-upstream", "origin", branch)
 
 
 class CodexInvoker:

@@ -13,6 +13,7 @@ from .models import (
     GitLabIssue,
     GitLabProject,
     GitPublicationEvidence,
+    MergeRequestDraft,
     MergeRequestEvidence,
     RunReport,
 )
@@ -65,6 +66,11 @@ class GitLabQueue(Protocol):
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
         """Return whether GitLab says the MR closes the issue."""
 
+    def create_merge_request(
+        self, issue: GitLabIssue, project: GitLabProject, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence:
+        """Create the prepared branch's same-project human-review MR."""
+
 
 class ServiceCheckout(Protocol):
     """Confirmed-checkout Git operations used by the policy."""
@@ -87,6 +93,9 @@ class ServiceCheckout(Protocol):
 
     def publication_tip(self, branch: str) -> GitPublicationEvidence:
         """Return local and remote publication tips."""
+
+    def publish(self, branch: str, draft: MergeRequestDraft) -> None:
+        """Commit and push worker changes from the trusted checkout."""
 
 
 class AgentInvoker(Protocol):
@@ -126,8 +135,8 @@ def _prompt(
         remediation = """
 This is a merge-conflict remediation pass. The existing merge request is
 blocked because the target branch changed. Update the required branch with the
-current target branch, resolve the conflicts, validate the result, and push the
-updated branch. Do not approve or merge the merge request.
+current target branch and resolve the conflicts. Do not commit, push, approve,
+or merge; the trusted runner publishes the validated update.
 
 """
     return f"""Use $work-item-runner to implement GitLab issue #{issue.iid}.
@@ -147,10 +156,12 @@ Body:
 {issue.description}
 
 {remediation}
-Follow the repository workflow and tests. Commit and push the required branch,
-then open a same-project merge request whose description contains
-`Closes #{issue.iid}`. Never approve or merge it. Stop after publication for
-human review. Do not emit a custom result document.
+The runner already created `{branch}` from `{project.default_branch}`. Implement
+and validate the change there. Do not commit, push, create a merge request,
+approve, or merge. At the end, emit exactly one JSON object between
+`<agent-work-merge-request>` and `</agent-work-merge-request>`, with nonempty
+`title` and `description` strings. The trusted runner appends `Closes #{issue.iid}`
+and performs the Git and GitLab publication steps.
 """
 
 
@@ -257,6 +268,20 @@ def _mark_failed(
     dependencies.gitlab.comment_failed(issue, reason)
 
 
+def _publish_worker_result(
+    dependencies: RunNextDependencies,
+    issue: GitLabIssue,
+    project: GitLabProject,
+    invocation: AgentInvocation,
+) -> None:
+    """Publish a successful worker's change through trusted runner boundaries."""
+    if invocation.returncode != 0:
+        raise RunNextError(f"Codex exited with status {invocation.returncode}")
+    draft = invocation.merge_request_draft()
+    dependencies.checkout.publish(_branch(issue), draft)
+    dependencies.gitlab.create_merge_request(issue, project, draft)
+
+
 def _preview(
     dependencies: RunNextDependencies, report_progress: Callable[[str], None]
 ) -> RunReport:
@@ -350,6 +375,19 @@ def run_next(
                 )
             except RuntimeError as error:
                 invocation = AgentInvocation(returncode=None, stderr=str(error))
+            if invocation.returncode == 0:
+                try:
+                    dependencies.checkout.publish(
+                        branch, invocation.merge_request_draft()
+                    )
+                except (RuntimeError, ValueError) as error:
+                    invocation = AgentInvocation(
+                        returncode=invocation.returncode,
+                        stdout=invocation.stdout,
+                        stderr="\n".join(
+                            part for part in (invocation.stderr, str(error)) if part
+                        ),
+                    )
             return _finish_from_evidence(dependencies, conflicted, project, invocation)
 
         eligible = dependencies.gitlab.list_eligible()
@@ -405,4 +443,18 @@ def run_next(
             # A timed-out or failed agent may still have published successfully.
             # GitLab and Git evidence, not process status, decide the outcome.
             invocation = AgentInvocation(returncode=None, stderr=str(error))
+        if (
+            invocation.returncode == 0
+            and dependencies.gitlab.publication(branch) is None
+        ):
+            try:
+                _publish_worker_result(dependencies, issue, project, invocation)
+            except (RuntimeError, ValueError) as error:
+                invocation = AgentInvocation(
+                    returncode=invocation.returncode,
+                    stdout=invocation.stdout,
+                    stderr="\n".join(
+                        part for part in (invocation.stderr, str(error)) if part
+                    ),
+                )
         return _finish_from_evidence(dependencies, issue, project, invocation)
