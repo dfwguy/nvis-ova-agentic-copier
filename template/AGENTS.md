@@ -1,12 +1,38 @@
 # AGENTS.md
 
-This repository uses Claude Code as its primary AI coding assistant. If you are another AI coding agent (Codex, Cursor, etc.), this file is your entry point.
+This repository ships Claude Code configuration and a portable workflow for
+Claude Code, Codex, and Pi. `AGENTS.md` is the entry point for every supported
+agent frontend; frontend-specific configuration must not replace the shared
+requirements here.
 
 @CLAUDE.md
 
 @.claude/lang/python.md
 
 @.claude/lang/bash.md
+
+## Agent interoperability and model tiers
+
+Claude Code, Codex, and Pi must follow the same repository workflow,
+validation gates, and human approval boundary. Claude Code reads the
+`.claude/` agents and slash commands directly. Codex and Pi treat those files
+as the canonical workflow description and use their equivalent native
+delegation mechanisms when available.
+
+Choose a model by capability tier, not by a provider-specific model name. The
+inference-hub mapping is deliberately deferred; a frontend resolves an enabled
+tier through its own configured mapping.
+
+| Tier | Intended work | Selection status |
+|---|---|---|
+| Most capable | Architecture, complex implementation, and code-quality review | Enabled |
+| Balanced | Implementation, tests, documentation, CI review, and test review | Enabled |
+| Fast | Focused validation and documentation checks | Enabled |
+| Frontier | Experimental frontier models, including Fable | Reserved — must not select |
+
+`frontier` is explicit so experimental models such as Fable are never chosen
+by default or as a fallback. Add a reviewed inference-hub mapping before
+enabling that tier.
 
 ## Codex workflow
 
@@ -15,8 +41,8 @@ does not execute their front matter; it follows the shared workflow and
 conventions they describe, then uses native Codex subagents when delegation is
 useful.
 
-Use this model routing for Codex subagents. These are capability/cost tiers,
-not parameter-count equivalences:
+Use the enabled tiers as follows for Codex subagents. These are
+capability/cost tiers, not parameter-count equivalences:
 
 | Work | Model | Reasoning effort |
 |---|---|---|
