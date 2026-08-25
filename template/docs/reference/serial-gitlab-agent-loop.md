@@ -47,6 +47,13 @@ also report that the MR closes the selected issue, which the prompt requires as
 The runner posts its safe failure reason as an issue comment; redacted worker
 diagnostics stay in the operator's private log.
 
+Each pass also checks open `agent::awaiting-human` handoffs. If GitLab reports
+that an otherwise exact MR has merge conflicts, the runner moves that issue
+back to `agent::running`, refreshes its deterministic branch, and invokes one
+conflict-remediation pass. It returns the issue to human review only after the
+updated MR is conflict-free and all publication evidence is exact. The runner
+still never approves or merges the MR.
+
 The `agent::running` label is the GitLab lock. `agent::running`,
 `agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
 After adding the lock, the runner

@@ -60,11 +60,13 @@ class _GitLab:
         *,
         eligible: tuple[GitLabIssue, ...] = (),
         running: tuple[GitLabIssue, ...] = (),
+        awaiting_human: tuple[GitLabIssue, ...] = (),
         publication: MergeRequestEvidence | None = None,
         closes_issue: bool = True,
     ) -> None:
         self.eligible = eligible
         self.running = running
+        self.awaiting_human = awaiting_human
         self._publication = publication
         self._closes_issue = closes_issue
         self.events: list[tuple[str, int]] = []
@@ -83,6 +85,9 @@ class _GitLab:
 
     def list_running(self) -> tuple[GitLabIssue, ...]:
         return self.running
+
+    def list_awaiting_human(self) -> tuple[GitLabIssue, ...]:
+        return self.awaiting_human
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         return next(
@@ -115,12 +120,17 @@ class _Checkout:
     """Semantic checkout boundary fake; it never touches a real repository."""
 
     def __init__(
-        self, *, sha: str = "a" * 40, branch_error: RuntimeError | None = None
+        self,
+        *,
+        sha: str = "a" * 40,
+        branch_error: RuntimeError | None = None,
+        resume_error: RuntimeError | None = None,
     ) -> None:
         self.path = Path("/trusted/checkout")
         self.events: list[str] = []
         self.sha = sha
         self.branch_error = branch_error
+        self.resume_error = resume_error
 
     def preview_preflight(self, *_args: object) -> None:
         self.events.append("preview_preflight")
@@ -138,6 +148,13 @@ class _Checkout:
     def prepare_branch(self, branch: str, default_branch: str) -> Path:
         del branch, default_branch
         self.events.append("prepare_branch")
+        return self.path
+
+    def resume_branch(self, branch: str, default_branch: str) -> Path:
+        del branch, default_branch
+        self.events.append("resume_branch")
+        if self.resume_error is not None:
+            raise self.resume_error
         return self.path
 
     def publication_tip(self, branch: str) -> GitPublicationEvidence:
@@ -404,6 +421,61 @@ def test_stranded_running_issue_recovers_exact_mr_without_another_invocation() -
 
     assert report.outcome == "awaiting_human"
     assert gitlab.events == [("awaiting_human", issue.iid)]
+    assert invoke.calls == []
+
+
+def test_applied_run_reclaims_a_conflicted_human_review_mr_for_remediation() -> None:
+    issue = _issue(iid=123, labels=("agent::awaiting-human",))
+    conflicted_publication = _publication(issue).model_copy(
+        update={"has_conflicts": True}
+    )
+    resolved_publication = _publication(issue)
+
+    class _ConflictResolvedByAgent(_GitLab):
+        def publication(self, branch: str) -> MergeRequestEvidence | None:
+            del branch
+            return (
+                resolved_publication
+                if self.events == [("running", issue.iid)]
+                else conflicted_publication
+            )
+
+    gitlab, checkout, invoke, lock = (
+        _ConflictResolvedByAgent(awaiting_human=(issue,)),
+        _Checkout(),
+        _Invoke(),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "awaiting_human"
+    assert gitlab.events == [("running", issue.iid), ("awaiting_human", issue.iid)]
+    assert checkout.events == ["applied_preflight", "resume_branch", "publication_tip"]
+    assert invoke.calls == [(checkout.path, 30)]
+
+
+def test_conflicted_handoff_fails_when_its_branch_cannot_be_restored() -> None:
+    issue = _issue(iid=123, labels=("agent::awaiting-human",))
+    publication = _publication(issue).model_copy(update={"has_conflicts": True})
+    gitlab, checkout, invoke, lock = (
+        _GitLab(awaiting_human=(issue,), publication=publication),
+        _Checkout(resume_error=AdapterError("checkout validation failed")),
+        _Invoke(),
+        _Lock(),
+    )
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "failed"
+    assert (
+        report.failure_reason
+        == "checkout preparation failed: checkout validation failed"
+    )
+    assert gitlab.events == [("running", issue.iid), ("failed", issue.iid)]
     assert invoke.calls == []
 
 

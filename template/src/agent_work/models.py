@@ -100,6 +100,7 @@ class MergeRequestEvidence(BaseModel):
     source_branch: str = Field(min_length=1)
     target_branch: str = Field(min_length=1)
     sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    has_conflicts: bool = False
 
 
 @dataclass(frozen=True)
