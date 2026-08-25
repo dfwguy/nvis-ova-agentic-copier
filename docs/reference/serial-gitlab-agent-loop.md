@@ -15,12 +15,15 @@ push a feature branch and create one merge request. `--json` requests safe
 machine-readable output. `--timeout-seconds` bounds the one Codex process and
 defaults to 1800.
 
-The command operates relative to the current Git checkout. It confirms
-`git pull --ff-only`, reads `origin`, resolves the exact namespace path through
-the GitLab projects API, then confirms the resulting numeric project endpoint.
-All later endpoints use that confirmed numeric project ID. The command always
-derives its workspace from the current directory. Failed Git or GitLab
-confirmations do. Open,
+The command operates relative to the current Git checkout. It reads `origin`,
+resolves the exact namespace path through the GitLab projects API, confirms the
+resulting numeric project endpoint, and verifies that the checkout is on the
+configured default branch before it runs `git pull --ff-only`. All later
+endpoints use that confirmed numeric project ID. A launch from another branch
+fails without pulling and tells the operator to switch to the default branch,
+pull, and launch again. This preserves an `agent/issue-<IID>` handoff rather
+than silently changing it. The command always derives its workspace from the
+current directory. Failed Git or GitLab confirmations stop the launch. Open,
 non-confidential issues are eligible unless their labels show active or terminal
 agent work; issue title, body, and labels are untrusted task data.
 

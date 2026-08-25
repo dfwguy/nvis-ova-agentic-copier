@@ -140,7 +140,7 @@ def _discover_project(
 def discover_checkout_config(
     *, current_directory: Path, run_command: CommandRunner
 ) -> AgentWorkConfig:
-    """Confirm the current checkout and derive its GitLab target without env vars."""
+    """Confirm an up-to-date default-branch checkout and derive its target."""
     checkout = Path(
         _confirmed_command(
             run_command,
@@ -148,11 +148,6 @@ def discover_checkout_config(
             "current directory is not inside a Git checkout",
         )
     ).resolve()
-    _confirmed_command(
-        run_command,
-        ("git", "-C", str(checkout), "pull", "--ff-only"),
-        "git pull --ff-only failed",
-    )
     origin = _confirmed_command(
         run_command,
         ("git", "-C", str(checkout), "remote", "get-url", "origin"),
@@ -161,6 +156,23 @@ def discover_checkout_config(
     host, path = _repository_location(origin)
     project_id, _project = _discover_project(
         host=host, path=path, run_command=run_command
+    )
+    current_branch = _confirmed_command(
+        run_command,
+        ("git", "-C", str(checkout), "branch", "--show-current"),
+        "current checkout branch could not be read",
+    )
+    default_branch = str(_project.get("default_branch", ""))
+    if current_branch != default_branch:
+        raise AdapterError(
+            "agent-work must start on the default branch "
+            f"{default_branch!r}; current branch is {current_branch!r}. "
+            f"Switch to {default_branch!r}, pull --ff-only, then launch agent-work again"
+        )
+    _confirmed_command(
+        run_command,
+        ("git", "-C", str(checkout), "pull", "--ff-only"),
+        "git pull --ff-only failed",
     )
     return AgentWorkConfig(host=host, project_id=project_id, checkout=checkout)
 

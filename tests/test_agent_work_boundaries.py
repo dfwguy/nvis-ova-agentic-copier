@@ -78,10 +78,11 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
     commands = _Commands(
         (
             CommandResult(0, str(checkout), ""),
-            CommandResult(0, "", ""),
             CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
             CommandResult(0, json.dumps([json.loads(project_payload)]), ""),
             CommandResult(0, project_payload, ""),
+            CommandResult(0, "main\n", ""),
+            CommandResult(0, "", ""),
         )
     )
 
@@ -92,7 +93,6 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
     assert dependencies.checkout.path == checkout
     assert commands.calls == [
         (("git", "-C", str(tmp_path), "rev-parse", "--show-toplevel"), {}),
-        (("git", "-C", str(checkout), "pull", "--ff-only"), {}),
         (("git", "-C", str(checkout), "remote", "get-url", "origin"), {}),
         (
             (
@@ -118,6 +118,8 @@ def test_default_dependencies_discover_checkout_and_project_without_environment(
             ),
             {},
         ),
+        (("git", "-C", str(checkout), "branch", "--show-current"), {}),
+        (("git", "-C", str(checkout), "pull", "--ff-only"), {}),
     ]
 
 
@@ -132,10 +134,11 @@ def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
     commands = _Commands(
         (
             CommandResult(0, str(checkout), ""),
-            CommandResult(0, "", ""),
             CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
             CommandResult(0, json.dumps([project]), ""),
             CommandResult(0, json.dumps(project), ""),
+            CommandResult(0, "main\n", ""),
+            CommandResult(0, "", ""),
         )
     )
 
@@ -144,11 +147,44 @@ def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
     assert config.checkout == checkout
 
 
+def test_checkout_derivation_refuses_to_launch_from_a_feature_branch(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    project = {
+        "id": 310967,
+        "path_with_namespace": "group/project",
+        "default_branch": "main",
+        "web_url": "https://gitlab.example.com/group/project",
+    }
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, json.dumps([project]), ""),
+            CommandResult(0, json.dumps(project), ""),
+            CommandResult(0, "agent/issue-12\n", ""),
+        )
+    )
+
+    with pytest.raises(
+        AdapterError,
+        match=(
+            "agent-work must start on the default branch 'main'; current branch is "
+            "'agent/issue-12'. Switch to 'main', pull --ff-only, then launch "
+            "agent-work again"
+        ),
+    ):
+        discover_checkout_config(current_directory=tmp_path, run_command=commands)
+
+    assert all("pull" not in command for command, _ in commands.calls)
+
+
 @pytest.mark.parametrize(
     ("failure_at", "message"),
     (
-        (1, "git pull --ff-only failed"),
-        (3, "GitLab project lookup failed"),
+        (5, "git pull --ff-only failed"),
+        (2, "GitLab project lookup failed"),
     ),
 )
 def test_default_dependencies_name_the_failed_confirmation(
@@ -156,7 +192,6 @@ def test_default_dependencies_name_the_failed_confirmation(
 ) -> None:
     results = [
         CommandResult(0, str(tmp_path), ""),
-        CommandResult(0, "", ""),
         CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
         CommandResult(
             0,
@@ -172,7 +207,19 @@ def test_default_dependencies_name_the_failed_confirmation(
             ),
             "",
         ),
-        CommandResult(0, "{}", ""),
+        CommandResult(
+            0,
+            json.dumps(
+                {
+                    "id": 310967,
+                    "default_branch": "main",
+                    "web_url": "https://gitlab.example.com/group/project",
+                }
+            ),
+            "",
+        ),
+        CommandResult(0, "main\n", ""),
+        CommandResult(0, "", ""),
     ]
     results[failure_at] = CommandResult(1, "", "connection failed")
 
