@@ -93,9 +93,10 @@ continue its already-selected workflow without recursively invoking
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
 test -d "$(git rev-parse --show-toplevel)/.git"
-expected_origin="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" --jq .http_url_to_repo)"
+project_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID")"
+expected_origin="$(jq -er '.http_url_to_repo' <<<"$project_json")"
 test "$(git remote get-url origin)" = "$expected_origin"
-configured_default_branch="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" --jq .default_branch)"
+configured_default_branch="$(jq -er '.default_branch' <<<"$project_json")"
 git merge-base --is-ancestor "origin/$configured_default_branch" HEAD
 ```
 

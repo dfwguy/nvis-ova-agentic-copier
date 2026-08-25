@@ -22,7 +22,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Sandbox
 
-Run commands in the sandbox first — never preemptively disable it. On a sandbox failure, try to fix the command (or sandbox config) before falling back to disabling the sandbox.
+Run commands through the configured execution path first. When a known
+environment failure occurs, apply its documented recovery and continue without
+asking the operator to repeat it. Keep recovery bounded: do not rerun the same
+known-failing route, but use the next documented sandbox, credential, host, or
+CLI compatibility path when it is available. Report a blocker only after the
+bounded recovery path is exhausted or when the next recovery requires new
+authority; include the attempted recoveries and the final non-secret
+diagnostic concisely.
 
 ## Links in responses
 
