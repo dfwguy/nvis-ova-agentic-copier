@@ -377,7 +377,9 @@ class GitLabGateway:
         body = (
             "Automated pass marked this issue `agent::failed`: "
             f"{reason}. Redacted worker diagnostics are available only in the "
-            "operator's private agent-work log."
+            "operator's private agent-work log. On the host running the timer, "
+            "inspect them with `journalctl --user -t <project-slug>-agent-work "
+            "--since today`."
         )
         self._call(
             f"projects/{self._config.project_id}/issues/{issue.iid}/notes",

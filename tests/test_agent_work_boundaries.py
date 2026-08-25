@@ -422,6 +422,10 @@ def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
     )
     assert "projects/310967/issues/3/notes" in command
     assert any("agent::failed" in argument for argument in command)
+    assert any(
+        "journalctl --user -t <project-slug>-agent-work --since today" in argument
+        for argument in command
+    )
 
 
 @pytest.mark.parametrize(
