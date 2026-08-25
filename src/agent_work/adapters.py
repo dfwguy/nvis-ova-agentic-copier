@@ -277,6 +277,20 @@ class GitLabGateway:
             if "agent::running" in issue.labels
         )
 
+    def list_awaiting_human(self) -> tuple[GitLabIssue, ...]:
+        """Return open non-confidential issues awaiting human review."""
+        return tuple(
+            issue
+            for issue in self._list_issues(
+                state="opened",
+                limit=100,
+                filters=("confidential=false", "labels=agent::awaiting-human"),
+            )
+            if issue.state == "opened"
+            and not issue.confidential
+            and "agent::awaiting-human" in issue.labels
+        )
+
     def fetch_issue(self, iid: int) -> GitLabIssue:
         """Refetch and validate one configured-project issue."""
         payload = self._mapping(
@@ -490,6 +504,26 @@ class ServiceCheckout:
         if re.fullmatch(r"agent/issue-[1-9][0-9]*", branch) is None:
             raise AdapterError("issue branch name is invalid")
         self._run("switch", "-c", branch, f"origin/{default_branch}")
+        return self.path
+
+    def resume_branch(self, branch: str, default_branch: str) -> Path:
+        """Select a published issue branch after refreshing its remote ref."""
+        if re.fullmatch(r"agent/issue-[1-9][0-9]*", branch) is None:
+            raise AdapterError("issue branch name is invalid")
+        self._run(
+            "fetch",
+            "origin",
+            f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
+            f"refs/heads/{branch}:refs/remotes/origin/{branch}",
+        )
+        local_branch = self._run(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", accepted=(0, 1)
+        )
+        if local_branch:
+            self._run("switch", branch)
+            self._run("merge", "--ff-only", f"origin/{branch}")
+        else:
+            self._run("switch", "--track", "-c", branch, f"origin/{branch}")
         return self.path
 
     def publication_tip(self, branch: str) -> GitPublicationEvidence:

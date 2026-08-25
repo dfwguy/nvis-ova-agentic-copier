@@ -157,8 +157,10 @@ tmux send-keys -t agent-work 'while :; do printf "[%s] agent-work: starting pass
 tmux attach -t agent-work
 ```
 
-Each pass checks GitLab for `agent::running`, claims one eligible open issue,
-and refetches the running list. It begins work only when
+Each pass checks GitLab for `agent::running` and conflicted
+`agent::awaiting-human` merge requests before it claims one eligible open
+issue, and refetches the running list. A conflicted handoff is reclaimed on
+its existing deterministic branch for one remediation pass. It begins work only when
 the selected issue is the sole running lock. Published work becomes
 `agent::awaiting-human`; failures become `agent::failed`. The loop never
 approves or merges an MR. Each failed transition leaves the safe failure reason

@@ -36,7 +36,10 @@ feature branch and opens an MR, then hands off at
 then `agent::awaiting-human` or `agent::failed`; the deterministic branch is
 `agent/issue-<IID>`. The runner accepts a handoff only after exact same-project
 MR, branch, default-target, local/remote tip, and `Closes #IID` verification.
-The loop never approves or merges that MR.
+The loop never approves or merges that MR. A later pass checks those open
+handoffs for GitLab-reported merge conflicts; a conflicted MR is reclaimed on
+its same deterministic branch for one remediation pass, then returns to human
+review only after it is conflict-free again.
 
 Serial is a deliberate local safety boundary, not distributed coordination. A
 nonblocking local project lock is an explicit temporary failure: `run-next`
