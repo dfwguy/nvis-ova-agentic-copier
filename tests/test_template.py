@@ -557,6 +557,18 @@ def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> N
     )
 
 
+def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
+    generated_project: Path,
+) -> None:
+    """The documented continuous loop must reset after each bounded worker pass."""
+    content = (
+        generated_project / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
+    ).read_text()
+
+    assert "git switch main && git pull --ff-only" in content
+    assert "Do not make the wrapper switch branches automatically." not in content
+
+
 def test_setup_repo_interviews_self_approval(generated_project: Path) -> None:
     """Test that /setup-repo interviews the user before blocking self-approval (single-user opt-out)."""
     content = (generated_project / ".claude" / "commands" / "setup-repo.md").read_text()

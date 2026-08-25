@@ -153,7 +153,7 @@ mkdir -p -m 700 "$log_dir"
 log_file="$log_dir/agent-work-$(date -u +%Y%m%dT%H%M%SZ).log"
 tmux new-session -d -s agent-work
 tmux pipe-pane -t agent-work -o "cat >> '$log_file'"
-tmux send-keys -t agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; fi; break; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done' C-m
+tmux send-keys -t agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; fi; break; fi; printf "[%s] agent-work: returning checkout to main\n" "$(date -Is)"; git switch main && git pull --ff-only; status=$?; if [ "$status" -ne 0 ]; then printf "[%s] agent-work: stopped after checkout reset failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; break; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done' C-m
 tmux attach -t agent-work
 ```
 
@@ -174,11 +174,13 @@ If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
 that error and stops instead of quietly retrying against the held lock.
 
-After a worker has handed an issue to human review, its dedicated checkout is
-still on `agent/issue-<IID>`. The next `agent-work` launch intentionally exits
-before pulling from that branch and names the recovery: wait for the MR to be
-merged, then use `git switch main` and `git pull --ff-only` before starting the
-loop again. Do not make the wrapper switch branches automatically.
+Each successful bounded pass leaves the dedicated checkout on its deterministic
+issue branch. Before the wrapper sleeps, it switches that *dedicated* checkout
+back to `main` and fast-forwards it, preserving the issue branch and its MR for
+human review. If that reset fails (for example, because the checkout is dirty),
+the wrapper stops and leaves the diagnostic visible. A direct `agent-work`
+launch from an issue branch still intentionally fails rather than silently
+changing branches.
 
 Stop the loop with `Ctrl-C`, or from another terminal:
 
