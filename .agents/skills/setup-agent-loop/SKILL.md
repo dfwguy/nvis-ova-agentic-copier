@@ -28,8 +28,8 @@ before checking repository safeguards.
    if ! command -v git glab codex jq >/dev/null; then
      block_apply 'install the required Git, glab, Codex, and jq tools'
    fi
-   if ! glab auth status --hostname "$GITLAB_HOST"; then
-     block_apply 'authenticate glab for the configured GitLab host'
+   if ! glab api --hostname "$GITLAB_HOST" user >/dev/null; then
+     block_apply 'authenticate the active GitLab API credential route for the configured host'
    fi
    if ! codex login status; then
      block_apply 'authenticate Codex'
@@ -91,7 +91,7 @@ before checking repository safeguards.
    ```
 2. Create a clean dedicated checkout that is not an operator's active checkout.
    Run the runner from that checkout. It derives the checkout and GitLab project
-   from the current directory and `origin`; `AGENT_WORK_CHECKOUT` is unused.
+   from the current directory and `origin`.
    The local lock is always the fixed, gitignored
    `<checkout>/.agent-work.lock`; it is not configurable.
 3. Check `uv` and `tmux`, then run `uv run agent-work run-next --json` from the

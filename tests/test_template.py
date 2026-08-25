@@ -1456,6 +1456,9 @@ glab() {{
     api)
       request="${{@: -1}}"
       case "$request" in
+        user)
+          printf '%s\\n' '{{"username":"developer"}}'
+          ;;
         */approvals*)
           printf '%s\\n' 'unexpected Maintainer-only /approvals request' >&2
           return 91

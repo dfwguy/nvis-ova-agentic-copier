@@ -10,17 +10,15 @@ human-gated merge request; the loop never approves or merges it.
 
 ```bash
 uv run agent-work run-next --json
-tmux new-session -d -s agent-work 'while :; do printf "[%s] agent-work: starting pass\\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure\\n" "$(date -Is)" >&2; fi; exit "$status"; fi; printf "[%s] agent-work: next pass in 300 seconds\\n" "$(date -Is)"; sleep 300; done'
-tmux attach -t agent-work
 ```
 
 Run it from the repository it should operate on. The runner confirms that
 checkout with `git pull --ff-only`, derives the GitLab host and project from
-`origin`, and confirms that project through GitLab before it selects work. The
-runner does not use `AGENT_WORK_CHECKOUT` or any checkout-selection environment
-variable. The tmux loop reports its start, exit status, and next poll time; a
-held checkout lock stops the loop with temporary-failure exit `75`. The complete
-commands are in [`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md).
+`origin`, and confirms that project through GitLab before it selects work. Use
+[`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md)
+to start the tmux loop: it persists redacted worker diagnostics to a private
+log and leaves the pane open after failure. A held checkout lock stops the loop
+with temporary-failure exit `75`.
 
 ## Serial GitLab agent loop
 

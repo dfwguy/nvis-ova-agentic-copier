@@ -8,26 +8,27 @@ unattended publication until the explicit gate below is complete.
 
 ## Check prerequisites and confirm the current checkout
 
-Run the loop from the repository it should operate on. No GitLab-target or
-checkout environment variables, including `AGENT_WORK_CHECKOUT`, are required.
-The runner itself confirms Git
+Run the loop from the repository it should operate on. The runner itself confirms Git
 access with `git pull --ff-only`, derives the GitLab host and project path from
 `origin`, resolves that exact path through the GitLab API, and confirms the
 numeric project endpoint. Do not print, export, or put tokens in this setup.
 
-Check the preinstalled Git, `glab`, and Codex tools, then verify the existing
-`glab` and Codex sessions:
+Check the preinstalled Git, `glab`, and Codex tools, then verify that the
+active credential route can call the GitLab API. This supports either a stored
+`glab` login or a directory-scoped token such as `GITLAB_TOKEN`:
 
 ```bash
 command -v git glab codex jq
 codex login status
+glab api --hostname "$GITLAB_HOST" user >/dev/null
 git pull --ff-only
 git remote get-url origin
 ```
 
 If any confirmation fails, repair the repository's Git remote/credential or
-the `glab` login, then rerun the command. A Developer account can poll eligible
-issues; it does not need permission to install a webhook or an inbound service.
+the active GitLab API credential route, then rerun the command. A Developer
+account can poll eligible issues; it does not need permission to install a
+webhook or an inbound service.
 
 The fail-closed readiness block obtains the numeric
 project representation once. It classifies the `glab` identity from the maximum
@@ -147,7 +148,12 @@ exactly `30`; it does not replace the documented branch-protection or approval
 evidence.
 
 ```bash
-tmux new-session -d -s agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure\n" "$(date -Is)" >&2; fi; exit "$status"; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done'
+log_dir="$PWD/.agent-work-logs"
+mkdir -p -m 700 "$log_dir"
+log_file="$log_dir/agent-work-$(date -u +%Y%m%dT%H%M%SZ).log"
+tmux new-session -d -s agent-work
+tmux pipe-pane -t agent-work -o "cat >> '$log_file'"
+tmux send-keys -t agent-work 'while :; do printf "[%s] agent-work: starting pass\n" "$(date -Is)"; uv run agent-work run-next --apply --json; status=$?; printf "[%s] agent-work: pass exited %s\n" "$(date -Is)" "$status"; if [ "$status" -ne 0 ]; then if [ "$status" -eq 75 ]; then printf "[%s] agent-work: stopped; checkout lock is held\n" "$(date -Is)" >&2; else printf "[%s] agent-work: stopped after failure; see the diagnostic above and $log_file\n" "$(date -Is)" >&2; fi; break; fi; printf "[%s] agent-work: next pass in 300 seconds\n" "$(date -Is)"; sleep 300; done' C-m
 tmux attach -t agent-work
 ```
 
@@ -155,8 +161,11 @@ Each pass checks GitLab for `agent::running`, claims one eligible open issue,
 and refetches the running list. It begins work only when
 the selected issue is the sole running lock. Published work becomes
 `agent::awaiting-human`; failures become `agent::failed`. The loop never
-approves or merges an MR. Every pass prints its start, exit status, and waiting
-state, so the attached pane remains informative between polls. If another local
+approves or merges an MR. Each failed transition leaves the safe failure reason
+as an issue comment; worker output remains only in the private log. Every pass prints its start, worker diagnostic, exit
+status, and waiting state. The tmux shell stays open after a failure and
+`pipe-pane` appends all output to the private log path printed by the wrapper.
+If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the wrapper reports
 that error and stops instead of quietly retrying against the held lock.
 

@@ -10,6 +10,7 @@ import pytest
 
 from agent_work.adapters import AdapterError
 from agent_work.models import (
+    AgentInvocation,
     GitLabIssue,
     GitLabProject,
     GitPublicationEvidence,
@@ -62,6 +63,7 @@ class _GitLab:
         self._publication = publication
         self._closes_issue = closes_issue
         self.events: list[tuple[str, int]] = []
+        self.failure_comments: list[tuple[int, str]] = []
 
     def verify_project(self) -> GitLabProject:
         return GitLabProject(
@@ -91,6 +93,9 @@ class _GitLab:
 
     def mark_failed(self, issue: GitLabIssue) -> None:
         self.events.append(("failed", issue.iid))
+
+    def comment_failed(self, issue: GitLabIssue, reason: str) -> None:
+        self.failure_comments.append((issue.iid, reason))
 
     def publication(self, branch: str) -> MergeRequestEvidence | None:
         del branch
@@ -151,14 +156,14 @@ class _Invoke:
         self.events = events
         self.calls: list[tuple[Path, int]] = []
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> int:
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> AgentInvocation:
         assert prompt
         self.calls.append((checkout, timeout))
         if self.events is not None:
             self.events.append("invoke")
         if self.error is not None:
             raise self.error
-        return self.returncode
+        return AgentInvocation(returncode=self.returncode)
 
 
 def _publication(issue: GitLabIssue) -> MergeRequestEvidence:
@@ -280,6 +285,25 @@ def test_applied_run_selects_only_the_first_ready_issue() -> None:
     assert report.issue_iid == first.iid
     assert gitlab.events == [("running", first.iid), ("awaiting_human", first.iid)]
     assert len(invoke.calls) == 1
+
+
+def test_failed_applied_issue_reports_agent_exit_and_diagnostics() -> None:
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(eligible=(issue,)),
+        _Checkout(),
+        _Invoke(returncode=7),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.failure_reason == (
+        "Codex exited with status 7; no exact published MR evidence"
+    )
+    assert gitlab.failure_comments == [(issue.iid, report.failure_reason)]
 
 
 def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> None:

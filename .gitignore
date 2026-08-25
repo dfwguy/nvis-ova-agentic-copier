@@ -61,6 +61,7 @@ local_settings.py
 instance/
 .webassets-cache
 .agent-work.lock
+.agent-work-logs/
 
 # Distribution / packaging
 .Python

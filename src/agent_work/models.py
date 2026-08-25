@@ -111,6 +111,20 @@ class GitPublicationEvidence:
 
 
 @dataclass(frozen=True)
+class AgentInvocation:
+    """Result and redacted diagnostic output from one Codex invocation."""
+
+    returncode: int | None
+    stdout: str = ""
+    stderr: str = ""
+
+    @property
+    def diagnostic(self) -> str:
+        """Return the available redacted output in command-stream order."""
+        return "\n".join(part for part in (self.stdout, self.stderr) if part)
+
+
+@dataclass(frozen=True)
 class RunReport:
     """Safe, non-persistent output from one bounded command."""
 
@@ -124,3 +138,5 @@ class RunReport:
     issue_iid: int | None = None
     branch: str | None = None
     merge_request_url: str | None = None
+    failure_reason: str | None = None
+    agent_diagnostic: str | None = None

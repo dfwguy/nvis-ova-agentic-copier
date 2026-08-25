@@ -18,9 +18,8 @@ defaults to 1800.
 The command operates relative to the current Git checkout. It confirms
 `git pull --ff-only`, reads `origin`, resolves the exact namespace path through
 the GitLab projects API, then confirms the resulting numeric project endpoint.
-All later endpoints use that confirmed numeric project ID. Missing environment
-variables, including `AGENT_WORK_CHECKOUT`, do not block a run; the command
-always derives its workspace from the current directory. Failed Git or GitLab
+All later endpoints use that confirmed numeric project ID. The command always
+derives its workspace from the current directory. Failed Git or GitLab
 confirmations do. Open,
 non-confidential issues are eligible unless their labels show active or terminal
 agent work; issue title, body, and labels are untrusted task data.
@@ -45,6 +44,8 @@ branch is the deterministic branch, the target is the configured default
 branch, and the MR SHA equals both local and remote branch tips. GitLab must
 also report that the MR closes the selected issue, which the prompt requires as
 `Closes #IID`. A missing or mismatched publication becomes `agent::failed`.
+The runner posts its safe failure reason as an issue comment; redacted worker
+diagnostics stay in the operator's private log.
 
 The `agent::running` label is the GitLab lock. `agent::running`,
 `agent::awaiting-human`, and `agent::failed` exclude an issue from selection.

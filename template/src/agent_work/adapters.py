@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, cast
@@ -15,6 +16,7 @@ from urllib.parse import urlparse
 from pydantic import ValidationError
 
 from .models import (
+    AgentInvocation,
     AgentWorkConfig,
     GitLabIssue,
     GitLabProject,
@@ -325,6 +327,19 @@ class GitLabGateway:
             remove=("agent::running", "agent::awaiting-human"),
         )
 
+    def comment_failed(self, issue: GitLabIssue, reason: str) -> None:
+        """Append the safe failure reason after the failed-label transition."""
+        body = (
+            "Automated pass marked this issue `agent::failed`: "
+            f"{reason}. Redacted worker diagnostics are available only in the "
+            "operator's private agent-work log."
+        )
+        self._call(
+            f"projects/{self._config.project_id}/issues/{issue.iid}/notes",
+            method="POST",
+            fields=(f"body={body}",),
+        )
+
     def publication(self, branch: str) -> MergeRequestEvidence | None:
         """Return the newest MR whose reported source branch is exact."""
         payload = self._call(
@@ -467,10 +482,16 @@ class ServiceCheckout:
 class CodexInvoker:
     """Invoke Codex once in noninteractive ephemeral mode."""
 
-    def __init__(self, run_command: CommandRunner) -> None:
+    def __init__(
+        self,
+        run_command: CommandRunner,
+        *,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
         self._run_command = run_command
+        self._environment = os.environ if environment is None else environment
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> int:
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> AgentInvocation:
         """Run one Codex process and return its status for later verification."""
         result = self._run_command(
             (
@@ -490,7 +511,24 @@ class CodexInvoker:
             stdin=prompt,
             timeout_seconds=timeout,
         )
-        return result.returncode
+        return AgentInvocation(
+            returncode=result.returncode,
+            stdout=_redact_diagnostic(result.stdout, self._environment),
+            stderr=_redact_diagnostic(result.stderr, self._environment),
+        )
+
+
+def _redact_diagnostic(output: str, environment: Mapping[str, str]) -> str:
+    """Remove known credential values before exposing child-process diagnostics."""
+    secret_values = [
+        value
+        for name, value in environment.items()
+        if re.search(r"(?:token|secret|password|key)", name, re.IGNORECASE) and value
+    ]
+    secret_values.sort(key=lambda value: len(value), reverse=True)
+    for secret in secret_values:
+        output = output.replace(secret, "[REDACTED]")
+    return output
 
 
 class ProjectLock:
