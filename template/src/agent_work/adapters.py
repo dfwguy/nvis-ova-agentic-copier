@@ -139,7 +139,10 @@ def _discover_project(
 
 
 def discover_checkout_config(
-    *, current_directory: Path, run_command: CommandRunner
+    *,
+    current_directory: Path,
+    environment: Mapping[str, str] = os.environ,
+    run_command: CommandRunner,
 ) -> AgentWorkConfig:
     """Confirm an up-to-date default-branch checkout and derive its target."""
     checkout = Path(
@@ -175,7 +178,12 @@ def discover_checkout_config(
         ("git", "-C", str(checkout), "pull", "--ff-only"),
         "git pull --ff-only failed",
     )
-    return AgentWorkConfig(host=host, project_id=project_id, checkout=checkout)
+    return AgentWorkConfig(
+        host=host,
+        project_id=project_id,
+        checkout=checkout,
+        journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
+    )
 
 
 class GitLabGateway:
@@ -378,8 +386,8 @@ class GitLabGateway:
             "Automated pass marked this issue `agent::failed`: "
             f"{reason}. Redacted worker diagnostics are available only in the "
             "operator's private agent-work log. On the host running the timer, "
-            "inspect them with `journalctl --user -t <project-slug>-agent-work "
-            "--since today`."
+            "inspect them with `journalctl --user -t "
+            f"{self._config.journal_tag} --since today`."
         )
         self._call(
             f"projects/{self._config.project_id}/issues/{issue.iid}/notes",
