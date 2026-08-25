@@ -615,6 +615,13 @@ class ServiceCheckout:
             raise AdapterError("the issue branch tip is invalid")
         return baseline
 
+    def _publish_run(self, operation: str, *arguments: str) -> str:
+        """Run one trusted publication command with a safe, specific failure."""
+        result = self._run_command(("git", "-C", str(self.path), *arguments))
+        if result.returncode != 0:
+            raise AdapterError(f"{operation} failed (exit {result.returncode})")
+        return result.stdout.strip()
+
     def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         """Create one commit and push it without granting Git writes to Codex."""
         if self._run("rev-parse", "--abbrev-ref", "HEAD") != branch:
@@ -625,19 +632,50 @@ class ServiceCheckout:
             history = self._run("rev-list", "--parents", "-n", "1", "HEAD").split()
             if baseline not in history[1:]:
                 raise AdapterError("worker created unsupported commit history")
-            self._run("commit", "--amend", "--reset-author", "-m", draft.title)
-            self._run("push", "--set-upstream", "origin", branch)
+            self._publish_run(
+                "amending the trusted worker commit",
+                "commit",
+                "--amend",
+                "--reset-author",
+                "-m",
+                draft.title,
+            )
+            self._publish_run(
+                "pushing the trusted worker branch",
+                "push",
+                "--set-upstream",
+                "origin",
+                branch,
+            )
             return
-        self._run("add", "--all")
+        self._publish_run("staging worker changes", "add", "--all")
         staged = self._run_command(
-            ("git", "-C", str(self.path), "diff", "--cached", "--quiet")
+            (
+                "git",
+                "-C",
+                str(self.path),
+                "diff",
+                "--cached",
+                "--name-only",
+                "--no-renames",
+            )
         )
-        if staged.returncode == 0:
+        if staged.returncode != 0:
+            raise AdapterError(
+                f"checking staged worker changes failed (exit {staged.returncode})"
+            )
+        if not staged.stdout.strip():
             raise AdapterError("worker made no changes to publish")
-        if staged.returncode != 1:
-            raise AdapterError("checkout validation failed")
-        self._run("commit", "-m", draft.title)
-        self._run("push", "--set-upstream", "origin", branch)
+        self._publish_run(
+            "committing trusted worker changes", "commit", "-m", draft.title
+        )
+        self._publish_run(
+            "pushing the trusted worker branch",
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        )
 
 
 class AgentInvoker:
