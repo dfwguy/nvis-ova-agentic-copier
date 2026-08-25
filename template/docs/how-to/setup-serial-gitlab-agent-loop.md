@@ -153,6 +153,12 @@ Record the chosen agent and the absolute executable paths for it and `uv` in
 the environment file instead of relying on a later command lookup. The runner
 invokes that recorded absolute agent path directly.
 
+The user service manager also does not inherit a checkout's `direnv` variables.
+When `GITLAB_TOKEN` is supplied through `direnv`, record the absolute `direnv`
+path below. The wrapper then uses `direnv exec` for the runner process only; it
+does not write the token to the environment file. `glab auth status` reports
+only stored `glab` logins, so it is not a valid test for this token route.
+
 Run the read-only preview from that checkout:
 
 ```bash
@@ -194,10 +200,15 @@ if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
   printf '%s\n' 'agent must resolve to an executable absolute path' >&2
   exit 1
 fi
+direnv_path="$(command -v direnv || true)"
+if [[ -n "$direnv_path" && ( "$direnv_path" != /* || ! -x "$direnv_path" ) ]]; then
+  printf '%s\n' 'direnv must resolve to an executable absolute path' >&2
+  exit 1
+fi
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 sudo loginctl enable-linger "$USER"
 loginctl show-user "$USER" --property=Linger
@@ -248,7 +259,12 @@ if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
   printf '%s\n' 'agent must resolve to an executable absolute path' >&2
   exit 1
 fi
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" >"$HOME/.config/$unit_name/agent-work.env"
+direnv_path="$(command -v direnv || true)"
+if [[ -n "$direnv_path" && ( "$direnv_path" != /* || ! -x "$direnv_path" ) ]]; then
+  printf '%s\n' 'direnv must resolve to an executable absolute path' >&2
+  exit 1
+fi
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"

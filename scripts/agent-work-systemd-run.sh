@@ -33,11 +33,8 @@ if [[ ! -x "$AGENT_WORK_UV" ]]; then
   log "stopped: AGENT_WORK_UV is not executable: $AGENT_WORK_UV"
   exit 2
 fi
-if [[ -z "${AGENT_WORK_AGENT:-}" ]]; then
-  log "stopped: AGENT_WORK_AGENT is not set"
-  exit 2
-fi
-case "$AGENT_WORK_AGENT" in
+agent_name="${AGENT_WORK_AGENT:-codex}"
+case "$agent_name" in
   codex|claude|pi) ;;
   *)
     log "stopped: AGENT_WORK_AGENT must be one of: codex, claude, pi"
@@ -52,11 +49,20 @@ if [[ ! -x "$AGENT_WORK_AGENT_PATH" ]]; then
   log "stopped: AGENT_WORK_AGENT_PATH is not executable: $AGENT_WORK_AGENT_PATH"
   exit 2
 fi
+if [[ -n "${AGENT_WORK_DIRENV:-}" && ! -x "$AGENT_WORK_DIRENV" ]]; then
+  log "stopped: AGENT_WORK_DIRENV is not executable: $AGENT_WORK_DIRENV"
+  exit 2
+fi
 
 cd "$AGENT_WORK_CHECKOUT"
-log "starting applied $AGENT_WORK_AGENT pass in $AGENT_WORK_CHECKOUT"
+log "starting applied $agent_name pass in $AGENT_WORK_CHECKOUT"
 
-if run_logged "${AGENT_WORK_UV}" run agent-work run-next --apply --json; then
+if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
+  runner=("$AGENT_WORK_DIRENV" exec "$AGENT_WORK_CHECKOUT" "$AGENT_WORK_UV")
+else
+  runner=("$AGENT_WORK_UV")
+fi
+if run_logged "${runner[@]}" run agent-work run-next --apply --json; then
   :
 else
   status=$?

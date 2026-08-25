@@ -106,6 +106,11 @@ before checking repository safeguards.
    Record the selected agent name and absolute executable paths for both `uv`
    and the agent in its environment file; the runner invokes that recorded
    absolute agent path directly, rather than relying on the service manager PATH.
+   If the GitLab token is directory-scoped through `direnv`, also record the
+   absolute `direnv` path and run the runner through `direnv exec <checkout>`.
+   The user manager does not inherit interactive `direnv` variables; never put
+   the token in the environment file or use `glab auth status` to test this
+   credential route, because it reports only stored `glab` logins.
    Its service wrapper uses `logger` with the matching `<project-slug>-agent-work`
    tag, so operators use `journalctl --user -t <project-slug>-agent-work` for pass
    output and failures. The timer uses a stable randomized delay to spread
