@@ -2430,8 +2430,9 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
         "EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env"
         in root_service
     )
-    assert '"${AGENT_WORK_UV}" run agent-work run-next --apply --json' in wrapper
-    assert "AGENT_WORK_AGENT is not set" in wrapper
+    assert 'agent_name="${AGENT_WORK_AGENT:-codex}"' in wrapper
+    assert '"${runner[@]}" run agent-work run-next --apply --json' in wrapper
+    assert "AGENT_WORK_DIRENV is not executable" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not set" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not executable" in wrapper
     assert (
@@ -2448,6 +2449,8 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
     assert "agent must resolve to an executable absolute path" in how_to
     assert "AGENT_WORK_AGENT=%q" in how_to
     assert "AGENT_WORK_AGENT_PATH=%q" in how_to
+    assert "AGENT_WORK_DIRENV=%q" in how_to
+    assert "glab auth status` reports" in how_to
     assert "Repair unavailable user-journal access" in how_to
     assert "systemd-journal" in how_to
     assert (
