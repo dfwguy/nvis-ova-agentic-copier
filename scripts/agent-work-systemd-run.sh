@@ -33,19 +33,28 @@ if [[ ! -x "$AGENT_WORK_UV" ]]; then
   log "stopped: AGENT_WORK_UV is not executable: $AGENT_WORK_UV"
   exit 2
 fi
-if [[ -z "${AGENT_WORK_CODEX:-}" ]]; then
-  log "stopped: AGENT_WORK_CODEX is not set"
+if [[ -z "${AGENT_WORK_AGENT:-}" ]]; then
+  log "stopped: AGENT_WORK_AGENT is not set"
   exit 2
 fi
-if [[ ! -x "$AGENT_WORK_CODEX" ]]; then
-  log "stopped: AGENT_WORK_CODEX is not executable: $AGENT_WORK_CODEX"
+case "$AGENT_WORK_AGENT" in
+  codex|claude|pi) ;;
+  *)
+    log "stopped: AGENT_WORK_AGENT must be one of: codex, claude, pi"
+    exit 2
+    ;;
+esac
+if [[ -z "${AGENT_WORK_AGENT_PATH:-}" ]]; then
+  log "stopped: AGENT_WORK_AGENT_PATH is not set"
+  exit 2
+fi
+if [[ ! -x "$AGENT_WORK_AGENT_PATH" ]]; then
+  log "stopped: AGENT_WORK_AGENT_PATH is not executable: $AGENT_WORK_AGENT_PATH"
   exit 2
 fi
 
 cd "$AGENT_WORK_CHECKOUT"
-codex_directory="$(dirname "$AGENT_WORK_CODEX")"
-export PATH="$codex_directory:$PATH"
-log "starting applied pass in $AGENT_WORK_CHECKOUT"
+log "starting applied $AGENT_WORK_AGENT pass in $AGENT_WORK_CHECKOUT"
 
 if run_logged "${AGENT_WORK_UV}" run agent-work run-next --apply --json; then
   :

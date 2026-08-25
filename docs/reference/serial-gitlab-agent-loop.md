@@ -12,7 +12,7 @@ agent-work run-next [--apply] [--json] [--timeout-seconds SECONDS]
 issue, and exits. Without `--apply`, it previews the selected work without
 repository or GitLab mutation. `--apply` authorizes one bounded run that may
 push a feature branch and create one merge request. `--json` requests safe
-machine-readable output. `--timeout-seconds` bounds the one Codex process and
+machine-readable output. `--timeout-seconds` bounds the one configured coding-agent process and
 defaults to 1800.
 
 The command operates relative to the current Git checkout. It reads `origin`,
@@ -65,7 +65,7 @@ issue's resulting MR; the failure is never left as a report-only condition.
 Successful, running, pending, and absent pipelines do not add a remediation
 requirement.
 
-Codex works only in the prepared branch, which the runner created from the
+The configured coding agent works only in the prepared branch, which the runner created from the
 default branch. It does not commit, push, or create an MR. Instead it returns a
 delimited JSON draft containing the MR title and description. The trusted
 runner validates that draft, stages and commits the working-tree changes, pushes

@@ -140,7 +140,7 @@ class GitPublicationEvidence:
 
 @dataclass(frozen=True)
 class AgentInvocation:
-    """Result and redacted diagnostic output from one Codex invocation."""
+    """Result and redacted diagnostic output from one agent invocation."""
 
     returncode: int | None
     stdout: str = ""

@@ -380,7 +380,7 @@ def test_failed_applied_issue_reports_agent_exit_and_diagnostics() -> None:
     )
 
     assert report.failure_reason == (
-        "Codex exited with status 7; no exact published MR evidence"
+        "Agent exited with status 7; no exact published MR evidence"
     )
     assert gitlab.failure_comments == [(issue.iid, report.failure_reason)]
 

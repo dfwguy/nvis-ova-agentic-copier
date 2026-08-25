@@ -13,22 +13,36 @@ access with `git pull --ff-only`, derives the GitLab host and project path from
 `origin`, resolves that exact path through the GitLab API, and confirms the
 numeric project endpoint. Do not print, export, or put tokens in this setup.
 
-Check the preinstalled Git, `glab`, and Codex tools, then verify that the
-active credential route can call the GitLab API. This supports either a stored
+Choose one supported coding agent: `codex` (the default), `claude`, or `pi`.
+Check that agent, Git, and `glab`, then verify that the active credential route
+can call the GitLab API. This supports either a stored
 `glab` login or a directory-scoped token such as `GITLAB_TOKEN`:
 
+To use Claude Code or Pi for this installation or repair, set the non-secret
+profile before running the applicable block:
+
 ```bash
-command -v git glab codex jq
-codex login status
+export AGENT_WORK_AGENT=claude  # Or: pi. Omit for the codex default.
+```
+
+```bash
+agent_name="${AGENT_WORK_AGENT:-codex}"
+case "$agent_name" in codex|claude|pi) ;; *) exit 2;; esac
+command -v git glab "$agent_name" jq
 glab api --hostname "$GITLAB_HOST" user >/dev/null
 git pull --ff-only
 git remote get-url origin
 ```
 
-If any confirmation fails, repair the repository's Git remote/credential or
-the active GitLab API credential route, then rerun the command. A Developer
+If any confirmation fails, repair the repository's Git remote/credential,
+active GitLab API credential route, or selected agent authentication, then
+rerun the command. A Developer
 account can poll eligible issues; it does not need permission to install a
 webhook or an inbound service.
+
+Run `codex login status` or `claude auth status` for those profiles before the
+readiness block. Pi has no equivalent non-secret status command; verify its
+configured provider credential with Pi before enabling `--apply`.
 
 The fail-closed readiness block obtains the numeric
 project representation once. It classifies the `glab` identity from the maximum
@@ -130,20 +144,28 @@ Run the runner through the repository's own UV environment. This prevents one
 repository's version from replacing another repository's runner:
 
 ```bash
-command -v uv codex logger systemctl loginctl
+command -v uv logger systemctl loginctl
 uv run agent-work --help
 ```
 
 The user service manager does not inherit an interactive shell's `PATH`.
-Record the absolute `uv` and Codex executables in its environment file instead
-of relying on a later command lookup. The wrapper adds the recorded Codex
-directory to its process `PATH` before it starts the runner.
+Record the chosen agent and the absolute executable paths for it and `uv` in
+the environment file instead of relying on a later command lookup. The runner
+invokes that recorded absolute agent path directly.
 
 Run the read-only preview from that checkout:
 
 ```bash
 uv run agent-work run-next --json
 ```
+
+The runner has built-in noninteractive profiles for `codex`, `claude`, and
+`pi`. Codex receives its prompt on standard input. Claude Code and Pi receive
+it as one literal argument in print mode with ephemeral session settings. All
+profiles must follow the same prompt contract: edit and validate only the
+prepared branch, never commit, push, approve, or merge, and emit exactly one
+delimited merge-request JSON draft. The trusted runner remains the only
+publisher.
 
 After a human explicitly authorizes unattended publication, install the
 one-shot service and its five-minute timer. The service runs the repository's
@@ -161,15 +183,21 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   printf '%s\n' 'uv must resolve to an executable absolute path' >&2
   exit 1
 fi
-codex_path="$(command -v codex)"
-if [[ "$codex_path" != /* || ! -x "$codex_path" ]]; then
-  printf '%s\n' 'codex must resolve to an executable absolute path' >&2
+agent_name="${AGENT_WORK_AGENT:-codex}"
+case "$agent_name" in codex|claude|pi) ;; *)
+  printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
+  exit 1
+  ;;
+esac
+agent_path="$(command -v "$agent_name")"
+if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
+  printf '%s\n' 'agent must resolve to an executable absolute path' >&2
   exit 1
 fi
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_CODEX=%q\n' "$PWD" "$uv_path" "$codex_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 sudo loginctl enable-linger "$USER"
 loginctl show-user "$USER" --property=Linger
@@ -192,7 +220,7 @@ the user manager socket is unavailable. Do not retry through another
 credential, host, or execution environment. Report that first non-secret
 diagnostic to the operator.
 
-### Repair an installation missing `AGENT_WORK_UV` or `AGENT_WORK_CODEX`
+### Repair an installation missing the selected agent configuration
 
 For a timer installed by an earlier version, stop it before rewriting its
 environment file, then enable it again:
@@ -209,12 +237,18 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   printf '%s\n' 'uv must resolve to an executable absolute path' >&2
   exit 1
 fi
-codex_path="$(command -v codex)"
-if [[ "$codex_path" != /* || ! -x "$codex_path" ]]; then
-  printf '%s\n' 'codex must resolve to an executable absolute path' >&2
+agent_name="${AGENT_WORK_AGENT:-codex}"
+case "$agent_name" in codex|claude|pi) ;; *)
+  printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
+  exit 1
+  ;;
+esac
+agent_path="$(command -v "$agent_name")"
+if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
+  printf '%s\n' 'agent must resolve to an executable absolute path' >&2
   exit 1
 fi
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_CODEX=%q\n' "$PWD" "$uv_path" "$codex_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"

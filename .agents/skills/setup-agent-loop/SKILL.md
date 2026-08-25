@@ -12,7 +12,8 @@ before checking repository safeguards.
 
 1. Establish and validate a bare `GITLAB_HOST` and numeric
    `GITLAB_PROJECT_ID` first. Then run the complete Developer-readable
-   readiness preflight using only the preinstalled Git, `glab`, Codex, and
+   readiness preflight using only the preinstalled Git, `glab`, selected coding
+   agent, and
    `jq` tools and their existing noninteractive sessions. Do not print or
    place tokens in commands, environment files, or logs:
 
@@ -25,14 +26,18 @@ before checking repository safeguards.
    trap 'status=$?; trap - ERR; block_apply "preflight command failed (exit $status)"' ERR
    case "${GITLAB_HOST:-}" in ''|*://*|*/*) block_apply 'GITLAB_HOST must be a bare hostname';; esac
    case "${GITLAB_PROJECT_ID:-}" in ''|*[!0-9]*) block_apply 'GITLAB_PROJECT_ID must be numeric';; esac
-   if ! command -v git glab codex jq >/dev/null; then
-     block_apply 'install the required Git, glab, Codex, and jq tools'
+   agent_name="${AGENT_WORK_AGENT:-codex}"
+   case "$agent_name" in codex|claude|pi) ;; *) block_apply 'AGENT_WORK_AGENT must be codex, claude, or pi';; esac
+   if ! command -v git glab "$agent_name" jq >/dev/null; then
+     block_apply 'install the required Git, glab, selected coding agent, and jq tools'
    fi
+   case "$agent_name" in
+     codex) codex login status >/dev/null || block_apply 'authenticate Codex';;
+     claude) claude auth status >/dev/null || block_apply 'authenticate Claude Code';;
+     pi) ;;
+   esac
    if ! glab api --hostname "$GITLAB_HOST" user >/dev/null; then
      block_apply 'authenticate the active GitLab API credential route for the configured host'
-   fi
-   if ! codex login status; then
-     block_apply 'authenticate Codex'
    fi
    if ! project_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID")"; then
      block_apply 'read the configured numeric GitLab project'
@@ -94,13 +99,13 @@ before checking repository safeguards.
    from the current directory and `origin`.
    The local lock is always the fixed, gitignored
    `<checkout>/.agent-work.lock`; it is not configurable.
-3. Check `uv`, `codex`, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
+3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
    dedicated checkout as a preview smoke test. Do not use a separately installed
    bare `agent-work` executable, which can be stale. Install and enable the
    documented project-named user-level timer only after explicit authorization.
-   Record the absolute executable paths for both `uv` and `codex` in its
-   environment file; the wrapper makes only the recorded Codex directory
-   available to the worker, rather than relying on the service manager PATH.
+   Record the selected agent name and absolute executable paths for both `uv`
+   and the agent in its environment file; the runner invokes that recorded
+   absolute agent path directly, rather than relying on the service manager PATH.
    Its service wrapper uses `logger` with the matching `<project-slug>-agent-work`
    tag, so operators use `journalctl --user -t <project-slug>-agent-work` for pass
    output and failures. The timer uses a stable randomized delay to spread

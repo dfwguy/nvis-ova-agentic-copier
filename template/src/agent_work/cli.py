@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_integer,
         default=1800,
         metavar="SECONDS",
-        help="bound the single Codex invocation (default: 1800)",
+        help="bound the single coding-agent invocation (default: 1800)",
     )
     return parser
 
@@ -101,7 +101,7 @@ def main(
     if report.failure_reason is not None:
         write_stderr(f"Failure: {report.failure_reason}")
     if report.agent_diagnostic is not None:
-        write_stderr(f"Codex diagnostic (redacted):\n{report.agent_diagnostic}")
+        write_stderr(f"Agent diagnostic (redacted):\n{report.agent_diagnostic}")
     write_stdout(_render(report, as_json=parsed.json))
     return 1 if report.outcome == "failed" else 0
 
