@@ -24,8 +24,11 @@ At the start of every session, before taking action:
    boundaries, and expected output it needs. Keep continuity-sensitive work,
    such as the red/green handoff, with the main agent.
 6. Before remote work, verify Git and GitLab API access independently, then
-   use the configured numeric project ID for GitLab API calls. Keep commit,
-   push, and merge-request identities distinct.
+   use the configured numeric project ID for GitLab API calls. When this
+   checkout provides `GITLAB_TOKEN` through `.envrc`, run API commands through
+   `direnv exec . glab api ...`; `glab auth status` checks only stored logins
+   and cannot diagnose that token route. Keep commit, push, and merge-request
+   identities distinct.
 7. Preserve the human review boundary. Never approve or merge; hand off a
    verified merge request for human review.
 
