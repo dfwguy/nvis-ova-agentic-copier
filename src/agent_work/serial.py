@@ -244,6 +244,7 @@ def _finish_from_evidence(
     issue: GitLabIssue,
     project: GitLabProject,
     invocation: AgentInvocation | None = None,
+    publication_failure: str | None = None,
 ) -> RunReport:
     branch = _branch(issue)
     try:
@@ -255,8 +256,8 @@ def _finish_from_evidence(
     except RuntimeError:
         merge_request = None
     if merge_request is None:
-        failure_reason = "no exact published MR evidence"
-        if invocation is not None:
+        failure_reason = publication_failure or "no exact published MR evidence"
+        if invocation is not None and publication_failure is None:
             status = (
                 "failed to start"
                 if invocation.returncode is None
@@ -300,9 +301,18 @@ def _publish_worker_result(
     """Publish a successful worker's change through trusted runner boundaries."""
     if invocation.returncode != 0:
         raise RunNextError(f"Agent exited with status {invocation.returncode}")
-    draft = invocation.merge_request_draft()
-    dependencies.checkout.publish(_branch(issue), draft, baseline)
-    dependencies.gitlab.create_merge_request(issue, project, draft)
+    try:
+        draft = invocation.merge_request_draft()
+    except ValueError as error:
+        raise RunNextError(f"worker draft validation failed: {error}") from error
+    try:
+        dependencies.checkout.publish(_branch(issue), draft, baseline)
+    except RuntimeError as error:
+        raise RunNextError(f"trusted branch publication failed: {error}") from error
+    try:
+        dependencies.gitlab.create_merge_request(issue, project, draft)
+    except RuntimeError as error:
+        raise RunNextError(f"merge-request creation failed: {error}") from error
 
 
 def _preview(
@@ -416,12 +426,17 @@ def run_next(
                 )
             except RuntimeError as error:
                 invocation = AgentInvocation(returncode=None, stderr=str(error))
+            publication_failure: str | None = None
             if invocation.returncode == 0:
                 try:
                     dependencies.checkout.publish(
                         branch, invocation.merge_request_draft(), baseline
                     )
                 except (RuntimeError, ValueError) as error:
+                    publication_failure = (
+                        f"trusted branch publication failed: {error}; "
+                        "no exact published MR evidence"
+                    )
                     invocation = AgentInvocation(
                         returncode=invocation.returncode,
                         stdout=invocation.stdout,
@@ -429,7 +444,17 @@ def run_next(
                             part for part in (invocation.stderr, str(error)) if part
                         ),
                     )
-            return _finish_from_evidence(dependencies, conflicted, project, invocation)
+            if publication_failure is None and invocation.returncode == 0:
+                publication_failure = (
+                    "publication verification failed: no exact published MR evidence"
+                )
+            return _finish_from_evidence(
+                dependencies,
+                conflicted,
+                project,
+                invocation,
+                publication_failure,
+            )
 
         eligible = dependencies.gitlab.list_eligible()
         if not eligible:
@@ -495,6 +520,7 @@ def run_next(
             # A timed-out or failed agent may still have published successfully.
             # GitLab and Git evidence, not process status, decide the outcome.
             invocation = AgentInvocation(returncode=None, stderr=str(error))
+        publication_failure: str | None = None
         if (
             invocation.returncode == 0
             and dependencies.gitlab.publication(branch) is None
@@ -503,7 +529,8 @@ def run_next(
                 _publish_worker_result(
                     dependencies, issue, project, invocation, baseline
                 )
-            except (RuntimeError, ValueError) as error:
+            except RunNextError as error:
+                publication_failure = f"{error}; no exact published MR evidence"
                 invocation = AgentInvocation(
                     returncode=invocation.returncode,
                     stdout=invocation.stdout,
@@ -511,4 +538,10 @@ def run_next(
                         part for part in (invocation.stderr, str(error)) if part
                     ),
                 )
-        return _finish_from_evidence(dependencies, issue, project, invocation)
+        if publication_failure is None and invocation.returncode == 0:
+            publication_failure = (
+                "publication verification failed: no exact published MR evidence"
+            )
+        return _finish_from_evidence(
+            dependencies, issue, project, invocation, publication_failure
+        )
