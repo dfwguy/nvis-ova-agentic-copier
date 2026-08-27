@@ -318,6 +318,35 @@ dirty), the service fails and records the diagnostic in the journal. A direct
 `agent-work` launch from an issue branch still intentionally fails rather than
 silently changing branches.
 
+## Restart the loop
+
+Restart the loop after a transient user-manager or service failure without
+changing the checkout, credentials, or environment file. If the one-shot
+service is active, let its bounded pass finish before restarting it when
+possible. Stopping an active pass interrupts it; the next pass will use the
+runner's normal running-issue recovery or safe failure handling.
+
+Set the unit name, ensure the user-manager bus is reachable, then stop both
+units, reload their definitions, enable the timer again, and start one
+immediate bounded pass:
+
+```bash
+unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+systemctl --user stop "$unit_name.timer" "$unit_name.service"
+systemctl --user daemon-reload
+systemctl --user enable --now "$unit_name.timer"
+systemctl --user start "$unit_name.service"
+systemctl --user status --no-pager "$unit_name.timer" "$unit_name.service"
+```
+
+The final `start` runs one pass immediately; the enabled timer schedules later
+passes. If the user-manager bus is unavailable, stop and resolve that first
+non-secret diagnostic rather than attempting a different credential or host.
+
 ## Monitor activity and inspect failures
 
 Set the project-specific systemd unit name before querying its logs or status:
