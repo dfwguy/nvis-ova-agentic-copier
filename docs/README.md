@@ -25,6 +25,8 @@ copier template. Choose the page that matches what you need now.
   the documentation structure.
 - **Explanation:** [Why coding standards exist](explanation/coding-standards.md)
   — understand the rationale for the development rules.
+- **Explanation:** [Why the agent workflow uses specialized roles](explanation/agentic-workflow.md)
+  — understand the workflow's roles, validation sequence, and human gate.
 - **Explanation:** [Why the agent loop is serial and GitLab-native](explanation/serial-gitlab-agent-loop.md)
   — understand polling, checkout-scoped locking, and the human publication gate.
 - **Process:** [Diátaxis documentation process](diataxis.md) — maintain these

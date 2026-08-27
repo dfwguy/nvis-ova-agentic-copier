@@ -501,23 +501,26 @@ def test_documentation_index_links_every_diataxis_page(project_root: Path) -> No
         "explanation/template-and-generated-project.md",
         "explanation/why-diataxis.md",
         "explanation/coding-standards.md",
+        "explanation/agentic-workflow.md",
         "diataxis.md",
     ):
         assert page in index
 
 
-def test_explanations_and_readme_use_mermaid_for_relationship_diagrams(
+def test_explanations_use_mermaid_for_relationship_diagrams(
     project_root: Path,
 ) -> None:
-    """Test that documentation uses Mermaid for relationship and workflow diagrams."""
-    readme = (project_root / "README.md").read_text()
-    explanation = (
+    """Test that explanation pages use Mermaid for relationship diagrams."""
+    template_explanation = (
         project_root / "docs" / "explanation" / "template-and-generated-project.md"
     ).read_text()
+    workflow_explanation = (
+        project_root / "docs" / "explanation" / "agentic-workflow.md"
+    ).read_text()
 
-    assert "```mermaid\nflowchart" in readme
-    assert 'filesystem["Filesystem Judge"]' in readme
-    assert "```mermaid\nflowchart" in explanation
+    assert "```mermaid\nflowchart" in template_explanation
+    assert "```mermaid\nflowchart" in workflow_explanation
+    assert "Filesystem Judge" in workflow_explanation
 
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:

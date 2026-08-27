@@ -119,4 +119,5 @@ not overwrite either file to perform that migration.
 - Follow the [first-project tutorial](../tutorials/create-your-first-project.md).
 - Use the [non-interactive creation guide](../how-to/create-a-project-non-interactively.md).
 - Read [why the template is structured this way](../explanation/template-and-generated-project.md).
+- Read [why the agent workflow uses specialized roles](../explanation/agentic-workflow.md).
 - Read [why the coding standards exist](../explanation/coding-standards.md).
