@@ -695,7 +695,7 @@ def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> N
     )
 
 
-def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
+def test_agent_loop_wrapper_returns_dedicated_checkout_to_its_base_branch(
     generated_project: Path,
 ) -> None:
     """The systemd pass wrapper resets its dedicated checkout after a pass."""
@@ -704,11 +704,18 @@ def test_agent_loop_wrapper_returns_dedicated_checkout_to_main(
     ).read_text()
     wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
 
-    assert "Every bounded pass attempts to leave the dedicated checkout" in content
-    assert "git switch main" in wrapper
+    assert (
+        "Every bounded pass attempts to leave the dedicated checkout on its base branch"
+        in content
+    )
+    assert "AGENT_WORK_BASE_BRANCH" in content
+    assert 'base_branch="${AGENT_WORK_BASE_BRANCH:-main}"' in wrapper
+    assert 'git switch "$base_branch"' in wrapper
     assert "git pull --ff-only" in wrapper
     assert "pass failed (exit $pass_status); attempting checkout recovery" in wrapper
-    assert wrapper.index("pass_status=0") < wrapper.rindex("return_checkout_to_main")
+    assert wrapper.index("pass_status=0") < wrapper.rindex(
+        "return_checkout_to_base_branch"
+    )
 
 
 def test_agent_work_worker_exception_overrides_generic_publication_rules(

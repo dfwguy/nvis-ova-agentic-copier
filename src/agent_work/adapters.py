@@ -144,7 +144,7 @@ def discover_checkout_config(
     environment: Mapping[str, str] = os.environ,
     run_command: CommandRunner,
 ) -> AgentWorkConfig:
-    """Confirm an up-to-date default-branch checkout and derive its target."""
+    """Confirm an up-to-date configured-base checkout and derive its target."""
     checkout = Path(
         _confirmed_command(
             run_command,
@@ -161,29 +161,39 @@ def discover_checkout_config(
     project_id, _project = _discover_project(
         host=host, path=path, run_command=run_command
     )
+    base_branch = environment.get("AGENT_WORK_BASE_BRANCH") or None
+    try:
+        config = AgentWorkConfig(
+            host=host,
+            project_id=project_id,
+            checkout=checkout,
+            base_branch=base_branch,
+            journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
+        )
+    except ValidationError as error:
+        raise AdapterError("AGENT_WORK_BASE_BRANCH is invalid") from error
     current_branch = _confirmed_command(
         run_command,
         ("git", "-C", str(checkout), "branch", "--show-current"),
         "current checkout branch could not be read",
     )
     default_branch = str(_project.get("default_branch", ""))
-    if current_branch != default_branch:
+    expected_branch = config.base_branch or default_branch
+    if current_branch != expected_branch:
+        branch_kind = (
+            "configured agent base branch" if config.base_branch else "default branch"
+        )
         raise AdapterError(
-            "agent-work must start on the default branch "
-            f"{default_branch!r}; current branch is {current_branch!r}. "
-            f"Switch to {default_branch!r}, pull --ff-only, then launch agent-work again"
+            f"agent-work must start on the {branch_kind} "
+            f"{expected_branch!r}; current branch is {current_branch!r}. "
+            f"Switch to {expected_branch!r}, pull --ff-only, then launch agent-work again"
         )
     _confirmed_command(
         run_command,
         ("git", "-C", str(checkout), "pull", "--ff-only"),
         "git pull --ff-only failed",
     )
-    return AgentWorkConfig(
-        host=host,
-        project_id=project_id,
-        checkout=checkout,
-        journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
-    )
+    return config
 
 
 class GitLabGateway:
@@ -486,7 +496,7 @@ class ServiceCheckout:
         return result.stdout.strip()
 
     def applied_preflight(self, project: GitLabProject) -> None:
-        """Require a clean bound checkout and fast-forward its default branch."""
+        """Require a clean bound checkout and fast-forward its configured base."""
         if not self.path.is_dir():
             raise AdapterError("the checkout does not exist")
         top_level = Path(self._run("rev-parse", "--show-toplevel")).resolve()
@@ -507,7 +517,7 @@ class ServiceCheckout:
             f"refs/heads/{project.default_branch}:"
             f"refs/remotes/origin/{project.default_branch}",
         )
-        self._run("switch", project.default_branch)
+        self._run("switch", self._config.base_branch or project.default_branch)
         self._run("merge", "--ff-only", f"origin/{project.default_branch}")
         if self._run("status", "--porcelain"):
             raise AdapterError("the refreshed checkout is dirty")

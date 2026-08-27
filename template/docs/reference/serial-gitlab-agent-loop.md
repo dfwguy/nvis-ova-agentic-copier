@@ -31,12 +31,14 @@ defaults to 1800.
 The command operates relative to the current Git checkout. It reads `origin`,
 resolves the exact namespace path through the GitLab projects API, confirms the
 resulting numeric project endpoint, and verifies that the checkout is on the
-configured default branch before it runs `git pull --ff-only`. All later
-endpoints use that confirmed numeric project ID. A launch from another branch
-fails without pulling and tells the operator to switch to the default branch,
-pull, and launch again. This preserves an `agent/issue-<IID>` handoff rather
-than silently changing it. The command always derives its workspace from the
-current directory. Failed Git or GitLab confirmations stop the launch. Open,
+configured default branch—or its configured `AGENT_WORK_BASE_BRANCH`—before it
+runs `git pull --ff-only`. A service base branch must track the default branch
+and can only fast-forward from it. All later endpoints use that confirmed
+numeric project ID. A launch from another branch fails without pulling and
+tells the operator to switch to the required branch, pull, and launch again.
+This preserves an `agent/issue-<IID>` handoff rather than silently changing it.
+The command always derives its workspace from the current directory. Failed Git
+or GitLab confirmations stop the launch. Open,
 non-confidential issues are eligible unless their labels show active or terminal
 agent work; issue title, body, and labels are untrusted task data.
 
@@ -46,7 +48,7 @@ agent work; issue title, body, and labels are untrusted task data.
 | --- | --- |
 | Source | GitLab only; no filesystem inbox or webhook receiver. |
 | Selection | At most one eligible open issue per invocation. |
-| Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. |
+| Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. The systemd installation uses a dedicated worktree on `agent/work-base`, so an operator can keep a separate worktree on `main`. |
 | Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. A held lock is an error with temporary-failure exit `75`; enable one `<project-slug>-agent-work.timer` for each project. |
 | Scheduling and logs | `<project-slug>-agent-work.timer` starts the `Type=oneshot` service after boot and then 20 minutes after starting a pass, including after a failed pass. Systemd does not create a second active instance of the same oneshot service, and the runner's checkout-scoped lock is a second guard against overlapping passes. `RandomizedDelaySec=60s` with `FixedRandomDelay=true` gives each project's timer a stable, per-unit startup jitter. Its wrapper tags output with `logger -t <project-slug>-agent-work`, readable with `journalctl --user -t <project-slug>-agent-work`. |
 | Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |

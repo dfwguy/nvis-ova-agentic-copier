@@ -56,6 +56,13 @@ handoffs for GitLab-reported merge conflicts; a conflicted MR is reclaimed on
 its same deterministic branch for one remediation pass, then returns to human
 review only after it is conflict-free again.
 
+The timer uses a dedicated worktree on a local `agent/work-base` branch. That
+branch only fast-forwards from `origin/main`, while the operator's worktree can
+remain on local `main`. This avoids Git's rule that one local branch can be
+checked out by only one linked worktree. The worktrees still share Git objects,
+references, and credentials, so this is working-directory isolation rather
+than a same-user security boundary.
+
 Serial is a deliberate local safety boundary, not distributed coordination. A
 nonblocking local project lock is an explicit temporary failure: `run-next`
 prints the held-lock error and returns exit `75` when another local run holds

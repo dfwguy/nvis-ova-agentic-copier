@@ -65,8 +65,9 @@ Git may use a different credential and is checked with `git ls-remote`.
 
 The runner uses the current checkout and stores its fixed, gitignored
 `.agent-work.lock` alongside it. Start only one loop for a checkout. The
-checkout must be dedicated: the service returns it to the default branch after
-each pass, so never use it for interactive development or another agent session.
+checkout must be dedicated: the service returns it to its configured agent base
+branch after each pass, so never use it for interactive development or another
+agent session.
 
 ## Verify Developer-readable safeguards
 
@@ -155,6 +156,23 @@ preserving this block's nonzero status.
 
 ## Install and start the systemd user timer
 
+Create a dedicated worktree before installing the timer. Its local
+`agent/work-base` branch tracks `origin/main`; your interactive checkout can
+remain on `main`. The runner fast-forwards this base before every pass and
+creates each `agent/issue-<IID>` branch from `origin/main`.
+
+```bash
+agent_checkout="$(dirname "$PWD")/$(basename "$PWD")-agent-work"
+git worktree add -b agent/work-base "$agent_checkout" origin/main
+git -C "$agent_checkout" branch --set-upstream-to=origin/main agent/work-base
+cd "$agent_checkout"
+```
+
+Git worktrees share object storage and references, so this separates working
+files and active branch checkouts but is not a credential or same-user security
+boundary. Do not check out an `agent/issue-<IID>` branch in the interactive
+worktree.
+
 Run the runner through the repository's own UV environment. This prevents one
 repository's version from replacing another repository's runner:
 
@@ -213,6 +231,7 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   exit 1
 fi
 agent_name="${AGENT_WORK_AGENT:-codex}"
+base_branch="agent/work-base"
 case "$agent_name" in codex|claude|pi) ;; *)
   printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
   exit 1
@@ -231,7 +250,7 @@ fi
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" "$base_branch" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 sudo loginctl enable-linger "$USER"
 loginctl show-user "$USER" --property=Linger
@@ -245,8 +264,9 @@ systemctl --user enable --now "$unit_name.timer"
 
 The linger check must report `Linger=yes`. Linger keeps the user service
 manager available after logout, so the timer can continue to run. Use a
-dedicated checkout, not an operator's active checkout. The rendered unit name
-is `<project-slug>-agent-work`; this repository's is
+dedicated checkout, not an operator's active checkout. Its `agent/work-base`
+branch avoids Git's one-worktree-per-local-branch rule, so the active checkout
+can remain on `main`. The rendered unit name is `<project-slug>-agent-work`; this repository's is
 `agentic-copier-agent-work`.
 
 If `systemctl --user` still reports `Failed to connect to bus`, stop the setup:
@@ -279,6 +299,7 @@ if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   exit 1
 fi
 agent_name="${AGENT_WORK_AGENT:-codex}"
+base_branch="agent/work-base"
 case "$agent_name" in codex|claude|pi) ;; *)
   printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
   exit 1
@@ -294,7 +315,7 @@ if [[ -n "$direnv_path" && ( "$direnv_path" != /* || ! -x "$direnv_path" ) ]]; t
   printf '%s\n' 'direnv must resolve to an executable absolute path' >&2
   exit 1
 fi
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" "$base_branch" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"
@@ -325,13 +346,14 @@ If another local
 process holds `.agent-work.lock`, `run-next` exits `75`; the service records
 the temporary failure and the timer remains enabled.
 
-Every bounded pass attempts to leave the dedicated checkout on `main` before
-the service exits, including a pass that failed after creating a local issue
-commit. It fast-forwards `main` while preserving that issue branch for recovery
-and human review. If the reset fails (for example, because the checkout is
-dirty), the service fails and records the diagnostic in the journal. A direct
-`agent-work` launch from an issue branch still intentionally fails rather than
-silently changing branches.
+Every bounded pass attempts to leave the dedicated checkout on its base branch
+(`agent/work-base` in the setup above) before the service exits, including a
+pass that failed after creating a local issue commit. The base only
+fast-forwards from `origin/main`, while the issue branch remains available for
+recovery and human review. If the reset fails (for example, because the
+checkout is dirty), the service fails and records the diagnostic in the
+journal. A direct `agent-work` launch from an issue branch still intentionally
+fails rather than silently changing branches.
 
 ## Restart the loop
 

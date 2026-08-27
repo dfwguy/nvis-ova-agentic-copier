@@ -21,20 +21,22 @@ run_logged() {
   return "${statuses[0]}"
 }
 
-return_checkout_to_main() {
-  log "returning dedicated checkout to main"
-  if run_logged git switch main; then
+return_checkout_to_base_branch() {
+  local base_branch="${AGENT_WORK_BASE_BRANCH:-main}"
+
+  log "returning dedicated checkout to $base_branch"
+  if run_logged git switch "$base_branch"; then
     :
   else
     status=$?
-    log "stopped: could not switch to main (exit $status)"
+    log "stopped: could not switch to $base_branch (exit $status)"
     return "$status"
   fi
   if run_logged git pull --ff-only; then
     :
   else
     status=$?
-    log "stopped: could not fast-forward main (exit $status)"
+    log "stopped: could not fast-forward $base_branch (exit $status)"
     return "$status"
   fi
 }
@@ -88,7 +90,7 @@ else
   log "pass failed (exit $pass_status); attempting checkout recovery"
 fi
 
-if return_checkout_to_main; then
+if return_checkout_to_base_branch; then
   :
 else
   cleanup_status=$?
