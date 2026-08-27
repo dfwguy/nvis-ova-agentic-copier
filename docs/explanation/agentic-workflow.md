@@ -27,7 +27,9 @@ flowchart TD
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
-    mr --> human[Human approval and merge]
+    mr --> performance[Pipeline Performance Judge]
+    performance --> triage[Findings Triage]
+    triage --> human[Human approval and merge]
 ```
 
 For non-trivial work, the Test Writer and Documentation Writer proceed in
@@ -36,6 +38,27 @@ the failing tests. Validation and final review then provide separate evidence
 for implementation, documentation, tests, quality, CI, the README, CLI
 behavior, and filesystem structure. Small, low-risk changes can use the same
 publication and validation boundaries without the full routing sequence.
+
+The Pipeline Performance Judge is deliberately post-publication: it examines
+the current merge request's pipeline only after GitLab has produced job timing
+and status evidence. It verifies the branch tip, separates runner queue time
+from bootstrap, execution, cache, and artifact work, and inspects traces only
+as needed for a failed or unexplained slow job. It does not busy-poll a running
+pipeline, edit CI, retry work, approve, or merge. A later bounded
+reconciliation supplies `needs verification` when the pipeline is not yet
+terminal.
+
+Findings Triage runs last, after the Finalizer, publication, and terminal
+pipeline review. It receives accumulated Minor records from every judge,
+deduplicates them with a stable marker, and creates the corresponding GitLab
+Bug issues. Those issues are normal eligible input for the serial agent loop;
+the triage role never edits the current change or invokes the loop itself.
+
+For a finding against an open merge request, the issue's marker records the
+verified MR IID and source tip. The later remediation worker re-verifies the
+open same-project MR, resumes its source branch, and updates that MR rather
+than opening another one. This makes an issue a durable follow-up record while
+preserving one review thread and its human approval boundary.
 
 ## Merge requests are the shared record
 
@@ -68,6 +91,8 @@ approval and merge boundary.
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
 | CI/CD Judge | Checks CI configuration and pipeline health | Edit CI configuration or retry pipelines |
+| Pipeline Performance Judge | After publication, diagnoses the current MR pipeline's health, queue, timing, image, cache, and bootstrap evidence | Edit code or CI, retry/cancel jobs, approve, or merge |
+| Findings Triage | After terminal pipeline review, creates deduplicated GitLab Bug issues for actionable Minor findings from every judge | Edit code, run validation, commit, push, approve, or merge |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
 | Finalizer | Verifies final gates and commits locally before publication handoff | Fix issues |

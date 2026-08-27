@@ -291,6 +291,27 @@ They do not prevent another unrelated work item from starting.
    landed until the latest `main` pipeline passes. A failed post-merge pipeline
    is reported for remediation, but it does not block unrelated work.
 
+   For a reported CI failure or performance concern, invoke the Pipeline Performance Judge
+   during this bounded reconciliation. It inspects the current MR pipeline (not only the latest `main` pipeline), separates runner
+   queue time from bootstrap, execution, cache, and artifact time, and checks
+   the current branch tip before reporting evidence. A pending or running
+   pipeline is `needs verification` for a later reconciliation; never poll it,
+   retry it, or delay the human handoff.
+
+   Once that MR pipeline is terminal, invoke Findings Triage as the final
+   post-publication step. It consumes accumulated Minor findings from every
+   judge, including the pipeline review, and creates deduplicated Bug issues.
+   Those issues are eligible input for a later serial-loop pass; the current
+   MR remains `awaiting_human` and the triage step never edits, pushes, or
+   waits.
+
+   An MR remediation issue contains the verified `agent-mr-remediation` marker.
+   A later worker must re-fetch the referenced open MR, verify the same-project
+   default target and remote source-branch tip, resume that source branch, and
+   update the existing merge request with `Closes #<triage-issue>`. It must not
+   create a second MR. Any stale, merged, cross-project, or mismatched marker
+   fails the remediation issue without changing the original MR.
+
 4. **Clean up only after merge confirmation.** Only once the MR is merged and `main` is green may reconciliation update `main` and remove the local branch:
    ```bash
    git checkout main

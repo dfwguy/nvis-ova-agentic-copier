@@ -78,7 +78,7 @@ Always, after `nonfunctional-review`, `tdd-judge`, and `diataxis-judge` approve,
 
 ## Hand-off to publish
 
-The push and merge-request creation happen in the **orchestrator** (main thread) after you return — they need main-thread access and a user approval. **Do not** run `git push`, `glab api`, or any other remote-touching command yourself. Stop at the local commit.
+The push and merge-request creation happen in the **orchestrator** (main thread) after you return — they need main-thread access and a user approval. Preserve the accumulated judge handoffs for the terminal post-publication Pipeline Performance Judge and Findings Triage steps. **Do not** run `git push`, `glab api`, or any other remote-touching command yourself. Stop at the local commit.
 
 ## Constraints
 
