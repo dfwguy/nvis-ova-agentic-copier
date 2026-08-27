@@ -145,6 +145,7 @@ class _Checkout:
         branch_error: RuntimeError | None = None,
         resume_error: RuntimeError | None = None,
         baseline_error: RuntimeError | None = None,
+        publish_error: RuntimeError | None = None,
     ) -> None:
         self.path = Path("/trusted/checkout")
         self.events: list[str] = []
@@ -152,6 +153,7 @@ class _Checkout:
         self.branch_error = branch_error
         self.resume_error = resume_error
         self.baseline_error = baseline_error
+        self.publish_error = publish_error
 
     def preview_preflight(self, *_args: object) -> None:
         self.events.append("preview_preflight")
@@ -193,6 +195,8 @@ class _Checkout:
     def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         del branch, draft, baseline
         self.events.append("publish")
+        if self.publish_error is not None:
+            raise self.publish_error
 
 
 class _Invoke:
@@ -403,6 +407,30 @@ def test_failed_applied_issue_reports_agent_exit_and_diagnostics() -> None:
 
     assert report.failure_reason == (
         "Agent exited with status 7; no exact published MR evidence"
+    )
+    assert gitlab.failure_comments == [(issue.iid, report.failure_reason)]
+
+
+def test_failed_publication_names_the_trusted_boundary() -> None:
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(eligible=(issue,)),
+        _Checkout(
+            publish_error=AdapterError(
+                "pushing trusted worker branch failed (exit 128)"
+            )
+        ),
+        _Invoke(),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.failure_reason == (
+        "trusted branch publication failed: pushing trusted worker branch failed "
+        "(exit 128); no exact published MR evidence"
     )
     assert gitlab.failure_comments == [(issue.iid, report.failure_reason)]
 

@@ -734,6 +734,17 @@ def test_worker_merge_request_draft_requires_one_valid_delimited_json_object() -
     )
 
 
+def test_worker_diagnostic_is_bounded_without_losing_its_end() -> None:
+    invocation = AgentInvocation(returncode=1, stdout="a" * 12_001 + " final detail")
+
+    assert len(invocation.diagnostic) < 12_100
+    assert (
+        "[worker diagnostic truncated; retaining beginning and end]"
+        in invocation.diagnostic
+    )
+    assert invocation.diagnostic.endswith(" final detail")
+
+
 def test_checkout_refuses_an_existing_deterministic_local_branch(
     tmp_path: Path,
 ) -> None:

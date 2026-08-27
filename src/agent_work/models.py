@@ -149,8 +149,10 @@ class AgentInvocation:
 
     @property
     def diagnostic(self) -> str:
-        """Return the available redacted output in command-stream order."""
-        return "\n".join(part for part in (self.stdout, self.stderr) if part)
+        """Return a bounded redacted diagnostic in command-stream order."""
+        return "\n".join(
+            _diagnostic_excerpt(part) for part in (self.stdout, self.stderr) if part
+        )
 
     def merge_request_draft(self) -> MergeRequestDraft:
         """Parse the sole delimited JSON draft emitted by the worker."""
@@ -167,6 +169,18 @@ class AgentInvocation:
             raise ValueError(
                 "worker returned an invalid merge-request draft"
             ) from error
+
+
+def _diagnostic_excerpt(output: str, *, limit: int = 12_000) -> str:
+    """Keep journal diagnostics useful without allowing one worker to flood them."""
+    if len(output) <= limit:
+        return output
+    half_limit = limit // 2
+    return (
+        f"{output[:half_limit]}\n"
+        "...[worker diagnostic truncated; retaining beginning and end]...\n"
+        f"{output[-half_limit:]}"
+    )
 
 
 @dataclass(frozen=True)
