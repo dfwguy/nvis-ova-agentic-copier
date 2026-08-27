@@ -23,19 +23,18 @@ categories into an unfocused page.
 
 ## Steps
 
-1. Read the architect's design and the current change to identify documentation
+1. Read `DIATAXIS.md`, then the architect's design and the current change to identify documentation
    that readers will need.
 2. Check `docs/` for the existing page that owns the topic. Create or update a
    page only when the change affects user or maintainer understanding.
-3. State the selected Diátaxis category near the top of a new page, and write
-   for that category's reader need.
+3. Apply its classification procedure, front matter, reciprocal `related`
+   entries, landing-page generation, and audit requirements.
 4. Keep commands, options, examples, and links consistent with the design and
    repository source. Do not document speculative behavior.
-5. Update `docs/README.md` whenever a Diátaxis page is added, removed,
-   renamed, or materially repurposed. The index must link every Diátaxis page
-   with a brief description; a directory-only link is not enough.
+5. Regenerate the affected type landing page and `docs/index.md` whenever a
+   Diátaxis page is added, removed, renamed, retyped, or its summary changes.
 
 ## Output
 
-Report the files changed, each page's Diátaxis category, and any documented
-assumptions. If no `docs/` update is needed, state why.
+Use the documentation change report defined in `DIATAXIS.md`. If no `docs/`
+update is needed, state why.

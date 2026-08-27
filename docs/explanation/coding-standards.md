@@ -1,6 +1,19 @@
+---
+title: Why the coding standards exist
+type: explanation
+summary: Understand the rationale for the generated development conventions.
+audience: maintainer
+tags: [template-architecture]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: agentic-workflow.md
+    why: Applies these conventions through independent workflow roles.
+---
+
 # Why the coding standards exist
 
-**Diátaxis category: Explanation.** This page explains the intent behind the
+This page explains the intent behind the
 Python and Bash conventions generated in `CLAUDE.md` and `.claude/lang/`.
 
 The standards are designed to make ordinary changes safe to review, easy to

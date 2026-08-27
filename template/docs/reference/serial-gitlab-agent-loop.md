@@ -1,6 +1,19 @@
-# Serial GitLab agent-loop reference
+---
+title: Serial GitLab agent-loop reference
+type: reference
+summary: Look up the run-next command, lifecycle, and publication constraints.
+audience: maintainer
+tags: [agent-workflow]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../how-to/setup-serial-gitlab-agent-loop.md
+    why: Configures the loop described by this reference.
+  - path: ../explanation/serial-gitlab-agent-loop.md
+    why: Explains the design trade-offs behind the lifecycle.
+---
 
-*Diátaxis category: Reference.*
+# Serial GitLab agent-loop reference
 
 ## Command
 

@@ -1,6 +1,19 @@
-# Set up the serial GitLab agent loop
+---
+title: Set up the serial GitLab agent loop
+type: how-to
+summary: Configure one checkout and guarded user timer for issue work.
+audience: maintainer
+tags: [agent-workflow]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the command and lifecycle configured here.
+  - path: ../explanation/serial-gitlab-agent-loop.md
+    why: Explains why this loop is serial and GitLab-native.
+---
 
-*Diátaxis category: How-to guide.*
+# Set up the serial GitLab agent loop
 
 Use this procedure to configure one serial agent loop for one GitLab project.
 It uses Developer-compatible polling, not a webhook, and it does not authorize

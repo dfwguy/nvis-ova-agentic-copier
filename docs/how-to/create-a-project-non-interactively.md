@@ -1,6 +1,21 @@
+---
+title: Create a project non-interactively
+type: how-to
+summary: Supply Copier answers from a script or CI job.
+audience: practitioner
+tags: [project-generation]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../tutorials/create-your-first-project.md
+    why: Introduces the interactive path before automation.
+  - path: ../reference/template-contract.md
+    why: Defines the Copier inputs used by this command.
+---
+
 # Create a project non-interactively
 
-**Diátaxis category: How-to guide.** Use this when automation or a repeatable
+Use this when automation or a repeatable
 script needs to provide all Copier answers without prompts.
 
 Pass values with `--data` and give Copier a target directory:

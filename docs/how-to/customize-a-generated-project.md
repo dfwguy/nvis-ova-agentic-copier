@@ -1,6 +1,21 @@
+---
+title: Customize a generated project's workflow
+type: how-to
+summary: Tailor generated code and tooling without losing template compatibility.
+audience: practitioner
+tags: [project-generation]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../reference/template-contract.md
+    why: Defines the generated files and template-owned boundaries.
+  - path: ../explanation/template-and-generated-project.md
+    why: Explains why template and project changes have different owners.
+---
+
 # Customize a generated project's workflow
 
-**Diátaxis category: How-to guide.** Use this when a generated project needs
+Use this when a generated project needs
 project-specific conventions or tooling after its initial creation.
 
 1. Change the generated project's own configuration, rather than editing this

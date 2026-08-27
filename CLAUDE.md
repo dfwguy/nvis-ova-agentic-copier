@@ -102,7 +102,7 @@ Language-agnostic guidance lives in `.claude/guidance/`. Read the relevant file 
 |-------|------|
 | Test-driven development | `.claude/guidance/tdd.md` |
 | Markdown conventions | `.claude/guidance/markdown.md` |
-| Diátaxis documentation process | `docs/diataxis.md` |
+| Diátaxis documentation process | `DIATAXIS.md` |
 
 ## Multi-Agent Workflow
 
@@ -211,7 +211,7 @@ Diátaxis separates documentation by reader need: **Tutorials** teach through a
 lesson, **How-to guides** solve a task, **Reference** supports accurate lookup,
 and **Explanation** supplies understanding and rationale. The writer and judge
 use this separation so `docs/` remains navigable instead of becoming a mixed
-collection of catch-all pages. See [`docs/diataxis.md`](docs/diataxis.md) for
+collection of catch-all pages. See [`DIATAXIS.md`](DIATAXIS.md) for
 the required workflow and category guidance.
 
 ### Remediation workflow

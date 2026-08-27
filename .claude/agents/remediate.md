@@ -26,17 +26,17 @@ improvement.
 
 ## Process
 
-1. Read `CLAUDE.md`, `.claude/project.md`, `docs/diataxis.md`, the relevant
+1. Read `CLAUDE.md`, `.claude/project.md`, `DIATAXIS.md`, the relevant
    language conventions, and the current CI/pre-commit configuration.
 2. Inventory tracked source, tests, scripts, CI, documentation, and the
-   `docs/README.md` documentation index. Identify languages from actual tracked files.
+   canonical `docs/index.md` and section landing pages. Identify languages from actual tracked files.
 3. Run the applicable existing validation commands without changing files.
    Record each failure exactly once with its command, affected files, and a
    short evidence-backed diagnosis. Treat unavailable tooling as a blocker,
    not a pass.
 4. Review the documentation separately: classify missing or stale `docs/`
-   material by Diátaxis quadrant and check that `docs/README.md` links every
-   Diátaxis page with a brief explanation.
+   material by Diátaxis quadrant and run the landing-page and link audit in
+   `DIATAXIS.md`.
 5. Produce a small-to-large sequence of independently reviewable remediation
    slices. Each slice must name its acceptance tests, documentation work, and
    expected validation gates. Use the normal architect → Red → Green → judges
