@@ -318,6 +318,14 @@ dirty), the service fails and records the diagnostic in the journal. A direct
 `agent-work` launch from an issue branch still intentionally fails rather than
 silently changing branches.
 
+## Monitor activity and inspect failures
+
+Set the project-specific systemd unit name before querying its logs or status:
+
+```bash
+unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+```
+
 Follow activity and inspect failures with `journalctl`:
 
 ```bash

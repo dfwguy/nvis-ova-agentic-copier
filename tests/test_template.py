@@ -107,6 +107,7 @@ def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
     assert "--git-history none" in ci_config
     assert "--no-validate" in ci_config
     assert "--exclude .git" in ci_config
+    assert "--exclude .cache" in ci_config
 
 
 def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
@@ -114,7 +115,25 @@ def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
     ci_config = (generated_project / ".gitlab-ci.yml").read_text()
 
     assert "shellcheck:" in ci_config
-    assert "apt-get install -y --no-install-recommends shellcheck" in ci_config
+    shellcheck_job = re.search(
+        r"^shellcheck:\n(?P<body>(?:^[ \t].*\n?)*)",
+        ci_config,
+        flags=re.MULTILINE,
+    )
+
+    assert shellcheck_job is not None
+    assert "koalaman/shellcheck-alpine:stable" in shellcheck_job.group("body")
+    assert "apt-get" not in shellcheck_job.group("body")
+
+
+def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> None:
+    """CI reuses UV downloads and avoids downloading its bootstrap Python."""
+    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+
+    assert "UV_CACHE_DIR" in ci_config
+    assert ".cache/uv/" in ci_config
+    assert "uv:0.7.3-python3.13-bookworm-slim" in ci_config
+    assert "uv cache prune --ci" in ci_config
 
 
 def test_pytest_ci_installs_jq_for_executable_preflight_tests(
@@ -161,6 +180,13 @@ def test_root_tox_generates_enforced_coverage_artifacts(project_root: Path) -> N
     for environment in ("py311", "py314"):
         command = config["tool"]["tox"]["env"][environment]["commands"][0]
         assert expected_arguments.issubset(command)
+
+
+def test_generated_dev_environment_includes_tox_uv(generated_project: Path) -> None:
+    """CI can run tox without provisioning a second tool environment."""
+    config = tomllib.loads((generated_project / "pyproject.toml").read_text())
+
+    assert "tox-uv>=1.20" in config["dependency-groups"]["dev"]
 
 
 def _unlabeled_markdown_fences(content: str) -> list[str]:
