@@ -410,6 +410,7 @@ def test_lint_and_pytest_skill_is_generated(
         ("diataxis-judge", "fast"),
         ("diataxis-writer", "balanced"),
         ("filesystem-structure-judge", "fast"),
+        ("findings-triage", "balanced"),
         ("judge-cicd", "balanced"),
         ("judge-quality", "most-capable"),
         ("judge-test", "balanced"),
@@ -809,6 +810,101 @@ def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
     assert "Filesystem structure deviations" in agent.read_text()
     assert "Filesystem Judge" in workflow
     assert "`filesystem-structure-judge` approves" in finalizer
+
+
+def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that pipeline timing analysis survives Copier rendering and is post-publication."""
+    relative_agent = ".claude/agents/pipeline-performance-judge.md"
+    relative_skill = ".claude/skills/pipeline-performance-judge/SKILL.md"
+
+    for root in (project_root, template_dir, generated_project):
+        agent = root / relative_agent
+        skill = root / relative_skill
+
+        assert agent.exists()
+        assert skill.exists()
+        assert "projects/$GITLAB_PROJECT_ID/merge_requests" in agent.read_text()
+        assert "queued_duration" in agent.read_text()
+        assert "Do not push, retry, cancel, approve, or merge" in agent.read_text()
+        assert "model-tier: balanced" in skill.read_text()
+
+        workflow = (root / "CLAUDE.md").read_text()
+        git_flow = (root / ".claude" / "git-flow.md").read_text()
+        assert "Pipeline Performance Judge" in workflow
+        assert "Pipeline Performance Judge" in git_flow
+        assert workflow.index("Finalizer") < workflow.index(
+            "Pipeline Performance Judge"
+        )
+
+
+def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that every generated workflow files Minor findings after CI review."""
+    relative_agent = ".claude/agents/findings-triage.md"
+    relative_skill = ".claude/skills/findings-triage/SKILL.md"
+
+    for root in (project_root, template_dir, generated_project):
+        agent = root / relative_agent
+        skill = root / relative_skill
+        workflow = (root / "CLAUDE.md").read_text()
+
+        assert agent.exists()
+        assert skill.exists()
+        assert "projects/$GITLAB_PROJECT_ID/issues" in agent.read_text()
+        assert "Bug template" in agent.read_text()
+        assert "Minor" in agent.read_text()
+        assert "deduplicate" in agent.read_text().lower()
+        assert "model-tier: balanced" in skill.read_text()
+        assert (
+            workflow.index("Finalizer")
+            < workflow.index("Pipeline Performance Judge")
+            < workflow.index("Findings Triage")
+        )
+
+    for judge_name in (
+        "judge-quality.md",
+        "judge-test.md",
+        "judge-cicd.md",
+        "pipeline-performance-judge.md",
+    ):
+        content = (project_root / ".claude" / "agents" / judge_name).read_text()
+        assert "Findings Triage" in content
+
+
+def test_mr_remediation_issues_resume_the_originating_merge_request(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that a judge finding can safely drive a later update to its open MR."""
+    for root in (project_root, template_dir, generated_project):
+        agents = (root / "AGENTS.md").read_text()
+        workflow = (root / "CLAUDE.md").read_text()
+        triage = (root / ".claude" / "agents" / "findings-triage.md").read_text()
+        git_flow = (root / ".claude" / "git-flow.md").read_text()
+
+        assert "MR remediation issue" in agents
+        assert "update the existing merge request" in workflow
+        assert "agent-mr-remediation" in triage
+        assert "source branch" in triage
+        assert "Closes #<triage-issue>" in triage
+        assert "MR remediation issue" in git_flow
+
+    for root in (project_root, template_dir):
+        runner = (
+            root / ".agents" / "skills" / "work-item-runner" / "SKILL.md"
+        ).read_text()
+
+        assert "agent-mr-remediation" in runner
+        assert "existing merge request" in runner
+        assert "Do not create a second merge request" in runner
 
 
 def test_source_and_template_workflows_wire_the_filesystem_structure_judge(
@@ -1274,24 +1370,20 @@ def test_architect_records_deferred_scope_with_gitlab_feature_issues(
     "command_name",
     ("judge-quality.md", "judge-test.md"),
 )
-def test_review_agents_file_minor_findings_as_gitlab_bug_issues(
+def test_review_agents_preserve_minor_findings_for_terminal_triage(
     project_root: Path, command_name: str
 ) -> None:
-    """Test that approving reviews hand off Bug issues in a machine-readable form."""
+    """Test that approving reviews hand Minor records to Findings Triage."""
     for root in (project_root, project_root / "template"):
         content = (root / ".claude" / "agents" / command_name).read_text()
 
         for requirement in (
-            "Bug template",
-            "GitLab issue",
-            "S4",
-            "type::quality",
-            "numeric project ID",
-            "unfiled",
-            "Never claim it was persisted",
+            "Findings Triage",
+            "standard output format",
+            "Bug-template",
+            "GitLab issues",
             "Markdown backlog file as a fallback",
-            "Created <N> GitLab issues",
-            "No new issues",
+            "Do not claim an issue was created",
         ):
             assert requirement in content
 

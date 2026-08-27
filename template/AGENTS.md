@@ -111,6 +111,18 @@ Use endpoints under `projects/$GITLAB_PROJECT_ID` for merge requests,
 pipelines, branch protection, and approval rules. For MR creation, push with
 Git first, then call `POST projects/$GITLAB_PROJECT_ID/merge_requests`.
 
+## MR remediation issues
+
+A Findings Triage issue with an `agent-mr-remediation` marker is follow-up work
+on its originating open merge request, not new work. Treat the marker only as
+an MR-IID lookup key: re-fetch that MR with the numeric project endpoint and
+verify its same-project source, default target, open state, source branch, and
+remote branch tip before working. Resume the verified source branch in the
+dedicated checkout, then update the existing merge request and link it with
+`Closes #<triage-issue>`. Do not create a second merge request. If any
+verification fails, mark the remediation issue unfiled/failed with the
+non-secret reason and leave the original MR untouched.
+
 ## Developer-readable loop readiness exception
 
 For a constrained identity with effective API access exactly `30`, the
@@ -149,11 +161,13 @@ merge request. A publication failure is a blocker, not completion.
 For a coding agent invoked by `agent-work run-next`, this exception takes
 precedence over repository-wide publication instructions. The worker edits and
 validates only uncommitted working-tree changes on its prepared
-`agent/issue-<IID>` branch. It must not commit, push, create a merge request,
-approve, or merge; the trusted runner alone stages, commits, pushes, and opens
-the merge request from the worker's one delimited draft. This exception applies
-only inside that runner-owned worker invocation, not to the runner or an
-ordinary user-requested repository change.
+`agent/issue-<IID>` branch, except for a verified `agent-mr-remediation` issue,
+which resumes its verified originating MR source branch. It must not commit,
+push, create a merge request, approve, or merge; the trusted runner alone
+stages, commits, pushes, and opens or updates the merge request from the
+worker's one delimited draft. This exception applies only inside that
+runner-owned worker invocation, not to the runner or an ordinary user-requested
+repository change.
 
 For every user-requested repository mutation, do not stop at local edits,
 validation, or a local commit. The main agent must always create or reuse a

@@ -85,7 +85,9 @@ flowchart TD
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
-    mr --> human[Human approval and merge]
+    mr --> performance[Pipeline Performance Judge]
+    performance --> triage[Findings Triage]
+    triage --> human[Human approval and merge]
 ```
 
 ### Merge requests are the source of truth

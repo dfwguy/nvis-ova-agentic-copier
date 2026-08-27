@@ -166,7 +166,16 @@ New feature or non-trivial change
                           and commits locally. Rejects to the README Reviewer if README is stale.
         │
         ▼
-   (Steps 3–4 of git-flow.md: push + open/update MR, then hand off as awaiting_human)
+   (Step 3 of git-flow.md: push + open/update MR)
+        │
+        ▼
+ Pipeline Performance Judge ← bounded analysis of the current MR pipeline after it becomes terminal
+        │
+        ▼
+ Findings Triage           ← files deduplicated GitLab issues for accumulated Minor findings
+        │
+        ▼
+   (Step 4 of git-flow.md: hand off as awaiting_human; never wait or merge)
 ```
 
 ### Agent Summary
@@ -185,6 +194,8 @@ New feature or non-trivial change
 | Test Judge | Pure test-quality review (Sonnet): meaningful assertions and language-appropriate test practices; tags findings **Major** / **Minor** / **Existing** | Run any tooling; review production-code quality |
 | README Reviewer | Ensures README.md accurately orients people landing on the project | Touch `docs/`, code, tests, or agent definitions |
 | CI/CD Judge | Verifies `.gitlab-ci.yml` is in sync with the change and checks pipeline health via `glab` | Edit CI config or retry pipelines |
+| Pipeline Performance Judge | After publication, analyzes the current MR pipeline's queue, job timing, bootstrap, image, cache, and failure evidence | Edit code or CI, retry/cancel jobs, approve, or merge |
+| Findings Triage | At the end, creates deduplicated GitLab Bug issues for actionable Minor findings from any judge; its MR remediation issues update the originating open MR | Edit code, run validation, commit, push, approve, or merge |
 | CLI Judge | Validates CLI changes against CLIG and the `--json`, `--help`, `--apply`, dry-run, exit-code, and output contracts | Run tooling or edit files |
 | Filesystem Judge | Verifies the Python/Bash filesystem layout or a specific `.claude/project.md` deviation | Edit files, run tooling, or review non-layout quality |
 | Finalizer | Verifies README sync, all final judges including filesystem structure, applicable Python/Bash gates, then commits locally; the orchestrator then follows `git-flow.md` Steps 3–4 (push + MR; hand off without waiting for merge) | Fix issues — rejects and routes back |
@@ -245,10 +256,10 @@ When a judge rejects and routes work back to an earlier role, proceed automatica
 The Quality Judge (production-code review) and Test Judge (test-quality review) both classify every finding as one of:
 
 - **Major** — defect in this change. Triggers `Overall: Reject`. The Quality Judge reroutes to the Implementer; the Test Judge reroutes to the Test Writer (test defects belong to the Test Writer) — except a Test Judge Major flagging production code that *forces* internal mocking (a missing injection point), which reroutes to the Implementer. Reroutes are automatic.
-- **Minor** — non-blocking style/clarity nit caused or kept by this change. The main agent creates a GitLab issue from the Bug template, records the finding, and labels it `type::quality`. Does not reroute. See "GitLab issues" below.
+- **Minor** — non-blocking style/clarity nit caused or kept by this change. Findings Triage creates a deduplicated GitLab issue from the Bug template after post-publication pipeline review, and labels it `type::quality` when available. Does not reroute. See "GitLab issues" below.
 - **Existing** — pre-existing issue in surrounding code or tests, not introduced by this change. Surfaced verbatim in the judge's report but not automatically filed. Never blocks.
 
-Both reviewers end their return note with `Created <N> GitLab issues` (or `No new issues`). The main agent forwards those lines to the Finalizer so it can link the issues from the MR. Existing findings are surfaced to the user at the same point but are not automatically filed.
+Both reviewers emit their Minor records in the standard output format. Findings Triage runs after the Finalizer and Pipeline Performance Judge, then ends with `Created <N> GitLab issues` (or `No new issues`). Existing findings are surfaced to the user but are not automatically filed.
 
 The Quality Judge owns production-code quality; the Test Judge runs on **Sonnet** and owns test quality — meaningful assertions that would catch a wrong implementation, `pytest.mark.parametrize`, `hypothesis` for pure functions, order-independence (`pytest-randomly`), dependency-injected test doubles instead of internal-symbol patching, and test hygiene. The two reviewers do not duplicate each other.
 
@@ -265,7 +276,8 @@ GitLab issues are the system of record for deferred work, planned work, and non-
 
 ### Workflow
 
-- The main agent files a Bug issue for each new **Minor** finding after an approving quality or test review, uses `S4` unless the finding has greater impact, and applies the `type::quality` label when that label exists. The issue must link to the relevant file, line, MR, or review note.
+- Findings Triage files a Bug issue for each deduplicated, actionable **Minor** finding from any judge after the Finalizer and terminal MR-pipeline review. It uses `S4` unless the finding has greater impact, applies `type::quality` when that label exists, and links to the relevant file, line, MR, pipeline, job, or review note.
+- When the finding belongs to an open MR, Findings Triage creates an **MR remediation issue** with the verified MR IID, source branch, and source SHA in its `agent-mr-remediation` marker. The next worker verifies those fields against GitLab, resumes that source branch, and must update the existing merge request with `Closes #<triage-issue>`; it never opens a second MR. A stale, merged, cross-project, or mismatched marker is failed without touching the MR.
 - Existing findings remain in the review report and are never filed automatically.
 - When design, planning, or conversation identifies deferred scope, the main agent files a Feature issue after confirming it with the user. Link it from the originating issue or MR.
 - Close issues only when the associated work lands or a user explicitly drops it. Link MRs with `Closes #<issue>` when the MR resolves the work.

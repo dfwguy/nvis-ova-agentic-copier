@@ -79,8 +79,8 @@ The orchestrator parses these lines literally — keep the format consistent. Th
 - You have no Bash, Edit, or Write tools — you cannot run code or make changes. Pure review only. `tdd-judge` already ran the suite; do not ask anyone to run it.
 - If a finding can only be confirmed by running the tests, classify it as **Minor** with a "needs verification" note rather than rejecting.
 - Tests are your scope. Flag production-code issues only insofar as they *force* bad tests (e.g. a missing injection point); leave general production-code quality to `judge-quality`.
-- Do not approve tests with any **Major** finding. Minor and Existing findings never cause a rejection — they are deferred to the user at the end of the workflow.
-- For each Minor, the main agent files a GitLab issue from the Bug template,
-  normally `S4` with `type::quality`, using the numeric project ID. If filing
-  is unavailable, report it as unfiled; Never claim it was persisted or use a
-  Markdown backlog file as a fallback. End the handoff with `Created <N> GitLab issues` or `No new issues`.
+- Do not approve tests with any **Major** finding. Minor and Existing findings never cause a rejection.
+- Preserve every Minor in the standard output format for Findings Triage. That
+  terminal agent, not this read-only judge, files deduplicated Bug-template
+  GitLab issues after pipeline review. Do not claim an issue was created or use
+  a Markdown backlog file as a fallback.

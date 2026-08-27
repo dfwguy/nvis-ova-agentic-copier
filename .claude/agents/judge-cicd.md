@@ -66,7 +66,8 @@ A change to the template directory may need both updated; a change to `tests/` o
 
 Provide a verdict for each of the three sections — **Config sync**, **Pipeline shape**, **Pipeline health** — as **Pass**, **Minor** (note but don't block), or **Reject** (must fix). List every specific issue with file and line number.
 
-On approval, hand off to `tdd-finalizer`. On rejection, name the agent that should pick it up:
+On approval, preserve each Minor for Findings Triage and hand off to
+`tdd-finalizer`. On rejection, name the agent that should pick it up:
 - Missing or stale CI config → `tdd-green` (CI YAML is implementation; the Implementer owns it).
 - Failing remote pipeline caused by code in this iteration → `tdd-green`.
 - Failing remote pipeline caused by something unrelated (infra, prior commit) → flag for the user; do not block this iteration.
