@@ -183,8 +183,15 @@ Use this path only when the readiness check reports effective Developer access
 exactly `30`; it does not replace the documented branch-protection or approval
 evidence.
 
+Set the project-specific systemd unit name:
+
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+```
+
+Then capture the executable paths and install the service files:
+
+```bash
 uv_path="$(command -v uv)"
 if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
   printf '%s\n' 'uv must resolve to an executable absolute path' >&2
@@ -237,8 +244,15 @@ diagnostic to the operator.
 For a timer installed by an earlier version, stop it before rewriting its
 environment file, then enable it again:
 
+Set the same project-specific systemd unit name:
+
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+```
+
+Then stop and restart the timer:
+
+```bash
 if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
