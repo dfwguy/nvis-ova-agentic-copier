@@ -21,6 +21,9 @@ class AgentWorkConfig(BaseModel):
     host: str
     project_id: int = Field(gt=0)
     checkout: Path
+    base_branch: str | None = Field(
+        default=None, pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    )
     journal_tag: str = Field(default="agent-work", min_length=1)
 
     @field_validator("host")

@@ -320,6 +320,37 @@ def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
     assert config.journal_tag == "project-agent-work"
 
 
+def test_checkout_derivation_accepts_a_configured_agent_base_branch(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    project = {
+        "id": 310967,
+        "path_with_namespace": "group/project",
+        "default_branch": "main",
+        "web_url": "https://gitlab.example.com/group/project",
+    }
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, json.dumps([project]), ""),
+            CommandResult(0, json.dumps(project), ""),
+            CommandResult(0, "agent/work-base\n", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+
+    config = discover_checkout_config(
+        current_directory=tmp_path,
+        environment={"AGENT_WORK_BASE_BRANCH": "agent/work-base"},
+        run_command=commands,
+    )
+
+    assert config.base_branch == "agent/work-base"
+    assert commands.calls[-1][0] == ("git", "-C", str(checkout), "pull", "--ff-only")
+
+
 def test_checkout_derivation_refuses_to_launch_from_a_feature_branch(
     tmp_path: Path,
 ) -> None:
@@ -351,6 +382,87 @@ def test_checkout_derivation_refuses_to_launch_from_a_feature_branch(
         discover_checkout_config(current_directory=tmp_path, run_command=commands)
 
     assert all("pull" not in command for command, _ in commands.calls)
+
+
+def test_checkout_derivation_rejects_an_invalid_agent_base_before_pulling(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    project = {
+        "id": 310967,
+        "path_with_namespace": "group/project",
+        "default_branch": "main",
+        "web_url": "https://gitlab.example.com/group/project",
+    }
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, json.dumps([project]), ""),
+            CommandResult(0, json.dumps(project), ""),
+        )
+    )
+
+    with pytest.raises(AdapterError, match="AGENT_WORK_BASE_BRANCH is invalid"):
+        discover_checkout_config(
+            current_directory=tmp_path,
+            environment={"AGENT_WORK_BASE_BRANCH": "main"},
+            run_command=commands,
+        )
+
+    assert all(
+        "branch" not in command and "pull" not in command
+        for command, _ in commands.calls
+    )
+
+
+def test_service_checkout_fast_forwards_the_configured_agent_base_branch(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=310967,
+        checkout=checkout,
+        base_branch="agent/work-base",
+    )
+    commands = _Commands(
+        (
+            CommandResult(0, str(checkout), ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "", ""),
+        )
+    )
+    project = GitLabProject(
+        id=310967,
+        host="gitlab.example.com",
+        default_branch="main",
+        web_url="https://gitlab.example.com/group/project",
+        http_url_to_repo="https://gitlab.example.com/group/project.git",
+    )
+
+    ServiceCheckout(config, commands).applied_preflight(project)
+
+    assert commands.calls[4][0] == (
+        "git",
+        "-C",
+        str(checkout),
+        "switch",
+        "agent/work-base",
+    )
+    assert commands.calls[5][0] == (
+        "git",
+        "-C",
+        str(checkout),
+        "merge",
+        "--ff-only",
+        "origin/main",
+    )
 
 
 @pytest.mark.parametrize(
