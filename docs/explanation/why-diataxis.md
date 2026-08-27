@@ -1,6 +1,19 @@
+---
+title: Why this repository uses Diátaxis
+type: explanation
+summary: Understand why the documentation separates reader needs.
+audience: maintainer
+tags: [template-architecture]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: agentic-workflow.md
+    why: Explains the workflow that applies these documentation rules.
+---
+
 # Why this repository uses Diátaxis
 
-**Diátaxis category: Explanation.** This page explains why the repository
+This page explains why the repository
 organizes its documentation around reader needs instead of collecting every
 topic in a single guide.
 
@@ -42,7 +55,7 @@ That makes documentation a reviewed part of a change rather than a final,
 undifferentiated add-on.
 
 For the process used by contributors, see the
-[Diátaxis documentation process](../diataxis.md). To browse the current
+[Diátaxis documentation process](../../DIATAXIS.md). To browse the current
 quadrants, start at the [documentation index](../README.md). For another
 example of an Explanation page, see
 [why the coding standards exist](coding-standards.md).

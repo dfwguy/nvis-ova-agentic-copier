@@ -1,6 +1,21 @@
+---
+title: Create your first project
+type: tutorial
+summary: Generate a project and verify its development tooling is ready.
+audience: new-user
+tags: [project-generation]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../how-to/create-a-project-non-interactively.md
+    why: Provides the automation-oriented alternative to this lesson.
+  - path: ../reference/template-contract.md
+    why: Lists the generated files and setup behavior used here.
+---
+
 # Create your first project
 
-**Diátaxis category: Tutorial.** This lesson creates a working Python project
+This lesson creates a working Python project
 from the template and confirms that its development tooling is ready.
 
 ## Before you begin

@@ -1,6 +1,19 @@
+---
+title: Validate template changes
+type: how-to
+summary: Run the checks required before proposing a template change.
+audience: maintainer
+tags: [template-maintenance]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../reference/template-contract.md
+    why: Defines the template behavior those checks protect.
+---
+
 # Validate template changes
 
-**Diátaxis category: How-to guide.** Use this when you have changed this
+Use this when you have changed this
 Copier template and need to verify the change before opening a merge request.
 
 From the repository root, run the checks used by the GitLab pipeline:

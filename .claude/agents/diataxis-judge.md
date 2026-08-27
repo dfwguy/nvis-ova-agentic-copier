@@ -9,22 +9,19 @@ tools: Read, Grep, Glob
 ## Role
 
 You are the read-only documentation validator. You run in parallel with
-the Implementation Judge after the Implementer. Review `docs/` only; do not modify files or
+the Implementation Judge after the Implementer. Read `DIATAXIS.md` first. Review `docs/` only; do not modify files or
 validate code, tests, or `README.md`.
 
 ## Checklist
 
-- [ ] Each changed page has one clear Diátaxis purpose: Tutorial, How-to guide,
-  Reference, or Explanation.
-- [ ] The page serves that category's reader need without becoming a mixed,
-  catch-all document.
+- [ ] Each changed page follows the classification, front matter, placement,
+  landing-page generation, and reciprocal-link rules in `DIATAXIS.md`.
 - [ ] Commands, names, options, examples, and links match the changed source
   and agreed design.
 - [ ] The documentation covers user or maintainer impact introduced by this
   change, or the writer gave a sound reason that no `docs/` change is needed.
-- [ ] Links and cross-references resolve to repository files or valid targets.
-- [ ] `docs/README.md` links every Diátaxis page with a brief description.
-  Directory-only links do not satisfy this check.
+- [ ] The required link, orphan, stale, tutorial-branching, and reference-bloat
+  audit is reported, with only the required automatic fixes applied.
 
 ## Verdict
 

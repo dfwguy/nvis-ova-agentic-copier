@@ -476,19 +476,17 @@ def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> 
 
 def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the Diataxis documentation gates."""
-    docs_process = generated_project / "docs" / "diataxis.md"
+    docs_process = generated_project / "DIATAXIS.md"
     writer = generated_project / ".claude" / "agents" / "diataxis-writer.md"
     judge = generated_project / ".claude" / "agents" / "diataxis-judge.md"
 
     assert docs_process.exists()
-    assert "Tutorials" in docs_process.read_text()
-    assert "How-to guides" in docs_process.read_text()
-    assert "Reference" in docs_process.read_text()
-    assert "Explanation" in docs_process.read_text()
-    assert "include a Mermaid flowchart" in docs_process.read_text()
+    assert "Canonical layout" in docs_process.read_text()
+    assert "Required front matter" in docs_process.read_text()
+    assert "Landing pages" in docs_process.read_text()
+    assert "Documentation change report" in docs_process.read_text()
     assert writer.exists()
     assert judge.exists()
-    assert "Test Writer" in docs_process.read_text()
     assert "Implementation Judge" in judge.read_text()
     assert (
         "README.md"
@@ -502,36 +500,51 @@ def test_generated_remediation_workflow_and_documentation_index_rule(
 ) -> None:
     """Test that projects can remediate themselves and keep documentation navigable."""
     remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
-    documentation_process = generated_project / "docs" / "diataxis.md"
-    documentation_index = generated_project / "docs" / "README.md"
+    documentation_process = generated_project / "DIATAXIS.md"
+    documentation_index = generated_project / "docs" / "index.md"
 
     assert remediation_agent.exists()
     assert "Make this repo meet our standards" in remediation_agent.read_text()
     assert "baseline" in remediation_agent.read_text()
-    assert "Documentation index" in documentation_process.read_text()
-    assert "Diátaxis page" in documentation_process.read_text()
+    assert "Landing pages" in documentation_process.read_text()
+    assert "Required front matter" in documentation_process.read_text()
     assert documentation_index.exists()
-    assert "diataxis.md" in documentation_index.read_text()
+    assert "how-to/index.md" in documentation_index.read_text()
 
 
 def test_documentation_index_links_every_diataxis_page(project_root: Path) -> None:
-    """Test that the source documentation index exposes every Diataxis page."""
-    index = (project_root / "docs" / "README.md").read_text()
+    """Test that the source index links only to the four Diataxis sections."""
+    index = (project_root / "docs" / "index.md").read_text()
 
-    for page in (
-        "tutorials/create-your-first-project.md",
-        "how-to/create-a-project-non-interactively.md",
-        "how-to/customize-a-generated-project.md",
-        "how-to/update-a-generated-project.md",
-        "how-to/validate-template-changes.md",
-        "reference/template-contract.md",
-        "explanation/template-and-generated-project.md",
-        "explanation/why-diataxis.md",
-        "explanation/coding-standards.md",
-        "explanation/agentic-workflow.md",
-        "diataxis.md",
+    for section in (
+        "tutorials/index.md",
+        "how-to/index.md",
+        "reference/index.md",
+        "explanation/index.md",
     ):
-        assert page in index
+        assert section in index
+
+    assert "create-your-first-project.md" not in index
+
+
+def test_diataxis_pages_have_required_front_matter(project_root: Path) -> None:
+    """Test that every non-index documentation page declares its Diataxis metadata."""
+    for page in (project_root / "docs").glob("*/*.md"):
+        if page.name == "index.md":
+            continue
+        content = page.read_text()
+        assert content.startswith("---\n")
+        for field in (
+            "title:",
+            "type:",
+            "summary:",
+            "audience:",
+            "tags:",
+            "status:",
+            "last_reviewed:",
+            "related:",
+        ):
+            assert field in content
 
 
 def test_explanations_use_mermaid_for_relationship_diagrams(

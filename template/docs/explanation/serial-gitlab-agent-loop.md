@@ -1,6 +1,21 @@
-# Why the agent loop is serial and GitLab-native
+---
+title: Why the agent loop is serial and GitLab-native
+type: explanation
+summary: Understand serial polling, checkout locking, and human publication.
+audience: maintainer
+tags: [agent-workflow]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../how-to/setup-serial-gitlab-agent-loop.md
+    why: Configures the workflow explained here.
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the exact command and lifecycle.
+  - path: agentic-workflow.md
+    why: Explains the roles used by the loop.
+---
 
-*Diátaxis category: Explanation.*
+# Why the agent loop is serial and GitLab-native
 
 The agent loop has one source of work: eligible open GitLab issues in one
 configured numeric project. A bounded poll selects at most one issue, prepares

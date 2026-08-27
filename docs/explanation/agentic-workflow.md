@@ -1,6 +1,23 @@
+---
+title: Why the agent workflow uses specialized roles
+type: explanation
+summary: Understand the workflow roles, validation sequence, and human gate.
+audience: maintainer
+tags: [agent-workflow]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: why-diataxis.md
+    why: Explains the documentation model enforced by workflow roles.
+  - path: coding-standards.md
+    why: Explains the conventions reviewed by the workflow.
+  - path: serial-gitlab-agent-loop.md
+    why: Describes the issue workflow that uses these roles.
+---
+
 # Why the agent workflow uses specialized roles
 
-**Diátaxis category: Explanation.** This page explains how the generated
+This page explains how the generated
 multi-agent workflow turns a change into a human-reviewed merge request.
 
 The workflow separates design, test design, documentation, implementation,

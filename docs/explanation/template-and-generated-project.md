@@ -1,6 +1,21 @@
+---
+title: Why the template and generated project are separate
+type: explanation
+summary: Understand the boundary between this Copier template and its generated output.
+audience: maintainer
+tags: [template-architecture]
+status: current
+last_reviewed: 2026-08-27
+related:
+  - path: ../reference/template-contract.md
+    why: Documents the observable template behavior explained here.
+  - path: ../how-to/customize-a-generated-project.md
+    why: Applies this boundary while changing a generated project.
+---
+
 # Why the template and generated project are separate
 
-**Diátaxis category: Explanation.** This page explains the boundary between
+This page explains the boundary between
 this repository and the projects it creates.
 
 ```mermaid

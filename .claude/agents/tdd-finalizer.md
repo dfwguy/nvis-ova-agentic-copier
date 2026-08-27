@@ -52,9 +52,9 @@ Always, after `nonfunctional-review`, `tdd-judge`, and `diataxis-judge` approve,
    commands, setup steps, env vars), confirm `README.md` was updated to match.
    If a user-facing change shipped without a corresponding doc update, **reject
    and route back to `tdd-document` immediately** — do not update README
-   yourself. Also verify `docs/README.md` links every Diátaxis page with a
-   brief description. If the index is absent or stale, reject and route back
-   to `diataxis-writer`; do not update it yourself. This index check always
+   yourself. Also verify the documentation report and all generated landing
+   pages satisfy `DIATAXIS.md`. If they are absent or stale, reject and route
+   back to `diataxis-writer`; do not update them yourself. This check always
    applies.
 
 6. **Stage and commit** (ordinary workflows only):

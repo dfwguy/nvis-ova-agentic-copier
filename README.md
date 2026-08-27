@@ -101,7 +101,7 @@ for the full explanation.
 
 ## Documentation
 
-The [documentation index](docs/README.md) organizes the detailed material as
+The [documentation index](docs/index.md) organizes the detailed material as
 tutorials, how-to guides, reference, and explanation. It includes project
 creation and updates, template validation, the loop setup, and the template
 contract.
