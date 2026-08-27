@@ -1313,7 +1313,6 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
         )
 
     for workflow_path in (
-        project_root / "README.md",
         project_root / "CLAUDE.md",
         project_root / "template" / "CLAUDE.md",
     ):
@@ -1321,6 +1320,9 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
         assert not any(gate in content for gate in forbidden_gates), workflow_path
         assert "awaiting_human" in content
         assert "without waiting for merge" in content
+
+    readme_content = (project_root / "README.md").read_text()
+    assert "docs/how-to/setup-serial-gitlab-agent-loop.md" in readme_content
 
 
 @pytest.mark.parametrize(
@@ -2442,8 +2444,10 @@ def test_readmes_describe_developer_access_as_a_caveat_not_proof(
     generated_project: Path, project_root: Path
 ) -> None:
     """Landing-page guidance does not mistake Developer access for a safeguard."""
+    root_readme = (project_root / "README.md").read_text()
+    assert "docs/how-to/setup-serial-gitlab-agent-loop.md" in root_readme
+
     readmes = (
-        (project_root / "README.md").read_text(),
         (project_root / "template" / "README.md.jinja").read_text(),
         (generated_project / "README.md").read_text(),
     )

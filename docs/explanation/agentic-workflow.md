@@ -37,6 +37,21 @@ for implementation, documentation, tests, quality, CI, the README, CLI
 behavior, and filesystem structure. Small, low-risk changes can use the same
 publication and validation boundaries without the full routing sequence.
 
+## Merge requests are the shared record
+
+A local branch and an agent session are working contexts, not the durable
+record of a change. The GitLab merge request is the shared source of truth: it
+records the proposed diff, branch tip, pipeline results, review discussions,
+approvals, conflicts, and whether the change is open, merged, or closed.
+
+Agents therefore interact with the merge request throughout the handoff. They
+open or update it after publishing a feature branch, use its reported state to
+decide whether follow-up work belongs on that branch, and return it to human
+review after a repair. A new session does not infer completion from a local
+checkout or a prior conversation; it checks the merge request. This keeps
+review and publication visible to every collaborator and preserves the human
+approval and merge boundary.
+
 ## Roles
 
 | Role | Responsibility | Does not |

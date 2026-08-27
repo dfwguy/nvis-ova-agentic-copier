@@ -5,28 +5,40 @@ It provides a modern Python toolchain and a portable, human-gated workflow for
 Claude Code, Codex, and Pi. Generated projects support Python and, when
 present, Bash-specific checks.
 
-## Check and start the GitLab issue loop
+## Check the agent once
 
-Check whether the serial loop can select work without changing the repository
+Check whether the agent can select work without changing the repository
 or GitLab:
 
 ```bash
 uv run agent-work run-next --json
 ```
 
+## Run the agent once
+
 After a human has authorized unattended publication and the safeguards are in
-place, process one issue:
+place, process one issue in a bounded pass:
 
 ```bash
 uv run agent-work run-next --apply --json
 ```
 
-For the one-time safety checks and user-level timer installation, follow
+For scheduled operation, safeguards, status checks, and troubleshooting, see
 [Set up the serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
-The loop hands completed work to `awaiting_human` without waiting for merge and
-never approves or merges a merge request. Developer access alone is not proof
-of project approval or self-approval safeguards; the how-to verifies the
-observable controls before `--apply` is enabled.
+
+## Check the scheduled agent loop
+
+Check the timer and its most recent service activity:
+
+```bash
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
+systemctl --user status agentic-copier-agent-work.timer agentic-copier-agent-work.service
+journalctl --user -u agentic-copier-agent-work.service --since today
+```
 
 ## Quick start
 
@@ -56,26 +68,34 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 
 ## Agent workflow
 
-Generated projects include these roles. Read [how the agent workflow works](docs/explanation/agentic-workflow.md)
-for its design, lifecycle, and validation boundaries.
+Generated projects follow this workflow. Read [how the agent workflow works](docs/explanation/agentic-workflow.md)
+for its design, lifecycle, role boundaries, and validation details.
 
-| Role | Responsibility | Does not |
-| --- | --- | --- |
-| Architect | Designs modules, data structures, and dependency boundaries | Write code or tests |
-| Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
-| Test Writer | Writes failing tests and stops at Red | Touch implementation |
-| Documentation Writer | Creates or updates Diátaxis documentation | Touch code, tests, or README.md |
-| Implementer | Makes the minimum change to reach Green | Refactor or add untested features |
-| Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
-| Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
-| Documentation Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
-| Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
-| Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
-| README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
-| CI/CD Judge | Checks CI configuration and pipeline health | Edit CI configuration or retry pipelines |
-| CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
-| Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
-| Finalizer | Verifies final gates and commits locally before publication handoff | Fix issues |
+```mermaid
+flowchart TD
+    branch[Feature branch] --> architect[Architect]
+    architect --> tests[Test Writer]
+    architect --> docs[Documentation Writer]
+    tests --> implementer[Implementer]
+    docs --> implementer
+    implementer --> nonfunctional[Non-functional Reviewer]
+    nonfunctional --> implementation[Implementation Judge]
+    nonfunctional --> documentation[Documentation Judge]
+    implementation --> final_gates[Final review gates]
+    documentation --> final_gates
+    final_gates --> finalizer[Finalizer]
+    finalizer --> mr[Publish or update merge request]
+    mr --> human[Human approval and merge]
+```
+
+### Merge requests are the source of truth
+
+GitLab merge requests are the shared record of a change: they show its proposed
+diff, branch tip, pipeline results, review discussions, and current state.
+Agents use that record to publish work, continue follow-up changes, and hand
+the result to reviewers; a local branch or agent session is only a working
+context. See [how merge requests coordinate agent work](docs/explanation/agentic-workflow.md#merge-requests-are-the-shared-record)
+for the full explanation.
 
 ## Documentation
 
