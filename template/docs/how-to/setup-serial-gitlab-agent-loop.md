@@ -51,7 +51,9 @@ numeric project/group access value; no numeric value is `unknown`. Only exactly
 Git may use a different credential and is checked with `git ls-remote`.
 
 The runner uses the current checkout and stores its fixed, gitignored
-`.agent-work.lock` alongside it. Start only one loop for a checkout.
+`.agent-work.lock` alongside it. Start only one loop for a checkout. The
+checkout must be dedicated: the service returns it to the default branch after
+each pass, so never use it for interactive development or another agent session.
 
 ## Verify Developer-readable safeguards
 

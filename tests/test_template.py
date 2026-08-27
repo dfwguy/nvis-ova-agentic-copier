@@ -2685,7 +2685,7 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
         in generated_service
     )
     assert "Unit=my_test_project-agent-work.service" in generated_timer
-    assert "OnUnitActiveSec=5min" in generated_timer
+    assert "OnUnitActiveSec=20min" in generated_timer
     assert "RandomizedDelaySec=60s" in generated_timer
     assert "FixedRandomDelay=true" in generated_timer
     assert 'log_tag="${AGENT_WORK_LOG_TAG:-agent-work}"' in wrapper
