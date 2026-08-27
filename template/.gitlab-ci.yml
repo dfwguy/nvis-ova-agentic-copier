@@ -1,8 +1,18 @@
+.uv_cache:
+  cache: &uv_cache
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .cache/uv/
+
 .base_uv:
   stage: build
   interruptible: true
   image:
-    name: ghcr.io/astral-sh/uv:0.7.3-bookworm-slim
+    name: ghcr.io/astral-sh/uv:0.7.3-python3.13-bookworm-slim
+  variables:
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
   before_script:
     - cd $CI_PROJECT_DIR
     - uv --version
@@ -39,11 +49,15 @@ pytest:
   extends: .base_uv
   tags:
     - size/medium
+  cache:
+    <<: *uv_cache
+    policy: pull-push
+  after_script:
+    - uv cache prune --ci
   before_script:
     - !reference [.base_uv, before_script]
     - apt-get update -qq && apt-get install -y --no-install-recommends git jq
   script:
-    - uv run tox --version
     - echo "Running tox with coverage"
     - uv run tox
   artifacts:
@@ -78,7 +92,7 @@ kingfisher:
   script:
     - uv run kingfisher --version
     - echo "Scanning working tree for secrets"
-    - uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
+    - uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .cache --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
 
 type_check:
   extends: .base_uv
@@ -91,11 +105,16 @@ type_check:
   allow_failure: false
 
 shellcheck:
-  extends: .base_uv
+  stage: build
+  interruptible: true
+  image:
+    name: docker.io/koalaman/shellcheck-alpine:stable
+    entrypoint: [""]
   tags:
     - size/medium
+  rules:
+    - if: $CI_COMMIT_BRANCH
   script:
-    - apt-get update -qq && apt-get install -y --no-install-recommends shellcheck
     - shellcheck --version
     - echo "Linting all shell scripts"
     - find . -type f -not -path './.git/*' -exec sh -c 'case "$1" in *.sh) shellcheck "$1";; *) if head -n1 "$1" | grep -Eq "^#!.*(ba)?sh"; then shellcheck "$1"; fi;; esac' _ {} \;
