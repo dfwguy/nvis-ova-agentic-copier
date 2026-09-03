@@ -1074,6 +1074,31 @@ def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> N
     ]
 
 
+def test_applied_cli_run_returns_an_owned_issue_checkout_to_its_base() -> None:
+    """Direct applied runs share the systemd wrapper's checkout recovery."""
+    events: list[str] = []
+
+    class _Checkout:
+        def return_to_base(self) -> None:
+            events.append("return_to_base")
+
+    class _Dependencies:
+        checkout = _Checkout()
+
+    dependencies = cast(RunNextDependencies, _Dependencies())
+
+    exit_code = main(
+        ["run-next", "--apply"],
+        dependencies_factory=lambda: dependencies,
+        run=lambda _dependencies, **_kwargs: RunReport(outcome="idle"),
+        write_stdout=lambda _value: None,
+        write_stderr=lambda _value: None,
+    )
+
+    assert exit_code == 0
+    assert events == ["return_to_base"]
+
+
 def test_cli_help_exposes_only_the_serial_run_next_command() -> None:
     help_text = build_parser().format_help()
 

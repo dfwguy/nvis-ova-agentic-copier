@@ -192,6 +192,10 @@ class _Checkout:
             raise self.baseline_error
         return self.sha
 
+    def return_to_base(self) -> None:
+        """Record direct-command recovery without touching a real checkout."""
+        self.events.append("return_to_base")
+
     def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         del branch, draft, baseline
         self.events.append("publish")

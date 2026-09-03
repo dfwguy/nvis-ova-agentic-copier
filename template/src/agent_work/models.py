@@ -21,6 +21,7 @@ class AgentWorkConfig(BaseModel):
     host: str
     project_id: int = Field(gt=0)
     checkout: Path
+    default_branch: str = Field(default="main", min_length=1)
     base_branch: str | None = Field(
         default=None, pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$"
     )

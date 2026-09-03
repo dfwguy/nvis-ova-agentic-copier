@@ -85,25 +85,44 @@ def main(
     """Run one preview or applied pass and return its documented exit code."""
     parsed = build_parser().parse_args(arguments)
     write_stderr("Checking for next work item...")
+    dependencies: RunNextDependencies | None = None
+    report: RunReport | None = None
+    exit_code = 0
     try:
+        dependencies = dependencies_factory()
         report = run(
-            dependencies_factory(),
+            dependencies,
             apply=parsed.apply,
             timeout_seconds=parsed.timeout_seconds,
             report_progress=write_stderr,
         )
     except LockBusy as error:
         write_stderr(str(error))
-        return 75
+        exit_code = 75
     except (AdapterError, RunNextError, ValueError) as error:
         write_stderr(str(error))
-        return 1
+        exit_code = 1
+    finally:
+        checkout = getattr(dependencies, "checkout", None)
+        cleanup = (
+            getattr(checkout, "return_to_base", None)
+            if parsed.apply and checkout is not None
+            else None
+        )
+        if callable(cleanup):
+            try:
+                cleanup()
+            except AdapterError as error:
+                write_stderr(str(error))
+                exit_code = 1
+    if report is None:
+        return exit_code
     if report.failure_reason is not None:
         write_stderr(f"Failure: {report.failure_reason}")
     if report.agent_diagnostic is not None:
         write_stderr(f"Agent diagnostic (redacted):\n{report.agent_diagnostic}")
     write_stdout(_render(report, as_json=parsed.json))
-    return 1 if report.outcome == "failed" else 0
+    return 1 if report.outcome == "failed" else exit_code
 
 
 if __name__ == "__main__":

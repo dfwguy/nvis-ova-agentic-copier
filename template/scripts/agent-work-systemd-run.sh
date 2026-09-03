@@ -23,6 +23,24 @@ run_logged() {
 
 return_checkout_to_base_branch() {
   local base_branch="${AGENT_WORK_BASE_BRANCH:-main}"
+  local stash_ref
+
+  if [[ -n "$(git status --porcelain)" ]]; then
+    log "preserving uncommitted worker changes in an agent-work recovery stash"
+    if run_logged git stash push --include-untracked --message "agent-work recovery"; then
+      :
+    else
+      status=$?
+      log "stopped: could not preserve worker changes (exit $status)"
+      return "$status"
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+      log "stopped: worker changes remain after recovery stash"
+      return 1
+    fi
+    stash_ref="$(git rev-parse --verify -q refs/stash)"
+    log "preserved worker changes in recovery stash $stash_ref"
+  fi
 
   log "returning dedicated checkout to $base_branch"
   if run_logged git switch "$base_branch"; then

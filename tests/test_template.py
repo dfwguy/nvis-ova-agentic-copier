@@ -722,14 +722,122 @@ def test_agent_loop_wrapper_returns_dedicated_checkout_to_its_base_branch(
         "Every bounded pass attempts to leave the dedicated checkout on its base branch"
         in content
     )
+    assert "agent-work recovery" in content
+    assert "git stash apply <SHA>" in content
     assert "AGENT_WORK_BASE_BRANCH" in content
     assert 'base_branch="${AGENT_WORK_BASE_BRANCH:-main}"' in wrapper
     assert 'git switch "$base_branch"' in wrapper
     assert "git pull --ff-only" in wrapper
     assert "pass failed (exit $pass_status); attempting checkout recovery" in wrapper
+    assert "git stash push --include-untracked" in wrapper
+    assert "preserved worker changes in recovery stash" in wrapper
     assert wrapper.index("pass_status=0") < wrapper.rindex(
         "return_checkout_to_base_branch"
     )
+
+
+def test_agent_loop_wrapper_preserves_failed_worker_changes_before_recovery(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A failed pass stashes worker output before resetting its checkout."""
+    remote = tmp_path / "remote.git"
+    checkout = tmp_path / "checkout"
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    _write_command(commands / "uv", "exit 1")
+    _write_command(commands / "agent", "exit 0")
+    _write_command(commands / "logger", "cat")
+
+    for command in (
+        ["git", "init", "--bare", str(remote)],
+        ["git", "init", "--initial-branch", "main", str(checkout)],
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    for command in (
+        ["git", "-C", str(checkout), "config", "user.name", "Test User"],
+        ["git", "-C", str(checkout), "config", "user.email", "test@example.com"],
+        ["git", "-C", str(checkout), "remote", "add", "origin", str(remote)],
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    (checkout / "tracked.txt").write_text("baseline\n")
+    subprocess.run(
+        ["git", "-C", str(checkout), "add", "tracked.txt"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(checkout), "commit", "-m", "baseline"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(checkout), "push", "-u", "origin", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(checkout), "switch", "-c", "agent/issue-123"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (checkout / "tracked.txt").write_text("worker output\n")
+    (checkout / "untracked.txt").write_text("worker output\n")
+
+    environment = os.environ | {
+        "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "AGENT_WORK_AGENT": "codex",
+        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "AGENT_WORK_BASE_BRANCH": "main",
+        "PATH": f"{commands}:{os.environ['PATH']}",
+    }
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts" / "agent-work-systemd-run.sh")],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert (
+        subprocess.run(
+            ["git", "-C", str(checkout), "branch", "--show-current"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "main"
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(checkout), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+    stash_files = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "stash",
+            "show",
+            "--include-untracked",
+            "--name-only",
+            "stash@{0}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert {"tracked.txt", "untracked.txt"} <= set(stash_files.splitlines())
 
 
 def test_agent_work_worker_exception_overrides_generic_publication_rules(
