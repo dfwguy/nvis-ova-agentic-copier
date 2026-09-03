@@ -607,6 +607,8 @@ def test_claude_git_flow_verifies_git_and_gitlab_access(
     assert "## Git and GitLab access preflight" in content
     assert "git pull --ff-only" in content
     assert 'glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"' in content
+    assert "direnv exec . glab api" in content
+    assert "path-based `404`" in content
     assert "Do not change a working remote or credential configuration" in content
 
 
