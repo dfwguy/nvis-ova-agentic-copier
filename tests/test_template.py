@@ -21,6 +21,18 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+def test_generated_project_requires_debuggable_local_application_logging(
+    generated_project: Path,
+) -> None:
+    """Generated coding agents require debug and local log handlers."""
+    guidance = (generated_project / ".claude" / "lang" / "python.md").read_text()
+
+    assert "--debug" in guidance
+    assert "logging.FileHandler" in guidance
+    assert "local handler" in guidance
+    assert "remote syslog" in guidance
+
+
 def test_generated_agent_instructions_define_portable_model_tiers(
     generated_project: Path,
 ) -> None:

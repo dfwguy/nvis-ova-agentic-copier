@@ -94,6 +94,13 @@ When writing standalone scripts:
 - Define a `main()` function as the entry point
 - Define `parse_arguments()` separately from `main()`
 - Add a `--debug` / `-d` flag that routes extra output to `logger.debug`
+- **Operational logging stays local.** A user-facing CLI or service with
+  operational logging must configure a `logging.FileHandler` (or rotating file
+  handler) at an explicit application-owned local path. `--debug` / `-d` must
+  raise the local handler's verbosity to include diagnostic events; ordinary
+  runs retain lifecycle and failure events locally. Do not add
+  `logging.handlers.SysLogHandler`, another remote syslog handler, or a network
+  log handler. Tests must cover both ordinary and `--debug` verbosity.
 - **Make no changes by default; require an `--apply` / `-a` flag to mutate state** for any script or CLI that writes files, calls a network/external service, changes git state, or deletes anything. Without `--apply`, the script makes **no** changes — it logs each action it *would* take via `logger.info` (prefixed e.g. `[dry-run]`) and exits success. The mutation only happens when the user passes `--apply`. This safe-by-default stance is non-negotiable for mutating tools: a bare invocation must always be a harmless preview. Read-only scripts do not need the flag.
 - Use `logger.info` (not `print`) once the logger is initialized
 
