@@ -103,6 +103,9 @@ class ServiceCheckout(Protocol):
     def worker_baseline(self, branch: str) -> str:
         """Return the trusted branch tip before one worker invocation."""
 
+    def return_to_base(self) -> None:
+        """Preserve owned worker output and return to the configured base branch."""
+
     def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
         """Commit and push worker changes from the trusted checkout."""
 

@@ -167,6 +167,7 @@ def discover_checkout_config(
             host=host,
             project_id=project_id,
             checkout=checkout,
+            default_branch=str(_project.get("default_branch", "")),
             base_branch=base_branch,
             journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
         )
@@ -624,6 +625,25 @@ class ServiceCheckout:
         if re.fullmatch(r"[0-9a-f]{40}", baseline) is None:
             raise AdapterError("the issue branch tip is invalid")
         return baseline
+
+    def return_to_base(self) -> None:
+        """Preserve owned worker output and restore the configured base branch."""
+        current_branch = self._run("branch", "--show-current")
+        if not re.fullmatch(r"agent/issue-[1-9][0-9]*", current_branch):
+            return
+        if self._run("status", "--porcelain"):
+            self._run(
+                "stash",
+                "push",
+                "--include-untracked",
+                "--message",
+                "agent-work recovery",
+            )
+            if self._run("status", "--porcelain"):
+                raise AdapterError("worker changes remain after recovery stash")
+        base_branch = self._config.base_branch or self._config.default_branch
+        self._run("switch", base_branch)
+        self._run("merge", "--ff-only", f"origin/{self._config.default_branch}")
 
     def _publish_run(self, operation: str, *arguments: str) -> str:
         """Run one trusted publication command with a safe, specific failure."""

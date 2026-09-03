@@ -351,9 +351,12 @@ Every bounded pass attempts to leave the dedicated checkout on its base branch
 pass that failed after creating a local issue commit. The base only
 fast-forwards from `origin/main`, while the issue branch remains available for
 recovery and human review. If the reset fails (for example, because the
-checkout is dirty), the service fails and records the diagnostic in the
-journal. A direct `agent-work` launch from an issue branch still intentionally
-fails rather than silently changing branches.
+checkout is dirty), the wrapper first creates an `agent-work recovery` stash
+that includes tracked and untracked worker output. It records the stash SHA in
+the journal; restore it with `git stash apply <SHA>`. If stashing fails, the
+service leaves the checkout unchanged and records the diagnostic. A direct
+`agent-work` launch from an issue branch still intentionally fails rather than
+silently changing branches.
 
 ## Restart the loop
 
