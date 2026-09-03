@@ -467,6 +467,66 @@ def test_applied_ready_issue_invokes_once_then_parks_on_exact_publication() -> N
     ]
 
 
+def test_applied_ready_issue_parks_after_trusted_publication() -> None:
+    """A newly created exact MR is sufficient publication evidence."""
+    issue = _issue(iid=123)
+    gitlab, checkout, invoke, lock = (
+        _GitLab(eligible=(issue,)),
+        _Checkout(),
+        _Invoke(),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "awaiting_human"
+    assert report.merge_request_url == _publication(issue).web_url
+    assert gitlab.events == [
+        ("running", issue.iid),
+        ("create_merge_request", issue.iid),
+        ("awaiting_human", issue.iid),
+    ]
+    assert checkout.events == [
+        "applied_preflight",
+        "ensure_branch_available",
+        "prepare_branch",
+        "worker_baseline",
+        "publish",
+        "publication_tip",
+    ]
+
+
+def test_applied_ready_issue_uses_created_mr_when_followup_lookup_is_stale() -> None:
+    """A create response avoids a false failure during API-list propagation."""
+    issue = _issue(iid=123)
+
+    class _StalePublicationLookup(_GitLab):
+        def publication(self, branch: str) -> MergeRequestEvidence | None:
+            del branch
+            return None
+
+    gitlab, checkout, invoke, lock = (
+        _StalePublicationLookup(eligible=(issue,)),
+        _Checkout(),
+        _Invoke(),
+        _Lock(),
+    )
+
+    report = run_next(
+        _deps(gitlab, checkout, invoke, lock), apply=True, timeout_seconds=30
+    )
+
+    assert report.outcome == "awaiting_human"
+    assert report.merge_request_url == _publication(issue).web_url
+    assert gitlab.events == [
+        ("running", issue.iid),
+        ("create_merge_request", issue.iid),
+        ("awaiting_human", issue.iid),
+    ]
+
+
 def test_applied_issue_fails_when_existing_publication_does_not_close_issue() -> None:
     issue = _issue(iid=123)
     gitlab, checkout, invoke, lock = (
