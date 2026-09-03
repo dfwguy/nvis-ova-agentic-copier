@@ -200,9 +200,10 @@ def _publication_is_exact(
     dependencies: RunNextDependencies,
     issue: GitLabIssue,
     project: GitLabProject,
+    publication: MergeRequestEvidence | None = None,
 ) -> MergeRequestEvidence | None:
     branch = _branch(issue)
-    merge_request = dependencies.gitlab.publication(branch)
+    merge_request = publication or dependencies.gitlab.publication(branch)
     if merge_request is None or merge_request.state not in {"opened", "merged"}:
         return None
     tip = dependencies.checkout.publication_tip(branch)
@@ -245,6 +246,7 @@ def _finish_from_evidence(
     project: GitLabProject,
     invocation: AgentInvocation | None = None,
     publication_failure: str | None = None,
+    publication: MergeRequestEvidence | None = None,
 ) -> RunReport:
     branch = _branch(issue)
     try:
@@ -252,6 +254,7 @@ def _finish_from_evidence(
             dependencies=dependencies,
             issue=issue,
             project=project,
+            publication=publication,
         )
     except RuntimeError:
         merge_request = None
@@ -297,7 +300,7 @@ def _publish_worker_result(
     project: GitLabProject,
     invocation: AgentInvocation,
     baseline: str,
-) -> None:
+) -> MergeRequestEvidence:
     """Publish a successful worker's change through trusted runner boundaries."""
     if invocation.returncode != 0:
         raise RunNextError(f"Agent exited with status {invocation.returncode}")
@@ -310,7 +313,7 @@ def _publish_worker_result(
     except RuntimeError as error:
         raise RunNextError(f"trusted branch publication failed: {error}") from error
     try:
-        dependencies.gitlab.create_merge_request(issue, project, draft)
+        return dependencies.gitlab.create_merge_request(issue, project, draft)
     except RuntimeError as error:
         raise RunNextError(f"merge-request creation failed: {error}") from error
 
@@ -509,6 +512,7 @@ def run_next(
                 failure_reason=failure_reason,
             )
         invocation: AgentInvocation | None = None
+        created_publication: MergeRequestEvidence | None = None
         try:
             report_progress(f"Starting agent for issue #{issue.iid} on {branch}.")
             invocation = dependencies.invoke.invoke(
@@ -526,7 +530,7 @@ def run_next(
             and dependencies.gitlab.publication(branch) is None
         ):
             try:
-                _publish_worker_result(
+                created_publication = _publish_worker_result(
                     dependencies, issue, project, invocation, baseline
                 )
             except RunNextError as error:
@@ -543,5 +547,10 @@ def run_next(
                 "publication verification failed: no exact published MR evidence"
             )
         return _finish_from_evidence(
-            dependencies, issue, project, invocation, publication_failure
+            dependencies,
+            issue,
+            project,
+            invocation,
+            publication_failure,
+            created_publication,
         )
