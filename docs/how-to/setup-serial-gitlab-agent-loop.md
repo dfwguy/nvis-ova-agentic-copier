@@ -426,8 +426,28 @@ journalctl --user -t "$unit_name" --since today
 If the new group does not appear in `id -nG`, do not change journald storage
 settings; resolve the account/session membership with the host administrator.
 
-Stop the timer from another terminal:
+## Stop the loop
+
+Stop the timer to prevent future passes. If a pass is currently active, let it
+finish when possible; stopping the service interrupts that pass, which the
+runner handles through its normal recovery or safe-failure path.
+
+Set the project-specific unit name, ensure the user-manager bus is reachable,
+then disable the timer and stop any active pass:
 
 ```bash
+unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
 systemctl --user disable --now "$unit_name.timer"
+systemctl --user stop "$unit_name.service"
+systemctl --user show "$unit_name.timer" "$unit_name.service" \
+  --property=UnitFileState --property=ActiveState
 ```
+
+The timer must report `UnitFileState=disabled` and `ActiveState=inactive`
+before the loop is stopped. This does not delete the dedicated checkout, its
+environment file, branches, or previous journal entries. Re-enable the timer
+using [Restart the loop](#restart-the-loop) when you are ready to resume it.
