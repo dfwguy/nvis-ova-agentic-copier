@@ -629,7 +629,10 @@ class ServiceCheckout:
         """Run one trusted publication command with a safe, specific failure."""
         result = self._run_command(("git", "-C", str(self.path), *arguments))
         if result.returncode != 0:
-            raise AdapterError(f"{operation} failed (exit {result.returncode})")
+            message = f"{operation} failed (exit {result.returncode})"
+            if excerpt := _safe_stderr_excerpt(result.stderr):
+                message = f"{message}: {excerpt}"
+            raise AdapterError(message)
         return result.stdout.strip()
 
     def publish(self, branch: str, draft: MergeRequestDraft, baseline: str) -> None:
@@ -686,6 +689,15 @@ class ServiceCheckout:
             "origin",
             branch,
         )
+
+
+def _safe_stderr_excerpt(stderr: str) -> str:
+    """Return a bounded, redacted single-line command diagnostic."""
+    excerpt = _redact_diagnostic(" ".join(stderr.split()), os.environ)
+    limit = 500
+    if len(excerpt) > limit:
+        return f"{excerpt[: limit - 3]}..."
+    return excerpt
 
 
 class AgentInvoker:

@@ -189,6 +189,38 @@ def test_trusted_publish_names_a_staged_diff_failure(tmp_path: Path) -> None:
         )
 
 
+def test_trusted_publish_retains_a_bounded_push_stderr_excerpt(tmp_path: Path) -> None:
+    """A trusted push failure preserves its Git diagnostic for safe triage."""
+    baseline = "a" * 40
+    commands = _Commands(
+        (
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, baseline, ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "AGENTS.md\n", ""),
+            CommandResult(0, "", ""),
+            CommandResult(
+                128,
+                "",
+                "remote: pre-receive hook declined\nfatal: unable to access remote",
+            ),
+        )
+    )
+
+    with pytest.raises(
+        AdapterError,
+        match=(
+            "pushing the trusted worker branch failed \\(exit 128\\): "
+            "remote: pre-receive hook declined fatal: unable to access remote"
+        ),
+    ):
+        ServiceCheckout(_config(tmp_path), commands).publish(
+            "agent/issue-12",
+            MergeRequestDraft(title="Worker change", description="Validated."),
+            baseline,
+        )
+
+
 def test_trusted_publish_preserves_worker_merge_parents(tmp_path: Path) -> None:
     """A conflict-resolution merge is reauthored without flattening it."""
     baseline = "a" * 40
