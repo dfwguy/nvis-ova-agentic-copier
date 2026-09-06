@@ -1,9 +1,10 @@
 """Pytest configuration and fixtures for the copier template tests."""
 
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
-import copier
 import pytest
 
 
@@ -31,28 +32,54 @@ def template_source(
     decouples the test from the surrounding repo state.
     """
     staged = tmp_path_factory.mktemp("template_source")
-    shutil.copytree(project_root / "template", staged / "template")
+    shutil.copytree(project_root / "template", staged / "template", symlinks=True)
     shutil.copy(project_root / "copier.yaml", staged / "copier.yaml")
     return staged
 
 
 @pytest.fixture(scope="session")
 def generated_project(
-    tmp_path_factory: pytest.TempPathFactory, template_source: Path
+    tmp_path_factory: pytest.TempPathFactory,
+    template_source: Path,
+    project_root: Path,
 ) -> Path:
-    """Generate a project from the template once per test session."""
+    """Generate a project through Copier's real trusted-task orchestration."""
     output_dir = tmp_path_factory.mktemp("generated") / "my_project"
-    copier.run_copy(
-        str(template_source),
-        str(output_dir),
-        data={
-            "project_name": "My Test Project",
-            "project_slug": "my_test_project",
-            "description": "A test project",
-        },
-        defaults=True,
-        overwrite=True,
-        unsafe=True,
-        skip_tasks=True,
+    commands = tmp_path_factory.mktemp("copier_commands")
+    for command in ("glab", "uv"):
+        _write_noop_command(commands / command)
+    uv_command = shutil.which("uv")
+    assert uv_command is not None
+    environment = os.environ | {"PATH": f"{commands}:{os.environ['PATH']}"}
+
+    subprocess.run(
+        [
+            uv_command,
+            "run",
+            "copier",
+            "copy",
+            "--trust",
+            "--force",
+            "--quiet",
+            "--data",
+            "project_name=My Test Project",
+            "--data",
+            "project_slug=my_test_project",
+            "--data",
+            "description=A test project",
+            str(template_source),
+            str(output_dir),
+        ],
+        check=True,
+        capture_output=True,
+        cwd=project_root,
+        env=environment,
+        text=True,
     )
     return output_dir
+
+
+def _write_noop_command(path: Path) -> None:
+    """Create a successful command stub for an environment-dependent task."""
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)

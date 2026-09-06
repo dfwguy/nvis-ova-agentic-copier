@@ -5,7 +5,7 @@ summary: Bring template improvements into an existing generated project.
 audience: practitioner
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: ../reference/template-contract.md
     why: Defines Copier update behavior and preserved files.
@@ -41,6 +41,23 @@ are preserved instead of overwritten. Consult the
 [template reference](../reference/template-contract.md#update-behavior) when
 deciding whether to incorporate a change manually.
 
+If the update reports legacy context at `.claude/project.md`, merge its
+project-specific details into `.agents/project.md`, remove the old file, and
+rerun Copier. Both files are preserved during the transition, and `AGENTS.md`
+requires agents to read both, so local guidance is not orphaned.
+
+After accepting the update, confirm that Claude Code uses the canonical
+workflow tree:
+
+```bash
+test "$(readlink .claude/skills)" = ../.agents/skills
+```
+
+The guarded task keeps an existing correct link. For an older copied
+`.claude/skills` directory, it replaces only a tree identical to
+`.agents/skills`. A different directory or link remains intact: preserve or
+reconcile it, then rerun Copier. Do not remove the path blindly.
+
 ## Migrate a legacy flat Python package
 
 The current template uses `src/<package>/`. If an older project keeps its
@@ -57,7 +74,7 @@ tree: that is a split layout and the generated filesystem gate rejects it.
    Keep or add any Python console commands in `[project.scripts]`.
 4. Run `uv run pytest` and `uv run tox`. Fix imports, packaging configuration,
    and tests before continuing.
-5. Update `.claude/project.md` if it describes the old layout, then run
+5. Update `.agents/project.md` if it describes the old layout, then run
    `uvx copier update --trust`. Copier preserves `pyproject.toml` and
-   `.claude/project.md`, so it will not overwrite this project-specific
+   `.agents/project.md`, so it will not overwrite this project-specific
    migration work. Rerun the checks afterward.

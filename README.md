@@ -62,7 +62,7 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - UV-managed Python, Ruff, ty, pytest, tox, pre-commit, and GitLab CI.
 - A `src/<package>/` project layout with starter tests and documentation.
 - Bash syntax and ShellCheck validation when a project contains Bash.
-- A portable, test-driven, human-gated agent workflow.
+- A portable, test-driven, human-gated agent workflow rooted in `.agents/skills`.
 - A serial GitLab issue loop that creates merge requests but never approves or
   merges them.
 

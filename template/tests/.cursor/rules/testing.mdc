@@ -3,4 +3,4 @@ description: Python testing patterns (fixtures, subprocess, HTTP, imports, loggi
 globs: "**/test_*.py,**/conftest.py"
 alwaysApply: false
 ---
-@.claude/lang/python-testing.md
+@.agents/lang/python-testing.md

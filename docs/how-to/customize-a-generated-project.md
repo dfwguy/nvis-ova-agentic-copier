@@ -32,7 +32,7 @@ project-specific conventions or tooling after its initial creation.
    ```
 
 3. If you change the agent workflow or coding conventions, update the
-   generated project's `CLAUDE.md` and the referenced `.claude/` guidance at
+   generated project's `AGENTS.md` and the referenced `.agents/` guidance at
    the same time. Those files are the source of truth for contributors and
    agents working in that project.
 4. Commit the customization through the generated project's required feature
@@ -41,7 +41,7 @@ project-specific conventions or tooling after its initial creation.
 Do not expect `uvx copier update --trust` to overwrite the generated project's
 `README.md`, `.gitlab-ci.yml`, or package initializer: the template deliberately
 preserves those files. It also preserves `pyproject.toml` and
-`.claude/project.md`, which contain project-specific package metadata and agent
+`.agents/project.md`, which contain project-specific package metadata and agent
 context. Update those files deliberately when changing the project layout. For
 the reasoning, see
 [why the template separates source from generated output](../explanation/template-and-generated-project.md).

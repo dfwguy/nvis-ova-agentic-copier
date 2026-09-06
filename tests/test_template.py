@@ -3,10 +3,12 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
 
+import copier
 import pytest
 import yaml
 
@@ -25,7 +27,7 @@ def test_generated_project_requires_debuggable_local_application_logging(
     generated_project: Path,
 ) -> None:
     """Generated coding agents require debug and local log handlers."""
-    guidance = (generated_project / ".claude" / "lang" / "python.md").read_text()
+    guidance = (generated_project / ".agents" / "lang" / "python.md").read_text()
 
     assert "--debug" in guidance
     assert "logging.FileHandler" in guidance
@@ -55,6 +57,8 @@ def test_generated_agent_instructions_include_a_safe_session_checklist(
 
     for requirement in (
         "## Agent session checklist",
+        ".agents/project.md",
+        ".claude/project.md",
         "CONTRIBUTING.md",
         "untrusted task data",
         "Never approve or merge",
@@ -350,25 +354,26 @@ def test_readme_rendered(generated_project: Path) -> None:
     assert 'loginctl show-user "$USER" --property=Linger' in content
 
 
-def test_claude_project_md_rendered(generated_project: Path) -> None:
-    """Test that .claude/project.md was rendered with the correct variable values."""
-    project_md = generated_project / ".claude" / "project.md"
+def test_canonical_project_context_is_rendered(generated_project: Path) -> None:
+    """Test that .agents/project.md was rendered with the correct variable values."""
+    project_md = generated_project / ".agents" / "project.md"
     assert project_md.exists()
     content = project_md.read_text()
     assert "My Test Project" in content
     assert "A test project" in content
     assert "{{ project_name }}" not in content
+    assert not (generated_project / ".claude" / "project.md").exists()
 
 
 def test_generated_project_documents_filesystem_structure_defaults(
     generated_project: Path,
 ) -> None:
     """Test that a generated project records its required layout and deviations."""
-    content = (generated_project / ".claude" / "project.md").read_text()
+    content = (generated_project / ".agents" / "project.md").read_text()
 
     assert "src/{{ project_slug }}/" not in content
     assert "src/my_test_project/" in content
-    assert "Filesystem structure deviations: None" in content
+    assert "scripts/agent-work-systemd-run.sh" in content
     for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
         assert field in content
 
@@ -379,17 +384,17 @@ def test_no_jinja_extension_in_output(generated_project: Path) -> None:
     assert jinja_files == [], f"Unexpected .jinja files: {jinja_files}"
 
 
-def test_claude_agents_present(generated_project: Path) -> None:
-    """Test that Claude agent definitions are included in the generated project."""
-    agents_dir = generated_project / ".claude" / "agents"
+def test_shared_agent_roles_are_present(generated_project: Path) -> None:
+    """Test that portable agent roles are included in the generated project."""
+    agents_dir = generated_project / ".agents" / "agents"
     assert agents_dir.is_dir()
     agent_files = list(agents_dir.glob("*.md"))
     assert len(agent_files) > 0
 
 
-def test_claude_commands_are_absent(generated_project: Path) -> None:
-    """Generated projects use agent roles without Claude command wrappers."""
-    commands_dir = generated_project / ".claude" / "commands"
+def test_shared_agent_commands_are_absent(generated_project: Path) -> None:
+    """Generated projects use portable roles without command wrappers."""
+    commands_dir = generated_project / ".agents" / "commands"
     assert not commands_dir.exists()
 
 
@@ -439,7 +444,7 @@ def test_workflow_roles_are_portable_directory_skills(
     generated_project: Path, project_root: Path, skill_name: str, model_tier: str
 ) -> None:
     """Every workflow role is a shared Agent Skills directory with a tier."""
-    relative_path = f".claude/skills/{skill_name}/SKILL.md"
+    relative_path = f".agents/skills/{skill_name}/SKILL.md"
     root_skill = project_root / relative_path
     generated_skill = generated_project / relative_path
 
@@ -452,45 +457,221 @@ def test_workflow_roles_are_portable_directory_skills(
     assert (
         "\nmodel:"
         not in (
-            generated_project / ".claude" / "agents" / f"{skill_name}.md"
+            generated_project / ".agents" / "agents" / f"{skill_name}.md"
         ).read_text()
     )
 
 
-def test_pi_loads_the_shared_project_skill_directory(
-    generated_project: Path, project_root: Path
+def test_all_frontends_use_the_shared_project_skill_directory(
+    generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
-    """Pi uses the same project skill directories as the other frontends."""
-    relative_path = ".pi/settings.json"
-    root_settings = project_root / relative_path
-    generated_settings = generated_project / relative_path
+    """Codex and Pi discover native skills; Claude uses one compatibility link."""
+    for root in (project_root, template_dir, generated_project):
+        assert (root / ".agents" / "skills").is_dir()
+        claude_skills = root / ".claude" / "skills"
+        assert claude_skills.is_symlink()
+        assert claude_skills.resolve() == (root / ".agents" / "skills").resolve()
+        assert not (root / ".pi" / "settings.json").exists()
 
-    assert root_settings.read_text() == generated_settings.read_text()
-    assert json.loads(root_settings.read_text()) == {"skills": ["../.claude/skills"]}
+
+@pytest.mark.parametrize("customized", (False, True))
+def test_copier_links_only_an_unchanged_rendered_skill_tree(
+    project_root: Path, tmp_path: Path, *, customized: bool
+) -> None:
+    """Copier links the shared skills without deleting customized legacy files."""
+    configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
+    canonical = tmp_path / ".agents" / "skills"
+    compatibility = tmp_path / ".claude" / "skills"
+    shutil.copytree(project_root / ".agents" / "skills", canonical)
+    shutil.copytree(canonical, compatibility)
+    if customized:
+        (compatibility / "local-skill.md").write_text("local\n")
+
+    result = _run_shell_task(_copier_frontend_migration_task(project_root), tmp_path)
+
+    assert "_preserve_symlinks" not in configuration
+    assert result.returncode == int(customized)
+    assert compatibility.is_symlink() is (not customized)
+    if customized:
+        assert (compatibility / "local-skill.md").read_text() == "local\n"
+        assert "differs from .agents/skills" in result.stderr
+    else:
+        assert compatibility.readlink() == Path("../.agents/skills")
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_returncode", "expected_message"),
+    (
+        (Path("../.agents/skills"), 0, None),
+        (Path("../local/skills"), 1, "does not point to ../.agents/skills"),
+    ),
+)
+def test_copier_link_task_handles_an_existing_compatibility_link(
+    project_root: Path,
+    tmp_path: Path,
+    target: Path,
+    expected_returncode: int,
+    expected_message: str | None,
+) -> None:
+    """Repeating setup keeps the correct link and preserves an unexpected one."""
+    canonical = tmp_path / ".agents" / "skills"
+    canonical.mkdir(parents=True)
+    compatibility = tmp_path / ".claude" / "skills"
+    compatibility.parent.mkdir()
+    compatibility.symlink_to(target)
+
+    result = _run_shell_task(_copier_frontend_migration_task(project_root), tmp_path)
+
+    assert result.returncode == expected_returncode
+    assert compatibility.is_symlink()
+    assert compatibility.readlink() == target
+    if expected_message is not None:
+        assert expected_message in result.stderr
+
+
+def test_copier_frontend_migration_preserves_legacy_project_context(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """The migration reports customized project context without changing it."""
+    (tmp_path / ".agents" / "skills").mkdir(parents=True)
+    compatibility = tmp_path / ".claude" / "skills"
+    compatibility.parent.mkdir()
+    compatibility.symlink_to(Path("../.agents/skills"))
+    legacy_context = tmp_path / ".claude" / "project.md"
+    legacy_context.write_text("custom legacy context\n")
+
+    result = _run_shell_task(_copier_frontend_migration_task(project_root), tmp_path)
+
+    assert result.returncode == 0
+    assert legacy_context.read_text() == "custom legacy context\n"
+    assert "Reconcile it into .agents/project.md" in result.stderr
+
+
+def test_copier_update_preserves_legacy_project_context(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A real Copier update keeps customized context from the legacy frontend path."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _initialize_test_repository(source)
+
+    legacy_configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
+    legacy_configuration["_skip_if_exists"] = [
+        path
+        for path in legacy_configuration["_skip_if_exists"]
+        if path != ".agents/project.md"
+    ]
+    legacy_configuration["_tasks"] = []
+    (source / "copier.yaml").write_text(
+        yaml.safe_dump(legacy_configuration, sort_keys=False)
+    )
+    versioned_template = source / "template"
+    legacy_template = versioned_template / ".claude"
+    legacy_template.mkdir(parents=True)
+    shutil.copy(
+        project_root / "template" / "{{ _copier_conf.answers_file }}.jinja",
+        versioned_template / "{{ _copier_conf.answers_file }}.jinja",
+    )
+    shutil.copy(
+        project_root / "template" / ".agents" / "project.md.jinja",
+        legacy_template / "project.md.jinja",
+    )
+    _commit_template_version(source, "v1")
+
+    output = tmp_path / "existing-project"
+    copier.run_copy(
+        str(source),
+        output,
+        data={
+            "project_name": "Existing Project",
+            "project_slug": "existing_project",
+            "description": "Existing project",
+        },
+        defaults=True,
+        overwrite=True,
+        unsafe=True,
+        skip_tasks=True,
+        vcs_ref="v1",
+    )
+    legacy_context = output / ".claude" / "project.md"
+    legacy_context.write_text("custom legacy context\n")
+    _initialize_test_repository(output)
+    _commit_repository_state(output, "customized legacy project")
+
+    shutil.rmtree(versioned_template)
+    (versioned_template / ".agents").mkdir(parents=True)
+    (versioned_template / ".claude").mkdir()
+    for relative_path in (
+        Path("{{ _copier_conf.answers_file }}.jinja"),
+        Path("AGENTS.md"),
+        Path(".agents/project.md.jinja"),
+        Path(".claude/project.md"),
+    ):
+        destination = versioned_template / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(project_root / "template" / relative_path, destination)
+    shutil.copy(project_root / "copier.yaml", source / "copier.yaml")
+    _commit_template_version(source, "v2")
+
+    copier.run_update(
+        output,
+        defaults=True,
+        overwrite=True,
+        skip_tasks=True,
+        unsafe=True,
+        vcs_ref="v2",
+    )
+
+    assert legacy_context.read_text() == "custom legacy context\n"
+    assert (output / ".agents" / "project.md").exists()
+    assert ".claude/project.md" in (output / "AGENTS.md").read_text()
+
+
+def test_canonical_workflow_does_not_reference_legacy_claude_paths(
+    project_root: Path,
+) -> None:
+    """The canonical tree never routes agents through frontend compatibility files."""
+    for root in (project_root, project_root / "template"):
+        for path in (root / ".agents").rglob("*.md"):
+            content = path.read_text()
+            assert "CLAUDE.md" not in content, path
+            assert ".claude/" not in content, path
+
+
+def test_agents_entry_point_keeps_specialized_policy_in_owning_skills(
+    generated_project: Path,
+) -> None:
+    """AGENTS.md stays a concise entry point while preserving core safeguards."""
+    content = (generated_project / "AGENTS.md").read_text()
+
+    assert len(content.splitlines()) <= 130
+    assert "Developer-readable loop readiness exception" not in content
+    assert "MR remediation issues" not in content
+    assert "Every repository change must publish" in content
+    assert "Never approve or merge" in content
 
 
 def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects review shared timed test results before finalization."""
-    agent = generated_project / ".claude" / "agents" / "nonfunctional-review.md"
-    workflow = (generated_project / "CLAUDE.md").read_text()
+    agent = generated_project / ".agents" / "agents" / "nonfunctional-review.md"
+    workflow = (generated_project / "AGENTS.md").read_text()
 
     assert agent.exists()
     assert "test-results.xml" in agent.read_text()
     assert "time" in agent.read_text()
     assert "performance" in agent.read_text().lower()
-    assert "Non-functional Reviewer" in workflow
-    assert workflow.index("Non-functional Reviewer") < workflow.index("Finalizer")
+    assert "non-trivial changes" in workflow
     assert (
         "nonfunctional-review"
-        in (generated_project / ".claude" / "agents" / "tdd-finalizer.md").read_text()
+        in (generated_project / ".agents" / "agents" / "tdd-finalizer.md").read_text()
     )
 
 
 def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the Diataxis documentation gates."""
     docs_process = generated_project / "DIATAXIS.md"
-    writer = generated_project / ".claude" / "agents" / "diataxis-writer.md"
-    judge = generated_project / ".claude" / "agents" / "diataxis-judge.md"
+    writer = generated_project / ".agents" / "agents" / "diataxis-writer.md"
+    judge = generated_project / ".agents" / "agents" / "diataxis-judge.md"
 
     assert docs_process.exists()
     assert "Canonical layout" in docs_process.read_text()
@@ -502,7 +683,7 @@ def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -
     assert "Implementation Judge" in judge.read_text()
     assert (
         "README.md"
-        in (generated_project / ".claude" / "agents" / "tdd-document.md").read_text()
+        in (generated_project / ".agents" / "agents" / "tdd-document.md").read_text()
     )
     assert "docs/" in writer.read_text()
 
@@ -511,7 +692,7 @@ def test_generated_remediation_workflow_and_documentation_index_rule(
     generated_project: Path,
 ) -> None:
     """Test that projects can remediate themselves and keep documentation navigable."""
-    remediation_agent = generated_project / ".claude" / "agents" / "remediate.md"
+    remediation_agent = generated_project / ".agents" / "agents" / "remediate.md"
     documentation_process = generated_project / "DIATAXIS.md"
     documentation_index = generated_project / "docs" / "index.md"
 
@@ -577,20 +758,19 @@ def test_explanations_use_mermaid_for_relationship_diagrams(
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
     """Test that generated projects include the CLI syntax design gate."""
-    agent = generated_project / ".claude" / "agents" / "cli-syntax-judge.md"
-    workflow = (generated_project / "CLAUDE.md").read_text()
+    agent = generated_project / ".agents" / "agents" / "cli-syntax-judge.md"
+    workflow = (generated_project / "AGENTS.md").read_text()
 
     assert agent.exists()
     assert "https://clig.dev" in agent.read_text()
     assert "--json" in agent.read_text()
     assert "--apply" in agent.read_text()
-    assert "CLI Judge" in workflow
-    assert "Architect" in workflow
+    assert "non-trivial changes" in workflow
 
 
-def test_claude_git_flow_present(generated_project: Path) -> None:
+def test_portable_git_flow_is_present(generated_project: Path) -> None:
     """Test that the git-flow lifecycle doc is included so the orchestrator loads it."""
-    git_flow = generated_project / ".claude" / "git-flow.md"
+    git_flow = generated_project / ".agents" / "skills" / "git-flow" / "SKILL.md"
     assert git_flow.exists()
     content = git_flow.read_text()
     assert "projects/$GITLAB_PROJECT_ID/merge_requests" in content
@@ -598,11 +778,13 @@ def test_claude_git_flow_present(generated_project: Path) -> None:
     assert "git checkout main" in content
 
 
-def test_claude_git_flow_verifies_git_and_gitlab_access(
+def test_portable_git_flow_verifies_git_and_gitlab_access(
     generated_project: Path,
 ) -> None:
     """Test that the generated workflow verifies both remote access paths."""
-    content = (generated_project / ".claude" / "git-flow.md").read_text()
+    content = (
+        generated_project / ".agents" / "skills" / "git-flow" / "SKILL.md"
+    ).read_text()
 
     assert "## Git and GitLab access preflight" in content
     assert "git pull --ff-only" in content
@@ -645,7 +827,7 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
 def test_repository_setup_procedure_present(generated_project: Path) -> None:
     """New projects retain the portable repository lock-down skill."""
     setup_repo = (
-        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
     )
     assert setup_repo.exists()
     content = setup_repo.read_text()
@@ -662,7 +844,7 @@ def test_repository_setup_procedure_present(generated_project: Path) -> None:
 def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> None:
     """Test that lock-down setup cannot strand CONTRIBUTING.md on local main."""
     content = (
-        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
     ).read_text()
     mr_lookup = (
         'glab api --hostname "$GITLAB_HOST" '
@@ -853,14 +1035,13 @@ def test_agent_work_worker_exception_overrides_generic_publication_rules(
     """Generated workers do not inherit the ordinary-agent publication duty."""
     required = "Serial agent-work worker exception"
 
-    for relative_path in ("AGENTS.md", "CLAUDE.md"):
-        assert required in (generated_project / relative_path).read_text()
+    assert required in (generated_project / "AGENTS.md").read_text()
 
 
 def test_repository_setup_interviews_self_approval(generated_project: Path) -> None:
     """The setup procedure asks about self-approval for single-user projects."""
     content = (
-        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
     ).read_text()
     assert "AskUserQuestion" in content, (
         "setup-repo must interview the user about self-approval"
@@ -875,28 +1056,28 @@ def test_contributing_md_absent_in_generated_project(generated_project: Path) ->
     assert not (generated_project / "CONTRIBUTING.md").exists()
 
 
-def test_generated_claude_md_loads_lockdown_skill_when_marker_is_missing(
+def test_generated_agents_md_loads_lockdown_skill_when_marker_is_missing(
     generated_project: Path,
 ) -> None:
     """The generated workflow routes a missing marker to the setup skill."""
-    content = (generated_project / "CLAUDE.md").read_text()
+    content = (generated_project / "AGENTS.md").read_text()
     assert (
         "grep -Fq 'All changes go through a merge request.' CONTRIBUTING.md" in content
     )
-    assert ".claude/skills/repository-setup/SKILL.md" in content
+    assert ".agents/skills/repository-setup/SKILL.md" in content
     assert "protected_branches" not in content
 
 
-def test_generated_claude_workflow_supports_bash(generated_project: Path) -> None:
+def test_generated_agent_workflow_supports_bash(generated_project: Path) -> None:
     """Test that generated agent guidance selects Bash-specific validation."""
-    workflow = (generated_project / "CLAUDE.md").read_text()
-    bash_conventions = generated_project / ".claude" / "lang" / "bash.md"
-    judge = generated_project / ".claude" / "agents" / "tdd-judge.md"
-    finalizer = generated_project / ".claude" / "agents" / "tdd-finalizer.md"
+    workflow = (generated_project / "AGENTS.md").read_text()
+    bash_conventions = generated_project / ".agents" / "lang" / "bash.md"
+    judge = generated_project / ".agents" / "agents" / "tdd-judge.md"
+    finalizer = generated_project / ".agents" / "agents" / "tdd-finalizer.md"
 
     assert bash_conventions.exists()
     assert "ShellCheck" in bash_conventions.read_text()
-    assert "supports Python and Bash projects" in workflow
+    assert ".agents/lang/bash.md" in workflow
     assert "bash -n" in judge.read_text()
     assert "shellcheck" in finalizer.read_text()
 
@@ -905,8 +1086,8 @@ def test_generated_language_guidance_requires_a_separate_code_directory(
     generated_project: Path,
 ) -> None:
     """Test that generated Python and Bash guidance sets layout boundaries."""
-    python_guidance = (generated_project / ".claude" / "lang" / "python.md").read_text()
-    bash_guidance = (generated_project / ".claude" / "lang" / "bash.md").read_text()
+    python_guidance = (generated_project / ".agents" / "lang" / "python.md").read_text()
+    bash_guidance = (generated_project / ".agents" / "lang" / "bash.md").read_text()
 
     assert "src/" in python_guidance
     assert "src/<package>/" in python_guidance
@@ -927,8 +1108,8 @@ def test_source_and_template_language_guidance_define_the_same_structure_gate(
 ) -> None:
     """Test that Copier source and generated guidance both specify the gate."""
     for guidance_dir in (
-        project_root / ".claude" / "lang",
-        template_dir / ".claude" / "lang",
+        project_root / ".agents" / "lang",
+        template_dir / ".agents" / "lang",
     ):
         python_guidance = (guidance_dir / "python.md").read_text()
         bash_guidance = (guidance_dir / "bash.md").read_text()
@@ -950,17 +1131,17 @@ def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
     generated_project: Path,
 ) -> None:
     """Test that generated projects review layout before finalization."""
-    agent = generated_project / ".claude" / "agents" / "filesystem-structure-judge.md"
-    workflow = (generated_project / "CLAUDE.md").read_text()
+    agent = generated_project / ".agents" / "agents" / "filesystem-structure-judge.md"
+    workflow = (generated_project / "AGENTS.md").read_text()
     finalizer = (
-        generated_project / ".claude" / "agents" / "tdd-finalizer.md"
+        generated_project / ".agents" / "agents" / "tdd-finalizer.md"
     ).read_text()
 
     assert agent.exists()
     assert "src/" in agent.read_text()
     assert "bin/" in agent.read_text()
     assert "Filesystem structure deviations" in agent.read_text()
-    assert "Filesystem Judge" in workflow
+    assert "non-trivial changes" in workflow
     assert "`filesystem-structure-judge` approves" in finalizer
 
 
@@ -970,8 +1151,8 @@ def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
     template_dir: Path,
 ) -> None:
     """Test that pipeline timing analysis survives Copier rendering and is post-publication."""
-    relative_agent = ".claude/agents/pipeline-performance-judge.md"
-    relative_skill = ".claude/skills/pipeline-performance-judge/SKILL.md"
+    relative_agent = ".agents/agents/pipeline-performance-judge.md"
+    relative_skill = ".agents/skills/pipeline-performance-judge/SKILL.md"
 
     for root in (project_root, template_dir, generated_project):
         agent = root / relative_agent
@@ -984,13 +1165,9 @@ def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
         assert "Do not push, retry, cancel, approve, or merge" in agent.read_text()
         assert "model-tier: balanced" in skill.read_text()
 
-        workflow = (root / "CLAUDE.md").read_text()
-        git_flow = (root / ".claude" / "git-flow.md").read_text()
-        assert "Pipeline Performance Judge" in workflow
+        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
+        assert "Pipeline Performance Judge" in agent.read_text()
         assert "Pipeline Performance Judge" in git_flow
-        assert workflow.index("Finalizer") < workflow.index(
-            "Pipeline Performance Judge"
-        )
 
 
 def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
@@ -999,13 +1176,13 @@ def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
     template_dir: Path,
 ) -> None:
     """Test that every generated workflow files Minor findings after CI review."""
-    relative_agent = ".claude/agents/findings-triage.md"
-    relative_skill = ".claude/skills/findings-triage/SKILL.md"
+    relative_agent = ".agents/agents/findings-triage.md"
+    relative_skill = ".agents/skills/findings-triage/SKILL.md"
 
     for root in (project_root, template_dir, generated_project):
         agent = root / relative_agent
         skill = root / relative_skill
-        workflow = (root / "CLAUDE.md").read_text()
+        workflow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
 
         assert agent.exists()
         assert skill.exists()
@@ -1014,10 +1191,8 @@ def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
         assert "Minor" in agent.read_text()
         assert "deduplicate" in agent.read_text().lower()
         assert "model-tier: balanced" in skill.read_text()
-        assert (
-            workflow.index("Finalizer")
-            < workflow.index("Pipeline Performance Judge")
-            < workflow.index("Findings Triage")
+        assert workflow.index("Pipeline Performance Judge") < workflow.index(
+            "Findings Triage"
         )
 
     for judge_name in (
@@ -1026,7 +1201,7 @@ def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
         "judge-cicd.md",
         "pipeline-performance-judge.md",
     ):
-        content = (project_root / ".claude" / "agents" / judge_name).read_text()
+        content = (project_root / ".agents" / "agents" / judge_name).read_text()
         assert "Findings Triage" in content
 
 
@@ -1037,17 +1212,14 @@ def test_mr_remediation_issues_resume_the_originating_merge_request(
 ) -> None:
     """Test that a judge finding can safely drive a later update to its open MR."""
     for root in (project_root, template_dir, generated_project):
-        agents = (root / "AGENTS.md").read_text()
-        workflow = (root / "CLAUDE.md").read_text()
-        triage = (root / ".claude" / "agents" / "findings-triage.md").read_text()
-        git_flow = (root / ".claude" / "git-flow.md").read_text()
+        triage = (root / ".agents" / "agents" / "findings-triage.md").read_text()
+        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
 
-        assert "MR remediation issue" in agents
-        assert "update the existing merge request" in workflow
         assert "agent-mr-remediation" in triage
         assert "source branch" in triage
         assert "Closes #<triage-issue>" in triage
         assert "MR remediation issue" in git_flow
+        assert "update the existing merge request" in git_flow
 
     for root in (project_root, template_dir):
         runner = (
@@ -1065,12 +1237,12 @@ def test_source_and_template_workflows_wire_the_filesystem_structure_judge(
 ) -> None:
     """Test that the source workflow and Copier output retain the same gate."""
     for root in (project_root, template_dir):
-        workflow = (root / "CLAUDE.md").read_text()
-        finalizer = (root / ".claude" / "agents" / "tdd-finalizer.md").read_text()
-        agent = root / ".claude" / "agents" / "filesystem-structure-judge.md"
+        workflow = (root / "AGENTS.md").read_text()
+        finalizer = (root / ".agents" / "agents" / "tdd-finalizer.md").read_text()
+        agent = root / ".agents" / "agents" / "filesystem-structure-judge.md"
 
         assert agent.exists()
-        assert "Filesystem Judge" in workflow
+        assert "non-trivial changes" in workflow
         assert "`filesystem-structure-judge` approves" in finalizer
 
 
@@ -1081,9 +1253,9 @@ def test_filesystem_structure_judge_defines_concrete_layout_and_deviation_rules(
 ) -> None:
     """Test that every shipped filesystem judge enforces the full contract."""
     judge_paths = (
-        generated_project / ".claude" / "agents" / "filesystem-structure-judge.md",
-        project_root / ".claude" / "agents" / "filesystem-structure-judge.md",
-        template_dir / ".claude" / "agents" / "filesystem-structure-judge.md",
+        generated_project / ".agents" / "agents" / "filesystem-structure-judge.md",
+        project_root / ".agents" / "agents" / "filesystem-structure-judge.md",
+        template_dir / ".agents" / "agents" / "filesystem-structure-judge.md",
     )
 
     for judge_path in judge_paths:
@@ -1102,12 +1274,11 @@ def test_filesystem_structure_judge_defines_concrete_layout_and_deviation_rules(
         assert "rationale" in content.lower()
 
 
-def test_generated_settings_denies_mr_approval(generated_project: Path) -> None:
-    """Test that the generated .claude/settings.json denies AI-driven MR approval."""
-    settings = json.loads((generated_project / ".claude" / "settings.json").read_text())
-    deny = settings.get("permissions", {}).get("deny", [])
-    assert any("glab mr approve" in entry for entry in deny)
-    assert any("glab mr revoke" in entry for entry in deny)
+def test_claude_md_is_a_minimal_agents_md_entry_point(generated_project: Path) -> None:
+    """Claude receives shared instructions without a second configuration tree."""
+    assert (
+        generated_project / "CLAUDE.md"
+    ).read_text() == "# CLAUDE.md\n\n@AGENTS.md\n"
 
 
 def test_agents_md_present(generated_project: Path) -> None:
@@ -1115,17 +1286,17 @@ def test_agents_md_present(generated_project: Path) -> None:
     agents_md = generated_project / "AGENTS.md"
     assert agents_md.exists()
     content = agents_md.read_text()
-    assert "CLAUDE.md" in content
-    assert ".claude/lang/python.md" in content
+    assert ".claude/skills -> ../.agents/skills" in content
+    assert ".agents/lang/python.md" in content
     assert "gpt-5.6-sol" in content
     assert "gpt-5.6-terra" in content
     assert "gpt-5.6-luna" in content
     assert "GITLAB_PROJECT_ID" in content
 
 
-def test_claude_lang_python_present(generated_project: Path) -> None:
-    """Test that .claude/lang/python.md is generated with Python conventions."""
-    python_md = generated_project / ".claude" / "lang" / "python.md"
+def test_canonical_python_guidance_is_present(generated_project: Path) -> None:
+    """Test that .agents/lang/python.md is generated with Python conventions."""
+    python_md = generated_project / ".agents" / "lang" / "python.md"
     assert python_md.exists()
     content = python_md.read_text()
     assert "uv run pytest" in content
@@ -1133,16 +1304,16 @@ def test_claude_lang_python_present(generated_project: Path) -> None:
     assert "pytest.mark.parametrize" in content
 
 
-def test_generated_claude_md_has_language_index(generated_project: Path) -> None:
-    """Test that the generated CLAUDE.md references the language conventions file."""
-    content = (generated_project / "CLAUDE.md").read_text()
-    assert ".claude/lang/python.md" in content
-    assert "Language-Specific Conventions" in content
+def test_generated_agents_md_has_language_index(generated_project: Path) -> None:
+    """Test that AGENTS.md references the language conventions file."""
+    content = (generated_project / "AGENTS.md").read_text()
+    assert ".agents/lang/python.md" in content
+    assert "files you expect to change" in content
 
 
-def test_claude_lang_python_testing_present(generated_project: Path) -> None:
+def test_canonical_python_testing_guidance_is_present(generated_project: Path) -> None:
     """Test that the detailed testing reference is generated as a canonical language file."""
-    testing_md = generated_project / ".claude" / "lang" / "python-testing.md"
+    testing_md = generated_project / ".agents" / "lang" / "python-testing.md"
     assert testing_md.exists()
     content = testing_md.read_text()
     assert "pytest-subprocess" in content
@@ -1154,16 +1325,16 @@ def test_cursor_testing_rule_references_canonical_file(generated_project: Path) 
     rule = generated_project / "tests" / ".cursor" / "rules" / "testing.mdc"
     assert rule.exists()
     content = rule.read_text()
-    assert "@.claude/lang/python-testing.md" in content
+    assert "@.agents/lang/python-testing.md" in content
     # The old per-topic duplicated rules must be gone.
     rules_dir = generated_project / "tests" / ".cursor" / "rules"
     assert not (rules_dir / "subprocess.mdc").exists()
     assert not (rules_dir / "modify_tests.mdc").exists()
 
 
-def test_claude_guidance_present(generated_project: Path) -> None:
-    """Test that language-agnostic guidance files are generated in .claude/guidance/."""
-    guidance = generated_project / ".claude" / "guidance"
+def test_shared_guidance_is_present(generated_project: Path) -> None:
+    """Test that language-agnostic guidance files are generated in .agents/guidance/."""
+    guidance = generated_project / ".agents" / "guidance"
     assert (guidance / "tdd.md").exists()
     assert (guidance / "markdown.md").exists()
     assert "Red" in (guidance / "tdd.md").read_text()
@@ -1174,17 +1345,16 @@ def test_general_cursor_rules_reference_canonical_files(
 ) -> None:
     """Test the general Cursor rules are thin @-imports of the canonical guidance files."""
     rules = generated_project / ".cursor" / "rules"
-    assert "@.claude/guidance/tdd.md" in (rules / "tdd.mdc").read_text()
-    assert "@.claude/guidance/markdown.md" in (rules / "markdown.mdc").read_text()
+    assert "@.agents/guidance/tdd.md" in (rules / "tdd.mdc").read_text()
+    assert "@.agents/guidance/markdown.md" in (rules / "markdown.mdc").read_text()
 
 
-def test_generated_claude_md_has_general_guidance_index(
+def test_generated_agents_md_has_general_guidance_index(
     generated_project: Path,
 ) -> None:
-    """Test that the generated CLAUDE.md references the general guidance layer."""
-    content = (generated_project / "CLAUDE.md").read_text()
-    assert "General Guidance" in content
-    assert ".claude/guidance/tdd.md" in content
+    """Test that shared guidance remains available from the canonical layout."""
+    content = (generated_project / ".agents" / "guidance" / "tdd.md").read_text()
+    assert "Red" in content
 
 
 def test_copier_yaml_exists(project_root: Path) -> None:
@@ -1208,6 +1378,7 @@ def test_copier_skip_paths_preserve_project_specific_metadata(
     assert "src/{{ project_slug }}/__init__.py" in configuration["_skip_if_exists"]
     assert "{{ project_slug }}/__init__.py" not in configuration["_skip_if_exists"]
     assert "pyproject.toml" in configuration["_skip_if_exists"]
+    assert ".agents/project.md" in configuration["_skip_if_exists"]
     assert ".claude/project.md" in configuration["_skip_if_exists"]
 
 
@@ -1232,9 +1403,9 @@ def test_filesystem_structure_judge_rejects_split_legacy_python_layouts(
 ) -> None:
     """Test that the layout gate blocks a flat and src package split."""
     judge_paths = (
-        generated_project / ".claude" / "agents" / "filesystem-structure-judge.md",
-        project_root / ".claude" / "agents" / "filesystem-structure-judge.md",
-        template_dir / ".claude" / "agents" / "filesystem-structure-judge.md",
+        generated_project / ".agents" / "agents" / "filesystem-structure-judge.md",
+        project_root / ".agents" / "agents" / "filesystem-structure-judge.md",
+        template_dir / ".agents" / "agents" / "filesystem-structure-judge.md",
     )
 
     for judge_path in judge_paths:
@@ -1272,14 +1443,14 @@ def test_root_and_template_project_notes_declare_structure_compliance(
     template_dir: Path,
 ) -> None:
     """Test that every project records deviations from the standard layout."""
-    root_notes = (project_root / ".claude" / "project.md").read_text()
-    template_notes = (template_dir / ".claude" / "project.md.jinja").read_text()
+    root_notes = (project_root / ".agents" / "project.md").read_text()
+    template_notes = (template_dir / ".agents" / "project.md.jinja").read_text()
 
     assert "Filesystem structure deviations" in root_notes
     for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
         assert field in root_notes
     assert "src/{{ project_slug }}/" in template_notes
-    assert "Filesystem structure deviations: None" in template_notes
+    assert "scripts/agent-work-systemd-run.sh" in template_notes
     for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
         assert field in template_notes
 
@@ -1335,13 +1506,81 @@ def _copier_tasks(project_root: Path) -> list[str]:
     return configuration["_tasks"]
 
 
+def _copier_frontend_migration_task(project_root: Path) -> str:
+    """Return the guarded Claude compatibility migration task."""
+    return next(
+        task for task in _copier_tasks(project_root) if ".claude/skills" in task
+    )
+
+
+def _run_shell_task(
+    task: str, working_directory: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run one Copier shell task in an isolated directory."""
+    return subprocess.run(
+        ["/bin/sh", "-c", task],
+        check=False,
+        capture_output=True,
+        cwd=working_directory,
+        text=True,
+    )
+
+
 def _write_command(path: Path, body: str) -> None:
     """Create an executable POSIX-shell command stub."""
     path.write_text(f"#!/bin/sh\n{body}\n")
     path.chmod(0o755)
 
 
-def _run_copier_tasks(tasks: list[str], environment: dict[str, str]) -> list[str]:
+def _commit_template_version(source: Path, tag: str) -> None:
+    """Commit and tag one version of a temporary Copier source."""
+    _commit_repository_state(source, tag)
+    _run_test_git(source, "tag", tag)
+
+
+def _initialize_test_repository(path: Path) -> None:
+    """Initialize a temporary Git repository without user templates or hooks."""
+    _run_test_git(path, "init", "--initial-branch", "main", "--template=")
+
+
+def _commit_repository_state(path: Path, message: str) -> None:
+    """Commit the complete state of a temporary Git repository."""
+    for command in (("add", "--all"), ("commit", "-m", message)):
+        _run_test_git(path, *command)
+
+
+def _run_test_git(path: Path, *arguments: str) -> None:
+    """Run Git with deterministic identity, signing, hooks, and config boundaries."""
+    environment = os.environ | {
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_AUTHOR_NAME": "Test User",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test User",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *arguments,
+        ],
+        check=True,
+        capture_output=True,
+        cwd=path,
+        env=environment,
+        text=True,
+    )
+
+
+def _run_copier_tasks(
+    tasks: list[str], environment: dict[str, str], working_directory: Path
+) -> list[str]:
     """Run Copier tasks in order, stopping after the first failed task."""
     results = []
     for task in tasks:
@@ -1349,6 +1588,7 @@ def _run_copier_tasks(tasks: list[str], environment: dict[str, str]) -> list[str
             ["/bin/sh", "-c", task],
             check=False,
             capture_output=True,
+            cwd=working_directory,
             env=environment,
             text=True,
         )
@@ -1374,7 +1614,7 @@ esac""",
     _write_command(commands / "uv", 'printf \'uv %s\\n\' "$1" >> "$MARKER"')
     environment = os.environ | {"MARKER": str(marker), "PATH": str(commands)}
 
-    results = _run_copier_tasks(_copier_tasks(project_root), environment)
+    results = _run_copier_tasks(_copier_tasks(project_root), environment, tmp_path)
 
     assert len(results) == 1
     assert "Missing required command: glab" in results[0]
@@ -1402,9 +1642,11 @@ esac""",
   api:--hostname:gitlab-master.nvidia.com) [ "$4" = user ] ;;
 esac""",
     )
+    (tmp_path / ".agents" / "skills").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
     environment = os.environ | {"MARKER": str(marker), "PATH": str(commands)}
 
-    results = _run_copier_tasks(_copier_tasks(project_root), environment)
+    results = _run_copier_tasks(_copier_tasks(project_root), environment, tmp_path)
 
     assert len(results) == len(_copier_tasks(project_root))
     assert marker.read_text().splitlines() == ["git init", "uv sync", "uv run"]
@@ -1431,9 +1673,11 @@ esac""",
   api) exit 1 ;;
 esac""",
     )
+    (tmp_path / ".agents" / "skills").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
     environment = os.environ | {"MARKER": str(marker), "PATH": str(commands)}
 
-    results = _run_copier_tasks(_copier_tasks(project_root), environment)
+    results = _run_copier_tasks(_copier_tasks(project_root), environment, tmp_path)
 
     assert len(results) == len(_copier_tasks(project_root))
     assert marker.read_text().splitlines() == ["git init", "uv sync", "uv run"]
@@ -1445,7 +1689,6 @@ def _workflow_paths(root: Path) -> tuple[Path, ...]:
         root / "AGENTS.md",
         root / "CLAUDE.md",
         root / "README.md",
-        *(root / ".claude").rglob("*.md"),
         *(root / ".agents").rglob("*.md"),
     )
     return tuple(path for path in candidates if path.exists())
@@ -1487,7 +1730,7 @@ def test_repository_changes_require_publication_and_treat_failures_as_blockers(
                 policy in content for policy in forbidden_completion_policies
             ), workflow_path
 
-        for relative_path in ("AGENTS.md", "CLAUDE.md", ".claude/git-flow.md"):
+        for relative_path in ("AGENTS.md", ".agents/skills/git-flow/SKILL.md"):
             content = (root / relative_path).read_text().lower()
             for policy in required_policy:
                 assert policy in content, relative_path
@@ -1501,7 +1744,7 @@ def test_architect_records_deferred_scope_with_gitlab_feature_issues(
     project_root: Path, root: str
 ) -> None:
     """Test that deferred design scope is captured as GitLab Feature work."""
-    content = (project_root / root / ".claude" / "agents" / "architect.md").read_text()
+    content = (project_root / root / ".agents" / "agents" / "architect.md").read_text()
 
     for requirement in (
         "GitLab Feature issue",
@@ -1527,7 +1770,7 @@ def test_review_agents_preserve_minor_findings_for_terminal_triage(
 ) -> None:
     """Test that approving reviews hand Minor records to Findings Triage."""
     for root in (project_root, project_root / "template"):
-        content = (root / ".claude" / "agents" / command_name).read_text()
+        content = (root / ".agents" / "agents" / command_name).read_text()
 
         for requirement in (
             "Findings Triage",
@@ -1555,7 +1798,9 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
     )
 
     for root in (project_root, project_root / "template"):
-        content = (root / ".claude" / "git-flow.md").read_text().lower()
+        content = (
+            (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text().lower()
+        )
 
         assert not any(gate in content for gate in forbidden_gates)
         assert "unrelated open merge requests" in content
@@ -1582,15 +1827,6 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
             'git checkout -b "$intended_branch"'
         )
 
-    for workflow_path in (
-        project_root / "CLAUDE.md",
-        project_root / "template" / "CLAUDE.md",
-    ):
-        content = workflow_path.read_text().lower()
-        assert not any(gate in content for gate in forbidden_gates), workflow_path
-        assert "awaiting_human" in content
-        assert "without waiting for merge" in content
-
     readme_content = (project_root / "README.md").read_text()
     assert "docs/how-to/setup-serial-gitlab-agent-loop.md" in readme_content
 
@@ -1598,12 +1834,12 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
 @pytest.mark.parametrize(
     "relative_path",
     (
-        ".claude/git-flow.md",
-        ".claude/skills/repository-setup/SKILL.md",
-        ".claude/agents/architect.md",
-        ".claude/agents/judge-quality.md",
-        ".claude/agents/judge-test.md",
-        ".claude/agents/tdd-finalizer.md",
+        ".agents/skills/git-flow/SKILL.md",
+        ".agents/skills/repository-setup/SKILL.md",
+        ".agents/agents/architect.md",
+        ".agents/agents/judge-quality.md",
+        ".agents/agents/judge-test.md",
+        ".agents/agents/tdd-finalizer.md",
     ),
 )
 def test_root_and_template_share_the_same_phase_zero_workflow_contract(
@@ -1661,7 +1897,7 @@ def test_session_boundary_workflow_preserves_agentic_handoffs(
     generated_project: Path, project_root: Path
 ) -> None:
     """Agentic workers and user sessions have distinct main-branch exits."""
-    relative_path = ".claude/git-flow.md"
+    relative_path = ".agents/skills/git-flow/SKILL.md"
     content = (project_root / relative_path).read_text()
 
     assert content == (project_root / "template" / relative_path).read_text()
@@ -1749,32 +1985,6 @@ def test_setup_loop_skill_preflights_developer_readable_repository_safeguards(
     assert skill.index(effective_access_marker) < skill.index("approval_rules")
     assert "repository/files/CONTRIBUTING.md/raw" not in skill
     assert "author/committers cannot self-approve" not in skill
-
-
-def test_agents_define_the_developer_readable_preflight_exception(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Every project copy preserves the narrow exception to Maintainer-only nag."""
-    root_agents = (project_root / "AGENTS.md").read_text()
-
-    assert root_agents == (project_root / "template" / "AGENTS.md").read_text()
-    assert root_agents == (generated_project / "AGENTS.md").read_text()
-
-    for requirement in (
-        "Developer-readable",
-        "exactly `30`",
-        "branch protection",
-        "approval_rules",
-        "default branch",
-        "exception",
-        "Maintainer-only",
-        "/approvals",
-        "recurring Maintainer attestation",
-        "Developer role alone does not prove",
-        "self-approval",
-        "override",
-    ):
-        assert requirement in root_agents
 
 
 @pytest.mark.parametrize(
@@ -2581,21 +2791,22 @@ def test_agent_controls_prohibit_approval_and_merge_in_every_project_copy(
     generated_project: Path, project_root: Path
 ) -> None:
     """Policy controls and runtime both exclude approval and merge operations."""
-    expected_denials = {
-        "Bash(glab mr approve*)",
-        "Bash(glab mr revoke*)",
+    expected_denials = [
         "Bash(glab api*merge_requests*approve*)",
         "Bash(glab api*merge_requests*merge*)",
-    }
+        "Bash(glab mr approve*)",
+        "Bash(glab mr revoke*)",
+    ]
 
     for root in (project_root, project_root / "template", generated_project):
+        instructions = (root / "AGENTS.md").read_text()
         settings = json.loads((root / ".claude" / "settings.json").read_text())
-        denials = set(settings["permissions"]["deny"])
         runtime = "\n".join(
             path.read_text() for path in (root / "src" / "agent_work").glob("*.py")
         )
 
-        assert expected_denials.issubset(denials)
+        assert "Never approve or merge" in instructions
+        assert settings == {"permissions": {"deny": expected_denials}}
         assert "mr approve" not in runtime
         assert "merge_requests/{mr_iid}/approve" not in runtime
         assert "merge_requests/{mr_iid}/merge" not in runtime
@@ -2687,7 +2898,6 @@ def test_setup_loop_explanation_preserves_developer_access_caveats(
 @pytest.mark.parametrize(
     "relative_path",
     (
-        "AGENTS.md",
         ".agents/skills/setup-agent-loop/SKILL.md",
         "docs/how-to/setup-serial-gitlab-agent-loop.md",
         "docs/reference/serial-gitlab-agent-loop.md",
@@ -2703,11 +2913,9 @@ def test_developer_readiness_never_treats_privileged_access_as_an_alternative_pa
     assert root_document == (project_root / "template" / relative_path).read_text()
     assert root_document == (generated_project / relative_path).read_text()
     assert "privileged path" not in root_document
-
-    if relative_path != "AGENTS.md":
-        assert re.search(r"`?40`?\s+or greater", root_document)
-        assert re.search(r"constrained Developer\s+credential", root_document)
-        assert re.search(r"(?:block `--apply`|BLOCK --apply)", root_document)
+    assert re.search(r"`?40`?\s+or greater", root_document)
+    assert re.search(r"constrained Developer\s+credential", root_document)
+    assert re.search(r"(?:block `--apply`|BLOCK --apply)", root_document)
 
 
 def test_readmes_describe_developer_access_as_a_caveat_not_proof(
@@ -2744,7 +2952,7 @@ def test_legacy_local_queue_contracts_and_commands_are_absent(
         ".agents/contracts/work-item-contract.md",
         ".agents/contracts/work-item-result-v1.schema.json",
         ".agents/contracts/work-item-filesystem-v1.schema.json",
-        ".claude/work-item.md",
+        ".agents/work-item.md",
         "src/agent_work/filesystem.py",
         "src/agent_work/prompt.py",
         "src/agent_work/result.py",
@@ -2820,8 +3028,8 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
         ).read_text()
     )
     for git_flow in (
-        project_root / ".claude" / "git-flow.md",
-        project_root / "template" / ".claude" / "git-flow.md",
+        project_root / ".agents" / "skills" / "git-flow" / "SKILL.md",
+        project_root / "template" / ".agents" / "skills" / "git-flow" / "SKILL.md",
     ):
         assert "--jq" not in git_flow.read_text()
         assert "jq -er" in git_flow.read_text()
@@ -2849,13 +3057,12 @@ def test_shared_workflow_uses_documented_recovery_before_reporting_blockers(
 ) -> None:
     """Known environment failures use their documented recovery path first."""
     for workflow in (
-        project_root / "CLAUDE.md",
-        project_root / "template" / "CLAUDE.md",
+        project_root / "AGENTS.md",
+        project_root / "template" / "AGENTS.md",
     ):
         content = workflow.read_text()
 
-        assert "documented recovery" in content
-        assert "bounded recovery path is exhausted" in content
+        assert "publication failure is a blocker" in content.lower()
         assert "stop\nthat work item" not in content
 
 

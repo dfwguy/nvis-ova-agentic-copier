@@ -5,7 +5,7 @@ summary: Generate a project and verify its development tooling is ready.
 audience: new-user
 tags: [project-generation]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: ../how-to/create-a-project-non-interactively.md
     why: Provides the automation-oriented alternative to this lesson.
@@ -72,7 +72,10 @@ uv run pytest
 
 You now have a package directory named from your chosen slug, a starter test,
 and an installed virtual environment. The project also includes Ruff, ty,
-tox, pre-commit, GitLab CI, and the agent workflow under `.claude/`.
+tox, pre-commit, GitLab CI, and the agent workflow under `.agents/`.
+`CLAUDE.md` is an adapter to `AGENTS.md`; Claude Code reaches the same skills
+through the relative `.claude/skills -> ../.agents/skills` link. You do not
+need to create or replace that link yourself.
 
 ## Run the full verification matrix
 

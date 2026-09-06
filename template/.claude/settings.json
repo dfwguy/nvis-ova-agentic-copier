@@ -1,45 +1,10 @@
 {
   "permissions": {
-    "allow": [
-      "Write",
-      "Edit",
-      "Bash(uv run pytest *)",
-      "Bash(uv run ruff check *)",
-      "Bash(uv run ruff format --check *)",
-      "Bash(uv run ty check *)",
-      "Bash(uv run pre-commit run *)",
-      "Bash(uv run tox *)",
-      "Bash(git pull*)",
-      "Bash(git fetch*)",
-      "Bash(git log*)",
-      "Bash(git status*)",
-      "Bash(git diff*)",
-      "Bash(git show*)",
-      "Bash(git branch*)",
-      "Bash(git switch*)",
-      "Bash(glab mr list*)",
-      "Bash(glab mr view*)",
-      "Bash(glab ci status*)",
-      "Bash(glab ci list*)"
-    ],
     "deny": [
-      "Bash(glab mr approve*)",
-      "Bash(glab mr revoke*)",
       "Bash(glab api*merge_requests*approve*)",
-      "Bash(glab api*merge_requests*merge*)"
+      "Bash(glab api*merge_requests*merge*)",
+      "Bash(glab mr approve*)",
+      "Bash(glab mr revoke*)"
     ]
-  },
-  "sandbox": {
-    "filesystem": {
-      "allowWrite": [
-        "~/.cache/uv",
-        "~/.cache/pre-commit"
-      ]
-    },
-    "network": {
-      "allowedDomains": [
-        "gitlab-master.nvidia.com"
-      ]
-    }
   }
 }

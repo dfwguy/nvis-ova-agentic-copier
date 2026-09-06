@@ -3,4 +3,4 @@ description: Python coding conventions for this project
 globs: "**/*.py"
 alwaysApply: false
 ---
-@.claude/lang/python.md
+@.agents/lang/python.md
