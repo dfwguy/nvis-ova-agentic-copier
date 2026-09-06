@@ -643,20 +643,27 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
 
 
 def test_repository_setup_procedure_present(generated_project: Path) -> None:
-    """New projects retain a portable procedure for GitLab lock-down."""
-    setup_repo = generated_project / ".claude" / "repository-setup.md"
+    """New projects retain the portable repository lock-down skill."""
+    setup_repo = (
+        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+    )
     assert setup_repo.exists()
     content = setup_repo.read_text()
+    assert "name: repository-setup" in content
     assert "protected_branches" in content
     assert "approval_rules" in content
     assert "/approvals" in content, (
         "self-approval block must target /projects/<id>/approvals, not the bare project endpoint"
     )
+    assert "direnv exec . glab api user" in content
+    assert "non-empty `username`" in content
 
 
 def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> None:
     """Test that lock-down setup cannot strand CONTRIBUTING.md on local main."""
-    content = (generated_project / ".claude" / "repository-setup.md").read_text()
+    content = (
+        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+    ).read_text()
     mr_lookup = (
         'glab api --hostname "$GITLAB_HOST" '
         '"projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&'
@@ -852,7 +859,9 @@ def test_agent_work_worker_exception_overrides_generic_publication_rules(
 
 def test_repository_setup_interviews_self_approval(generated_project: Path) -> None:
     """The setup procedure asks about self-approval for single-user projects."""
-    content = (generated_project / ".claude" / "repository-setup.md").read_text()
+    content = (
+        generated_project / ".claude" / "skills" / "repository-setup" / "SKILL.md"
+    ).read_text()
     assert "AskUserQuestion" in content, (
         "setup-repo must interview the user about self-approval"
     )
@@ -862,19 +871,20 @@ def test_repository_setup_interviews_self_approval(generated_project: Path) -> N
 
 
 def test_contributing_md_absent_in_generated_project(generated_project: Path) -> None:
-    """Test that CONTRIBUTING.md is NOT generated — its absence is the gate trigger in CLAUDE.md."""
+    """Test that CONTRIBUTING.md is NOT generated — its absence triggers setup."""
     assert not (generated_project / "CONTRIBUTING.md").exists()
 
 
-def test_generated_claude_md_has_lockdown_gate(generated_project: Path) -> None:
-    """Test that the generated CLAUDE.md tells Claude to refuse work when CONTRIBUTING.md is missing."""
+def test_generated_claude_md_loads_lockdown_skill_when_marker_is_missing(
+    generated_project: Path,
+) -> None:
+    """The generated workflow routes a missing marker to the setup skill."""
     content = (generated_project / "CLAUDE.md").read_text()
-    assert "Repo lock-down gate" in content
-    assert "CONTRIBUTING.md" in content
-    assert ".claude/repository-setup.md" in content
-    assert "glab mr approve" in content
-    assert "sole bounded mutation" in content
-    assert "publishes its own merge request" in content
+    assert (
+        "grep -Fq 'All changes go through a merge request.' CONTRIBUTING.md" in content
+    )
+    assert ".claude/skills/repository-setup/SKILL.md" in content
+    assert "protected_branches" not in content
 
 
 def test_generated_claude_workflow_supports_bash(generated_project: Path) -> None:
@@ -1589,7 +1599,7 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
     "relative_path",
     (
         ".claude/git-flow.md",
-        ".claude/repository-setup.md",
+        ".claude/skills/repository-setup/SKILL.md",
         ".claude/agents/architect.md",
         ".claude/agents/judge-quality.md",
         ".claude/agents/judge-test.md",

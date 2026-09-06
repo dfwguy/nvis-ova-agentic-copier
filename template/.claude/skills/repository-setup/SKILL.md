@@ -1,11 +1,20 @@
 ---
-description: Lock down the GitLab repo (protect main, require MR approval) and write CONTRIBUTING.md. Idempotent.
+name: repository-setup
+description: Lock down an unprotected GitLab repository by verifying the user, protecting its default branch, requiring approval, and publishing the bootstrap merge request.
+metadata:
+  model-tier: most capable
 ---
 
-Configures GitLab project-level protections so the default branch cannot be pushed to directly and merge requests require approval. Interviews the user on whether to block self-approval by authors and committers (recommended for multi-user repos; opt out for single-user repos where there is no second reviewer). Writes `CONTRIBUTING.md` so the repo-lock-down gate in `CLAUDE.md` silences itself.
+# Repository setup
 
-While `CONTRIBUTING.md` is absent, this command is the **sole bounded mutation**
-allowed by the no-mutation gate. It must create or reuse only its dedicated
+Use this skill only when
+`grep -Fq 'All changes go through a merge request.' CONTRIBUTING.md` fails.
+It is the sole permitted repository mutation until its bootstrap merge request
+is published. Do not make unrelated changes, approve, or merge.
+
+Configures GitLab project-level protections so the default branch cannot be pushed to directly and merge requests require approval. Interviews the user on whether to block self-approval by authors and committers (recommended for multi-user repos; opt out for single-user repos where there is no second reviewer). Writes `CONTRIBUTING.md` with the marker that ends this setup flow.
+
+It must create or reuse only its dedicated
 feature branch, configure project protections and approval policy, and publish
 the `CONTRIBUTING.md` change through an MR. It must not make unrelated changes,
 approve, or merge. A run that makes the bootstrap change returns
@@ -19,7 +28,19 @@ All `glab` calls are in-sandbox HTTPS via the proxy; no `dangerouslyDisableSandb
 
 ## Procedure
 
-### 1. Resolve the project
+### 1. Verify the GitLab user and resolve the project
+
+Before changing GitLab settings, verify that the current directory's
+credentials identify a GitLab user:
+
+```bash
+direnv exec . glab api user | jq '{name, email, public_email, username}'
+```
+
+Require a successful response with a non-empty `username`. If the command
+fails or `username` is null or empty, stop and report that no authenticated
+GitLab user was verified. Do not create a branch, change project settings, or
+write `CONTRIBUTING.md`.
 
 ```bash
 glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
