@@ -3,4 +3,4 @@ description: Test-driven development discipline
 globs: "**/*.py"
 alwaysApply: false
 ---
-@.claude/guidance/tdd.md
+@.agents/guidance/tdd.md

@@ -3,4 +3,4 @@ description: Markdown conventions
 globs: "**/*.md"
 alwaysApply: true
 ---
-@.claude/guidance/markdown.md
+@.agents/guidance/markdown.md

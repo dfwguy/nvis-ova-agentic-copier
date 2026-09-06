@@ -5,6 +5,7 @@ _skip_if_exists:
   - README.md
   - .gitlab-ci.yml
   - .pre-commit-config.yaml
+  - .agents/project.md
   - .claude/project.md
   - "src/{{ project_slug }}/__init__.py"
 
@@ -34,6 +35,27 @@ _tasks:
       exit 1
     fi
   - git init
+  - |-
+    if [ -L .claude/skills ]; then
+      if [ "$(command -p readlink .claude/skills)" != ../.agents/skills ]; then
+        printf 'Cannot link Claude Code skills: .claude/skills does not point to ../.agents/skills. Preserve the existing link, then rerun Copier.\n' >&2
+        exit 1
+      fi
+    elif ! git diff --no-index --quiet -- .claude/skills .agents/skills; then
+      printf 'Cannot link Claude Code skills: .claude/skills differs from .agents/skills. Preserve any local changes, then rerun Copier.\n' >&2
+      exit 1
+    else
+      command -p rm -r .claude/skills
+      command -p ln -s ../.agents/skills .claude/skills
+    fi
+    legacy_project_guard='<!-- agent-workflow-legacy-project-guard -->'
+    if [ -f .claude/project.md ]; then
+      if [ "$(command -p cat .claude/project.md)" = "$legacy_project_guard" ]; then
+        command -p rm .claude/project.md
+      else
+        printf 'Legacy project context remains at .claude/project.md. Reconcile it into .agents/project.md, remove the legacy file, then rerun Copier.\n' >&2
+      fi
+    fi
   - |-
     if ! git var GIT_AUTHOR_IDENT >/dev/null 2>&1; then
       printf 'Warning: Git cannot resolve an author identity. Configure this directory or set GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL.\n' >&2

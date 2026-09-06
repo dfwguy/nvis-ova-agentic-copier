@@ -14,7 +14,7 @@ related:
 # Why the coding standards exist
 
 This page explains the intent behind the
-Python and Bash conventions generated in `CLAUDE.md` and `.claude/lang/`.
+Python and Bash conventions generated in `AGENTS.md` and `.agents/lang/`.
 
 The standards are designed to make ordinary changes safe to review, easy to
 test, and unsurprising to maintain. They are defaults for a new project, not a
@@ -36,7 +36,7 @@ public interfaces. Development and CI helpers can live elsewhere when their
 purpose is clear, but they are not additional user CLIs.
 
 Some projects have genuine compatibility or operational reasons for another
-layout. Those decisions are explicit rather than implicit: `.claude/project.md`
+layout. Those decisions are explicit rather than implicit: `.agents/project.md`
 must identify the affected language, the normal rule being replaced, the actual
 source and entry-point paths, and the reason. The filesystem-structure gate
 uses that record to distinguish a deliberate exception from structure that has

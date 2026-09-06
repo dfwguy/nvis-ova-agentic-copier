@@ -5,7 +5,7 @@ summary: Look up template inputs, generated files, setup tasks, and update behav
 audience: integrator
 tags: [template]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: ../tutorials/create-your-first-project.md
     why: Uses the generated project behavior defined here.
@@ -40,7 +40,11 @@ The [`copier.yaml`](../../copier.yaml) configuration defines these values:
 
 The template payload is the [`template/`](../../template) directory. Copier
 renders `.jinja` files and removes their extension. It also renders path names
-that contain Jinja expressions. All other files are copied unchanged.
+that contain Jinja expressions. The guarded post-render task establishes the
+relative `.claude/skills -> ../.agents/skills` compatibility link and removes
+its transient `.claude/project.md` migration marker on new copies. Existing
+legacy context at that path is preserved and reported. All remaining files are
+copied unchanged.
 
 ## Trusted post-render tasks
 
@@ -52,9 +56,10 @@ destination directory.
 | --- | --- | --- |
 | 1 | Command preflight | Validates required commands. A failure prevents all later tasks. |
 | 2 | `git init` | Creates a Git repository. |
-| 3 | Readiness diagnostics | Checks the Git identity resolved in the new repository and authenticated GitLab API access. Diagnostics do not prevent later setup tasks. |
-| 4 | `uv sync` | Creates the virtual environment and installs dependencies. |
-| 5 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
+| 3 | Frontend migration | Maintains the skills link, removes the new-copy project-context marker, and reports preserved legacy context. |
+| 4 | Readiness diagnostics | Checks the Git identity resolved in the new repository and authenticated GitLab API access. Diagnostics do not prevent later setup tasks. |
+| 5 | `uv sync` | Creates the virtual environment and installs dependencies. |
+| 6 | `uv run pre-commit install` | Installs the repository's pre-commit hook. |
 
 ### Preflight contract
 
@@ -97,7 +102,7 @@ initialized project until the command preflight has passed.
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
 | CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. |
-| Agent workflow | `CLAUDE.md`, `.claude/`, and `DIATAXIS.md` for architecture, TDD, documentation, review, and publication routing. |
+| Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout
 
@@ -114,10 +119,10 @@ development and CI helpers are not public CLI entry points and do not belong in
 `bin/`.
 
 The filesystem-structure gate reviews these defaults before finalization. A
-project may depart from them only when `.claude/project.md` records the affected
+project may depart from them only when `.agents/project.md` records the affected
 language, the standard rule being departed from, the actual source and
 entry-point paths, and the compatibility or operational rationale. The default
-generated project records no filesystem-structure deviations.
+generated project records the systemd wrapper's intentional `scripts/` path.
 
 ## Update behavior
 
@@ -129,13 +134,24 @@ preserved when they already exist:
 - `README.md`
 - `.gitlab-ci.yml`
 - `.pre-commit-config.yaml`
-- `.claude/project.md`
+- `.agents/project.md`
+- legacy `.claude/project.md`
 - `src/<project_slug>/__init__.py`
 
-`pyproject.toml` and `.claude/project.md` are project-specific and remain
-preserved. A legacy flat-package project must update its own package path and
-project context deliberately before accepting this template update; Copier does
-not overwrite either file to perform that migration.
+`pyproject.toml` and `.agents/project.md` are project-specific and remain
+preserved. The legacy `.claude/project.md` is also kept so an existing
+project's context is never discarded during the move: sessions read it until
+the owner reconciles it into `.agents/project.md` and removes the old file. A
+legacy flat-package project must likewise update its own package path. Copier
+does not overwrite project-owned files to perform either migration.
+
+The compatibility link is template-owned: after an update,
+`.claude/skills` should be the relative link `../.agents/skills`. Copier keeps
+that link when it already exists. For an older copied directory, it compares
+`.claude/skills` and `.agents/skills` with `git diff --no-index` and replaces
+only identical trees. A different directory or link remains intact while the
+task reports how to continue. Preserve or reconcile the local path, then rerun
+Copier; do not remove it blindly.
 
 ## Related pages
 

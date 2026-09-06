@@ -5,7 +5,7 @@ summary: Understand the boundary between this Copier template and its generated 
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: ../reference/template-contract.md
     why: Documents the observable template behavior explained here.
@@ -47,6 +47,16 @@ project-specific agent context. A template update should offer an upgrade path,
 not silently replace a team's decisions. This makes updates a deliberate
 maintenance activity rather than an uncontrolled overwrite.
 
+The agent workflow follows the same ownership rule. `.agents/` is the single
+canonical workflow tree; `CLAUDE.md` is only an adapter to `AGENTS.md`, and
+`.claude/skills` is a relative compatibility link to `.agents/skills`. Copier
+uses a guarded post-render task to replace an identical legacy skills tree;
+when the trees differ, it stops without changing either one. The small Claude
+settings file is an enforcement adapter for the never-approve-or-merge rule,
+not a second workflow definition. During upgrades, a legacy
+`.claude/project.md` remains readable until its project-specific context is
+reconciled into `.agents/project.md`.
+
 The template combines Python tooling and an agent workflow because it aims to
 make a new project productive immediately. UV gives the project a consistent
 command entry point, while Ruff, ty, pytest, tox, pre-commit, and GitLab CI
@@ -58,7 +68,7 @@ implementation in `src/` or `lib/`.
 
 The gate is intentionally a documented standard rather than a claim that every
 project has identical constraints. A project that needs another layout records
-its real paths and rationale in `.claude/project.md`, so maintainers and
+its real paths and rationale in `.agents/project.md`, so maintainers and
 reviewers can understand the exception without reverse-engineering it from the
 tree.
 

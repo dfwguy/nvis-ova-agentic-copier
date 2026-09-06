@@ -5,7 +5,7 @@ summary: Understand why the documentation separates reader needs.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: agentic-workflow.md
     why: Explains the workflow that applies these documentation rules.
@@ -56,6 +56,6 @@ undifferentiated add-on.
 
 For the process used by contributors, see the
 [Diátaxis documentation process](../../DIATAXIS.md). To browse the current
-quadrants, start at the [documentation index](../README.md). For another
+quadrants, start at the [documentation index](../index.md). For another
 example of an Explanation page, see
 [why the coding standards exist](coding-standards.md).

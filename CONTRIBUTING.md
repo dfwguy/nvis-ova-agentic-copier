@@ -12,4 +12,6 @@
 
 ## AI contributions
 
-Claude Code drives most of the workflow. See [`.claude/git-flow.md`](.claude/git-flow.md) for the branch / commit / MR / return-to-main lifecycle and [`CLAUDE.md`](CLAUDE.md) for the multi-agent TDD process. AI must never run `glab mr approve` — approval is reserved for human reviewers.
+The shared agent workflow is defined by [`AGENTS.md`](AGENTS.md) and
+the [`git-flow` skill](.agents/skills/git-flow/SKILL.md). AI must never run `glab mr
+approve` — approval is reserved for human reviewers.

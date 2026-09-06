@@ -5,7 +5,7 @@ summary: Understand the workflow roles, validation sequence, and human gate.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-06
 related:
   - path: why-diataxis.md
     why: Explains the documentation model enforced by workflow roles.
@@ -22,9 +22,9 @@ multi-agent workflow turns a change into a human-reviewed merge request.
 
 The workflow separates design, test design, documentation, implementation,
 and review so that each step has a clear purpose and an independent check. It
-is portable across Claude Code, Codex, and Pi: every role is defined by a
-shared Agent Skill, while each frontend resolves the requested capability tier
-through its own configuration.
+is portable across Claude Code, Codex, and Pi: every role is defined under the
+shared `.agents/skills/` tree, while each frontend resolves the requested
+capability tier through its own configuration.
 
 The workflow is deliberately human-gated. Agents can prepare and publish a
 merge request, but they do not approve or merge it. The serial GitLab loop
