@@ -6,19 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @.claude/git-flow.md
 
-## Repo lock-down gate
+## Repository lock-down
 
-**Check before every response**: does `CONTRIBUTING.md` exist at the repo root?
-
-- **Missing** → the GitLab repo has not been locked down (no branch protection, no MR approval rules). Until that file exists:
-  1. Open the response with: `⚠ Repo not locked down — follow .claude/repository-setup.md to configure branch protection.`
-  2. Close the response with the same line.
-  3. Do not mutate the repository, commit, push, or open an MR. The repository setup procedure is the sole bounded mutation while this gate is active: it publishes its own merge request for `CONTRIBUTING.md` after applying the required protections and approval policy. No other repository mutation is allowed.
-- **Present** → the gate is silent; proceed normally.
-
-`.claude/repository-setup.md` defines the procedure that writes `CONTRIBUTING.md`, applies GitLab branch protection + MR approval rules, and publishes its own merge request in one bounded flow. It is idempotent — re-running safely reuses its setup branch and MR when appropriate.
-
-**Never run `glab mr approve` or `glab mr revoke`.** AI must not approve or unapprove merge requests; approval is reserved for human reviewers. `.claude/settings.json` denies these commands as a backstop.
+Run `grep -Fq 'All changes go through a merge request.' CONTRIBUTING.md`
+before repository work. If it fails, load and follow
+`.claude/skills/repository-setup/SKILL.md` before doing anything else in the
+repository.
 
 ## Sandbox
 
