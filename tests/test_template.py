@@ -58,7 +58,6 @@ def test_generated_agent_instructions_include_a_safe_session_checklist(
     for requirement in (
         "## Agent session checklist",
         ".agents/project.md",
-        ".claude/project.md",
         "CONTRIBUTING.md",
         "untrusted task data",
         "Never approve or merge",
@@ -624,7 +623,7 @@ def test_copier_update_preserves_legacy_project_context(
 
     assert legacy_context.read_text() == "custom legacy context\n"
     assert (output / ".agents" / "project.md").exists()
-    assert ".claude/project.md" in (output / "AGENTS.md").read_text()
+    assert ".claude/project.md" not in (output / "AGENTS.md").read_text()
 
 
 def test_canonical_workflow_does_not_reference_legacy_claude_paths(
@@ -649,6 +648,153 @@ def test_agents_entry_point_keeps_specialized_policy_in_owning_skills(
     assert "MR remediation issues" not in content
     assert "Every repository change must publish" in content
     assert "Never approve or merge" in content
+
+
+def test_agent_routing_manifest_is_explicit_portable_and_identical(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Every project copy names the exact instructions and skills to activate."""
+    root_content = (project_root / "AGENTS.md").read_text()
+
+    assert root_content == (template_dir / "AGENTS.md").read_text()
+    assert root_content == (generated_project / "AGENTS.md").read_text()
+    assert "\n@.agents/" not in root_content
+
+    for required_route in (
+        "Always | `.agents/project.md`",
+        "Missing contribution marker | `$repository-setup`",
+        "Markdown files | `.agents/guidance/markdown.md`",
+        "Non-trivial work | `.agents/guidance/tdd.md`",
+        "Python files | `.agents/lang/python.md`",
+        "Bash files or Bash shebangs | `.agents/lang/bash.md`",
+        "Python tests | `.agents/lang/python-testing.md`",
+        "Any repository mutation | `$git-flow`",
+    ):
+        assert required_route in root_content
+
+    assert "`@...` imports are not portable" in root_content
+    assert (
+        "Do not read conditional guidance when its condition is false" in root_content
+    )
+
+
+def test_shared_agent_instructions_do_not_use_nonportable_nested_imports(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Canonical instructions route conditional reads without recursive @ imports."""
+    for root in (project_root, template_dir, generated_project):
+        for instruction in (root / ".agents").rglob("*.md"):
+            imports = [
+                line
+                for line in instruction.read_text().splitlines()
+                if line.startswith("@.agents/")
+            ]
+            assert not imports, instruction
+
+
+def test_nontrivial_workflow_names_every_exact_skill_and_handoff(
+    generated_project: Path,
+) -> None:
+    """The manifest makes phase ownership, inputs, outputs, and reroutes mechanical."""
+    content = (generated_project / "AGENTS.md").read_text()
+    manifest = content[content.index("## Non-trivial workflow manifest") :]
+
+    for heading in (
+        "Applies",
+        "Owner",
+        "Tier / Codex",
+        "Requires",
+        "Receipt; rejection route",
+    ):
+        assert heading in manifest
+
+    ordered_skills = (
+        "architect",
+        "tdd-red",
+        "diataxis-writer",
+        "tdd-green",
+        "nonfunctional-review",
+        "tdd-judge",
+        "diataxis-judge",
+        "judge-quality",
+        "judge-test",
+        "judge-cicd",
+        "tdd-document",
+        "cli-syntax-judge",
+        "filesystem-structure-judge",
+        "tdd-finalizer",
+        "pipeline-performance-judge",
+        "findings-triage",
+    )
+    positions = [manifest.index(f"`${skill}`") for skill in ordered_skills]
+    assert positions == sorted(positions)
+    assert "Main; never delegate" in manifest
+    assert "Parallel with `$tdd-red`" in manifest
+    assert "`not applicable — <reason>`" in manifest
+    assert "Do not route by display name" in content
+    for phase in ("2a `$tdd-red`", "3 `$tdd-green`"):
+        phase_row = next(line for line in manifest.splitlines() if phase in line)
+        assert "| Main; never delegate | Current enabled |" in phase_row
+
+
+def test_main_red_green_skills_preserve_session_model_continuity(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Main-owned continuity phases never require an impossible model swap."""
+    for skill_name in ("tdd-red", "tdd-green"):
+        relative_skill = Path(".agents") / "skills" / skill_name / "SKILL.md"
+        copies = tuple(
+            (root / relative_skill).read_text()
+            for root in (project_root, template_dir, generated_project)
+        )
+        assert copies[0] == copies[1] == copies[2]
+        for skill in copies:
+            assert "current enabled main-session model" in skill
+            assert "do not switch models mid-session" in skill
+
+    relative_role = Path(".agents") / "agents" / "tdd-red.md"
+    role_copies = tuple(
+        (root / relative_role).read_text()
+        for root in (project_root, template_dir, generated_project)
+    )
+    assert role_copies[0] == role_copies[1] == role_copies[2]
+    for red_role in role_copies:
+        assert "same main agent" in red_role
+        assert "`tdd-green` subagent" not in red_role
+
+
+def test_scoped_judges_have_explicit_not_applicable_receipts(
+    generated_project: Path,
+) -> None:
+    """Conditional final judges cannot disappear without a recorded decision."""
+    workflow = (generated_project / "AGENTS.md").read_text()
+    finalizer = (
+        generated_project / ".agents" / "agents" / "tdd-finalizer.md"
+    ).read_text()
+
+    assert "CLI surface or contract changed" in workflow
+    assert "Python/Bash layout or packaging changed" in workflow
+    for skill_name in ("cli-syntax-judge", "filesystem-structure-judge"):
+        receipt = f"`${skill_name}`: `not applicable — <reason>`"
+        assert receipt in finalizer
+
+
+def test_serial_worker_routes_by_exact_skill_ids(generated_project: Path) -> None:
+    """The one-process worker activates manifest skills instead of role labels."""
+    content = (
+        generated_project / ".agents" / "skills" / "work-item-runner" / "SKILL.md"
+    ).read_text()
+
+    assert "exact `$skill-id`" in content
+    assert "Do not infer a skill from a display name" in content
+    for skill_name in (
+        "architect",
+        "tdd-red",
+        "diataxis-writer",
+        "tdd-green",
+        "tdd-finalizer",
+    ):
+        assert f"`${skill_name}`" in content
 
 
 def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
@@ -1341,12 +1487,15 @@ def test_shared_guidance_is_present(generated_project: Path) -> None:
 
 
 def test_general_cursor_rules_reference_canonical_files(
-    generated_project: Path,
+    generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
-    """Test the general Cursor rules are thin @-imports of the canonical guidance files."""
-    rules = generated_project / ".cursor" / "rules"
-    assert "@.agents/guidance/tdd.md" in (rules / "tdd.mdc").read_text()
-    assert "@.agents/guidance/markdown.md" in (rules / "markdown.mdc").read_text()
+    """Cursor imports canonical guidance only for files matching each rule."""
+    for root in (project_root, template_dir, generated_project):
+        rules = root / ".cursor" / "rules"
+        assert "@.agents/guidance/tdd.md" in (rules / "tdd.mdc").read_text()
+        markdown_rule = (rules / "markdown.mdc").read_text()
+        assert "@.agents/guidance/markdown.md" in markdown_rule
+        assert "alwaysApply: false" in markdown_rule
 
 
 def test_generated_agents_md_has_general_guidance_index(

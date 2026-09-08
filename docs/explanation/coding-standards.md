@@ -7,8 +7,8 @@ tags: [template-architecture]
 status: current
 last_reviewed: 2026-08-27
 related:
-  - path: agentic-workflow.md
-    why: Applies these conventions through independent workflow roles.
+  - path: why-diataxis.md
+    why: Explains the documentation structure used for these conventions.
 ---
 
 # Why the coding standards exist

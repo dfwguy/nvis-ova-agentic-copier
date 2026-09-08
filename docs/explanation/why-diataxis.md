@@ -7,8 +7,8 @@ tags: [template-architecture]
 status: current
 last_reviewed: 2026-09-06
 related:
-  - path: agentic-workflow.md
-    why: Explains the workflow that applies these documentation rules.
+  - path: coding-standards.md
+    why: Explains the conventions that apply this documentation structure.
 ---
 
 # Why this repository uses Diátaxis

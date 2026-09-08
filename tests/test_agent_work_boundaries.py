@@ -796,6 +796,8 @@ def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
                 "--mode",
                 "text",
                 "--no-session",
+                "--skill",
+                "{checkout}/.agents/skills",
                 "untrusted prompt",
             ),
             None,

@@ -68,8 +68,10 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 
 ## Agent workflow
 
-Generated projects follow this workflow. Read [how the agent workflow works](docs/explanation/agentic-workflow.md)
-for its design, lifecycle, role boundaries, and validation details.
+Generated projects follow this workflow. `AGENTS.md` is the authoritative
+manifest for exact skill routing and conditional instruction loading. Read [how
+the agent workflow works](docs/explanation/agentic-workflow.md) for its design,
+lifecycle, role boundaries, and validation details.
 
 ```mermaid
 flowchart TD

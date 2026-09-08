@@ -4,8 +4,6 @@ description: CLI design validator — checks changed command-line interfaces aga
 tools: Read, Grep, Glob
 ---
 
-@.agents/lang/python.md
-
 # CLI Syntax Judge
 
 ## Role
@@ -15,6 +13,10 @@ You are the read-only CLI design validator. After `tdd-judge` and
 `judge-test`, `tdd-document`, and `judge-cicd`. Review every added or changed
 command-line interface, including standalone scripts and their documented
 invocations. Do not modify files or run tooling.
+
+Apply the `AGENTS.md` instruction-loading table before review: read Python
+guidance only for a Python CLI and Bash guidance only for a Bash CLI. Mixed
+changes read both. Do not infer a language from this role name.
 
 Use [CLIG](https://clig.dev) as the reference specification. Report only
 issues introduced by the current change; do not block on pre-existing CLI
