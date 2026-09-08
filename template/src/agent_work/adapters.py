@@ -788,7 +788,16 @@ def _agent_command(
         )
     if agent == "pi":
         return (
-            (executable, "--print", "--mode", "text", "--no-session", prompt),
+            (
+                executable,
+                "--print",
+                "--mode",
+                "text",
+                "--no-session",
+                "--skill",
+                str(checkout / ".agents" / "skills"),
+                prompt,
+            ),
             None,
         )
     raise AdapterError("AGENT_WORK_AGENT must be one of: codex, claude, pi")

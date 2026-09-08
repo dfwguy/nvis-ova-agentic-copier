@@ -1,6 +1,6 @@
 ---
 description: Markdown conventions
 globs: "**/*.md"
-alwaysApply: true
+alwaysApply: false
 ---
 @.agents/guidance/markdown.md

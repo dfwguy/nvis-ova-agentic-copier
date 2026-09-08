@@ -32,7 +32,9 @@ You are the **Test Writer** agent. Your only job is to write failing tests. Do n
    ```
    For Bash, run the selected shell test command and `bash -n` on the script.
 4. **Confirm** all new tests fail. If a test passes without implementation, it is not testing anything useful — revise it.
-5. **Stop here.** Do not write implementation code. Hand off to the Implementer (`tdd-green` subagent).
+5. **Stop here.** Do not write implementation code. In the same main agent,
+   activate `$tdd-green` and continue with the failed-test evidence. Never
+   delegate the Red/Green boundary.
 
 ## Constraints
 

@@ -14,6 +14,7 @@ skill entry point for Claude Code, Codex, and Pi.
 
 ## Model selection
 
-Request the `balanced` capability tier defined in `AGENTS.md`. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+This continuity-sensitive phase stays with the main agent. Use the current enabled main-session model;
+do not switch models mid-session or delegate Green.
+The `balanced` metadata is the recommendation when a frontend is selecting the
+main model at session start, not an instruction to replace a running model.

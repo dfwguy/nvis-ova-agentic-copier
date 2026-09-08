@@ -15,6 +15,6 @@ workflow. They explain design choices, boundaries, and trade-offs.
 - [Why coding standards exist](coding-standards.md) — Understand the rationale for the generated development conventions.
 
 ### Agent workflow
-- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand the workflow roles, validation sequence, and human gate.
+- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
 - [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand serial polling, checkout locking, and human publication.
 <!-- END GENERATED -->
