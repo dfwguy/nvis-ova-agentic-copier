@@ -114,12 +114,12 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
     assert "entry: shellcheck" in config
 
 
-def test_ci_has_one_runnable_validation_job(
+def test_ci_exposes_each_validation_gate_as_a_parallel_job(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """CI pays runner and dependency setup overhead only once."""
+    """Every required gate has an honest, independently visible status."""
     global_keywords = {
         "after_script",
         "before_script",
@@ -142,21 +142,43 @@ def test_ci_has_one_runnable_validation_job(
             if not key.startswith(".") and key not in global_keywords
         }
 
-        assert job_names == {"validation"}
+        assert job_names == {
+            "kingfisher",
+            "pytest-py311",
+            "pytest-py314",
+            "ruff-check",
+            "ruff-format",
+            "shellcheck",
+            "type-check",
+            "yamllint",
+        }
+        assert configuration["stages"] == ["validate"]
+        common_base = configuration[".base_job"]
+        assert common_base["stage"] == "validate"
+        assert common_base["interruptible"] is True
+        assert common_base["tags"] == ["size/medium"]
+        assert common_base["rules"] == [{"if": "$CI_COMMIT_BRANCH"}]
+        assert configuration[".base_uv"]["extends"] == ".base_job"
+        for job_name in job_names:
+            job = configuration[job_name]
+            inherited = configuration[job["extends"]]
+            while "stage" not in inherited:
+                inherited = configuration[inherited["extends"]]
+            assert job.get("stage", inherited["stage"]) == "validate"
+            assert "needs" not in job
+            assert "dependencies" not in job
+        assert "validation" not in configuration
         assert "size/medium" in ci_config
-        assert (
-            "apt-get install -y --no-install-recommends git jq shellcheck" in ci_config
-        )
-        assert ci_config.count("uv sync --locked --all-groups") == 2
-        assert "bash tests/helpers/run-ci-checks.sh" in ci_config
+        assert "bash tests/helpers/run-ci-checks.sh" not in ci_config
         assert "cache:" not in ci_config
         assert "uv cache prune --ci" not in ci_config
+        assert "tox run" not in ci_config
 
 
 def test_generated_ci_uses_exact_stable_python_versions(
     generated_project: Path,
 ) -> None:
-    """CI selects reproducible stable interpreters without cache overhead."""
+    """Each Python test job selects its own reproducible stable interpreter."""
     configuration = yaml.safe_load((generated_project / ".gitlab-ci.yml").read_text())
     base = configuration[".base_uv"]
 
@@ -165,22 +187,22 @@ def test_generated_ci_uses_exact_stable_python_versions(
         "sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
     )
     assert "variables" not in base
-    before_script = "\n".join(base["before_script"])
-    assert "uv python install 3.14.3 --managed-python" in before_script
-    assert "uv python install 3.14\n" not in before_script
+    py311_setup = "\n".join(configuration["pytest-py311"]["before_script"])
+    py314_setup = "\n".join(configuration["pytest-py314"]["before_script"])
     assert (
         'UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" '
-        "uv sync --locked --all-groups --python 3.11 --no-managed-python"
-        in before_script
+        "uv sync --locked --all-groups --python 3.11 --no-managed-python" in py311_setup
     )
+    assert "uv python install 3.14.3 --managed-python" in py314_setup
+    assert "uv python install 3.14\n" not in py314_setup
     assert (
         'UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" '
-        "uv sync --locked --all-groups --python 3.14.3 --managed-python"
-        in before_script
+        "uv sync --locked --all-groups --python 3.14.3 --managed-python" in py314_setup
     )
     assert ".uv_cache" not in configuration
-    assert "cache" not in configuration["validation"]
-    assert "after_script" not in configuration["validation"]
+    for job_name in ("pytest-py311", "pytest-py314"):
+        assert "cache" not in configuration[job_name]
+        assert "after_script" not in configuration[job_name]
 
 
 def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
@@ -191,7 +213,7 @@ def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
     """CI reaps both concurrent setup operations before dependency sync."""
     for root in (project_root, template_dir, generated_project):
         configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
-        before_script = configuration[".base_uv"]["before_script"]
+        before_script = configuration["pytest-py314"]["before_script"]
         bootstrap = next(
             command
             for command in before_script
@@ -230,7 +252,7 @@ def test_ci_bootstrap_propagates_each_failure_before_sync(
 ) -> None:
     """Either concurrent setup failure prevents dependency synchronization."""
     configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
-    setup_script = "\n".join(configuration[".base_uv"]["before_script"])
+    setup_script = "\n".join(configuration["pytest-py314"]["before_script"])
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     invocations = tmp_path / "invocations.log"
@@ -271,14 +293,11 @@ if [ "$FAIL_APT" = 1 ]; then exit 9; fi""",
     assert "uv python install 3.14.3 --managed-python" in invoked
     assert "apt-get update" in invoked
     assert (
-        "uv sync --locked --all-groups --python 3.11 --no-managed-python" in invoked
-    ) is expected_success
-    assert (
         "uv sync --locked --all-groups --python 3.14.3 --managed-python" in invoked
     ) is expected_success
 
 
-def test_ci_configuration_is_mirrored_and_installs_test_executables(
+def test_ci_configuration_is_mirrored_and_installs_only_test_executables(
     generated_project: Path,
     project_root: Path,
 ) -> None:
@@ -288,171 +307,68 @@ def test_ci_configuration_is_mirrored_and_installs_test_executables(
     generated_ci = (generated_project / ".gitlab-ci.yml").read_text()
 
     assert root_ci == template_ci == generated_ci
-    assert "apt-get install -y --no-install-recommends git jq shellcheck" in root_ci
+    assert root_ci.count("apt-get install -y --no-install-recommends git jq") == 2
+    assert "apt-get install -y --no-install-recommends git jq shellcheck" not in root_ci
 
 
-def test_ci_shellcheck_excludes_generated_environments(
+def test_ci_shellcheck_uses_a_pinned_image_and_excludes_generated_environments(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """The consolidated check helper skips generated tool environments."""
+    """The independent shell gate is reproducible and skips tool environments."""
     for root in (project_root, template_dir, generated_project):
-        helper = (root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
+        configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
+        shellcheck = configuration["shellcheck"]
+        script = "\n".join(shellcheck["script"])
 
-        assert "-not -path './.venv/*'" in helper
-        assert "-not -path './.tox/*'" in helper
-
-
-def test_ci_check_helper_is_mirrored_and_runs_every_gate_without_sync(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """The fixed helper runs all gates after dependency setup completes."""
-    root_helper = (project_root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
-    template_helper = (
-        template_dir / "tests" / "helpers" / "run-ci-checks.sh"
-    ).read_text()
-    generated_helper = (
-        generated_project / "tests" / "helpers" / "run-ci-checks.sh"
-    ).read_text()
-
-    assert root_helper == template_helper == generated_helper
-    for command in (
-        "uv run --no-sync ruff check",
-        "uv run --no-sync ruff format --check",
-        "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
-        "uv run --no-sync yamllint",
-        "uv run --no-sync kingfisher scan",
-        "uv run --no-sync ty check",
-        "shellcheck",
-    ):
-        assert command in root_helper
-    assert "tox run" not in root_helper
-    assert "run_tests()" in root_helper
-    for environment, project_environment in (
-        ("py311", ".venv"),
-        ("py314", "/tmp/ci-venvs/py314"),
-    ):
-        assert f'check_names+=("pytest-{environment}")' in root_helper
-        expected_path = (
-            project_environment
-            if project_environment.startswith("/")
-            else f"$CI_PROJECT_DIR/{project_environment}"
-        )
-        assert f'run_tests {environment} "{expected_path}"' in root_helper
-    for report_contract in (
-        'COVERAGE_FILE=".coverage.${environment}"',
-        "coverage-${environment}.xml",
-        "test-results-${environment}.xml",
-        "junit_suite_name=${environment}",
-        "cache_dir=.cache/pytest/${environment}",
-    ):
-        assert report_contract in root_helper
-    assert "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest" in root_helper
-    assert "--cov-fail-under=85" in root_helper
-    assert re.search(r"(?:^|\s)--cov(?:\s|\\|$)", root_helper)
-
-    last_start = root_helper.rindex('check_pids+=("$!")')
-    first_wait = root_helper.index("wait ")
-    assert last_start < first_wait
-    assert "eval " not in root_helper
-    assert "CI check summary" in root_helper
-    assert "PASS" in root_helper
-    assert "FAIL" in root_helper
+        assert shellcheck["image"] == {
+            "name": (
+                "docker.io/koalaman/shellcheck-alpine:v0.11.0@"
+                "sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002"
+            ),
+            "entrypoint": [""],
+        }
+        assert "-not -path './.venv/*'" in script
+        assert "-not -path './.tox/*'" in script
+        assert "shellcheck" in script
 
 
-@pytest.mark.parametrize(
-    ("failed_command", "failed_check"),
-    (
-        (None, None),
-        ("ruff check", "ruff-check"),
-        ("ruff format", "ruff-format"),
-        ("pytest-py311", "pytest-py311"),
-        ("pytest-py314", "pytest-py314"),
-        ("yamllint", "yamllint"),
-        ("kingfisher scan", "kingfisher"),
-        ("ty check", "type-check"),
-        ("shellcheck", "shellcheck"),
-    ),
-)
-def test_ci_check_helper_waits_for_every_gate_and_keeps_artifacts(
+@pytest.mark.parametrize("shellcheck_fails", (False, True))
+def test_ci_shellcheck_job_propagates_scan_failures(
     project_root: Path,
     tmp_path: Path,
-    failed_command: str | None,
-    failed_check: str | None,
+    *,
+    shellcheck_fails: bool,
 ) -> None:
-    """A failed parallel gate does not hide results from the other gates."""
-    helper_source = project_root / "tests" / "helpers" / "run-ci-checks.sh"
-    helper = tmp_path / "tests" / "helpers" / "run-ci-checks.sh"
-    helper.parent.mkdir(parents=True)
-    shutil.copy(helper_source, helper)
-    (tmp_path / "check.sh").write_text("#!/bin/sh\n")
-
+    """A ShellCheck violation makes its independently visible job fail."""
+    configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
+    scan_script = next(
+        command
+        for command in configuration["shellcheck"]["script"]
+        if "find ." in command
+    )
+    checked_file = tmp_path / "check.sh"
+    checked_file.write_text("#!/usr/bin/env bash\nprintf 'checked\\n'\n")
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
-    _write_command(
-        fake_bin / "uv",
-        r"""printf 'env=%s command=%s\n' "${UV_PROJECT_ENVIRONMENT:-}" "$*" >> "$INVOCATIONS"
-command_status=0
-if [ -n "${FAIL_MATCH:-}" ]; then
-    case "$*" in
-        *"$FAIL_MATCH"*) command_status=7 ;;
-    esac
-fi
-if [ "${FAIL_MATCH:-}" = pytest-py311 ] \
-    && [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
-    case "$*" in *pytest*) command_status=7 ;; esac
-fi
-if [ "${FAIL_MATCH:-}" = pytest-py314 ] \
-    && [ "${UV_PROJECT_ENVIRONMENT:-}" = /tmp/ci-venvs/py314 ]; then
-    case "$*" in *pytest*) command_status=7 ;; esac
-fi
-case "$*" in
-    *"ruff check"*) printf '[]\n' ;;
-    *"ruff format"*) printf 'format diff\n' ;;
-    *"pytest"*)
-        if [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
-            : > test-results-py311.xml
-            : > coverage-py311.xml
-        else
-            : > test-results-py314.xml
-            : > coverage-py314.xml
-        fi
-        ;;
-    *"python tests/helpers/yamllint_to_json.py"*)
-        cat >/dev/null
-        printf '[]\n'
-        ;;
-    *"yamllint"*) printf '%s\n' 'sample.yml:1:1: [warning] sample (rule)' ;;
-esac
-exit "$command_status"
-""",
-    )
+    invocations = tmp_path / "invocations.log"
     _write_command(
         fake_bin / "shellcheck",
         """printf 'shellcheck %s\\n' "$*" >> "$INVOCATIONS"
-if [ "${FAIL_MATCH:-}" = shellcheck ] && [ "$*" = ./check.sh ]; then exit 7; fi""",
+if [ "$FAIL_SHELLCHECK" = 1 ] && [ "$1" = ./check.sh ]; then exit 7; fi""",
     )
-    _write_command(
-        fake_bin / "jq",
-        """printf 'jq %s\\n' "$*" >> "$INVOCATIONS"
-printf '[]\\n' """,
-    )
-    invocations = tmp_path / "invocations.log"
     environment = os.environ.copy()
     environment.update(
         {
-            "FAIL_MATCH": failed_command or "",
-            "CI_PROJECT_DIR": str(tmp_path),
+            "FAIL_SHELLCHECK": str(int(shellcheck_fails)),
             "INVOCATIONS": str(invocations),
             "PATH": f"{fake_bin}:{environment['PATH']}",
         }
     )
 
     result = subprocess.run(
-        ["bash", str(helper)],
+        ["sh", "-c", scan_script],
         check=False,
         capture_output=True,
         cwd=tmp_path,
@@ -460,52 +376,46 @@ printf '[]\\n' """,
         text=True,
     )
 
-    assert result.returncode == (1 if failed_command else 0)
-    assert "CI check summary" in result.stdout
-    for check_name in (
-        "ruff-check",
-        "ruff-format",
-        "pytest-py311",
-        "pytest-py314",
-        "yamllint",
-        "kingfisher",
-        "type-check",
-        "shellcheck",
-    ):
-        assert check_name in result.stdout
-    if failed_check is None:
-        assert result.stdout.count("PASS ") == 8
-        assert "FAIL " not in result.stdout
-    else:
-        assert result.stdout.count("PASS ") == 7
-        assert result.stdout.count("FAIL ") == 1
-        assert f"FAIL {failed_check}" in result.stdout
-    invoked = invocations.read_text()
-    for expected in (
-        "ruff check",
-        "ruff format",
-        "env="
-        + str(tmp_path / ".venv")
-        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
-        "env="
-        + "/tmp/ci-venvs/py314"
-        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
-        "yamllint",
-        "kingfisher scan",
-        "ty check",
-        "shellcheck ./check.sh",
-        "jq -s add",
-    ):
-        assert expected in invoked
-    assert json.loads((tmp_path / "code-quality-report.json").read_text()) == []
-    assert (tmp_path / "format-changes.diff").read_text() == "format diff\n"
-    for report in (
-        "test-results-py311.xml",
-        "test-results-py314.xml",
-        "coverage-py311.xml",
-        "coverage-py314.xml",
-    ):
-        assert (tmp_path / report).exists()
+    assert (result.returncode != 0) is shellcheck_fails
+    assert "shellcheck ./check.sh" in invocations.read_text()
+
+
+def test_ci_jobs_run_each_gate_without_implicit_sync(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Each visible job owns one gate after a locked environment sync."""
+    expected_commands = {
+        "ruff-check": "uv run --no-sync ruff check",
+        "ruff-format": "uv run --no-sync ruff format --check",
+        "pytest-py311": "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "pytest-py314": "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "yamllint": "uv run --no-sync yamllint",
+        "kingfisher": "uv run --no-sync kingfisher scan",
+        "type-check": "uv run --no-sync ty check",
+        "shellcheck": "shellcheck",
+    }
+    for root in (project_root, template_dir, generated_project):
+        configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
+        for job_name, command in expected_commands.items():
+            assert command in "\n".join(configuration[job_name]["script"])
+        static_setup = "\n".join(configuration[".base_py311"]["before_script"])
+        assert (
+            "uv sync --locked --all-groups --python 3.11 --no-managed-python"
+            in static_setup
+        )
+        assert "tox run" not in str(configuration)
+
+
+def test_ci_fanout_helper_is_removed(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Independent GitLab jobs replace the opaque in-job fan-out helper."""
+    for root in (project_root, template_dir, generated_project):
+        assert not (root / "tests" / "helpers" / "run-ci-checks.sh").exists()
 
 
 def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
@@ -557,45 +467,43 @@ def test_parallel_tox_environments_use_distinct_report_paths(
             assert path in template_config
 
 
-def test_ci_publishes_reports_from_the_parallel_validation_helper(
+def test_ci_jobs_publish_independent_reports(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """CI shortens its longest job without losing per-version test evidence."""
+    """Visible jobs own their reports without a private aggregation layer."""
     for root in (project_root, template_dir, generated_project):
         ci_config = (root / ".gitlab-ci.yml").read_text()
-        validation_job = re.search(
-            r"^validation:\n(?P<body>(?:^[ \t].*\n?)*)",
-            ci_config,
-            flags=re.MULTILINE,
-        )
+        configuration = yaml.safe_load(ci_config)
+        for environment in ("py311", "py314"):
+            job = configuration[f"pytest-{environment}"]
+            script = "\n".join(job["script"])
+            reports = job["artifacts"]["reports"]
 
-        assert validation_job is not None
-        body = validation_job.group("body")
-        artifacts = re.search(
-            r"^  artifacts:\n(?P<body>(?:^ {4,}.*\n?)*)",
-            body,
-            flags=re.MULTILINE,
-        )
+            assert reports["junit"] == f"test-results-{environment}.xml"
+            assert reports["coverage_report"] == {
+                "coverage_format": "cobertura",
+                "path": f"coverage-{environment}.xml",
+            }
+            assert f'COVERAGE_FILE=".coverage.{environment}"' in script
+            assert f"--junitxml=test-results-{environment}.xml" in script
+            assert f"junit_suite_name={environment}" in script
+            assert f"cache_dir=.cache/pytest/{environment}" in script
+            assert job["artifacts"]["when"] == "always"
 
-        assert artifacts is not None
-        artifact_body = artifacts.group("body")
-        assert "bash tests/helpers/run-ci-checks.sh" in body
-        assert re.search(
-            r"reports:\n"
-            r" {6}junit:\n"
-            r" {8}- test-results-py311\.xml\n"
-            r" {8}- test-results-py314\.xml\n"
-            r" {6}coverage_report:\n"
-            r" {8}coverage_format: cobertura\n"
-            r" {8}path: coverage-py314\.xml",
-            artifact_body,
-        )
-        assert "codequality: code-quality-report.json" in artifact_body
-        assert "- ci-logs/" in artifact_body
-        assert "- format-changes.diff" in artifact_body
-        assert "htmlcov" not in artifact_body
+        assert configuration["ruff-check"]["artifacts"]["reports"] == {
+            "codequality": "ruff-code-quality-report.json"
+        }
+        assert configuration["yamllint"]["artifacts"]["reports"] == {
+            "codequality": "yamllint-code-quality-report.json"
+        }
+        assert configuration["ruff-format"]["artifacts"]["paths"] == [
+            "format-changes.diff"
+        ]
+        assert "jq -s" not in ci_config
+        assert "ci-logs/" not in ci_config
+        assert "htmlcov" not in ci_config
 
 
 def test_parallel_test_artifacts_are_ignored_everywhere(
@@ -605,14 +513,14 @@ def test_parallel_test_artifacts_are_ignored_everywhere(
 ) -> None:
     """Environment-specific reports stay out of source control."""
     for root in (project_root, template_dir, generated_project):
-        ignore = (root / ".gitignore").read_text()
+        ignore_lines = set((root / ".gitignore").read_text().splitlines())
 
-        assert "coverage-*.xml" in ignore
-        assert "test-results-*.xml" in ignore
-        assert "ci-logs/" in ignore
-        assert "format-changes.diff" in ignore
-        assert "code-quality-report.json" in ignore
-        assert "*-code-quality-report.json" in ignore
+        assert "coverage-*.xml" in ignore_lines
+        assert "test-results-*.xml" in ignore_lines
+        assert "ci-logs/" not in ignore_lines
+        assert "format-changes.diff" in ignore_lines
+        assert "code-quality-report.json" not in ignore_lines
+        assert "*-code-quality-report.json" in ignore_lines
 
 
 def test_generated_dev_environment_includes_local_tox_matrix(

@@ -99,9 +99,7 @@ cython_debug/
 galactus_backup.txt
 
 yamllint-report.json
-ci-logs/
 format-changes.diff
-code-quality-report.json
 *-code-quality-report.json
 test-results.xml
 test-results-*.xml
