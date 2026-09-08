@@ -31,11 +31,13 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-each check is a separately visible job: `ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and
-`shellcheck`. The two pytest jobs use separate locked Python 3.11 and 3.14.3
-environments. Their logs, JUnit reports, coverage reports, and caches remain
-independently identifiable.
+the physical `validation (8 gates)` job performs shared setup once, then runs
+these gates concurrently: `ruff-check`, `ruff-format`, `pytest-py311`,
+`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and `shellcheck`. The
+merge request Test summary and pipeline Tests tab show their named results in a
+`CI gates` JUnit suite. The two pytest gates also retain separate Python 3.11
+and 3.14.3 JUnit suites, logs, coverage reports, and caches. Use the
+collapsible per-gate log sections and artifacts to inspect an individual gate.
 
 If the change adds or modifies a Bash script, validate that script directly:
 
@@ -44,7 +46,7 @@ bash -n path/to/script.sh
 shellcheck path/to/script.sh
 ```
 
-The `shellcheck` job automatically ignores `.git`, `.cache`,
+The ShellCheck gate automatically ignores `.git`, `.cache`,
 `.venv`, `.tox`, `.pytest_cache`, and `.ruff_cache`, because they contain
 generated or tool-managed files rather than maintained source. Do not silence
 findings in tracked scripts; fix the script or make a documented standards

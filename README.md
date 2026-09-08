@@ -96,10 +96,11 @@ flowchart TD
 After publication, one Pipeline Performance Judge invocation exclusively owns
 live GitLab CI observation and its feedback issues. Findings Triage
 independently handles the prepublication judges' Minor findings. Other workflow
-roles do not inspect or interpret live CI. CI exposes eight parallel-eligible
-jobs: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
-`kingfisher`, `type-check`, and `shellcheck`; the two pytest jobs report
-Python 3.11 and 3.14.3 results separately.
+roles do not inspect or interpret live CI. One `validation (8 gates)` job runs
+shared setup once and eight gates concurrently. GitLab shows their named `CI
+gates` JUnit results in its Test summary and Tests tab, rather than as native
+job checkboxes. Python 3.11 and 3.14.3 retain separate suites, logs, and
+coverage; inspect individual gates through collapsible logs and artifacts.
 
 ### Merge requests are the source of truth
 
