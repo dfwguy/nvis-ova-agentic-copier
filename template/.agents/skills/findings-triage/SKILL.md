@@ -7,8 +7,9 @@ metadata:
 
 # Findings Triage
 
-Use this portable workflow skill after judges report their findings. Read and
-follow [the role instructions](../../agents/findings-triage.md) before acting.
+Use this portable workflow skill only after a terminal non-Reject Phase 9
+receipt. If pipeline review is nonterminal or Reject, defer instead of filing.
+Read and follow [the role instructions](../../agents/findings-triage.md) before acting.
 That file is a compatibility reference for Claude Code; this directory is the
 shared skill entry point for Codex, Pi, and Claude Code.
 

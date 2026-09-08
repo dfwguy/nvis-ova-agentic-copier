@@ -1316,6 +1316,106 @@ def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
         assert "Pipeline Performance Judge" in git_flow
 
 
+def test_pipeline_review_uses_a_bounded_interruptible_wait_until_terminal(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """A first pending observation keeps the active review open within a budget."""
+    for root in (project_root, template_dir, generated_project):
+        agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
+        workflow = (root / "AGENTS.md").read_text()
+
+        for requirement in (
+            "15-minute default deadline",
+            "30-second interval",
+            "intermediate progress observation",
+            "at least once every 60 seconds",
+            "interruptible wait",
+            "final snapshot",
+        ):
+            assert requirement in git_flow
+
+        assert "main agent owns the wait" in git_flow
+        assert "judge never waits or sleeps" in agent
+        assert "Pending observations are not Phase 9 receipts" in agent
+        assert "wait deadline reached" in agent
+        assert "terminal non-Reject Phase 9 receipt" in workflow
+        assert "while true" not in git_flow.lower()
+        assert "sleep 30" not in git_flow.lower()
+
+
+def test_pipeline_snapshot_classifies_statuses_and_uses_exact_source_sha(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Every snapshot selects the MR pipeline by exact source SHA and raw status."""
+    for root in (project_root, template_dir, generated_project):
+        agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+
+        for status in (
+            "created",
+            "waiting_for_resource",
+            "preparing",
+            "pending",
+            "running",
+            "success",
+            "failed",
+            "canceled",
+            "skipped",
+            "manual",
+            "scheduled",
+            "unknown status",
+        ):
+            assert f"`{status}`" in agent
+
+        for endpoint in (
+            "merge_requests/<iid>",
+            "merge_requests/<iid>/pipelines?per_page=100",
+            "pipelines/<pipeline-id>",
+            "pipelines/<pipeline-id>/jobs?include_retried=true&per_page=100",
+            "jobs/<job-id>/trace",
+        ):
+            assert endpoint in agent
+
+        assert (
+            "newest pipeline whose SHA exactly matches the expected source SHA" in agent
+        )
+        assert "Never substitute the newest `main` pipeline" in agent
+
+
+def test_pipeline_timeout_defers_findings_triage_and_remains_resumable(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """A bounded timeout has an explicit continuation and cannot trigger triage."""
+    for root in (project_root, template_dir, generated_project):
+        pipeline_agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+        triage_agent = (root / ".agents" / "agents" / "findings-triage.md").read_text()
+        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
+
+        assert "Reconciliation: nonterminal" in pipeline_agent
+        assert "Later action: rerun Phase 9" in pipeline_agent
+        assert "no separate merge request" in git_flow
+        assert "terminal non-Reject Phase 9 receipt" in triage_agent
+        assert (
+            "$findings-triage: deferred — Phase 9 has no terminal pipeline receipt"
+            in triage_agent
+        )
+        assert "deadline" in triage_agent
+        assert "stale source" in triage_agent
+        assert "API failure" in triage_agent
+
+
 def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
     generated_project: Path,
     project_root: Path,

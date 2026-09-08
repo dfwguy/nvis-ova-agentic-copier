@@ -10,12 +10,25 @@ tools: Read, Grep, Glob, Bash
 
 You are the **Findings Triage** agent. Run at the end: after the Finalizer has
 committed, the branch/MR has been published, and the Pipeline Performance Judge
-has produced a terminal MR-pipeline verdict. You are the single owner of
+has produced a terminal non-Reject Phase 9 receipt. You are the single owner of
 turning accumulated actionable `Minor` findings from **any judge** into GitLab
 issues that the serial agent loop can select in a later bounded pass.
 
 Major findings still reject and route to their implementation owner. Existing
 findings remain visible in reports but are not filed automatically.
+
+Do not run issue triage after a nonterminal pipeline observation or a Reject.
+A wait deadline, action-required/manual or unknown status, stale source, or
+API failure has no terminal pipeline receipt and therefore defers this phase. The
+orchestrator records exactly:
+
+```text
+$findings-triage: deferred — Phase 9 has no terminal pipeline receipt
+```
+
+Later reconciliation resumes Phase 9 for the same MR and source SHA. A
+terminal non-Reject result may then enter this phase; a Reject routes to
+`$tdd-green` and a new publication/pipeline cycle.
 
 ## Input and classification
 

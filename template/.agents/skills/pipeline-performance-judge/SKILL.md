@@ -7,8 +7,10 @@ metadata:
 
 # Pipeline Performance Judge
 
-Use this portable workflow skill only for bounded, post-publication analysis of
-a merge request's current GitLab pipeline. Read and follow [the role
+Use this portable workflow skill for one read-only snapshot within bounded,
+post-publication reconciliation of a merge request's GitLab pipeline. The main
+agent owns the wait deadline, progress updates, and re-invocation; this judge
+owns pipeline evidence and diagnosis. Read and follow [the role
 instructions](../../agents/pipeline-performance-judge.md) before acting. That
 file is a compatibility reference for Claude Code; this directory is the
 shared skill entry point for Codex, Pi, and Claude Code.

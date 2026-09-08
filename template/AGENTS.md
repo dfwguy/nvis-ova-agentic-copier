@@ -91,9 +91,9 @@ the named phase and invalidate its downstream receipts.
 | 6e `$cli-syntax-judge` | CLI surface or contract changed | Delegated | Fast / `gpt-5.6-luna` `low` | Phase 5 approvals or N/A reason | CLI verdict or N/A receipt; reject → `$architect` then `$tdd-green` |
 | 6f `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated | Fast / `gpt-5.6-luna` `low` | Phase 5 approvals or N/A reason | Layout verdict or N/A receipt; reject → `$architect` then `$tdd-green` |
 | 7 `$tdd-finalizer` | Required | Delegated | Fast / `gpt-5.6-luna` `low` | Every required receipt and scoped N/A | Final validation receipt; reject → named owning phase |
-| 8 `$git-flow` | Required after approval | Main; never delegate | Current enabled | Finalizer approval | Commit, push, verified MR URL and branch tip; publication failure is a blocker |
-| 9 `$pipeline-performance-judge` | Required after publication | Delegated | Balanced / `gpt-5.6-terra` `medium` | Verified MR | Terminal analysis or `needs verification`; CI finding → `$tdd-green` |
-| 10 `$findings-triage` | Required after terminal pipeline review | Delegated | Balanced / `gpt-5.6-terra` `medium` | All Minor findings | Deduplicated issue URLs or no-findings receipt; failure remains explicit |
+| 8 `$git-flow` | Required after approval | Main; never delegate | Current enabled | Finalizer approval | Commit, push, verified MR URL/tip, and initial pipeline state; pending is intermediate |
+| 9 `$pipeline-performance-judge` | Required after publication | Main wait; delegated snapshots | Balanced / `gpt-5.6-terra` `medium` | Verified MR and source SHA | Terminal review or bounded resumable timeout; CI finding → `$tdd-green` |
+| 10 `$findings-triage` | Required after terminal pipeline review | Delegated | Balanced / `gpt-5.6-terra` `medium` | terminal non-Reject Phase 9 receipt plus all Minor findings | Deduplicated issue URLs or no-findings receipt; failure remains explicit |
 
 ## GitLab publication
 

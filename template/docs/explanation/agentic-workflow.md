@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-08
 related:
   - path: serial-gitlab-agent-loop.md
     why: Describes the issue workflow that uses these roles.
@@ -78,8 +78,15 @@ flowchart TD
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
-    mr --> performance[Pipeline Performance Judge]
-    performance --> triage[Findings Triage]
+    mr --> pending[Report pending pipeline progress]
+    pending --> wait[Main-owned bounded wait]
+    wait --> performance[Pipeline Performance Judge snapshots]
+    performance --> verdict{Pipeline review result}
+    verdict -->|terminal non-Reject| triage[Findings Triage]
+    verdict -->|Reject| remediate[Remediate and republish]
+    remediate --> mr
+    verdict -->|nonterminal| resume[Resumable MR handoff]
+    resume -. later explicit continuation .-> pending
     triage --> human[Human approval and merge]
 ```
 
@@ -115,10 +122,35 @@ The Pipeline Performance Judge is deliberately post-publication: it examines
 the current merge request's pipeline only after GitLab has produced job timing
 and status evidence. It verifies the branch tip, separates runner queue time
 from bootstrap, execution, cache, and artifact work, and inspects traces only
-as needed for a failed or unexplained slow job. It does not busy-poll a running
-pipeline, edit CI, retry work, approve, or merge. A later bounded
-reconciliation supplies `needs verification` when the pipeline is not yet
-terminal.
+as needed for a failed or unexplained slow job. It does not edit CI, retry
+work, approve, or merge.
+
+## Pending pipelines have a bounded review path
+
+Publication first reports a pipeline that is pending or running as progress;
+that status is deliberately not a phase receipt. The main agent then owns an
+interruptible, bounded wait on the already-published merge request: it checks
+at a 30-second cadence, reports progress at least every 60 seconds, and waits
+for up to 15 minutes by default. This is a wait for CI evidence, not a new
+review workflow and not a reason to open a separate merge request.
+
+At each observation, the same Pipeline Performance Judge records its normal
+pipeline snapshot against the verified merge-request source tip. A terminal
+non-Reject analysis is the required receipt before Findings Triage may run. A
+Reject routes to remediation and republication; a pending observation alone
+cannot satisfy either phase.
+
+The wait remains responsive to an interrupt. If its time bound expires, or
+GitLab requires an action that the workflow is not authorized to take, the
+handoff records `needs verification` with the merge request, source tip, and
+latest pipeline state. A later explicit continuation re-verifies that same
+open merge request and resumes observation; it does not create another merge
+request merely to wait for CI.
+
+Human approval and merging are separate from this CI wait. Even after a
+terminal pipeline receipt and Findings Triage, the merge request remains open
+for a human to approve and merge; agents never wait for, provide, or perform
+that approval.
 
 Findings Triage runs last, after the Finalizer, publication, and terminal
 pipeline review. It receives accumulated Minor records from every judge,

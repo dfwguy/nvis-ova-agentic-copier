@@ -264,11 +264,37 @@ edits or a local commit complete.
 
 4. **Report** to the user: the `web_url` from the API response (or the existing-MR lookup), the current local commit hash, and a one-line summary. Because the MR uses `squash=true`, GitLab collapses the branch into a **single new commit on `main` with a different hash** when it merges — so the hash you report now is the local branch tip, *not* the SHA that will land. Do not present it as the final merged hash; the canonical post-merge SHA is available only after later reconciliation.
 
-## Step 4: Hand off without waiting for merge
+## Step 4: Reconcile the pipeline, then hand off without waiting for merge
 
-After Step 3, report the result as `awaiting_human` and end the active run. AI must never approve or merge the MR itself, so human review and merge still
-determine whether the change lands.
-They do not prevent another unrelated work item from starting.
+After Step 3, capture the MR IID and URL, source branch, and exact source SHA.
+The first pipeline state may be reported as pending, but that is an
+intermediate progress observation, not the Phase 9 receipt and not the end of
+the active run. The main agent owns the wait; the Pipeline Performance Judge
+owns each read-only snapshot and the terminal diagnosis.
+
+Use an absolute 15-minute default deadline and a 30-second interval. A user may
+choose a different finite deadline before Phase 9 begins. The deadline never
+resets between snapshots. After each judge snapshot, report every status
+change and otherwise report progress at least once every 60 seconds. Then use
+the frontend's native interruptible wait or yield for the next interval and
+invoke the same judge again with the captured identity, elapsed time, remaining
+time, and absolute deadline. If no native wait exists, use one cancellable
+delay of no more than 30 seconds; never implement a shell polling loop or use a
+shell `sleep`. User steering interrupts the wait immediately.
+
+When the deadline expires, request one final snapshot. A terminal non-Reject
+receipt permits Findings Triage. A Reject routes back to remediation and a new
+publication/pipeline cycle. A final waiting state, action-required state,
+stale source, or API failure produces a resumable nonterminal `needs
+verification` receipt and defers Findings Triage. Later reconciliation reruns
+Phase 9 for the same MR and source SHA. It creates no separate merge request
+merely to observe CI; fixes update the still-open MR, while a repair discovered
+only after merge follows the normal new-change lifecycle.
+
+After terminal review or the bounded nonterminal handoff,
+report the result as `awaiting_human` and end the active run. AI must never approve or merge the MR itself, so human review
+and merge still determine whether the change lands. They do not prevent
+another unrelated work item from starting.
 
 1. **Release the active checkout at the correct session boundary.** A serial-runner worker on an
    `agent/issue-<IID>` branch ends immediately after returning its merge-request
@@ -294,27 +320,22 @@ They do not prevent another unrelated work item from starting.
    there is a same-branch conflict, declared dependency, or concrete resource
    conflict.
 
-3. **Reconcile later without busy-polling.** When the user asks for status, or
-   a bounded reconciliation job revisits the item, query its branch-specific
-   MR and then the latest default-branch pipeline if it merged:
+3. **Resume deferred reconciliation by exact MR source SHA.** When a previous
+   bounded wait ended nonterminal, the user asks for status, or a bounded
+   reconciliation job revisits the item, query its captured MR and source SHA:
    ```bash
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=<feature-branch>"
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=1"
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests/<iid>"
+   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests/<iid>/pipelines?per_page=100"
    ```
-   An open MR remains `awaiting_human`. A merged MR is not declared fully
-   landed until the latest `main` pipeline passes. A failed post-merge pipeline
-   is reported for remediation, but it does not block unrelated work.
+   Never replace the source-SHA pipeline with the newest `main` pipeline, even
+   if a human merged the MR during the wait. Resume the bounded process above;
+   do not reset its deadline during one Phase 9 run.
 
-   For a reported CI failure or performance concern, invoke the Pipeline Performance Judge
-   during this bounded reconciliation. It inspects the current MR pipeline (not only the latest `main` pipeline), separates runner
-   queue time from bootstrap, execution, cache, and artifact time, and checks
-   the current branch tip before reporting evidence. A pending or running
-   pipeline is `needs verification` for a later reconciliation; never poll it,
-   retry it, or delay the human handoff.
-
-   Once that MR pipeline is terminal, invoke Findings Triage as the final
-   post-publication step. It consumes accumulated Minor findings from every
-   judge, including the pipeline review, and creates deduplicated Bug issues.
+   Once that exact MR pipeline is terminal and non-Reject, invoke Findings
+   Triage as the final post-publication step. It consumes accumulated Minor
+   findings from every judge, including the pipeline review, and creates
+   deduplicated Bug issues. If Phase 9 instead stops nonterminal, record
+   `$findings-triage: deferred — Phase 9 has no terminal pipeline receipt`.
    Those issues are eligible input for a later serial-loop pass; the current
    MR remains `awaiting_human` and the triage step never edits, pushes, or
    waits.

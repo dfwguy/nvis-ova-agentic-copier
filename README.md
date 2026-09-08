@@ -87,10 +87,23 @@ flowchart TD
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
-    mr --> performance[Pipeline Performance Judge]
-    performance --> triage[Findings Triage]
+    mr --> pending[Report pending pipeline progress]
+    pending --> wait[Main-owned bounded CI wait]
+    wait --> performance[Pipeline Performance Judge snapshots]
+    performance --> verdict{Pipeline review result}
+    verdict -->|terminal non-Reject| triage[Findings Triage]
+    verdict -->|Reject| remediate[Remediate and republish]
+    remediate --> mr
+    verdict -->|nonterminal| resume[Resumable MR handoff]
+    resume -. later explicit continuation .-> pending
     triage --> human[Human approval and merge]
 ```
+
+Pipeline progress is an intermediate update: the main agent waits for CI for a
+bounded period, while the Pipeline Performance Judge supplies snapshots. A
+terminal non-Reject receipt permits triage, a Reject returns to remediation,
+and a timeout or required manual action remains resumable on the same merge
+request. Waiting for CI does not create another merge request.
 
 ### Merge requests are the source of truth
 
