@@ -36,10 +36,11 @@ bash -n path/to/script.sh
 shellcheck path/to/script.sh
 ```
 
-The pipeline's ShellCheck job automatically ignores `.git`, `.venv`, and
-`.tox`, because they contain generated files rather than maintained source.
-Do not silence findings in tracked scripts; fix the script or make a
-documented standards change instead.
+The validation job's ShellCheck gate automatically ignores `.git`, `.cache`,
+`.venv`, `.tox`, `.pytest_cache`, and `.ruff_cache`, because they contain
+generated or tool-managed files rather than maintained source. Do not silence
+findings in tracked scripts; fix the script or make a documented standards
+change instead.
 
 For the exact generated-project contract, see the
 [template reference](../reference/template-contract.md). For the distinction

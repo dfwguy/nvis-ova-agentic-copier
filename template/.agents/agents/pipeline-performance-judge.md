@@ -33,6 +33,35 @@ merge during observation, but the captured source-SHA evidence remains the
 target. In Copier repositories, compare relevant root and `template/`
 CI/tooling files when diagnosing a configuration defect.
 
+## Project-owned execution budget
+
+Read the `Pipeline Performance Budget` section in the repository root
+`.agents/project.md` before interpreting a terminal pipeline. It owns these
+fields:
+
+- `pipeline_execution_preferred_seconds`
+- `pipeline_execution_hard_limit_seconds`
+
+Both values must be present, finite numeric values (not strings, `null`,
+`NaN`, infinities, or booleans) and greater than zero. The preferred budget
+must be less than or equal to the hard limit. Missing or invalid configuration
+is `needs verification`; never substitute a hidden default.
+
+Apply the budget to the GitLab pipeline `duration` field. Runner queue time is excluded
+from both thresholds and remains a separate diagnostic:
+
+- When duration is less than or equal to the preferred budget, report
+  `Preferred target: met` and `Hard limit: passed`.
+- When duration is greater than the preferred budget and less than or equal to
+  the hard limit, report `Preferred target: missed` and `Hard limit: passed`.
+- When duration is greater than the hard limit, report `Preferred target:
+  missed` and `Hard limit: exceeded`. This is a current-change defect even
+  when GitLab reports success: use `Direct feedback: Reject → $tdd-green; no
+  issue required`.
+
+If GitLab `duration` is unavailable, the budget result and pipeline health are
+`needs verification`.
+
 Use these numeric-project endpoints:
 
 ```text
@@ -86,6 +115,8 @@ portion for a failed or unexplained slow job, and never reproduce secrets.
 - **GitLab duration** and **GitLab queued duration:** report GitLab's fields
   separately as diagnostics. Never add job `queued_duration` values or job
   durations and call the sum elapsed because jobs can overlap.
+- **Execution budget:** report the configured preferred and hard values,
+  whether each threshold was met, and the queue-free `duration` used.
 - **Attribution:** distinguish runner queue/capacity from image/bootstrap,
   dependency installation, tests/checks, cache, and artifact work.
 - **Optimization assessment:** always choose `improvement available`, `no
@@ -158,6 +189,9 @@ Timestamp interval: <created_at> → <finished_at>
 Formula: finished_at - created_at
 GitLab duration: <seconds or unavailable>
 GitLab queued duration: <seconds or unavailable>
+Execution budget: preferred <seconds>, hard <seconds>, queue excluded
+Preferred target: met | missed | needs verification
+Hard limit: passed | exceeded | needs verification
 Optimization assessment: improvement available | no evidenced improvement | needs verification
 Dominant evidence: <job, queue, bootstrap, cache, or artifact evidence>
 Baseline comparison: <pipeline ID, signed seconds and percentage, or unavailable>
@@ -165,10 +199,11 @@ Feedback: Direct feedback: Reject → `$tdd-green`; no issue required | created 
 Limitations and next action: <explicit>
 ```
 
-`success` is `Pass` unless repository-actionable evidence requires a Minor
-feedback issue. A current-change `failed` result or root/template contract
-mismatch is `Reject`. Unrelated infrastructure failure, `canceled`, or
-`skipped` is terminal `needs verification`.
+`success` is `Pass` only when the hard limit passes, unless other
+repository-actionable evidence requires a Minor feedback issue. A hard-limit
+exceedance, current-change `failed` result, or root/template contract mismatch
+is `Reject`. Unrelated infrastructure failure, `canceled`, or `skipped` is
+terminal `needs verification`.
 
 For a bounded stop, return:
 

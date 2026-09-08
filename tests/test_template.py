@@ -114,31 +114,43 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
     assert "entry: shellcheck" in config
 
 
-def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
-    """Test that generated projects scan committed content for secrets in CI."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+def test_ci_has_one_runnable_validation_job(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """CI pays runner and dependency setup overhead only once."""
+    global_keywords = {
+        "after_script",
+        "before_script",
+        "cache",
+        "default",
+        "image",
+        "include",
+        "services",
+        "stages",
+        "types",
+        "variables",
+        "workflow",
+    }
+    for root in (project_root, template_dir, generated_project):
+        ci_config = (root / ".gitlab-ci.yml").read_text()
+        configuration = yaml.safe_load(ci_config)
+        job_names = {
+            key
+            for key in configuration
+            if not key.startswith(".") and key not in global_keywords
+        }
 
-    assert "kingfisher:" in ci_config
-    assert "--git-history none" in ci_config
-    assert "--no-validate" in ci_config
-    assert "--exclude .git" in ci_config
-    assert "--exclude .cache" in ci_config
-
-
-def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
-    """Test that generated projects lint Bash and shell-script shebangs in CI."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
-
-    assert "shellcheck:" in ci_config
-    shellcheck_job = re.search(
-        r"^shellcheck:\n(?P<body>(?:^[ \t].*\n?)*)",
-        ci_config,
-        flags=re.MULTILINE,
-    )
-
-    assert shellcheck_job is not None
-    assert "koalaman/shellcheck-alpine:stable" in shellcheck_job.group("body")
-    assert "apt-get" not in shellcheck_job.group("body")
+        assert job_names == {"validation"}
+        assert "size/medium" in ci_config
+        assert (
+            "apt-get install -y --no-install-recommends git jq shellcheck" in ci_config
+        )
+        assert "uv sync --locked --all-groups" in ci_config
+        assert "bash tests/helpers/run-ci-checks.sh" in ci_config
+        assert "policy: pull-push" in ci_config
+        assert "uv cache prune --ci" in ci_config
 
 
 def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> None:
@@ -151,27 +163,17 @@ def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> 
     assert "uv cache prune --ci" in ci_config
 
 
-def test_pytest_ci_installs_jq_for_executable_preflight_tests(
+def test_ci_configuration_is_mirrored_and_installs_test_executables(
     generated_project: Path,
     project_root: Path,
 ) -> None:
-    """Root and generated pytest jobs provide the jq executable tests require."""
-    for ci_path in (
-        project_root / ".gitlab-ci.yml",
-        project_root / "template" / ".gitlab-ci.yml",
-        generated_project / ".gitlab-ci.yml",
-    ):
-        ci_config = ci_path.read_text()
-        pytest_job = re.search(
-            r"^pytest:\n(?P<body>(?:^[ \t].*\n?)*)",
-            ci_config,
-            flags=re.MULTILINE,
-        )
+    """Root, template, and rendered CI use one byte-identical configuration."""
+    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
+    generated_ci = (generated_project / ".gitlab-ci.yml").read_text()
 
-        assert pytest_job is not None
-        assert "apt-get install -y --no-install-recommends git jq" in pytest_job.group(
-            "body"
-        )
+    assert root_ci == template_ci == generated_ci
+    assert "apt-get install -y --no-install-recommends git jq shellcheck" in root_ci
 
 
 def test_ci_shellcheck_excludes_generated_environments(
@@ -179,12 +181,173 @@ def test_ci_shellcheck_excludes_generated_environments(
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """Test that every CI ShellCheck job skips generated tool environments."""
+    """The consolidated check helper skips generated tool environments."""
     for root in (project_root, template_dir, generated_project):
-        ci_config = (root / ".gitlab-ci.yml").read_text()
+        helper = (root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
 
-        assert "-not -path './.venv/*'" in ci_config
-        assert "-not -path './.tox/*'" in ci_config
+        assert "-not -path './.venv/*'" in helper
+        assert "-not -path './.tox/*'" in helper
+
+
+def test_ci_check_helper_is_mirrored_and_runs_every_gate_without_sync(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """The fixed helper runs all gates after the job's single dependency sync."""
+    root_helper = (project_root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
+    template_helper = (
+        template_dir / "tests" / "helpers" / "run-ci-checks.sh"
+    ).read_text()
+    generated_helper = (
+        generated_project / "tests" / "helpers" / "run-ci-checks.sh"
+    ).read_text()
+
+    assert root_helper == template_helper == generated_helper
+    for command in (
+        "uv run --no-sync ruff check",
+        "uv run --no-sync ruff format --check",
+        "uv run --no-sync tox run-parallel",
+        "uv run --no-sync yamllint",
+        "uv run --no-sync kingfisher scan",
+        "uv run --no-sync ty check",
+        "shellcheck",
+    ):
+        assert command in root_helper
+
+    last_start = root_helper.rindex('check_pids+=("$!")')
+    first_wait = root_helper.index("wait ")
+    assert last_start < first_wait
+    assert "eval " not in root_helper
+    assert "CI check summary" in root_helper
+    assert "PASS" in root_helper
+    assert "FAIL" in root_helper
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "failed_check"),
+    (
+        (None, None),
+        ("ruff check", "ruff-check"),
+        ("ruff format", "ruff-format"),
+        ("tox run-parallel", "pytest-py311-py314"),
+        ("yamllint", "yamllint"),
+        ("kingfisher scan", "kingfisher"),
+        ("ty check", "type-check"),
+        ("shellcheck", "shellcheck"),
+    ),
+)
+def test_ci_check_helper_waits_for_every_gate_and_keeps_artifacts(
+    project_root: Path,
+    tmp_path: Path,
+    failed_command: str | None,
+    failed_check: str | None,
+) -> None:
+    """A failed parallel gate does not hide results from the other gates."""
+    helper_source = project_root / "tests" / "helpers" / "run-ci-checks.sh"
+    helper = tmp_path / "tests" / "helpers" / "run-ci-checks.sh"
+    helper.parent.mkdir(parents=True)
+    shutil.copy(helper_source, helper)
+    (tmp_path / "check.sh").write_text("#!/bin/sh\n")
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    _write_command(
+        fake_bin / "uv",
+        r"""printf '%s\n' "$*" >> "$INVOCATIONS"
+command_status=0
+if [ -n "${FAIL_MATCH:-}" ]; then
+    case "$*" in
+        *"$FAIL_MATCH"*) command_status=7 ;;
+    esac
+fi
+case "$*" in
+    *"ruff check"*) printf '[]\n' ;;
+    *"ruff format"*) printf 'format diff\n' ;;
+    *"tox run-parallel"*)
+        : > test-results-py311.xml
+        : > test-results-py314.xml
+        : > coverage-py311.xml
+        : > coverage-py314.xml
+        ;;
+    *"python tests/helpers/yamllint_to_json.py"*)
+        cat >/dev/null
+        printf '[]\n'
+        ;;
+    *"yamllint"*) printf '%s\n' 'sample.yml:1:1: [warning] sample (rule)' ;;
+esac
+exit "$command_status"
+""",
+    )
+    _write_command(
+        fake_bin / "shellcheck",
+        """printf 'shellcheck %s\\n' "$*" >> "$INVOCATIONS"
+if [ "${FAIL_MATCH:-}" = shellcheck ]; then exit 7; fi""",
+    )
+    _write_command(
+        fake_bin / "jq",
+        """printf 'jq %s\\n' "$*" >> "$INVOCATIONS"
+printf '[]\\n' """,
+    )
+    invocations = tmp_path / "invocations.log"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FAIL_MATCH": failed_command or "",
+            "INVOCATIONS": str(invocations),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(helper)],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == (1 if failed_command else 0)
+    assert "CI check summary" in result.stdout
+    for check_name in (
+        "ruff-check",
+        "ruff-format",
+        "pytest-py311-py314",
+        "yamllint",
+        "kingfisher",
+        "type-check",
+        "shellcheck",
+    ):
+        assert check_name in result.stdout
+    if failed_check is None:
+        assert result.stdout.count("PASS ") == 7
+        assert "FAIL " not in result.stdout
+    else:
+        assert result.stdout.count("PASS ") == 6
+        assert result.stdout.count("FAIL ") == 1
+        assert f"FAIL {failed_check}" in result.stdout
+    invoked = invocations.read_text()
+    for expected in (
+        "ruff check",
+        "ruff format",
+        "tox run-parallel",
+        "yamllint",
+        "kingfisher scan",
+        "ty check",
+        "shellcheck ./check.sh",
+        "jq -s add",
+    ):
+        assert expected in invoked
+    assert json.loads((tmp_path / "code-quality-report.json").read_text()) == []
+    assert (tmp_path / "format-changes.diff").read_text() == "format diff\n"
+    for report in (
+        "test-results-py311.xml",
+        "test-results-py314.xml",
+        "coverage-py311.xml",
+        "coverage-py314.xml",
+    ):
+        assert (tmp_path / report).exists()
 
 
 def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
@@ -195,6 +358,7 @@ def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
         command = config["tool"]["tox"]["env"][environment]["commands"][0]
         assert "--cov" in command
         assert "--cov-fail-under=85" in command
+        assert f"junit_suite_name={environment}" in command
 
 
 def test_parallel_tox_environments_use_distinct_report_paths(
@@ -206,13 +370,11 @@ def test_parallel_tox_environments_use_distinct_report_paths(
     expected_paths = {
         "py311": {
             "coverage": "coverage-py311.xml",
-            "html": "htmlcov/py311",
             "junit": "test-results-py311.xml",
             "data": ".coverage.py311",
         },
         "py314": {
             "coverage": "coverage-py314.xml",
-            "html": "htmlcov/py314",
             "junit": "test-results-py314.xml",
             "data": ".coverage.py314",
         },
@@ -226,9 +388,10 @@ def test_parallel_tox_environments_use_distinct_report_paths(
 
             assert tox_env["set_env"]["COVERAGE_FILE"] == paths["data"]
             assert f"--cov-report=xml:{paths['coverage']}" in command
-            assert f"--cov-report=html:{paths['html']}" in command
             assert f"--junitxml={paths['junit']}" in command
+            assert f"junit_suite_name={environment}" in command
             assert "--cov-fail-under=85" in command
+            assert "--cov-report=html" not in command
 
     template_config = (template_dir / "pyproject.toml.jinja").read_text()
     for paths in expected_paths.values():
@@ -236,7 +399,7 @@ def test_parallel_tox_environments_use_distinct_report_paths(
             assert path in template_config
 
 
-def test_ci_runs_tox_in_parallel_and_publishes_each_environment_report(
+def test_ci_publishes_reports_from_the_parallel_validation_helper(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
@@ -244,14 +407,14 @@ def test_ci_runs_tox_in_parallel_and_publishes_each_environment_report(
     """CI shortens its longest job without losing per-version test evidence."""
     for root in (project_root, template_dir, generated_project):
         ci_config = (root / ".gitlab-ci.yml").read_text()
-        pytest_job = re.search(
-            r"^pytest:\n(?P<body>(?:^[ \t].*\n?)*)",
+        validation_job = re.search(
+            r"^validation:\n(?P<body>(?:^[ \t].*\n?)*)",
             ci_config,
             flags=re.MULTILINE,
         )
 
-        assert pytest_job is not None
-        body = pytest_job.group("body")
+        assert validation_job is not None
+        body = validation_job.group("body")
         artifacts = re.search(
             r"^  artifacts:\n(?P<body>(?:^ {4,}.*\n?)*)",
             body,
@@ -260,7 +423,7 @@ def test_ci_runs_tox_in_parallel_and_publishes_each_environment_report(
 
         assert artifacts is not None
         artifact_body = artifacts.group("body")
-        assert "uv run tox run-parallel" in body
+        assert "bash tests/helpers/run-ci-checks.sh" in body
         assert re.search(
             r"reports:\n"
             r" {6}junit:\n"
@@ -271,12 +434,10 @@ def test_ci_runs_tox_in_parallel_and_publishes_each_environment_report(
             r" {8}path: coverage-py314\.xml",
             artifact_body,
         )
-        assert re.search(
-            r"paths:\n"
-            r" {6}- htmlcov/py311/\n"
-            r" {6}- htmlcov/py314/",
-            artifact_body,
-        )
+        assert "codequality: code-quality-report.json" in artifact_body
+        assert "- ci-logs/" in artifact_body
+        assert "- format-changes.diff" in artifact_body
+        assert "htmlcov" not in artifact_body
 
 
 def test_parallel_test_artifacts_are_ignored_everywhere(
@@ -290,6 +451,10 @@ def test_parallel_test_artifacts_are_ignored_everywhere(
 
         assert "coverage-*.xml" in ignore
         assert "test-results-*.xml" in ignore
+        assert "ci-logs/" in ignore
+        assert "format-changes.diff" in ignore
+        assert "code-quality-report.json" in ignore
+        assert "*-code-quality-report.json" in ignore
 
 
 def test_generated_dev_environment_includes_tox_uv(generated_project: Path) -> None:
@@ -457,6 +622,35 @@ def test_canonical_project_context_is_rendered(generated_project: Path) -> None:
     assert "A test project" in content
     assert "{{ project_name }}" not in content
     assert not (generated_project / ".claude" / "project.md").exists()
+
+
+def test_project_context_defines_pipeline_execution_budget_defaults(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Each project owns explicit queue-free pipeline execution budgets."""
+    expected = {
+        "pipeline_execution_preferred_seconds": 10,
+        "pipeline_execution_hard_limit_seconds": 60,
+    }
+
+    for root in (project_root, template_dir, generated_project):
+        project_context_path = root / ".agents" / "project.md"
+        if root == template_dir:
+            project_context_path = project_context_path.with_suffix(".md.jinja")
+        project_context = project_context_path.read_text()
+        budget_block = re.search(
+            r"^## Pipeline Performance Budget\n\n"
+            r"```yaml\n(?P<budget>.*?)\n```$",
+            project_context,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        assert budget_block is not None
+        budget = yaml.safe_load(budget_block.group("budget"))
+        assert budget == expected
+        assert all(type(value) is int for value in budget.values())
 
 
 def test_generated_project_documents_filesystem_structure_defaults(
@@ -1410,6 +1604,75 @@ def test_pipeline_performance_judge_is_the_single_live_pipeline_owner(
         assert "The agent owns the entire live-pipeline lifecycle" in agent_content
         assert "Do not push, retry, cancel, approve, or merge" in agent_content
         assert "model-tier: balanced" in skill_content
+
+
+def test_pipeline_agent_enforces_the_project_owned_execution_budget(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Only the live-pipeline owner interprets configurable execution limits."""
+    preferred_field = "pipeline_execution_preferred_seconds"
+    hard_field = "pipeline_execution_hard_limit_seconds"
+
+    for root in (project_root, template_dir, generated_project):
+        agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+        normalized_agent = " ".join(agent.split())
+
+        for requirement in (
+            ".agents/project.md",
+            "Pipeline Performance Budget",
+            preferred_field,
+            hard_field,
+            "finite numeric",
+            "booleans",
+            "greater than zero",
+            "preferred budget must be less than or equal to the hard limit",
+            "pipeline `duration`",
+            "queue time is excluded",
+            "Preferred target: met",
+            "Hard limit: passed",
+            "Hard limit: exceeded",
+            "Direct feedback: Reject → `$tdd-green`; no issue required",
+            "needs verification",
+        ):
+            assert requirement in normalized_agent
+
+        assert re.search(r"duration.*less than or equal to.*preferred", agent)
+        assert re.search(r"duration.*greater than.*hard limit", agent)
+        assert not re.search(rf"{preferred_field}:\s*10\b", agent)
+        assert not re.search(rf"{hard_field}:\s*60\b", agent)
+
+
+def test_pipeline_budget_has_no_unrelated_workflow_plumbing(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Other roles remain unaware of the project-owned pipeline thresholds."""
+    fields = (
+        "pipeline_execution_preferred_seconds",
+        "pipeline_execution_hard_limit_seconds",
+    )
+    unrelated_paths = (
+        Path("AGENTS.md"),
+        Path("README.md"),
+        Path(".agents/agents/judge-cicd.md"),
+        Path(".agents/agents/findings-triage.md"),
+        Path(".agents/agents/tdd-finalizer.md"),
+        Path(".agents/skills/git-flow/SKILL.md"),
+    )
+
+    for root in (project_root, template_dir, generated_project):
+        for relative_path in unrelated_paths:
+            path = root / relative_path
+            if root == template_dir and relative_path == Path("README.md"):
+                path = path.with_suffix(".md.jinja")
+            content = path.read_text()
+            for field in fields:
+                assert field not in content, relative_path
 
 
 def test_pipeline_agent_owns_bounded_interruptible_wait_until_terminal(

@@ -14,52 +14,24 @@
   variables:
     UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
   before_script:
-    - cd $CI_PROJECT_DIR
+    - cd "$CI_PROJECT_DIR"
     - uv --version
+    - apt-get update -qq && apt-get install -y --no-install-recommends git jq shellcheck
+    - uv sync --locked --all-groups
   rules:
     - if: $CI_COMMIT_BRANCH
 
-ruff_check:
-  extends: .base_uv
-  tags:
-    - size/medium
-  script:
-    - uv run ruff --version
-    - echo "Checking all Python files"
-    - uv run ruff check --output-format=gitlab . > code-quality-report.json
-  artifacts:
-    reports:
-      codequality: $CI_PROJECT_DIR/code-quality-report.json
-    when: always
-
-ruff_format:
-  extends: .base_uv
-  tags:
-    - size/medium
-  script:
-    - uv run ruff --version
-    - echo "Formatting all Python files"
-    - uv run ruff format --diff . > format-changes.diff
-  artifacts:
-    paths:
-      - format-changes.diff
-    when: always
-
-pytest:
+validation:
   extends: .base_uv
   tags:
     - size/medium
   cache:
     <<: *uv_cache
     policy: pull-push
+  script:
+    - bash tests/helpers/run-ci-checks.sh
   after_script:
     - uv cache prune --ci
-  before_script:
-    - !reference [.base_uv, before_script]
-    - apt-get update -qq && apt-get install -y --no-install-recommends git jq
-  script:
-    - echo "Running tox with coverage"
-    - uv run tox run-parallel
   artifacts:
     reports:
       junit:
@@ -68,56 +40,10 @@ pytest:
       coverage_report:
         coverage_format: cobertura
         path: coverage-py314.xml
+      codequality: code-quality-report.json
     paths:
-      - htmlcov/py311/
-      - htmlcov/py314/
+      - ci-logs/
+      - format-changes.diff
+      - coverage-py311.xml
+      - coverage-py314.xml
     when: always
-
-yamllint:
-  extends: .base_uv
-  tags:
-    - size/medium
-  script:
-    - uv run yamllint --version
-    - echo "Running yamllint"
-    - |
-      uv run yamllint -d '{"extends": "default", "rules": {"line-length": "disable", "document-start": "disable"}}' -f parsable . | \
-      uv run python tests/helpers/yamllint_to_json.py | tee yamllint-report.json
-  artifacts:
-    reports:
-      codequality: yamllint-report.json
-    when: always
-
-kingfisher:
-  extends: .base_uv
-  tags:
-    - size/medium
-  script:
-    - uv run kingfisher --version
-    - echo "Scanning working tree for secrets"
-    - uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .cache --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
-
-type_check:
-  extends: .base_uv
-  tags:
-    - size/medium
-  script:
-    - uv run ty --version
-    - echo "Running type checking"
-    - uv run ty check
-  allow_failure: false
-
-shellcheck:
-  stage: build
-  interruptible: true
-  image:
-    name: docker.io/koalaman/shellcheck-alpine:stable
-    entrypoint: [""]
-  tags:
-    - size/medium
-  rules:
-    - if: $CI_COMMIT_BRANCH
-  script:
-    - shellcheck --version
-    - echo "Linting all shell scripts"
-    - find . -type f -not -path './.git/*' -not -path './.venv/*' -not -path './.tox/*' -exec sh -c 'case "$1" in *.sh) shellcheck "$1";; *) if head -n1 "$1" | grep -Eq "^#!.*(ba)?sh"; then shellcheck "$1"; fi;; esac' _ {} \;

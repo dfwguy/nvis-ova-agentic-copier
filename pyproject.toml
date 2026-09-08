@@ -64,7 +64,7 @@ deps = [
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
 ]
-commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py311.xml", "--cov-report=html:htmlcov/py311", "--junitxml=test-results-py311.xml"]]
+commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py311.xml", "--junitxml=test-results-py311.xml", "-o", "junit_suite_name=py311"]]
 
 [tool.tox.env.py314]
 description = "Run tests with Python 3.14"
@@ -79,7 +79,7 @@ deps = [
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
 ]
-commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py314.xml", "--cov-report=html:htmlcov/py314", "--junitxml=test-results-py314.xml"]]
+commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py314.xml", "--junitxml=test-results-py314.xml", "-o", "junit_suite_name=py314"]]
 
 [dependency-groups]
 test = [

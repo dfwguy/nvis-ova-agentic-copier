@@ -63,6 +63,13 @@ Mirror shared workflow changes in `template/`. The project notes are the one
 intentional difference: the template renders `.agents/project.md.jinja` with
 the generated project's name, description, and package path.
 
+## Pipeline Performance Budget
+
+```yaml
+pipeline_execution_preferred_seconds: 10
+pipeline_execution_hard_limit_seconds: 60
+```
+
 ## Python Versions
 
 - Minimum: **3.11**
