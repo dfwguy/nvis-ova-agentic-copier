@@ -53,6 +53,7 @@ env_list = ["py311", "py314"]
 
 [tool.tox.env.py311]
 description = "Run tests with Python 3.11"
+set_env = { COVERAGE_FILE = ".coverage.py311" }
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",
@@ -63,10 +64,11 @@ deps = [
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
 ]
-commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage.xml", "--cov-report=html", "--junitxml=test-results.xml"]]
+commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py311.xml", "--cov-report=html:htmlcov/py311", "--junitxml=test-results-py311.xml"]]
 
 [tool.tox.env.py314]
 description = "Run tests with Python 3.14"
+set_env = { COVERAGE_FILE = ".coverage.py314" }
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",
@@ -77,7 +79,7 @@ deps = [
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
 ]
-commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage.xml", "--cov-report=html", "--junitxml=test-results.xml"]]
+commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py314.xml", "--cov-report=html:htmlcov/py314", "--junitxml=test-results-py314.xml"]]
 
 [dependency-groups]
 test = [

@@ -1,17 +1,18 @@
 ---
 name: findings-triage
-description: File deduplicated GitLab Bug issues for actionable Minor judge findings.
+description: File deduplicated GitLab Bug issues for actionable prepublication Minor findings.
 metadata:
   model-tier: balanced
 ---
 
 # Findings Triage
 
-Use this portable workflow skill only after a terminal non-Reject Phase 9
-receipt. If pipeline review is nonterminal or Reject, defer instead of filing.
-Read and follow [the role instructions](../../agents/findings-triage.md) before acting.
-That file is a compatibility reference for Claude Code; this directory is the
-shared skill entry point for Codex, Pi, and Claude Code.
+Use this portable workflow skill after publication to process accumulated
+actionable Minor findings from review Phases 4–6. This role is independent of
+other post-publication work. Read and follow [the role
+instructions](../../agents/findings-triage.md) before acting. That file is a
+compatibility reference for Claude Code; this directory is the shared skill
+entry point for Codex, Pi, and Claude Code.
 
 ## Model selection
 

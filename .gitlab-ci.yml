@@ -139,15 +139,18 @@ pytest:
     - apt-get update -qq && apt-get install -y --no-install-recommends git jq
   script:
     - echo "Running tox with coverage"
-    - uv run tox
+    - uv run tox run-parallel
   artifacts:
     reports:
-      junit: test-results.xml
+      junit:
+        - test-results-py311.xml
+        - test-results-py314.xml
       coverage_report:
         coverage_format: cobertura
-        path: coverage.xml
+        path: coverage-py314.xml
     paths:
-      - htmlcov/
+      - htmlcov/py311/
+      - htmlcov/py314/
     when: always
 
 yamllint:

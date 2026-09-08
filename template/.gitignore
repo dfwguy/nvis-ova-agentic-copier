@@ -100,4 +100,6 @@ galactus_backup.txt
 
 yamllint-report.json
 test-results.xml
+test-results-*.xml
+coverage-*.xml
 test_output.json

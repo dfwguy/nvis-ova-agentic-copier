@@ -174,27 +174,122 @@ def test_pytest_ci_installs_jq_for_executable_preflight_tests(
         )
 
 
-def test_root_ci_shellcheck_excludes_generated_environments(project_root: Path) -> None:
-    """Test that the root CI ShellCheck job skips generated tool environments."""
-    ci_config = (project_root / ".gitlab-ci.yml").read_text()
+def test_ci_shellcheck_excludes_generated_environments(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Test that every CI ShellCheck job skips generated tool environments."""
+    for root in (project_root, template_dir, generated_project):
+        ci_config = (root / ".gitlab-ci.yml").read_text()
 
-    assert "-not -path './.venv/*'" in ci_config
-    assert "-not -path './.tox/*'" in ci_config
+        assert "-not -path './.venv/*'" in ci_config
+        assert "-not -path './.tox/*'" in ci_config
 
 
-def test_root_tox_generates_enforced_coverage_artifacts(project_root: Path) -> None:
-    """Test that root tox produces the coverage artifacts uploaded by CI."""
+def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
+    """Test that root tox retains its coverage floor for every Python."""
     config = tomllib.loads((project_root / "pyproject.toml").read_text())
-    expected_arguments = {
-        "--cov-fail-under=85",
-        "--cov-report=xml:coverage.xml",
-        "--cov-report=html",
-        "--junitxml=test-results.xml",
-    }
 
     for environment in ("py311", "py314"):
         command = config["tool"]["tox"]["env"][environment]["commands"][0]
-        assert expected_arguments.issubset(command)
+        assert "--cov" in command
+        assert "--cov-fail-under=85" in command
+
+
+def test_parallel_tox_environments_use_distinct_report_paths(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Parallel tox environments cannot overwrite one another's reports."""
+    expected_paths = {
+        "py311": {
+            "coverage": "coverage-py311.xml",
+            "html": "htmlcov/py311",
+            "junit": "test-results-py311.xml",
+            "data": ".coverage.py311",
+        },
+        "py314": {
+            "coverage": "coverage-py314.xml",
+            "html": "htmlcov/py314",
+            "junit": "test-results-py314.xml",
+            "data": ".coverage.py314",
+        },
+    }
+
+    for root in (project_root, generated_project):
+        config = tomllib.loads((root / "pyproject.toml").read_text())
+        for environment, paths in expected_paths.items():
+            tox_env = config["tool"]["tox"]["env"][environment]
+            command = tox_env["commands"][0]
+
+            assert tox_env["set_env"]["COVERAGE_FILE"] == paths["data"]
+            assert f"--cov-report=xml:{paths['coverage']}" in command
+            assert f"--cov-report=html:{paths['html']}" in command
+            assert f"--junitxml={paths['junit']}" in command
+            assert "--cov-fail-under=85" in command
+
+    template_config = (template_dir / "pyproject.toml.jinja").read_text()
+    for paths in expected_paths.values():
+        for path in paths.values():
+            assert path in template_config
+
+
+def test_ci_runs_tox_in_parallel_and_publishes_each_environment_report(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """CI shortens its longest job without losing per-version test evidence."""
+    for root in (project_root, template_dir, generated_project):
+        ci_config = (root / ".gitlab-ci.yml").read_text()
+        pytest_job = re.search(
+            r"^pytest:\n(?P<body>(?:^[ \t].*\n?)*)",
+            ci_config,
+            flags=re.MULTILINE,
+        )
+
+        assert pytest_job is not None
+        body = pytest_job.group("body")
+        artifacts = re.search(
+            r"^  artifacts:\n(?P<body>(?:^ {4,}.*\n?)*)",
+            body,
+            flags=re.MULTILINE,
+        )
+
+        assert artifacts is not None
+        artifact_body = artifacts.group("body")
+        assert "uv run tox run-parallel" in body
+        assert re.search(
+            r"reports:\n"
+            r" {6}junit:\n"
+            r" {8}- test-results-py311\.xml\n"
+            r" {8}- test-results-py314\.xml\n"
+            r" {6}coverage_report:\n"
+            r" {8}coverage_format: cobertura\n"
+            r" {8}path: coverage-py314\.xml",
+            artifact_body,
+        )
+        assert re.search(
+            r"paths:\n"
+            r" {6}- htmlcov/py311/\n"
+            r" {6}- htmlcov/py314/",
+            artifact_body,
+        )
+
+
+def test_parallel_test_artifacts_are_ignored_everywhere(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Environment-specific reports stay out of source control."""
+    for root in (project_root, template_dir, generated_project):
+        ignore = (root / ".gitignore").read_text()
+
+        assert "coverage-*.xml" in ignore
+        assert "test-results-*.xml" in ignore
 
 
 def test_generated_dev_environment_includes_tox_uv(generated_project: Path) -> None:
@@ -1291,12 +1386,12 @@ def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
     assert "`filesystem-structure-judge` approves" in finalizer
 
 
-def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
+def test_pipeline_performance_judge_is_the_single_live_pipeline_owner(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """Test that pipeline timing analysis survives Copier rendering and is post-publication."""
+    """One generated agent owns complete post-publication reconciliation."""
     relative_agent = ".agents/agents/pipeline-performance-judge.md"
     relative_skill = ".agents/skills/pipeline-performance-judge/SKILL.md"
 
@@ -1306,46 +1401,41 @@ def test_pipeline_performance_judge_is_generated_and_runs_after_publication(
 
         assert agent.exists()
         assert skill.exists()
-        assert "projects/$GITLAB_PROJECT_ID/merge_requests" in agent.read_text()
-        assert "queued_duration" in agent.read_text()
-        assert "Do not push, retry, cancel, approve, or merge" in agent.read_text()
-        assert "model-tier: balanced" in skill.read_text()
+        agent_content = agent.read_text()
+        skill_content = skill.read_text()
 
-        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
-        assert "Pipeline Performance Judge" in agent.read_text()
-        assert "Pipeline Performance Judge" in git_flow
+        assert "projects/$GITLAB_PROJECT_ID/merge_requests" in agent_content
+        assert "queued_duration" in agent_content
+        assert "one complete bounded reconciliation invocation" in skill_content
+        assert "The agent owns the entire live-pipeline lifecycle" in agent_content
+        assert "Do not push, retry, cancel, approve, or merge" in agent_content
+        assert "model-tier: balanced" in skill_content
 
 
-def test_pipeline_review_uses_a_bounded_interruptible_wait_until_terminal(
+def test_pipeline_agent_owns_bounded_interruptible_wait_until_terminal(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """A first pending observation keeps the active review open within a budget."""
+    """Pending progress stays inside the single bounded agent invocation."""
     for root in (project_root, template_dir, generated_project):
         agent = (
             root / ".agents" / "agents" / "pipeline-performance-judge.md"
         ).read_text()
-        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
-        workflow = (root / "AGENTS.md").read_text()
-
         for requirement in (
             "15-minute default deadline",
             "30-second interval",
-            "intermediate progress observation",
             "at least once every 60 seconds",
             "interruptible wait",
             "final snapshot",
         ):
-            assert requirement in git_flow
+            assert requirement in agent
 
-        assert "main agent owns the wait" in git_flow
-        assert "judge never waits or sleeps" in agent
-        assert "Pending observations are not Phase 9 receipts" in agent
+        assert "Pending observations are progress" in agent
+        assert "do not return control" in agent
         assert "wait deadline reached" in agent
-        assert "terminal non-Reject Phase 9 receipt" in workflow
-        assert "while true" not in git_flow.lower()
-        assert "sleep 30" not in git_flow.lower()
+        assert "while true" not in agent.lower()
+        assert "sleep 30" not in agent.lower()
 
 
 def test_pipeline_snapshot_classifies_statuses_and_uses_exact_source_sha(
@@ -1390,65 +1480,223 @@ def test_pipeline_snapshot_classifies_statuses_and_uses_exact_source_sha(
         assert "Never substitute the newest `main` pipeline" in agent
 
 
-def test_pipeline_timeout_defers_findings_triage_and_remains_resumable(
+def test_pipeline_agent_returns_a_bounded_resumable_timeout(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """A bounded timeout has an explicit continuation and cannot trigger triage."""
+    """A bounded timeout is final for one complete reconciliation attempt."""
     for root in (project_root, template_dir, generated_project):
         pipeline_agent = (
             root / ".agents" / "agents" / "pipeline-performance-judge.md"
         ).read_text()
-        triage_agent = (root / ".agents" / "agents" / "findings-triage.md").read_text()
-        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
-
         assert "Reconciliation: nonterminal" in pipeline_agent
-        assert "Later action: rerun Phase 9" in pipeline_agent
-        assert "no separate merge request" in git_flow
-        assert "terminal non-Reject Phase 9 receipt" in triage_agent
         assert (
-            "$findings-triage: deferred — Phase 9 has no terminal pipeline receipt"
-            in triage_agent
+            "Later action: start one new complete reconciliation invocation"
+            in pipeline_agent
         )
-        assert "deadline" in triage_agent
-        assert "stale source" in triage_agent
-        assert "API failure" in triage_agent
+        assert "wait deadline reached" in pipeline_agent
+        assert "human action required" in pipeline_agent
+        assert "stale source" in pipeline_agent
+        assert "API failure" in pipeline_agent
 
 
-def test_findings_triage_files_minor_judge_findings_after_pipeline_review(
+def test_terminal_pipeline_receipt_reports_wall_elapsed_and_optimization(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """Test that every generated workflow files Minor findings after CI review."""
+    """Terminal handoffs report actual user wait time and improvement evidence."""
+    for root in (project_root, template_dir, generated_project):
+        pipeline_agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+        for requirement in (
+            "Pipeline elapsed (wall clock)",
+            "Timestamp interval",
+            "finished_at - created_at",
+            "GitLab duration",
+            "GitLab queued duration",
+            "Optimization assessment",
+            "Baseline comparison",
+            "Pipeline elapsed: unavailable",
+        ):
+            assert requirement in pipeline_agent
+
+        assert "Never add job `queued_duration` values" in pipeline_agent
+
+
+def test_ci_judge_reviews_static_configuration_without_live_pipeline_access(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """The CI judge validates local config without inspecting live pipelines."""
+    for root in (project_root, template_dir, generated_project):
+        ci_judge = (root / ".agents" / "agents" / "judge-cicd.md").read_text()
+
+        assert "repository configuration only" in ci_judge
+        assert "Do not query GitLab pipelines" in ci_judge
+        assert "Config sync" in ci_judge
+        assert "Static shape" in ci_judge
+        assert "glab api" not in ci_judge
+        assert "queued_duration" not in ci_judge
+        assert "Pipeline Performance Judge" not in ci_judge
+
+
+def test_findings_triage_files_prepublication_minor_findings_after_publication(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Ordinary triage owns only prepublication judge findings."""
     relative_agent = ".agents/agents/findings-triage.md"
     relative_skill = ".agents/skills/findings-triage/SKILL.md"
 
     for root in (project_root, template_dir, generated_project):
         agent = root / relative_agent
         skill = root / relative_skill
-        workflow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
-
         assert agent.exists()
         assert skill.exists()
-        assert "projects/$GITLAB_PROJECT_ID/issues" in agent.read_text()
-        assert "Bug template" in agent.read_text()
-        assert "Minor" in agent.read_text()
-        assert "deduplicate" in agent.read_text().lower()
+        agent_content = agent.read_text()
+        assert "projects/$GITLAB_PROJECT_ID/issues" in agent_content
+        assert "Bug template" in agent_content
+        assert "Phase 4–6" in agent_content
+        assert "Minor" in agent_content
+        assert "deduplicate" in agent_content.lower()
+        assert "pipeline" not in agent_content.lower()
         assert "model-tier: balanced" in skill.read_text()
-        assert workflow.index("Pipeline Performance Judge") < workflow.index(
-            "Findings Triage"
-        )
 
     for judge_name in (
         "judge-quality.md",
         "judge-test.md",
         "judge-cicd.md",
-        "pipeline-performance-judge.md",
     ):
         content = (project_root / ".agents" / "agents" / judge_name).read_text()
         assert "Findings Triage" in content
+
+
+def test_pipeline_agent_uses_stable_non_racing_loop_feedback(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Deferred CI findings use ordinary issues with a stable fingerprint."""
+    for root in (project_root, template_dir, generated_project):
+        agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+
+        for requirement in (
+            "projects/$GITLAB_PROJECT_ID/issues",
+            "agent-pipeline-feedback",
+            "fingerprint: <normalized-category>|<stable-scope>|<stable-summary>",
+            "Bug template",
+            "created",
+            "reused",
+            "unfiled",
+            "loop-ready fallback",
+            "No pipeline feedback issue required",
+        ):
+            assert requirement in agent
+
+        assert "search open GitLab issues" in agent
+        assert "Never hand pipeline findings to `$findings-triage`" in agent
+        assert "runner/platform" in agent
+        assert "Direct feedback: Reject → `$tdd-green`; no issue required" in agent
+        assert "ordinary issue" in agent
+
+        marker = re.search(
+            r"<!-- agent-pipeline-feedback\n(?P<body>.*?)-->",
+            agent,
+            flags=re.DOTALL,
+        )
+        assert marker is not None
+        marker_body = marker.group("body")
+        assert "project_id: <numeric-project-id>" in marker_body
+        assert "fingerprint:" in marker_body
+        for unstable_identity in (
+            "merge_request_iid",
+            "source_branch",
+            "source_sha",
+            "pipeline-id",
+            "job-id",
+        ):
+            assert unstable_identity not in marker_body
+
+        assert "compare exact marker text" in agent
+        assert "MR/source/pipeline/job evidence outside the marker" in agent
+        assert agent.index("search open GitLab issues") < agent.index(
+            "create one GitLab Bug template"
+        )
+
+
+def test_live_pipeline_internals_are_not_plumbed_through_other_roles(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Unrelated roles neither query nor interpret the live GitLab pipeline."""
+    unrelated_paths = (
+        ".agents/skills/git-flow/SKILL.md",
+        ".agents/skills/findings-triage/SKILL.md",
+        ".agents/skills/judge-cicd/SKILL.md",
+        ".agents/skills/judge-quality/SKILL.md",
+        ".agents/skills/judge-test/SKILL.md",
+        ".agents/skills/tdd-finalizer/SKILL.md",
+        ".agents/agents/findings-triage.md",
+        ".agents/agents/judge-cicd.md",
+        ".agents/agents/judge-quality.md",
+        ".agents/agents/judge-test.md",
+        ".agents/agents/tdd-finalizer.md",
+    )
+    forbidden_internals = (
+        "queued_duration",
+        "finished_at - created_at",
+        "30-second interval",
+        "wait deadline reached",
+        "merge_requests/<iid>/pipelines",
+    )
+
+    for root in (project_root, template_dir, generated_project):
+        for relative_path in unrelated_paths:
+            content = (root / relative_path).read_text()
+            for forbidden in forbidden_internals:
+                assert forbidden not in content, relative_path
+
+            if relative_path != ".agents/agents/judge-cicd.md":
+                assert "pipeline" not in content.lower(), relative_path
+
+        ci_judge = (root / ".agents" / "agents" / "judge-cicd.md").read_text()
+        assert "Do not query GitLab pipelines" in ci_judge
+        assert "repository configuration only" in ci_judge
+        for live_ownership in (
+            "projects/$GITLAB_PROJECT_ID/pipelines",
+            "interruptible wait",
+            "Pipeline elapsed",
+            "Pipeline Performance Judge",
+        ):
+            assert live_ownership not in ci_judge
+
+        workflow = (root / "AGENTS.md").read_text()
+        assert "exactly one invocation owns the complete phase" in workflow
+        assert "Phase 4–6 Minor findings" in workflow
+
+
+def test_explanation_routes_postpublication_roles_from_the_published_mr(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """The explanation shows both independent postpublication handoffs."""
+    for root in (project_root, template_dir, generated_project):
+        explanation = (root / "docs/explanation/agentic-workflow.md").read_text()
+
+        assert "mr --> pipeline[Pipeline Performance Judge]" in explanation
+        assert "mr -->|Phase 4–6 Minor findings| triage[Findings Triage]" in explanation
+        assert "pipeline --> human[Human approval and merge]" in explanation
+        assert "triage --> human" in explanation
+        assert "final_gates -. actionable Minor findings .-> triage" not in explanation
 
 
 def test_mr_remediation_issues_resume_the_originating_merge_request(
@@ -1459,13 +1707,9 @@ def test_mr_remediation_issues_resume_the_originating_merge_request(
     """Test that a judge finding can safely drive a later update to its open MR."""
     for root in (project_root, template_dir, generated_project):
         triage = (root / ".agents" / "agents" / "findings-triage.md").read_text()
-        git_flow = (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text()
-
         assert "agent-mr-remediation" in triage
         assert "source branch" in triage
         assert "Closes #<triage-issue>" in triage
-        assert "MR remediation issue" in git_flow
-        assert "update the existing merge request" in git_flow
 
     for root in (project_root, template_dir):
         runner = (
@@ -2059,7 +2303,7 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
         assert "resource conflict" in content
         assert "clean working tree" in content
         assert "git pull --ff-only" in content
-        assert "latest pipeline" in content
+        assert "latest pipeline" not in content
         assert "no direct-to-`main` path" in content
         assert "ai must never approve or merge" in content
         assert "report the result as `awaiting_human` and end the active run" in content
@@ -2068,8 +2312,8 @@ def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
         assert "source_branch=$intended_branch" in content
         assert 'git checkout "$intended_branch"' in content
         assert "source_branch=$(git rev-parse --abbrev-ref head)" in content
-        assert "only once the mr is merged and `main` is green" in content
-        assert content.index("only once the mr is merged and `main` is green") < (
+        assert "only once the mr is merged" in content
+        assert content.index("only once the mr is merged") < (
             content.index("git branch -d claude/<slug>")
         )
         assert content.index("source_branch=$intended_branch") < content.index(
