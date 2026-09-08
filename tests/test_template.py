@@ -171,17 +171,18 @@ def test_generated_ci_uses_exact_stable_python_versions(
     )
     assert "variables" not in base
     before_script = "\n".join(base["before_script"])
+    normalized_before_script = " ".join(before_script.replace("\\\n", "").split())
     assert "uv python install 3.14.3 --managed-python" in before_script
     assert "uv python install 3.14\n" not in before_script
     assert (
         'UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" '
         "uv sync --locked --all-groups --python 3.11 --no-managed-python"
-        in before_script
+        in normalized_before_script
     )
     assert (
         'UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" '
         "uv sync --locked --all-groups --python 3.14.3 --managed-python"
-        in before_script
+        in normalized_before_script
     )
     assert ".uv_cache" not in configuration
     validation_job = configuration["validation (8 gates)"]
@@ -215,6 +216,31 @@ def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
         assert wait_index < bootstrap.index("if (( apt_status != 0 ))")
         assert wait_index < bootstrap.index("if (( python_status != 0 ))")
         assert wait_index < all_setup.index("uv sync --locked --all-groups")
+
+
+def test_ci_syncs_locked_environments_concurrently(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Both locked environments start before CI waits for either one."""
+    for root in (project_root, template_dir, generated_project):
+        configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
+        sync_block = next(
+            command
+            for command in configuration[".base_uv"]["before_script"]
+            if command.count("uv sync --locked --all-groups") == 2
+        )
+
+        first_wait = sync_block.index("wait ")
+        assert sync_block.index("--python 3.11 --no-managed-python") < first_wait
+        assert sync_block.index("--python 3.14.3 --managed-python") < first_wait
+        assert 'wait "$py311_sync_pid"' in sync_block
+        assert 'wait "$py314_sync_pid"' in sync_block
+        assert "py311_status=0" in sync_block
+        assert "py314_status=0" in sync_block
+        assert "if (( py311_status != 0 ))" in sync_block
+        assert "if (( py314_status != 0 ))" in sync_block
 
 
 @pytest.mark.parametrize(
@@ -284,6 +310,76 @@ if [ "$FAIL_APT" = 1 ]; then exit 9; fi""",
     ) is expected_success
 
 
+@pytest.mark.parametrize(
+    ("fail_py311", "fail_py314", "expected_success"),
+    (
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+    ),
+)
+def test_ci_sync_waits_for_both_environments_and_propagates_failures(
+    project_root: Path,
+    tmp_path: Path,
+    *,
+    fail_py311: bool,
+    fail_py314: bool,
+    expected_success: bool,
+) -> None:
+    """Either parallel sync failure is returned only after both are reaped."""
+    configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
+    sync_block = next(
+        command
+        for command in configuration[".base_uv"]["before_script"]
+        if command.count("uv sync --locked --all-groups") == 2
+    )
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "invocations.log"
+    _write_command(
+        fake_bin / "uv",
+        """printf 'start %s %s\n' "$UV_PROJECT_ENVIRONMENT" "$*" >> "$INVOCATIONS"
+status=0
+if [ "$UV_PROJECT_ENVIRONMENT" = "$CI_PROJECT_DIR/.venv" ] \
+    && [ "$FAIL_PY311" = 1 ]; then
+    status=7
+fi
+if [ "$UV_PROJECT_ENVIRONMENT" = /tmp/ci-venvs/py314 ] \
+    && [ "$FAIL_PY314" = 1 ]; then
+    status=8
+fi
+printf 'finish %s %s\n' "$UV_PROJECT_ENVIRONMENT" "$status" >> "$INVOCATIONS"
+exit "$status"
+""",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CI_PROJECT_DIR": str(tmp_path),
+            "FAIL_PY311": str(int(fail_py311)),
+            "FAIL_PY314": str(int(fail_py314)),
+            "INVOCATIONS": str(invocations),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", sync_block],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert (result.returncode == 0) is expected_success
+    invoked = invocations.read_text()
+    assert f"start {tmp_path / '.venv'} sync --locked" in invoked
+    assert "start /tmp/ci-venvs/py314 sync --locked" in invoked
+    assert invoked.count("finish ") == 2
+
+
 def test_ci_configuration_is_mirrored_and_installs_test_executables(
     generated_project: Path,
     project_root: Path,
@@ -311,6 +407,8 @@ def test_ci_shellcheck_excludes_generated_environments(
         assert "-not -path './ci-logs/*'" in helper
         assert "--exclude ci-logs" in helper
         assert "--exclude 'test-results-*.xml'" in helper
+        assert "--exclude '.coverage.*'" in helper
+        assert "-not -name '.coverage.*'" in helper
 
 
 def test_ci_check_helper_runs_and_records_every_gate_without_sync(

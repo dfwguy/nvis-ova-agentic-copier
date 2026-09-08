@@ -106,8 +106,27 @@ ci-image:publish:
       if (( python_status != 0 )); then
           exit "$python_status"
       fi
-    - UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" uv sync --locked --all-groups --python 3.11 --no-managed-python
-    - UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" uv sync --locked --all-groups --python 3.14.3 --managed-python
+    - |
+      set -Eeuo pipefail
+      py311_status=0
+      py314_status=0
+
+      UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" \
+          uv sync --locked --all-groups --python 3.11 --no-managed-python &
+      py311_sync_pid=$!
+      UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" \
+          uv sync --locked --all-groups --python 3.14.3 --managed-python &
+      py314_sync_pid=$!
+
+      wait "$py311_sync_pid" || py311_status=$?
+      wait "$py314_sync_pid" || py314_status=$?
+
+      if (( py311_status != 0 )); then
+          exit "$py311_status"
+      fi
+      if (( py314_status != 0 )); then
+          exit "$py314_status"
+      fi
   rules:
     - if: $CI_COMMIT_BRANCH
 

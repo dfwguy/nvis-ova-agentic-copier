@@ -59,6 +59,7 @@ run_kingfisher() {
         --exclude ci-logs \
         --exclude 'ci-gates.*' \
         --exclude 'coverage-*.xml' \
+        --exclude '.coverage.*' \
         --exclude 'test-results-*.xml' \
         --exclude '*-code-quality-report.json' \
         --exclude format-changes.diff
@@ -85,6 +86,7 @@ run_shellcheck() {
             -not -path './ci-logs/*' \
             -not -name 'ci-gates.*' \
             -not -name 'coverage-*.xml' \
+            -not -name '.coverage.*' \
             -not -name 'test-results-*.xml' \
             -not -name '*-code-quality-report.json' \
             -not -name 'format-changes.diff' \
