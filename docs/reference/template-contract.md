@@ -98,12 +98,12 @@ initialized project until the command preflight has passed.
 
 | Area | Provided configuration |
 | --- | --- |
-| Python | Requires Python 3.11 or newer; tox tests Python 3.11 and 3.14. |
+| Python | Requires Python 3.11 or newer. Local tox runs test Python 3.11 and 3.14; CI creates locked Python 3.11 and 3.14.3 environments. |
 | Dependencies | UV-managed project, test, and development dependency groups. |
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
-| CI | One GitLab validation job performs shared setup, then runs parallel named gates for Ruff checks and formatting, tox, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. It publishes separate Python 3.11 and 3.14 JUnit and coverage evidence, an aggregate code-quality report, per-gate logs, and a formatting diff. The source repository may use a project-only dependency image to accelerate its own CI; generated projects do not inherit its registry configuration or credentials. |
+| CI | One GitLab validation job performs shared setup, then runs parallel named gates for Ruff checks and formatting, direct pytest processes for Python 3.11 and 3.14.3, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. Each Python test process has its own name, log, JUnit report, coverage report, and cache directory. The job also publishes an aggregate code-quality report and formatting diff. Local tox remains the supported-matrix runner outside CI. The source repository may use a project-only dependency image to accelerate its own CI; generated projects do not inherit its registry configuration or credentials. |
 | Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout

@@ -18,7 +18,8 @@ related:
 Use this when you have changed this
 Copier template and need to verify the change before opening a merge request.
 
-From the repository root, run the checks used by the GitLab pipeline:
+From the repository root, run the local equivalents of the GitLab validation
+checks:
 
 ```bash
 uv run ruff check .
@@ -28,6 +29,11 @@ uv run tox
 uv run yamllint -d '{"extends": "default", "rules": {"line-length": "disable", "document-start": "disable"}}' -f parsable .
 uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
 ```
+
+The local `tox` command remains the supported-matrix test runner. In GitLab CI,
+the validation job instead starts direct pytest processes in separate locked
+Python 3.11 and 3.14.3 environments so their logs, JUnit reports, coverage
+reports, and caches remain independently identifiable.
 
 If the change adds or modifies a Bash script, validate that script directly:
 

@@ -19,7 +19,18 @@ run_ruff_format() {
 }
 
 run_tests() {
-    uv run --no-sync tox run-parallel
+    local environment="$1"
+    local project_environment="$2"
+
+    COVERAGE_FILE=".coverage.${environment}" \
+        UV_PROJECT_ENVIRONMENT="$project_environment" \
+        uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
+            --cov \
+            --cov-fail-under=85 \
+            --cov-report="xml:coverage-${environment}.xml" \
+            --junitxml="test-results-${environment}.xml" \
+            -o "junit_suite_name=${environment}" \
+            -o "cache_dir=.cache/pytest/${environment}"
 }
 
 run_yamllint() {
@@ -87,8 +98,12 @@ check_pids+=("$!")
 check_names+=("ruff-format")
 run_ruff_format > "$log_directory/ruff-format.log" 2>&1 &
 check_pids+=("$!")
-check_names+=("pytest-py311-py314")
-run_tests > "$log_directory/pytest-py311-py314.log" 2>&1 &
+check_names+=("pytest-py311")
+run_tests py311 "$CI_PROJECT_DIR/.venv" > "$log_directory/pytest-py311.log" 2>&1 &
+check_pids+=("$!")
+check_names+=("pytest-py314")
+run_tests py314 "/tmp/ci-venvs/py314" \
+    > "$log_directory/pytest-py314.log" 2>&1 &
 check_pids+=("$!")
 check_names+=("yamllint")
 run_yamllint > "$log_directory/yamllint.log" 2>&1 &

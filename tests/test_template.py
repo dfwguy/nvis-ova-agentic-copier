@@ -147,31 +147,40 @@ def test_ci_has_one_runnable_validation_job(
         assert (
             "apt-get install -y --no-install-recommends git jq shellcheck" in ci_config
         )
-        assert "uv sync --locked --all-groups" in ci_config
+        assert ci_config.count("uv sync --locked --all-groups") == 2
         assert "bash tests/helpers/run-ci-checks.sh" in ci_config
-        assert "policy: pull-push" in ci_config
-        assert "uv cache prune --ci" in ci_config
+        assert "cache:" not in ci_config
+        assert "uv cache prune --ci" not in ci_config
 
 
-def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> None:
-    """CI reuses packages and both tested Python interpreters."""
+def test_generated_ci_uses_exact_stable_python_versions(
+    generated_project: Path,
+) -> None:
+    """CI selects reproducible stable interpreters without cache overhead."""
     configuration = yaml.safe_load((generated_project / ".gitlab-ci.yml").read_text())
     base = configuration[".base_uv"]
-    cache = configuration[".uv_cache"]["cache"]
 
     assert base["image"]["name"] == (
-        "ghcr.io/astral-sh/uv:0.7.3-python3.11-bookworm-slim"
+        "ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@"
+        "sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
     )
-    assert base["variables"]["UV_CACHE_DIR"] == "$CI_PROJECT_DIR/.cache/uv"
-    assert base["variables"]["UV_PYTHON_INSTALL_DIR"] == (
-        "$CI_PROJECT_DIR/.cache/uv-python"
+    assert "variables" not in base
+    before_script = "\n".join(base["before_script"])
+    assert "uv python install 3.14.3 --managed-python" in before_script
+    assert "uv python install 3.14\n" not in before_script
+    assert (
+        'UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" '
+        "uv sync --locked --all-groups --python 3.11 --no-managed-python"
+        in before_script
     )
-    assert base["variables"]["UV_PYTHON_PREFERENCE"] == "system"
-    assert cache["key"]["prefix"] == "uv-0.7.3-py311-py314-v1"
-    assert cache["key"]["files"] == ["uv.lock", "pyproject.toml"]
-    assert cache["paths"] == [".cache/uv/", ".cache/uv-python/"]
-    assert configuration["validation"]["cache"]["policy"] == "pull-push"
-    assert "uv cache prune --ci" in configuration["validation"]["after_script"]
+    assert (
+        'UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" '
+        "uv sync --locked --all-groups --python 3.14.3 --managed-python"
+        in before_script
+    )
+    assert ".uv_cache" not in configuration
+    assert "cache" not in configuration["validation"]
+    assert "after_script" not in configuration["validation"]
 
 
 def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
@@ -184,13 +193,15 @@ def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
         configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
         before_script = configuration[".base_uv"]["before_script"]
         bootstrap = next(
-            command for command in before_script if "uv python install 3.14" in command
+            command
+            for command in before_script
+            if "uv python install 3.14.3 --managed-python" in command
         )
         all_setup = "\n".join(before_script)
 
-        assert bootstrap.index("uv python install 3.14") < bootstrap.index(
-            "apt-get update"
-        )
+        assert bootstrap.index(
+            "uv python install 3.14.3 --managed-python"
+        ) < bootstrap.index("apt-get update")
         wait_index = bootstrap.index('wait "$python_install_pid"')
         assert "apt_status=0" in bootstrap
         assert "python_status=0" in bootstrap
@@ -226,7 +237,7 @@ def test_ci_bootstrap_propagates_each_failure_before_sync(
     _write_command(
         fake_bin / "uv",
         """printf 'uv %s\\n' "$*" >> "$INVOCATIONS"
-if [ "$*" = "python install 3.14" ] && [ "$FAIL_PYTHON" = 1 ]; then
+if [ "$*" = "python install 3.14.3 --managed-python" ] && [ "$FAIL_PYTHON" = 1 ]; then
     exit 8
 fi""",
     )
@@ -257,9 +268,14 @@ if [ "$FAIL_APT" = 1 ]; then exit 9; fi""",
 
     assert (result.returncode == 0) is expected_success
     invoked = invocations.read_text()
-    assert "uv python install 3.14" in invoked
+    assert "uv python install 3.14.3 --managed-python" in invoked
     assert "apt-get update" in invoked
-    assert ("uv sync --locked --all-groups" in invoked) is expected_success
+    assert (
+        "uv sync --locked --all-groups --python 3.11 --no-managed-python" in invoked
+    ) is expected_success
+    assert (
+        "uv sync --locked --all-groups --python 3.14.3 --managed-python" in invoked
+    ) is expected_success
 
 
 def test_ci_configuration_is_mirrored_and_installs_test_executables(
@@ -293,7 +309,7 @@ def test_ci_check_helper_is_mirrored_and_runs_every_gate_without_sync(
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """The fixed helper runs all gates after the job's single dependency sync."""
+    """The fixed helper runs all gates after dependency setup completes."""
     root_helper = (project_root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
     template_helper = (
         template_dir / "tests" / "helpers" / "run-ci-checks.sh"
@@ -306,13 +322,37 @@ def test_ci_check_helper_is_mirrored_and_runs_every_gate_without_sync(
     for command in (
         "uv run --no-sync ruff check",
         "uv run --no-sync ruff format --check",
-        "uv run --no-sync tox run-parallel",
+        "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
         "uv run --no-sync yamllint",
         "uv run --no-sync kingfisher scan",
         "uv run --no-sync ty check",
         "shellcheck",
     ):
         assert command in root_helper
+    assert "tox run" not in root_helper
+    assert "run_tests()" in root_helper
+    for environment, project_environment in (
+        ("py311", ".venv"),
+        ("py314", "/tmp/ci-venvs/py314"),
+    ):
+        assert f'check_names+=("pytest-{environment}")' in root_helper
+        expected_path = (
+            project_environment
+            if project_environment.startswith("/")
+            else f"$CI_PROJECT_DIR/{project_environment}"
+        )
+        assert f'run_tests {environment} "{expected_path}"' in root_helper
+    for report_contract in (
+        'COVERAGE_FILE=".coverage.${environment}"',
+        "coverage-${environment}.xml",
+        "test-results-${environment}.xml",
+        "junit_suite_name=${environment}",
+        "cache_dir=.cache/pytest/${environment}",
+    ):
+        assert report_contract in root_helper
+    assert "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest" in root_helper
+    assert "--cov-fail-under=85" in root_helper
+    assert re.search(r"(?:^|\s)--cov(?:\s|\\|$)", root_helper)
 
     last_start = root_helper.rindex('check_pids+=("$!")')
     first_wait = root_helper.index("wait ")
@@ -329,7 +369,8 @@ def test_ci_check_helper_is_mirrored_and_runs_every_gate_without_sync(
         (None, None),
         ("ruff check", "ruff-check"),
         ("ruff format", "ruff-format"),
-        ("tox run-parallel", "pytest-py311-py314"),
+        ("pytest-py311", "pytest-py311"),
+        ("pytest-py314", "pytest-py314"),
         ("yamllint", "yamllint"),
         ("kingfisher scan", "kingfisher"),
         ("ty check", "type-check"),
@@ -353,21 +394,32 @@ def test_ci_check_helper_waits_for_every_gate_and_keeps_artifacts(
     fake_bin.mkdir()
     _write_command(
         fake_bin / "uv",
-        r"""printf '%s\n' "$*" >> "$INVOCATIONS"
+        r"""printf 'env=%s command=%s\n' "${UV_PROJECT_ENVIRONMENT:-}" "$*" >> "$INVOCATIONS"
 command_status=0
 if [ -n "${FAIL_MATCH:-}" ]; then
     case "$*" in
         *"$FAIL_MATCH"*) command_status=7 ;;
     esac
 fi
+if [ "${FAIL_MATCH:-}" = pytest-py311 ] \
+    && [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
+    case "$*" in *pytest*) command_status=7 ;; esac
+fi
+if [ "${FAIL_MATCH:-}" = pytest-py314 ] \
+    && [ "${UV_PROJECT_ENVIRONMENT:-}" = /tmp/ci-venvs/py314 ]; then
+    case "$*" in *pytest*) command_status=7 ;; esac
+fi
 case "$*" in
     *"ruff check"*) printf '[]\n' ;;
     *"ruff format"*) printf 'format diff\n' ;;
-    *"tox run-parallel"*)
-        : > test-results-py311.xml
-        : > test-results-py314.xml
-        : > coverage-py311.xml
-        : > coverage-py314.xml
+    *"pytest"*)
+        if [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
+            : > test-results-py311.xml
+            : > coverage-py311.xml
+        else
+            : > test-results-py314.xml
+            : > coverage-py314.xml
+        fi
         ;;
     *"python tests/helpers/yamllint_to_json.py"*)
         cat >/dev/null
@@ -393,6 +445,7 @@ printf '[]\\n' """,
     environment.update(
         {
             "FAIL_MATCH": failed_command or "",
+            "CI_PROJECT_DIR": str(tmp_path),
             "INVOCATIONS": str(invocations),
             "PATH": f"{fake_bin}:{environment['PATH']}",
         }
@@ -412,7 +465,8 @@ printf '[]\\n' """,
     for check_name in (
         "ruff-check",
         "ruff-format",
-        "pytest-py311-py314",
+        "pytest-py311",
+        "pytest-py314",
         "yamllint",
         "kingfisher",
         "type-check",
@@ -420,17 +474,22 @@ printf '[]\\n' """,
     ):
         assert check_name in result.stdout
     if failed_check is None:
-        assert result.stdout.count("PASS ") == 7
+        assert result.stdout.count("PASS ") == 8
         assert "FAIL " not in result.stdout
     else:
-        assert result.stdout.count("PASS ") == 6
+        assert result.stdout.count("PASS ") == 7
         assert result.stdout.count("FAIL ") == 1
         assert f"FAIL {failed_check}" in result.stdout
     invoked = invocations.read_text()
     for expected in (
         "ruff check",
         "ruff format",
-        "tox run-parallel",
+        "env="
+        + str(tmp_path / ".venv")
+        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "env="
+        + "/tmp/ci-venvs/py314"
+        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
         "yamllint",
         "kingfisher scan",
         "ty check",
@@ -556,8 +615,10 @@ def test_parallel_test_artifacts_are_ignored_everywhere(
         assert "*-code-quality-report.json" in ignore
 
 
-def test_generated_dev_environment_includes_tox_uv(generated_project: Path) -> None:
-    """CI can run tox without provisioning a second tool environment."""
+def test_generated_dev_environment_includes_local_tox_matrix(
+    generated_project: Path,
+) -> None:
+    """Generated projects retain tox as the local supported-matrix runner."""
     config = tomllib.loads((generated_project / "pyproject.toml").read_text())
 
     assert "tox-uv>=1.20" in config["dependency-groups"]["dev"]
