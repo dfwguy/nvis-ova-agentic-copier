@@ -154,13 +154,112 @@ def test_ci_has_one_runnable_validation_job(
 
 
 def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> None:
-    """CI reuses UV downloads and avoids downloading its bootstrap Python."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+    """CI reuses packages and both tested Python interpreters."""
+    configuration = yaml.safe_load((generated_project / ".gitlab-ci.yml").read_text())
+    base = configuration[".base_uv"]
+    cache = configuration[".uv_cache"]["cache"]
 
-    assert "UV_CACHE_DIR" in ci_config
-    assert ".cache/uv/" in ci_config
-    assert "uv:0.7.3-python3.13-bookworm-slim" in ci_config
-    assert "uv cache prune --ci" in ci_config
+    assert base["image"]["name"] == (
+        "ghcr.io/astral-sh/uv:0.7.3-python3.11-bookworm-slim"
+    )
+    assert base["variables"]["UV_CACHE_DIR"] == "$CI_PROJECT_DIR/.cache/uv"
+    assert base["variables"]["UV_PYTHON_INSTALL_DIR"] == (
+        "$CI_PROJECT_DIR/.cache/uv-python"
+    )
+    assert base["variables"]["UV_PYTHON_PREFERENCE"] == "system"
+    assert cache["key"]["prefix"] == "uv-0.7.3-py311-py314-v1"
+    assert cache["key"]["files"] == ["uv.lock", "pyproject.toml"]
+    assert cache["paths"] == [".cache/uv/", ".cache/uv-python/"]
+    assert configuration["validation"]["cache"]["policy"] == "pull-push"
+    assert "uv cache prune --ci" in configuration["validation"]["after_script"]
+
+
+def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """CI reaps both concurrent setup operations before dependency sync."""
+    for root in (project_root, template_dir, generated_project):
+        configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
+        before_script = configuration[".base_uv"]["before_script"]
+        bootstrap = next(
+            command for command in before_script if "uv python install 3.14" in command
+        )
+        all_setup = "\n".join(before_script)
+
+        assert bootstrap.index("uv python install 3.14") < bootstrap.index(
+            "apt-get update"
+        )
+        wait_index = bootstrap.index('wait "$python_install_pid"')
+        assert "apt_status=0" in bootstrap
+        assert "python_status=0" in bootstrap
+        assert bootstrap.index("apt-get update") < wait_index
+        assert wait_index < bootstrap.index("if (( apt_status != 0 ))")
+        assert wait_index < bootstrap.index("if (( python_status != 0 ))")
+        assert wait_index < all_setup.index("uv sync --locked --all-groups")
+
+
+@pytest.mark.parametrize(
+    ("fail_apt", "fail_python", "expected_success"),
+    (
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+    ),
+)
+def test_ci_bootstrap_propagates_each_failure_before_sync(
+    project_root: Path,
+    tmp_path: Path,
+    *,
+    fail_apt: bool,
+    fail_python: bool,
+    expected_success: bool,
+) -> None:
+    """Either concurrent setup failure prevents dependency synchronization."""
+    configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
+    setup_script = "\n".join(configuration[".base_uv"]["before_script"])
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "invocations.log"
+    _write_command(
+        fake_bin / "uv",
+        """printf 'uv %s\\n' "$*" >> "$INVOCATIONS"
+if [ "$*" = "python install 3.14" ] && [ "$FAIL_PYTHON" = 1 ]; then
+    exit 8
+fi""",
+    )
+    _write_command(
+        fake_bin / "apt-get",
+        """printf 'apt-get %s\\n' "$*" >> "$INVOCATIONS"
+if [ "$FAIL_APT" = 1 ]; then exit 9; fi""",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CI_PROJECT_DIR": str(tmp_path),
+            "FAIL_APT": str(int(fail_apt)),
+            "FAIL_PYTHON": str(int(fail_python)),
+            "INVOCATIONS": str(invocations),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", setup_script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert (result.returncode == 0) is expected_success
+    invoked = invocations.read_text()
+    assert "uv python install 3.14" in invoked
+    assert "apt-get update" in invoked
+    assert ("uv sync --locked --all-groups" in invoked) is expected_success
 
 
 def test_ci_configuration_is_mirrored_and_installs_test_executables(
@@ -282,7 +381,7 @@ exit "$command_status"
     _write_command(
         fake_bin / "shellcheck",
         """printf 'shellcheck %s\\n' "$*" >> "$INVOCATIONS"
-if [ "${FAIL_MATCH:-}" = shellcheck ]; then exit 7; fi""",
+if [ "${FAIL_MATCH:-}" = shellcheck ] && [ "$*" = ./check.sh ]; then exit 7; fi""",
     )
     _write_command(
         fake_bin / "jq",
