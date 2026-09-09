@@ -98,5 +98,5 @@ The orchestrator parses these lines literally — keep the format consistent. Th
 - Do not approve code with any **Major** findings. Minor and Existing findings never cause a rejection.
 - Preserve every Minor in the standard output format for Findings Triage. That
   terminal agent, not this read-only judge, files deduplicated Bug-template
-  GitLab issues after pipeline review. Do not claim an issue was created or use
+  GitLab issues after publication. Do not claim an issue was created or use
   a Markdown backlog file as a fallback.

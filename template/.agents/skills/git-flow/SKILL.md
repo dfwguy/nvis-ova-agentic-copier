@@ -162,13 +162,7 @@ git rev-parse --abbrev-ref HEAD
    ```
    Fast smoke test. The full `tox` matrix still runs at finalization time.
 
-2. **GitLab pipeline health on `main`**:
-   ```bash
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=1"
-   ```
-   Treat `failed` / `canceled` on the latest pipeline as a failing check.
-
-3. **Open merge request awareness**:
+2. **Open merge request awareness**:
    ```bash
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&per_page=100"
    ```
@@ -178,7 +172,7 @@ git rev-parse --abbrev-ref HEAD
    resource conflict. A continuation of an existing MR reuses its branch as
    described above.
 
-4. **Branch-specific continuation from `main`**:
+3. **Branch-specific continuation from `main`**:
    ```bash
    git fetch origin --prune
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=$intended_branch"
@@ -200,7 +194,10 @@ git rev-parse --abbrev-ref HEAD
 git checkout -b "$intended_branch"
 ```
 
-**A blocking check fails** → summarize the failure (test names, pipeline ID + URL, dependency, same-branch ownership, or resource conflict) and remediate it before handoff. A failed or canceled latest pipeline is actionable: diagnose it, then either include its fix in the current feature MR when it is compatible with the requested work or open a dedicated pipeline-repair MR. A user report of a terminal pipeline failure authorizes this bounded diagnosis-and-repair path; once evidence ties the failure to the current MR, update that MR instead of stopping after diagnosis. Do not leave a failed pipeline merely reported. Other failures still require user direction when their repair would materially expand scope. An unrelated open MR is not a failed check.
+**A blocking check fails** → summarize the failure (test names, dependency,
+same-branch ownership, or resource conflict) and remediate it before handoff.
+Other failures still require user direction when their repair would materially
+expand scope. An unrelated open MR is not a failed check.
 
 If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
 
@@ -262,13 +259,17 @@ If `git push` or merge-request creation fails, stop and report the non-secret
 error and required next action. The failure blocks the work; do not call local
 edits or a local commit complete.
 
-4. **Report** to the user: the `web_url` from the API response (or the existing-MR lookup), the current local commit hash, and a one-line summary. Because the MR uses `squash=true`, GitLab collapses the branch into a **single new commit on `main` with a different hash** when it merges — so the hash you report now is the local branch tip, *not* the SHA that will land. Do not present it as the final merged hash; the canonical post-merge SHA is available only after later reconciliation.
+4. **Report** to the user: the `web_url` from the API response (or the
+   existing-MR lookup), the current local commit hash, and a one-line summary.
+   Because the MR uses `squash=true`, GitLab collapses the branch into a
+   **single new commit on `main` with a different hash** when it merges. The
+   reported hash is the branch tip, not the future merged SHA.
 
 ## Step 4: Hand off without waiting for merge
 
-After Step 3, report the result as `awaiting_human` and end the active run. AI must never approve or merge the MR itself, so human review and merge still
-determine whether the change lands.
-They do not prevent another unrelated work item from starting.
+After publication, report the result as `awaiting_human` and end the active run.
+AI must never approve or merge the MR itself, so human review and merge
+determine whether the change lands. They do not prevent unrelated work.
 
 1. **Release the active checkout at the correct session boundary.** A serial-runner worker on an
    `agent/issue-<IID>` branch ends immediately after returning its merge-request
@@ -294,39 +295,13 @@ They do not prevent another unrelated work item from starting.
    there is a same-branch conflict, declared dependency, or concrete resource
    conflict.
 
-3. **Reconcile later without busy-polling.** When the user asks for status, or
-   a bounded reconciliation job revisits the item, query its branch-specific
-   MR and then the latest default-branch pipeline if it merged:
-   ```bash
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=<feature-branch>"
-   glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/pipelines?ref=main&per_page=1"
-   ```
-   An open MR remains `awaiting_human`. A merged MR is not declared fully
-   landed until the latest `main` pipeline passes. A failed post-merge pipeline
-   is reported for remediation, but it does not block unrelated work.
+3. **Continue a branch-specific review fix.** Re-fetch the open MR by its
+   source branch, verify that the remote branch tip matches the intended work,
+   make the requested correction on that same branch, and update the existing
+   MR through Step 3b. Never create a second MR for the same review iteration.
 
-   For a reported CI failure or performance concern, invoke the Pipeline Performance Judge
-   during this bounded reconciliation. It inspects the current MR pipeline (not only the latest `main` pipeline), separates runner
-   queue time from bootstrap, execution, cache, and artifact time, and checks
-   the current branch tip before reporting evidence. A pending or running
-   pipeline is `needs verification` for a later reconciliation; never poll it,
-   retry it, or delay the human handoff.
-
-   Once that MR pipeline is terminal, invoke Findings Triage as the final
-   post-publication step. It consumes accumulated Minor findings from every
-   judge, including the pipeline review, and creates deduplicated Bug issues.
-   Those issues are eligible input for a later serial-loop pass; the current
-   MR remains `awaiting_human` and the triage step never edits, pushes, or
-   waits.
-
-   An MR remediation issue contains the verified `agent-mr-remediation` marker.
-   A later worker must re-fetch the referenced open MR, verify the same-project
-   default target and remote source-branch tip, resume that source branch, and
-   update the existing merge request with `Closes #<triage-issue>`. It must not
-   create a second MR. Any stale, merged, cross-project, or mismatched marker
-   fails the remediation issue without changing the original MR.
-
-4. **Clean up only after merge confirmation.** Only once the MR is merged and `main` is green may reconciliation update `main` and remove the local branch:
+4. **Clean up only after merge confirmation.** Only once the MR is merged may
+   the normal checkout update `main` and remove the local branch:
    ```bash
    git checkout main
    git pull --ff-only

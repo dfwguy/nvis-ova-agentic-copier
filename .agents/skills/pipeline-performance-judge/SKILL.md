@@ -1,17 +1,21 @@
 ---
 name: pipeline-performance-judge
-description: Analyze the current merge request pipeline's health and timing after publication.
+description: Own post-publication GitLab pipeline reconciliation, timing diagnosis, and loop-ready feedback.
 metadata:
   model-tier: balanced
 ---
 
 # Pipeline Performance Judge
 
-Use this portable workflow skill only for bounded, post-publication analysis of
-a merge request's current GitLab pipeline. Read and follow [the role
-instructions](../../agents/pipeline-performance-judge.md) before acting. That
-file is a compatibility reference for Claude Code; this directory is the
-shared skill entry point for Codex, Pi, and Claude Code.
+Use this portable workflow skill for one complete bounded reconciliation invocation
+after a merge request is published. This one agent owns live GitLab
+pipeline observation, internal waiting, timing and failure diagnosis, and any
+deduplicated feedback issue that should enter the serial work loop. No other
+workflow role polls or interprets the live pipeline.
+
+Read and follow [the role instructions](../../agents/pipeline-performance-judge.md)
+before acting. That file is a compatibility reference for Claude Code; this
+directory is the shared skill entry point for Codex, Pi, and Claude Code.
 
 ## Model selection
 
