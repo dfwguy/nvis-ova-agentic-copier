@@ -1,7 +1,7 @@
 ---
 title: Refresh the CI dependency image
 type: how-to
-summary: Publish and verify the project-only CI dependency image after a reviewed change.
+summary: Publish, pin, and verify the project-only CI image that root validation consumes.
 audience: maintainer
 tags: [template-maintenance]
 status: current
@@ -16,8 +16,10 @@ related:
 # Refresh the CI dependency image
 
 Use this procedure after changing the CI image definition, `pyproject.toml`,
-or `uv.lock`. The image is a project-only CI acceleration: generated Copier
-projects remain portable and do not inherit its registry location or
+or `uv.lock`. The image is a project-only root-repository dependency: root
+validation consumes its already-published contents by immutable digest and
+does no `apt` or UV bootstrap. Generated Copier projects keep their own
+portable CI bootstrap and do not inherit this registry location, image pin, or
 credentials.
 
 ## 1. Validate the image merge request
@@ -37,17 +39,26 @@ After the merge reaches the default branch, the publication job runs only when
 the image definition, `pyproject.toml`, or `uv.lock` changed. It publishes the
 project-only image and records its immutable digest as a pipeline artifact.
 
-Retrieve that artifact and confirm that it identifies the image by digest, not
-by a mutable tag. Keep the digest with the pipeline evidence; do not copy a
+Retrieve that artifact and confirm that it records `CI_IMAGE` in the form
+`<registry>/<project>/validation@sha256:<64 hexadecimal characters>`, not a
+mutable tag. Keep that exact digest with the pipeline evidence; do not copy a
 credential or registry-login command into a generated template.
 
 ## 3. Verify the consumer change
 
-Use the recorded digest to update the consumer merge request separately. For
-the current rollout, that is merge request !88. Its pipeline must retain the
-separate test results and complete execution in the project budget: prefer at
-most 10 seconds after a runner starts and reject execution over 60 seconds.
-Exclude runner queue time when measuring those limits.
+Use the recorded digest to update the root validation consumer in a separate
+merge request. Set its GitLab job image to the complete `CI_IMAGE` value,
+including `@sha256:...`; never substitute a floating tag. That consumer job
+must use the image's prepared interpreter, system tools, and locked project
+dependencies. It must not run `apt-get`, `uv python install`, `uv sync`, or
+another dependency-installation fallback.
+
+Run the consumer pipeline and retain its separate test results. It must
+complete execution within the project budget: prefer at most 10 seconds after
+a runner starts and reject execution over 60 seconds. Exclude runner queue
+time when measuring those limits. If the image needs another dependency,
+refresh and publish the image first, then repeat this pin-update procedure;
+do not restore bootstrap work to root validation.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership

@@ -31,13 +31,17 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-the physical `validation (8 gates)` job performs shared setup once, then runs
-these gates concurrently: `ruff-check`, `ruff-format`, `pytest-py311`,
-`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and `shellcheck`. The
-merge request Test summary and pipeline Tests tab show their named results in a
-`CI gates` JUnit suite. The two pytest gates also retain separate Python 3.11
-and 3.14.3 JUnit suites, logs, coverage reports, and caches. Use the
-collapsible per-gate log sections and artifacts to inspect an individual gate.
+the root physical `validation (8 gates)` job consumes an already-published,
+immutable-digest CI image. It performs no `apt-get`, `uv python install`, or
+`uv sync` bootstrap, then runs these gates concurrently: `ruff-check`,
+`ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`,
+`type-check`, and `shellcheck`. The merge request Test summary and pipeline
+Tests tab show their named results in a `CI gates` JUnit suite. The two pytest
+gates also retain separate Python 3.11 and 3.14.3 JUnit suites, logs, coverage
+reports, and caches. Generated projects retain their portable CI bootstrap;
+they do not consume the root image or require its registry credentials. Use
+the collapsible per-gate log sections and artifacts to inspect an individual
+gate.
 
 If the change adds or modifies a Bash script, validate that script directly:
 

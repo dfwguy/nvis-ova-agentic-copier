@@ -26,7 +26,8 @@ run_tests() {
     local environment="$1"
     local project_environment="$2"
 
-    COVERAGE_FILE=".coverage.${environment}" \
+    PYTHONPATH="$CI_PROJECT_DIR/src" \
+        COVERAGE_FILE=".coverage.${environment}" \
         UV_PROJECT_ENVIRONMENT="$project_environment" \
         uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
             --cov \
@@ -114,8 +115,8 @@ run_selected_gate() {
     case "$name" in
         ruff-check) run_ruff_check ;;
         ruff-format) run_ruff_format ;;
-        pytest-py311) run_tests py311 "$CI_PROJECT_DIR/.venv" ;;
-        pytest-py314) run_tests py314 "/tmp/ci-venvs/py314" ;;
+        pytest-py311) run_tests py311 "/opt/ci/py311" ;;
+        pytest-py314) run_tests py314 "/opt/ci/py314" ;;
         yamllint) run_yamllint ;;
         kingfisher) run_kingfisher ;;
         type-check) run_type_check ;;

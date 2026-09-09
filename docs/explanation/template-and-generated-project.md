@@ -41,6 +41,16 @@ can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—
 one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
 
+The root repository also has an internal CI boundary. Its validation job
+consumes a project-only image that has already been published and is pinned by
+immutable digest. The image holds the root job's interpreter, system tools,
+and locked dependencies, so the validation job does not install them again.
+That optimization belongs only to this repository: generated projects retain
+their existing portable bootstrap and need neither the private registry image
+nor its credentials. When root dependencies change, maintainers publish a new
+image digest and deliberately update the root consumer to that digest rather
+than relying on a mutable image tag.
+
 The update model intentionally preserves files that are commonly customized,
 such as a project's README, dependencies, CI pipeline, package initializer, and
 project-specific agent context. A template update should offer an upgrade path,

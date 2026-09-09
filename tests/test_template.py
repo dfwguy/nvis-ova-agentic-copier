@@ -121,10 +121,9 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
 
 def test_ci_has_one_runnable_eight_gate_validation_job(
     generated_project: Path,
-    project_root: Path,
     template_dir: Path,
 ) -> None:
-    """CI pays runner and dependency setup overhead only once."""
+    """Portable CI pays runner and dependency setup overhead only once."""
     global_keywords = {
         "after_script",
         "before_script",
@@ -138,7 +137,7 @@ def test_ci_has_one_runnable_eight_gate_validation_job(
         "variables",
         "workflow",
     }
-    for root in (project_root, template_dir, generated_project):
+    for root in (template_dir, generated_project):
         ci_config = (root / ".gitlab-ci.yml").read_text()
         configuration = yaml.safe_load(ci_config)
         job_names = {
@@ -192,11 +191,10 @@ def test_generated_ci_uses_exact_stable_python_versions(
 
 def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
     generated_project: Path,
-    project_root: Path,
     template_dir: Path,
 ) -> None:
     """CI reaps both concurrent setup operations before dependency sync."""
-    for root in (project_root, template_dir, generated_project):
+    for root in (template_dir, generated_project):
         configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
         before_script = configuration[".base_uv"]["before_script"]
         bootstrap = next(
@@ -220,11 +218,10 @@ def test_ci_bootstrap_overlaps_tools_and_python_before_sync(
 
 def test_ci_syncs_locked_environments_concurrently(
     generated_project: Path,
-    project_root: Path,
     template_dir: Path,
 ) -> None:
     """Both locked environments start before CI waits for either one."""
-    for root in (project_root, template_dir, generated_project):
+    for root in (template_dir, generated_project):
         configuration = yaml.safe_load((root / ".gitlab-ci.yml").read_text())
         sync_block = next(
             command
@@ -253,7 +250,7 @@ def test_ci_syncs_locked_environments_concurrently(
     ),
 )
 def test_ci_bootstrap_propagates_each_failure_before_sync(
-    project_root: Path,
+    template_dir: Path,
     tmp_path: Path,
     *,
     fail_apt: bool,
@@ -261,7 +258,7 @@ def test_ci_bootstrap_propagates_each_failure_before_sync(
     expected_success: bool,
 ) -> None:
     """Either concurrent setup failure prevents dependency synchronization."""
-    configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
+    configuration = yaml.safe_load((template_dir / ".gitlab-ci.yml").read_text())
     setup_script = "\n".join(configuration[".base_uv"]["before_script"])
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -320,7 +317,7 @@ if [ "$FAIL_APT" = 1 ]; then exit 9; fi""",
     ),
 )
 def test_ci_sync_waits_for_both_environments_and_propagates_failures(
-    project_root: Path,
+    template_dir: Path,
     tmp_path: Path,
     *,
     fail_py311: bool,
@@ -328,7 +325,7 @@ def test_ci_sync_waits_for_both_environments_and_propagates_failures(
     expected_success: bool,
 ) -> None:
     """Either parallel sync failure is returned only after both are reaped."""
-    configuration = yaml.safe_load((project_root / ".gitlab-ci.yml").read_text())
+    configuration = yaml.safe_load((template_dir / ".gitlab-ci.yml").read_text())
     sync_block = next(
         command
         for command in configuration[".base_uv"]["before_script"]
@@ -380,17 +377,16 @@ exit "$status"
     assert invoked.count("finish ") == 2
 
 
-def test_ci_configuration_is_mirrored_and_installs_test_executables(
+def test_portable_ci_is_mirrored_and_installs_test_executables(
     generated_project: Path,
     project_root: Path,
 ) -> None:
-    """Root, template, and rendered CI use one byte-identical configuration."""
-    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    """Template and rendered CI use one byte-identical configuration."""
     template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
     generated_ci = (generated_project / ".gitlab-ci.yml").read_text()
 
-    assert root_ci == template_ci == generated_ci
-    assert "apt-get install -y --no-install-recommends git jq shellcheck" in root_ci
+    assert template_ci == generated_ci
+    assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
 
 
 def test_ci_shellcheck_excludes_generated_environments(
@@ -425,7 +421,7 @@ def test_ci_check_helper_runs_and_records_every_gate_without_sync(
         generated_project / "tests" / "helpers" / "run-ci-checks.sh"
     ).read_text()
 
-    assert root_helper == template_helper == generated_helper
+    assert template_helper == generated_helper
     for command in (
         "uv run --no-sync ruff check",
         "uv run --no-sync ruff format --check",
@@ -436,19 +432,17 @@ def test_ci_check_helper_runs_and_records_every_gate_without_sync(
         "shellcheck",
     ):
         assert command in root_helper
+        assert command in template_helper
     assert "tox run" not in root_helper
     assert "run_tests()" in root_helper
     for environment, project_environment in (
-        ("py311", ".venv"),
-        ("py314", "/tmp/ci-venvs/py314"),
+        ("py311", "/opt/ci/py311"),
+        ("py314", "/opt/ci/py314"),
     ):
         assert f'    "pytest-{environment}"' in root_helper
-        expected_path = (
-            project_environment
-            if project_environment.startswith("/")
-            else f"$CI_PROJECT_DIR/{project_environment}"
-        )
-        assert f'run_tests {environment} "{expected_path}"' in root_helper
+        assert f'run_tests {environment} "{project_environment}"' in root_helper
+    assert 'run_tests py311 "$CI_PROJECT_DIR/.venv"' in template_helper
+    assert 'run_tests py314 "/tmp/ci-venvs/py314"' in template_helper
     for report_contract in (
         'COVERAGE_FILE=".coverage.${environment}"',
         "coverage-${environment}.xml",
@@ -507,7 +501,8 @@ def test_ci_check_helper_waits_for_every_gate_and_keeps_artifacts(
     fake_bin.mkdir()
     _write_command(
         fake_bin / "uv",
-        r"""printf 'env=%s command=%s\n' "${UV_PROJECT_ENVIRONMENT:-}" "$*" >> "$INVOCATIONS"
+        r"""printf 'env=%s pythonpath=%s command=%s\n' \
+    "${UV_PROJECT_ENVIRONMENT:-}" "${PYTHONPATH:-}" "$*" >> "$INVOCATIONS"
 if [ "$*" = "run --no-sync python tests/helpers/ci_gate_report.py" ]; then
     exec python3 tests/helpers/ci_gate_report.py
 fi
@@ -518,18 +513,18 @@ if [ -n "${FAIL_MATCH:-}" ]; then
     esac
 fi
 if [ "${FAIL_MATCH:-}" = pytest-py311 ] \
-    && [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
+    && [ "${UV_PROJECT_ENVIRONMENT:-}" = /opt/ci/py311 ]; then
     case "$*" in *pytest*) command_status=7 ;; esac
 fi
 if [ "${FAIL_MATCH:-}" = pytest-py314 ] \
-    && [ "${UV_PROJECT_ENVIRONMENT:-}" = /tmp/ci-venvs/py314 ]; then
+    && [ "${UV_PROJECT_ENVIRONMENT:-}" = /opt/ci/py314 ]; then
     case "$*" in *pytest*) command_status=7 ;; esac
 fi
 case "$*" in
     *"ruff check"*) printf '[]\n' ;;
     *"ruff format"*) printf 'format diff\n' ;;
     *"pytest"*)
-        if [ "${UV_PROJECT_ENVIRONMENT:-}" = "$CI_PROJECT_DIR/.venv" ]; then
+        if [ "${UV_PROJECT_ENVIRONMENT:-}" = /opt/ci/py311 ]; then
             : > test-results-py311.xml
             : > coverage-py311.xml
         else
@@ -603,12 +598,12 @@ printf '[]\\n' """,
     for expected in (
         "ruff check",
         "ruff format",
-        "env="
-        + str(tmp_path / ".venv")
-        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
-        "env="
-        + "/tmp/ci-venvs/py314"
-        + " command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "env=/opt/ci/py311 "
+        + f"pythonpath={tmp_path / 'src'} "
+        + "command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "env=/opt/ci/py314 "
+        + f"pythonpath={tmp_path / 'src'} "
+        + "command=run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
         "yamllint",
         "kingfisher scan",
         "ty check",
@@ -869,7 +864,7 @@ def test_ci_publishes_named_gate_and_python_reports_from_one_job(
     """One fast job exposes gate and Python results in GitLab's test UI."""
     for root in (project_root, template_dir, generated_project):
         ci_config = (root / ".gitlab-ci.yml").read_text()
-        configuration = yaml.safe_load(ci_config)
+        configuration = yaml.safe_load(ci_config.replace("!reference ", ""))
         job = configuration["validation (8 gates)"]
         reports = job["artifacts"]["reports"]
 

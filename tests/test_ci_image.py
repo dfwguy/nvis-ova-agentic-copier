@@ -8,6 +8,10 @@ from pathlib import Path
 import yaml
 
 _IMAGE_INPUTS = ("Dockerfile", "pyproject.toml", "uv.lock")
+_PUBLISHED_VALIDATION_IMAGE = (
+    "gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@"
+    "sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521"
+)
 
 
 def test_validation_image_contains_the_locked_non_root_toolchain(
@@ -164,3 +168,46 @@ def test_project_image_contract_does_not_leak_into_generated_ci(
     assert "ci-image:publish" in root_ci
     assert "CI_REGISTRY_IMAGE" not in template_ci
     assert "moby/buildkit" not in template_ci
+
+
+def test_root_validation_consumes_the_published_image_without_bootstrap(
+    project_root: Path,
+) -> None:
+    """Root validation reuses the reviewed image without downloading tools."""
+    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
+    base = configuration[".base_uv"]
+    before_script = "\n".join(base["before_script"])
+    helper = (project_root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
+
+    assert base["image"]["name"] == _PUBLISHED_VALIDATION_IMAGE
+    assert base["before_script"] == [
+        'cd "$CI_PROJECT_DIR"',
+        "uv --version",
+        "/opt/ci/py311/bin/python --version",
+        "/opt/ci/py314/bin/python --version",
+    ]
+    for runtime_setup in ("apt-get", "uv python install", "uv sync"):
+        assert runtime_setup not in before_script
+    assert 'run_tests py311 "/opt/ci/py311"' in helper
+    assert 'run_tests py314 "/opt/ci/py314"' in helper
+    assert 'PYTHONPATH="$CI_PROJECT_DIR/src"' in helper
+    assert 'run_tests py311 "$CI_PROJECT_DIR/.venv"' not in helper
+    assert 'run_tests py314 "/tmp/ci-venvs/py314"' not in helper
+
+
+def test_portable_template_keeps_its_independent_validation_bootstrap(
+    project_root: Path,
+) -> None:
+    """Generated repositories do not depend on this project's private image."""
+    template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
+    template_helper = (
+        project_root / "template" / "tests" / "helpers" / "run-ci-checks.sh"
+    ).read_text()
+
+    assert _PUBLISHED_VALIDATION_IMAGE not in template_ci
+    assert "gitlab-master.nvidia.com:5005/nvis-ova" not in template_ci
+    assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
+    assert template_ci.count("uv sync --locked --all-groups") == 2
+    assert 'run_tests py311 "$CI_PROJECT_DIR/.venv"' in template_helper
+    assert 'run_tests py314 "/tmp/ci-venvs/py314"' in template_helper

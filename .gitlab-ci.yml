@@ -82,51 +82,12 @@ ci-image:publish:
   stage: validate
   interruptible: true
   image:
-    name: ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
+    name: gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521
   before_script:
     - cd "$CI_PROJECT_DIR"
     - uv --version
-    - |
-      set -Eeuo pipefail
-      apt_status=0
-      python_status=0
-
-      uv python install 3.14.3 --managed-python &
-      python_install_pid=$!
-
-      apt-get update -qq \
-          && apt-get install -y --no-install-recommends git jq shellcheck \
-          || apt_status=$?
-
-      wait "$python_install_pid" || python_status=$?
-
-      if (( apt_status != 0 )); then
-          exit "$apt_status"
-      fi
-      if (( python_status != 0 )); then
-          exit "$python_status"
-      fi
-    - |
-      set -Eeuo pipefail
-      py311_status=0
-      py314_status=0
-
-      UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" \
-          uv sync --locked --all-groups --python 3.11 --no-managed-python &
-      py311_sync_pid=$!
-      UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" \
-          uv sync --locked --all-groups --python 3.14.3 --managed-python &
-      py314_sync_pid=$!
-
-      wait "$py311_sync_pid" || py311_status=$?
-      wait "$py314_sync_pid" || py314_status=$?
-
-      if (( py311_status != 0 )); then
-          exit "$py311_status"
-      fi
-      if (( py314_status != 0 )); then
-          exit "$py314_status"
-      fi
+    - /opt/ci/py311/bin/python --version
+    - /opt/ci/py314/bin/python --version
   rules:
     - if: $CI_COMMIT_BRANCH
 

@@ -15,7 +15,7 @@ practical work in a generated project or this template repository.
 
 ### Template maintenance
 - [Update a generated project](update-a-generated-project.md) — Bring template improvements into an existing generated project.
-- [Refresh the CI dependency image](refresh-ci-image.md) — Publish and verify the project-only CI dependency image after a reviewed change.
+- [Refresh the CI dependency image](refresh-ci-image.md) — Publish, pin, and verify the project-only CI image that root validation consumes.
 - [Validate template changes](validate-template-changes.md) — Run the checks required before proposing a template change.
 
 ### Agent workflow
