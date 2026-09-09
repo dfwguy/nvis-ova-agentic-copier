@@ -41,13 +41,21 @@ Route to the Architect before starting any work that involves:
      `src/<package>/` with external tests and `[project.scripts]` CLI metadata;
      Bash has one public `bin/<tool>` entry point backed by `src/` or `lib/`.
      A different layout needs a specific `.agents/project.md` deviation record.
-4. **Produce a design** that includes:
+4. **Choose the control model**:
+   - Prefer an explicit finite state machine when a workflow has multiple durable
+     states, resumable or interrupted transitions, retries, or externally
+     visible lifecycle phases.
+   - If selected, define the states, allowed transitions, invariants, retry and
+     recovery behavior, and terminal outcomes.
+   - Avoid a state machine for simple stateless or linear flows without a
+     recovery lifecycle.
+5. **Produce a design** that includes:
    - Module and function breakdown with responsibilities
    - Data structures (dataclasses preferred)
    - Dependency boundaries — every injection point named explicitly (see Output Format)
    - What is explicitly out of scope
-5. **State assumptions** — list anything you assumed that the user should validate
-6. **Hand off by lane** — coding designs specify Red tests and implementation;
+6. **State assumptions** — list anything you assumed that the user should validate
+7. **Hand off by lane** — coding designs specify Red tests and implementation;
    documentation/policy designs specify content boundaries, sources of truth,
    mirrors, and structural validation without inventing behavior tests.
 
