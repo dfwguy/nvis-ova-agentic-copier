@@ -156,11 +156,14 @@ git rev-parse --abbrev-ref HEAD
 
 **First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining checks:
 
-1. **Local tests**:
+1. **Coding-lane baseline tests** — after classifying the whole intended
+   change with `AGENTS.md`, run this only for the coding workflow:
    ```bash
    uv run pytest
    ```
-   Fast smoke test. The full `tox` matrix still runs at finalization time.
+   This is the fast coding baseline; the full matrix still runs at coding
+   finalization. Documentation and agent-policy work uses its content checks
+   and does not require a test baseline.
 
 2. **Open merge request awareness**:
    ```bash

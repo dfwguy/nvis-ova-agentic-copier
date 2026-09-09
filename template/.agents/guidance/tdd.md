@@ -1,7 +1,8 @@
 # Test-Driven Development
 
-Language-agnostic TDD discipline for this repo. `AGENTS.md` defines the route;
-this file defines the discipline every contributor and tool follows.
+Language-agnostic TDD discipline for this repo's coding workflow. `AGENTS.md`
+defines the route; documentation and agent-policy work uses its separate
+guidance and must not load this file merely because the content is non-trivial.
 
 ## Always
 

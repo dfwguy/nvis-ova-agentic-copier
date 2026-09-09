@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-08
+last_reviewed: 2026-09-09
 related:
   - path: serial-gitlab-agent-loop.md
     why: Describes the issue workflow that uses these roles.
@@ -19,7 +19,9 @@ interpretation. It is an explanation of the routing model; the authoritative
 step-by-step manifest is `AGENTS.md`.
 
 The workflow separates design, test design, documentation, implementation, and
-review so every step has a clear purpose and an independent check. Roles are
+review so every step has a clear purpose and an independent check. It has two
+lanes: the coding lane for behavior or machine-readable-contract changes, and
+the documentation and agent-policy lane for content-only changes. Roles are
 portable across Claude Code, Codex, and Pi because the shared entry points are
 the directories under `.agents/skills/`, not frontend-specific agents or
 configuration. A display name such as “Test Writer” helps a reader understand
@@ -33,6 +35,38 @@ phase produces, and where a rejection goes. The selected skill then links to
 the detailed role reference. This division keeps the portable decision visible
 at session start while keeping role procedures in one maintained location.
 
+## Two lanes keep validation proportional
+
+The coding lane is the default for a whole diff that changes executable code,
+tests, CI, packaging, configuration, schemas, command contracts, or executable
+automation. It uses the full TDD route: architecture, Red, Green, timing
+review, validation, and the applicable implementation, test, CI, CLI, and
+filesystem reviews. Documentation work can happen in parallel with Red, but it
+does not make a behavior change exempt from its behavior tests.
+
+The documentation and agent-policy lane is for a whole diff limited to
+documentation and the instructions that govern agent work. It does not invent
+passing tests for prose. Instead, its writer identifies the source of truth,
+records the files and mirrors changed, and validates structure: Markdown,
+links and anchors, Diátaxis metadata and indexes, skill and manifest
+references, and Copier rendering where a template is affected. Reviewers also
+compare claims about supported versions, test commands, CI, and shell behavior
+to their actual configuration and source. This checks that documentation stays
+in sync without making a test suite assert wording.
+
+The route is selected from the complete proposed diff, not from a file chosen
+to describe it. A mixed diff, executable Markdown fence, or uncertainty uses
+the coding lane. Agent-policy changes are never treated as trivial: changing a
+route, authority boundary, or validation requirement can change how later
+work is performed even when the edit is small.
+
+Both lanes preserve the same publication boundary. They establish a feature
+branch through Git flow, retain receipts for required or explicitly
+not-applicable phases, publish a merge request, and leave approval and merge
+to a human. The documentation lane substitutes content and policy validation
+for Red, Green, JUnit timing, and code-focused judges; it does not skip the
+merge-request record or human review.
+
 ## Loading is a decision, not an import side effect
 
 Every session reads `AGENTS.md` and `.agents/project.md` before repository
@@ -44,7 +78,8 @@ Language and process guidance are conditional. Python guidance applies when
 the intended change includes Python, Bash guidance when it includes Bash,
 Markdown guidance when it includes Markdown, and Python-testing guidance when
 the work writes or reviews the relevant Python tests. TDD guidance applies to
-non-trivial work. The manifest defines the classification boundary so an agent
+the coding workflow, while content guidance applies to documentation and
+agent-policy work. The manifest defines the classification boundary so an agent
 does not load a full change workflow for a small, isolated correction or skip
 it for a behavior-changing change.
 
@@ -66,27 +101,36 @@ keeps the same boundary when it processes an issue.
 
 ```mermaid
 flowchart TD
-    branch[Feature branch] --> architect[Architect]
-    architect --> tests[Test Writer]
-    architect --> docs[Documentation Writer]
+    branch[Feature branch] --> classify{Classify whole diff}
+    classify --> coding_architect[Architect: coding lane]
+    coding_architect --> tests[Test Writer]
+    coding_architect --> diataxis_writer[Diátaxis Writer]
     tests --> implementer[Implementer]
-    docs --> implementer
+    diataxis_writer --> implementer
     implementer --> nonfunctional[Non-functional Reviewer]
     nonfunctional --> implementation[Implementation Judge]
-    nonfunctional --> documentation[Documentation Judge]
+    nonfunctional --> diataxis_judge[Diátaxis Judge]
     implementation --> final_gates[Final review gates]
-    documentation --> final_gates
-    final_gates --> finalizer[Finalizer]
-    finalizer --> mr[Publish or update merge request]
+    diataxis_judge --> final_gates
+    final_gates --> coding_finalizer[Finalizer]
+    coding_finalizer --> mr[Publish or update merge request]
+    classify --> policy_architect[Architect: conditional policy design or N/A]
+    policy_architect --> documentation_writer[Documentation Writer]
+    documentation_writer --> documentation_judge[Diátaxis Judge]
+    documentation_writer --> policy_judge[Agent Policy Judge]
+    documentation_judge --> documentation_finalizer[Documentation Finalizer]
+    policy_judge --> documentation_finalizer
+    documentation_finalizer --> mr
     mr --> pipeline[Pipeline Performance Judge]
     mr -->|Phase 4–6 Minor findings| triage[Findings Triage]
+    mr -->|Content review Minor findings| triage
     pipeline --> human[Human approval and merge]
     triage --> human
 ```
 
-For non-trivial work, the manifest names every phase rather than rolling them
-up as “final judges.” It records each phase's applicability, owner, requested
-tier, prerequisite, receipt, and reroute. Delegated phases use the exact tier
+For non-trivial coding work, the manifest names every phase rather than rolling
+them up as “final judges.” Each manifest records phase applicability, ownership,
+prerequisites, receipts, and reroutes. Delegated phases use the exact tier
 and Codex model/effort named by their row. In Codex those tiers resolve to
 `gpt-5.6-sol` / `high` for most-capable work, `gpt-5.6-terra` / `medium` for
 balanced work, and `gpt-5.6-luna` / `low` for focused checks. Other supported
@@ -97,11 +141,16 @@ failed behavior evidence into the minimum implementation that satisfies it.
 They retain the current enabled main-session model and cannot switch
 model/effort mid-session. Their Balanced metadata is therefore a recommendation
 for selecting that session at its start, not a runtime model switch.
-The Documentation Writer is delegated in parallel with Red because it has a
-separate output and must not change tests or code. Architecture, reviews, and
-judges have similarly explicit delegated or main ownership in the manifest.
-If a phase rejects the work, its receipt identifies the owning earlier phase
-to revisit instead of allowing a later role to silently repair or waive it.
+The Diátaxis Writer is delegated in parallel with Red because it has a separate
+output and must not change tests or code. In the documentation and agent-policy
+lane, the main-owned Documentation Writer instead edits the approved content
+boundaries without manufacturing behavior tests. Its Diátaxis and Agent Policy
+judges independently review documentation and operational-policy claims before
+the Documentation Finalizer runs content-structure and synchronization gates.
+Architecture, reviews, and judges have similarly explicit delegated or main
+ownership in the manifest. If a phase rejects the work, its receipt identifies
+the owning earlier phase to revisit instead of allowing a later role to silently
+repair or waive it.
 
 The CLI and filesystem judges are conditional only because their subjects can
 be absent. Skipping either requires an explicit receipt in the applicability
@@ -124,9 +173,13 @@ documentation, or validation receipts.
 This separation keeps GitLab-specific observation, duration analysis, and
 follow-up authority out of the shared change workflow. The Pipeline Performance
 Judge's skill and role reference define its detailed behavior, including its
-duration report and when it creates or routes feedback. The general workflow
-needs only its boundary and its human approval rule: agents never approve or
-merge.
+duration report and when it creates or routes feedback. Execution budgets use
+the longest executed terminal job with a numeric duration; skipped, canceled,
+or manual jobs remain separately visible, and runner queues and staggered
+scheduling cannot reject a change. The general workflow needs only its
+boundary and its human approval rules: agents never approve or merge, and they
+never change project-owned values or workflow policy merely to clear a gate
+without explicit human approval for that exact change.
 
 Findings Triage is independent of that boundary. It records actionable Minor
 findings produced by the pre-publication judges as deduplicated GitLab issues;
@@ -154,20 +207,23 @@ approval and merge boundary.
 | Architect | Designs modules, data structures, and dependency boundaries | Write code or tests |
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
-| Documentation Writer | Creates or updates Diátaxis documentation | Touch code, tests, or README.md |
+| Diátaxis Writer | Creates or updates Diátaxis documentation in the coding lane | Touch code, tests, or README.md |
+| Documentation Writer | Main-owned editor for documentation and agent-policy changes | Change executable scope or manufacture behavior tests |
 | Implementer | Makes the minimum change to reach Green | Refactor or add untested features |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
-| Documentation Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
+| Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
+| Agent Policy Judge | Reviews agent routing, portable skills, mirrors, and authority boundaries | Edit instructions, code, tests, or README.md |
 | Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
 | CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
 | Pipeline Performance Judge | Exclusively owns post-publication live CI reconciliation, timing diagnosis, and its feedback issues | Edit code or CI, retry/cancel jobs, approve, or merge |
-| Findings Triage | After publication, creates deduplicated GitLab Bug issues for actionable Minor findings from review Phases 4–6 | Edit code, run validation, commit, push, approve, or merge |
+| Findings Triage | After publication, creates deduplicated GitLab Bug issues for actionable Minor findings from the selected workflow's reviews | Edit code, run validation, commit, push, approve, or merge |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |
+| Documentation Finalizer | Verifies content classification, structure, mirrors, and source synchronization | Edit, stage, publish, or call remote APIs |
 
 The role boundaries prevent one step from silently marking its own work as
 complete. They are workflow controls, not a same-user security boundary; GitLab

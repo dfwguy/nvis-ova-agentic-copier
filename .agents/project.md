@@ -63,12 +63,51 @@ Mirror shared workflow changes in `template/`. The project notes are the one
 intentional difference: the template renders `.agents/project.md.jinja` with
 the generated project's name, description, and package path.
 
+## Change-lane classification
+
+Use the coding workflow for changes to Python, Bash, tests, CI, configuration,
+packaging, services, Copier tasks, Jinja control logic, executable fenced
+commands, or any mixed or uncertain diff. Use the documentation and
+agent-policy workflow only when the whole change is prose, navigation, front
+matter, or non-executable portable instructions. Agent-policy changes are
+non-trivial even when small.
+
+## Documentation and agent-policy mirrors
+
+Shared workflow instructions, skills, roles, guidance, and documentation have
+byte-identical paths below the repository root and `template/`. The sole
+rendered exception is root `.agents/project.md` versus
+`template/.agents/project.md.jinja`. Smoke-render the Copier template after a
+template documentation or policy change.
+
+## Validation ownership
+
+The coding workflow owns executable behavior and its tests. The documentation
+workflow owns prose structure, Diátaxis metadata and navigation, local links,
+mirror parity, and synchronization with configured behavior. Do not add tests
+that merely lock down wording. Bash fenced snippets that operators execute are
+interfaces and remain in the coding workflow.
+
+## Testing source of truth
+
+- Python behavior, versions, and the supported matrix: `pyproject.toml` and tox.
+- CI behavior: `.gitlab-ci.yml`.
+- Local validation: `.pre-commit-config.yaml`.
+- Bash behavior: source scripts and ShellCheck configuration.
+- Shared instructions: root and `template/` byte parity.
+- Rendered project context: Copier smoke output.
+
 ## Pipeline Performance Budget
 
 ```yaml
 pipeline_execution_preferred_seconds: 60
 pipeline_execution_hard_limit_seconds: 120
 ```
+
+Apply these limits to the longest individual job `duration`, not the pipeline
+wall-clock span or any `queued_duration`. The jobs are the queue-free units of
+repository execution; runner scheduling must not reject a change. These values
+are human-controlled and require explicit human approval to change.
 
 ## Python Versions
 
