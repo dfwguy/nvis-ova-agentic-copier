@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import copier
 import pytest
@@ -114,68 +115,128 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
     assert "entry: shellcheck" in config
 
 
-def test_generated_ci_runs_kingfisher(generated_project: Path) -> None:
-    """Test that generated projects scan committed content for secrets in CI."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
+_VALIDATION_JOBS = {
+    "kingfisher",
+    "pytest-py311",
+    "pytest-py314",
+    "ruff-check",
+    "ruff-format",
+    "shellcheck",
+    "type-check",
+    "yamllint",
+}
 
-    assert "kingfisher:" in ci_config
-    assert "--git-history none" in ci_config
-    assert "--no-validate" in ci_config
-    assert "--exclude .git" in ci_config
-    assert "--exclude .cache" in ci_config
 
-
-def test_generated_ci_runs_shellcheck(generated_project: Path) -> None:
-    """Test that generated projects lint Bash and shell-script shebangs in CI."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
-
-    assert "shellcheck:" in ci_config
-    shellcheck_job = re.search(
-        r"^shellcheck:\n(?P<body>(?:^[ \t].*\n?)*)",
-        ci_config,
-        flags=re.MULTILINE,
+def _ci_configuration(root: Path) -> dict[str, Any]:
+    """Load GitLab CI while treating its reference tag as plain YAML."""
+    return yaml.safe_load(
+        (root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
 
-    assert shellcheck_job is not None
-    assert "koalaman/shellcheck-alpine:stable" in shellcheck_job.group("body")
-    assert "apt-get" not in shellcheck_job.group("body")
+
+def _ci_job_script(configuration: dict[str, Any], job_name: str) -> list[str]:
+    """Return a job script, following one hidden-template inheritance edge."""
+    job = configuration[job_name]
+    if "script" in job:
+        return job["script"]
+    return configuration[job["extends"]]["script"]
 
 
-def test_generated_ci_caches_uv_and_includes_python(generated_project: Path) -> None:
-    """CI reuses UV downloads and avoids downloading its bootstrap Python."""
-    ci_config = (generated_project / ".gitlab-ci.yml").read_text()
-
-    assert "UV_CACHE_DIR" in ci_config
-    assert ".cache/uv/" in ci_config
-    assert "uv:0.7.3-python3.13-bookworm-slim" in ci_config
-    assert "uv cache prune --ci" in ci_config
-
-
-def test_pytest_ci_installs_jq_for_executable_preflight_tests(
+def test_ci_avoids_duplicate_push_and_merge_request_pipelines(
     generated_project: Path,
-    project_root: Path,
+    template_dir: Path,
 ) -> None:
-    """Root and generated pytest jobs provide the jq executable tests require."""
-    for ci_path in (
-        project_root / ".gitlab-ci.yml",
-        project_root / "template" / ".gitlab-ci.yml",
-        generated_project / ".gitlab-ci.yml",
-    ):
-        ci_config = ci_path.read_text()
-        pytest_job = re.search(
-            r"^pytest:\n(?P<body>(?:^[ \t].*\n?)*)",
-            ci_config,
-            flags=re.MULTILINE,
-        )
+    """An open merge request suppresses the duplicate branch pipeline."""
+    expected_rules = [
+        {"if": '$CI_PIPELINE_SOURCE == "merge_request_event"'},
+        {
+            "if": "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS",
+            "when": "never",
+        },
+        {"if": "$CI_COMMIT_BRANCH"},
+    ]
+    for root in (template_dir, generated_project):
+        assert _ci_configuration(root)["workflow"]["rules"] == expected_rules
 
-        assert pytest_job is not None
-        assert "apt-get install -y --no-install-recommends git jq" in pytest_job.group(
-            "body"
-        )
+
+def test_generated_ci_uses_exact_stable_python_versions(
+    generated_project: Path,
+) -> None:
+    """Each Python test job selects a reproducible stable interpreter."""
+    configuration = _ci_configuration(generated_project)
+    base = configuration[".base_uv"]
+
+    assert base["image"]["name"] == (
+        "ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@"
+        "sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
+    )
+    before_script = "\n".join(base["before_script"])
+    normalized_before_script = " ".join(before_script.replace("\\\n", "").split())
+    assert (
+        'UV_PROJECT_ENVIRONMENT="$CI_PROJECT_DIR/.venv" '
+        "uv sync --locked --all-groups --python 3.11 --no-managed-python"
+        in normalized_before_script
+    )
+    assert "uv python install 3.14.3 --managed-python" in before_script
+    assert "uv python install 3.14\n" not in before_script
+    assert (
+        'UV_PROJECT_ENVIRONMENT="/tmp/ci-venvs/py314" '
+        "uv sync --locked --all-groups --python 3.14.3 --managed-python"
+        in normalized_before_script
+    )
+
+
+def test_portable_ci_is_mirrored_without_the_private_root_image(
+    generated_project: Path,
+    template_dir: Path,
+) -> None:
+    """Rendered projects keep the portable template CI byte-for-byte."""
+    template_ci = (template_dir / ".gitlab-ci.yml").read_text()
+    generated_ci = (generated_project / ".gitlab-ci.yml").read_text()
+
+    assert template_ci == generated_ci
+    assert "gitlab-master.nvidia.com:5005/nvis-ova" not in template_ci
+    assert "moby/buildkit" not in template_ci
+
+
+def test_portable_ci_keeps_one_shared_setup_job(
+    generated_project: Path,
+    template_dir: Path,
+) -> None:
+    """Generated CI stays portable without repeating setup across jobs."""
+    for root in (template_dir, generated_project):
+        configuration = _ci_configuration(root)
+        assert "validation (8 gates)" in configuration
+        assert not (_VALIDATION_JOBS & configuration.keys())
+        assert configuration["validation (8 gates)"]["script"] == [
+            "bash tests/helpers/run-ci-checks.sh"
+        ]
+        assert (root / "tests" / "helpers" / "run-ci-checks.sh").exists()
+
+
+def test_portable_ci_publishes_gate_and_test_reports(
+    generated_project: Path,
+    template_dir: Path,
+) -> None:
+    """The portable aggregate retains named gate and per-version evidence."""
+    for root in (template_dir, generated_project):
+        reports = _ci_configuration(root)["validation (8 gates)"]["artifacts"][
+            "reports"
+        ]
+        assert reports["junit"] == [
+            "ci-gates.xml",
+            "test-results-py311.xml",
+            "test-results-py314.xml",
+        ]
+        assert reports["coverage_report"] == {
+            "coverage_format": "cobertura",
+            "path": "coverage-py314.xml",
+        }
+        assert reports["codequality"] == "code-quality-report.json"
 
 
 def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
-    """Test that root tox retains its coverage floor for every Python."""
+    """Root tox retains its coverage floor for every Python."""
     config = tomllib.loads((project_root / "pyproject.toml").read_text())
 
     for environment in ("py311", "py314"):
@@ -184,8 +245,67 @@ def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
         assert "--cov-fail-under=85" in command
 
 
-def test_generated_dev_environment_includes_tox_uv(generated_project: Path) -> None:
-    """CI can run tox without provisioning a second tool environment."""
+def test_parallel_tox_environments_use_distinct_report_paths(
+    generated_project: Path,
+    template_dir: Path,
+) -> None:
+    """Parallel tox environments cannot overwrite one another's reports."""
+    expected_paths = {
+        "py311": {
+            "coverage": "coverage-py311.xml",
+            "junit": "test-results-py311.xml",
+            "data": ".coverage.py311",
+        },
+        "py314": {
+            "coverage": "coverage-py314.xml",
+            "junit": "test-results-py314.xml",
+            "data": ".coverage.py314",
+        },
+    }
+
+    for root in (generated_project,):
+        config = tomllib.loads((root / "pyproject.toml").read_text())
+        for environment, paths in expected_paths.items():
+            tox_env = config["tool"]["tox"]["env"][environment]
+            command = tox_env["commands"][0]
+
+            assert tox_env["set_env"]["COVERAGE_FILE"] == paths["data"]
+            assert f"--cov-report=xml:{paths['coverage']}" in command
+            assert f"--junitxml={paths['junit']}" in command
+            assert f"junit_suite_name={environment}" in command
+            assert "--cov-fail-under=85" in command
+            assert "--cov-report=html" not in command
+
+    template_config = (template_dir / "pyproject.toml.jinja").read_text()
+    for paths in expected_paths.values():
+        for path in paths.values():
+            assert path in template_config
+
+
+def test_parallel_test_artifacts_are_ignored_everywhere(
+    generated_project: Path,
+    template_dir: Path,
+) -> None:
+    """Environment-specific reports stay out of source control."""
+    for root in (template_dir, generated_project):
+        ignore_lines = set((root / ".gitignore").read_text().splitlines())
+
+        assert "coverage-*.xml" in ignore_lines
+        assert "test-results-*.xml" in ignore_lines
+        assert "format-changes.diff" in ignore_lines
+        assert "*-code-quality-report.json" in ignore_lines
+
+    template_ignore = set((template_dir / ".gitignore").read_text().splitlines())
+    assert "ci-gates.xml" in template_ignore
+    assert "ci-gates.tsv" in template_ignore
+    assert "ci-logs/" in template_ignore
+    assert "code-quality-report.json" in template_ignore
+
+
+def test_generated_dev_environment_includes_local_tox_matrix(
+    generated_project: Path,
+) -> None:
+    """Generated projects retain tox as the local supported-matrix runner."""
     config = tomllib.loads((generated_project / "pyproject.toml").read_text())
 
     assert "tox-uv>=1.20" in config["dependency-groups"]["dev"]

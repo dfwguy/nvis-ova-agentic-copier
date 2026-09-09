@@ -5,7 +5,7 @@ summary: Understand the boundary between this Copier template and its generated 
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-09
 related:
   - path: ../reference/template-contract.md
     why: Documents the observable template behavior explained here.
@@ -40,6 +40,13 @@ That distinction keeps two kinds of change understandable. Template maintainers
 can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—in
 one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
+
+Generated projects retain one portable `validation (8 gates)` job. It performs
+dependency setup once, runs the eight checks with named evidence, and reports
+the Python 3.11 and 3.14.3 suites separately. Keeping this behavior in the
+template avoids coupling generated projects to this repository's private
+registry or credentials. The generated workflow also avoids duplicate push and
+merge-request pipelines for the same commit.
 
 The update model intentionally preserves files that are commonly customized,
 such as a project's README, dependencies, CI pipeline, package initializer, and

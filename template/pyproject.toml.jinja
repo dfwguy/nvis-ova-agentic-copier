@@ -21,7 +21,7 @@ agent-work = "agent_work.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--cov={{ project_slug }} --cov-report=term-missing --cov-report=html"
+addopts = "--cov={{ project_slug }} --cov-report=term-missing"
 
 [tool.coverage.run]
 source = ["{{ project_slug }}"]
@@ -45,6 +45,7 @@ env_list = ["py311", "py314"]
 
 [tool.tox.env.py311]
 description = "Run tests with Python 3.11"
+set_env = { COVERAGE_FILE = ".coverage.py311" }
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",
@@ -55,10 +56,11 @@ deps = [
     "pytest-timeout>=2.2.0",
     "requests-mock>=1.12.1",
 ]
-commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "--cov-fail-under=85", "-v", "--junitxml=test-results.xml"]]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml:coverage-py311.xml", "--cov-report=term-missing", "--cov-fail-under=85", "-v", "--junitxml=test-results-py311.xml", "-o", "junit_suite_name=py311"]]
 
 [tool.tox.env.py314]
 description = "Run tests with Python 3.14"
+set_env = { COVERAGE_FILE = ".coverage.py314" }
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",
@@ -69,7 +71,7 @@ deps = [
     "pytest-timeout>=2.2.0",
     "requests-mock>=1.12.1",
 ]
-commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml", "--cov-report=term-missing", "--cov-report=html", "--cov-fail-under=85", "-v", "--junitxml=test-results.xml"]]
+commands = [["pytest", "--cov={{ project_slug }}", "--cov-report=xml:coverage-py314.xml", "--cov-report=term-missing", "--cov-fail-under=85", "-v", "--junitxml=test-results-py314.xml", "-o", "junit_suite_name=py314"]]
 
 [dependency-groups]
 test = [
