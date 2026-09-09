@@ -5,7 +5,7 @@ summary: Look up template inputs, generated files, setup tasks, and update behav
 audience: integrator
 tags: [template]
 status: current
-last_reviewed: 2026-09-08
+last_reviewed: 2026-09-09
 related:
   - path: ../tutorials/create-your-first-project.md
     why: Uses the generated project behavior defined here.
@@ -98,12 +98,12 @@ initialized project until the command preflight has passed.
 
 | Area | Provided configuration |
 | --- | --- |
-| Python | Requires Python 3.11 or newer; tox tests Python 3.11 and 3.14. |
+| Python | Requires Python 3.11 or newer. Local tox runs Python 3.11 and 3.14; CI creates locked Python 3.11 and 3.14.3 environments. |
 | Dependencies | UV-managed project, test, and development dependency groups. |
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
-| CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. The source repository may use a project-only dependency image to accelerate its own CI; generated projects do not inherit its registry configuration or credentials. |
+| CI | One portable `validation (8 gates)` job performs dependency setup once, runs Ruff checks, formatting, separate Python 3.11 and 3.14.3 pytest suites, YAML linting, Kingfisher, type checking, and ShellCheck, and publishes named gate and test reports. Generated projects do not require private registry configuration or credentials. Mutually exclusive workflow rules suppress a duplicate branch pipeline while a merge request is open. |
 | Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout
