@@ -5,7 +5,7 @@ summary: Publish, pin, and verify the project-only CI image that root validation
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-08
+last_reviewed: 2026-09-09
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -46,19 +46,22 @@ credential or registry-login command into a generated template.
 
 ## 3. Verify the consumer change
 
-Use the recorded digest to update the root validation consumer in a separate
-merge request. Set its GitLab job image to the complete `CI_IMAGE` value,
-including `@sha256:...`; never substitute a floating tag. That consumer job
-must use the image's prepared interpreter, system tools, and locked project
-dependencies. It must not run `apt-get`, `uv python install`, `uv sync`, or
-another dependency-installation fallback.
+Use the recorded digest to update the single image pin in the root `.base_uv`
+definition in a separate merge request. Set it to the complete `CI_IMAGE`
+value, including `@sha256:...`; never substitute a floating tag. The eight
+native jobs that extend `.base_uv`—`ruff-check`, `ruff-format`,
+`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and
+`shellcheck`—then use the image's prepared interpreter, system tools, and
+locked project dependencies. They must not run `apt-get`, `uv python install`,
+`uv sync`, or another dependency-installation fallback.
 
-Run the consumer pipeline and retain its separate test results. It must
-complete execution within the project budget: prefer at most 10 seconds after
-a runner starts and reject execution over 60 seconds. Exclude runner queue
-time when measuring those limits. If the image needs another dependency,
-refresh and publish the image first, then repeat this pin-update procedure;
-do not restore bootstrap work to root validation.
+Run the consumer pipeline and inspect the eight named root jobs directly; do
+not look for a root synthetic aggregate validation job or JUnit gate suite. The
+two pytest jobs retain separate JUnit and coverage reports. Apply the project
+budget to the overall queue-excluded pipeline duration: prefer at most 10
+seconds and reject execution over 60 seconds. If the image needs another
+dependency, refresh and publish the image first, then repeat this pin-update
+procedure; do not restore bootstrap work to root validation.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership

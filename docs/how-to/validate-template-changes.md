@@ -5,7 +5,7 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-08
+last_reviewed: 2026-09-09
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -31,17 +31,21 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-the root physical `validation (8 gates)` job consumes an already-published,
-immutable-digest CI image. It performs no `apt-get`, `uv python install`, or
-`uv sync` bootstrap, then runs these gates concurrently: `ruff-check`,
-`ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`,
-`type-check`, and `shellcheck`. The merge request Test summary and pipeline
-Tests tab show their named results in a `CI gates` JUnit suite. The two pytest
-gates also retain separate Python 3.11 and 3.14.3 JUnit suites, logs, coverage
-reports, and caches. Generated projects retain their portable CI bootstrap;
-they do not consume the root image or require its registry credentials. Use
-the collapsible per-gate log sections and artifacts to inspect an individual
-gate.
+the root pipeline lists eight native jobs: `ruff-check`, `ruff-format`,
+`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and
+`shellcheck`. They extend the one root `.base_uv` definition, whose image is
+pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
+`uv sync` bootstrap. There is no synthetic aggregate root validation job or
+aggregate JUnit gate suite. Inspect an individual root check through its named
+GitLab job. The two root pytest jobs retain separate Python 3.11 and 3.14.3
+JUnit and coverage reports.
+
+The generated template deliberately keeps its portable `validation (8 gates)`
+aggregate job. It performs the dependency bootstrap once, then reports its
+aggregate gate suite and separate pytest reports; it does not consume the root
+image or require registry credentials. In both configurations, workflow rules
+select a merge-request pipeline and suppress a duplicate branch pipeline while
+that merge request is open.
 
 If the change adds or modifies a Bash script, validate that script directly:
 

@@ -1,6 +1,13 @@
 stages:
   - validate
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
 .base_uv:
   stage: validate
   interruptible: true
@@ -50,9 +57,6 @@ stages:
       if (( py314_status != 0 )); then
           exit "$py314_status"
       fi
-  rules:
-    - if: $CI_COMMIT_BRANCH
-
 validation (8 gates):
   extends: .base_uv
   tags:

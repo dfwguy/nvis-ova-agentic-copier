@@ -96,12 +96,11 @@ flowchart TD
 After publication, one Pipeline Performance Judge invocation exclusively owns
 live GitLab CI observation and its feedback issues. Findings Triage
 independently handles the prepublication judges' Minor findings. Other workflow
-roles do not inspect or interpret live CI. One `validation (8 gates)` job uses
-the root repository's immutable prebuilt validation image and runs eight gates
-concurrently. GitLab shows their named `CI
-gates` JUnit results in its Test summary and Tests tab, rather than as native
-job checkboxes. Python 3.11 and 3.14.3 retain separate suites, logs, and
-coverage; inspect individual gates through collapsible logs and artifacts.
+roles do not inspect or interpret live CI. GitLab lists all eight validation
+gates as native jobs with individual green or red status indicators. The root
+jobs use the repository's immutable prebuilt validation image without runtime
+dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs, and
+coverage reports.
 
 ### Merge requests are the source of truth
 

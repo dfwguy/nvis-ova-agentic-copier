@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 _IMAGE_INPUTS = ("Dockerfile", "pyproject.toml", "uv.lock")
+_VALIDATION_JOBS = {
+    "kingfisher",
+    "pytest-py311",
+    "pytest-py314",
+    "ruff-check",
+    "ruff-format",
+    "shellcheck",
+    "type-check",
+    "yamllint",
+}
 _PUBLISHED_VALIDATION_IMAGE = (
     "gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@"
     "sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521"
@@ -178,22 +191,115 @@ def test_root_validation_consumes_the_published_image_without_bootstrap(
     configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
     base = configuration[".base_uv"]
     before_script = "\n".join(base["before_script"])
-    helper = (project_root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
+    validation_contract = "\n".join(
+        str(configuration[name]) for name in (".pytest", *sorted(_VALIDATION_JOBS))
+    )
 
     assert base["image"]["name"] == _PUBLISHED_VALIDATION_IMAGE
-    assert base["before_script"] == [
-        'cd "$CI_PROJECT_DIR"',
-        "uv --version",
-        "/opt/ci/py311/bin/python --version",
-        "/opt/ci/py314/bin/python --version",
-    ]
+    assert base["before_script"] == ['cd "$CI_PROJECT_DIR"']
     for runtime_setup in ("apt-get", "uv python install", "uv sync"):
         assert runtime_setup not in before_script
-    assert 'run_tests py311 "/opt/ci/py311"' in helper
-    assert 'run_tests py314 "/opt/ci/py314"' in helper
-    assert 'PYTHONPATH="$CI_PROJECT_DIR/src"' in helper
-    assert 'run_tests py311 "$CI_PROJECT_DIR/.venv"' not in helper
-    assert 'run_tests py314 "/tmp/ci-venvs/py314"' not in helper
+        assert runtime_setup not in validation_contract
+    assert configuration[".pytest"]["extends"] == ".base_uv"
+    assert 'UV_PROJECT_ENVIRONMENT="$python_environment"' in str(
+        configuration[".pytest"]
+    )
+    assert configuration["pytest-py311"]["variables"] == {
+        "TEST_ENVIRONMENT": "py311",
+    }
+    assert configuration["pytest-py314"]["variables"] == {
+        "TEST_ENVIRONMENT": "py314",
+    }
+    pytest_script = "\n".join(configuration[".pytest"]["script"])
+    assert 'py311) python_environment="$CI_PY311_ENVIRONMENT"' in pytest_script
+    assert 'py314) python_environment="$CI_PY314_ENVIRONMENT"' in pytest_script
+    assert 'PYTHONPATH="$CI_PROJECT_DIR/src"' in str(configuration[".pytest"])
+
+
+def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
+    project_root: Path,
+) -> None:
+    """Every validation result is an independently visible GitLab job."""
+    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
+    visible_validation_jobs = {
+        name
+        for name, value in configuration.items()
+        if name in _VALIDATION_JOBS and isinstance(value, dict)
+    }
+
+    assert visible_validation_jobs == _VALIDATION_JOBS
+    assert "validation (8 gates)" not in configuration
+    assert configuration["workflow"]["rules"] == [
+        {"if": '$CI_PIPELINE_SOURCE == "merge_request_event"'},
+        {
+            "if": "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS",
+            "when": "never",
+        },
+        {"if": "$CI_COMMIT_BRANCH"},
+    ]
+    for name in _VALIDATION_JOBS:
+        expected_base = ".pytest" if name.startswith("pytest-") else ".base_uv"
+        assert configuration[name]["extends"] == expected_base
+        effective_job = configuration[expected_base] | configuration[name]
+        assert effective_job["script"]
+        assert "run-ci-checks.sh" not in str(effective_job["script"])
+
+
+@pytest.mark.parametrize(
+    ("test_environment", "expected_environment", "expected_status"),
+    (
+        ("py311", "/opt/ci/py311", 0),
+        ("py314", "/opt/ci/py314", 0),
+        ("unknown", None, 2),
+    ),
+)
+def test_root_pytest_job_selects_the_image_environment_at_runtime(
+    project_root: Path,
+    tmp_path: Path,
+    test_environment: str,
+    expected_environment: str | None,
+    expected_status: int,
+) -> None:
+    """The shared pytest shell maps labels to image environments safely."""
+    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
+    script = "\n".join(configuration[".pytest"]["script"])
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    observed = tmp_path / "observed-environment"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$UV_PROJECT_ENVIRONMENT" > "$OBSERVED"\n'
+    )
+    fake_uv.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CI_PROJECT_DIR": str(tmp_path),
+            "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
+            "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
+            "OBSERVED": str(observed),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "TEST_ENVIRONMENT": test_environment,
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == expected_status
+    if expected_environment is None:
+        assert not observed.exists()
+        assert "Unknown test environment" in result.stderr
+    else:
+        assert observed.read_text().strip() == expected_environment
 
 
 def test_portable_template_keeps_its_independent_validation_bootstrap(
@@ -201,13 +307,12 @@ def test_portable_template_keeps_its_independent_validation_bootstrap(
 ) -> None:
     """Generated repositories do not depend on this project's private image."""
     template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
-    template_helper = (
-        project_root / "template" / "tests" / "helpers" / "run-ci-checks.sh"
-    ).read_text()
+    configuration = yaml.safe_load(template_ci)
 
     assert _PUBLISHED_VALIDATION_IMAGE not in template_ci
     assert "gitlab-master.nvidia.com:5005/nvis-ova" not in template_ci
     assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
-    assert template_ci.count("uv sync --locked --all-groups") == 2
-    assert 'run_tests py311 "$CI_PROJECT_DIR/.venv"' in template_helper
-    assert 'run_tests py314 "/tmp/ci-venvs/py314"' in template_helper
+    assert "uv python install 3.14.3 --managed-python" in template_ci
+    assert "UV_PROJECT_ENVIRONMENT=/opt/ci" not in template_ci
+    assert "validation (8 gates)" in configuration
+    assert not (_VALIDATION_JOBS & configuration.keys())

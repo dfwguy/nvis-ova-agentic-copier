@@ -5,7 +5,7 @@ summary: Understand the boundary between this Copier template and its generated 
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-09
 related:
   - path: ../reference/template-contract.md
     why: Documents the observable template behavior explained here.
@@ -41,15 +41,21 @@ can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—
 one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
 
-The root repository also has an internal CI boundary. Its validation job
-consumes a project-only image that has already been published and is pinned by
-immutable digest. The image holds the root job's interpreter, system tools,
-and locked dependencies, so the validation job does not install them again.
-That optimization belongs only to this repository: generated projects retain
-their existing portable bootstrap and need neither the private registry image
-nor its credentials. When root dependencies change, maintainers publish a new
-image digest and deliberately update the root consumer to that digest rather
-than relying on a mutable image tag.
+The root repository also has an internal CI boundary. Its `.base_uv` definition
+pins one project-only image by immutable digest, and eight native jobs extend
+it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
+`kingfisher`, `type-check`, and `shellcheck`. The image holds the jobs'
+interpreter, system tools, and locked dependencies, so they do not install them
+again. That optimization belongs only to this repository. Generated projects
+instead retain their single portable `validation (8 gates)` job, which performs
+dependency bootstrap once and reports the aggregate checks without the private
+registry image or its credentials. When root dependencies change, maintainers
+publish a new image digest and deliberately update the one `.base_uv` pin
+rather than relying on a mutable image tag.
+
+Both CI configurations prefer a merge-request pipeline and suppress the
+duplicate branch pipeline while that merge request is open. A branch pipeline
+still runs when no merge request is open.
 
 The update model intentionally preserves files that are commonly customized,
 such as a project's README, dependencies, CI pipeline, package initializer, and
