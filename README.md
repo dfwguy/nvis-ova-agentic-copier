@@ -114,3 +114,5 @@ Use [Validate template changes](docs/how-to/validate-template-changes.md) for
 the repository's validation commands. Read [Why the template and generated
 project are separate](docs/explanation/template-and-generated-project.md) for
 the boundary between this repository and its generated output.
+For the project-only validation image refresh and setup contract, see [Refresh
+the CI dependency image](docs/how-to/refresh-ci-image.md).

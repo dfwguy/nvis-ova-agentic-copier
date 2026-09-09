@@ -1,3 +1,83 @@
+stages:
+  - ci-image
+  - build
+
+.ci_image_builder:
+  stage: ci-image
+  interruptible: true
+  image:
+    name: docker.io/moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef
+    entrypoint: [""]
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  before_script:
+    - mkdir -p /tmp/ci-image-context
+    - cp Dockerfile pyproject.toml uv.lock /tmp/ci-image-context/
+
+ci-image:validate:
+  extends: .ci_image_builder
+  tags:
+    - size/medium
+  script:
+    - |
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=/tmp/ci-image-context \
+        --local dockerfile=/tmp/ci-image-context \
+        --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        paths:
+          - Dockerfile
+          - pyproject.toml
+          - uv.lock
+    - when: never
+
+ci-image:publish:
+  extends: .ci_image_builder
+  tags:
+    - size/medium
+  before_script:
+    - !reference [.ci_image_builder, before_script]
+    - mkdir -p "$HOME/.docker"
+    - |
+      auth="$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" \
+        | base64 | tr -d '\n')"
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" "$auth" \
+        > "$HOME/.docker/config.json"
+      unset auth
+  script:
+    - |
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=/tmp/ci-image-context \
+        --local dockerfile=/tmp/ci-image-context \
+        --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE" \
+        --metadata-file build-metadata.json \
+        --output "type=image,name=$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA,push=true"
+    - |
+      digest="$(sed -n 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' build-metadata.json)"
+      printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+      printf 'CI_IMAGE=%s/validation@%s\n' "$CI_REGISTRY_IMAGE" "$digest" \
+        > ci-image.env
+  artifacts:
+    reports:
+      dotenv: ci-image.env
+    paths:
+      - build-metadata.json
+      - ci-image.env
+    when: always
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        paths:
+          - Dockerfile
+          - pyproject.toml
+          - uv.lock
+    - when: never
+
 .uv_cache:
   cache: &uv_cache
     key:

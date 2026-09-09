@@ -5,7 +5,7 @@ summary: Look up template inputs, generated files, setup tasks, and update behav
 audience: integrator
 tags: [template]
 status: current
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-08
 related:
   - path: ../tutorials/create-your-first-project.md
     why: Uses the generated project behavior defined here.
@@ -17,6 +17,8 @@ related:
     why: Uses the update behavior defined here.
   - path: ../how-to/validate-template-changes.md
     why: Verifies the contract described here.
+  - path: ../how-to/refresh-ci-image.md
+    why: Maintains the project-only CI image without changing generated-project portability.
   - path: ../explanation/template-and-generated-project.md
     why: Explains the template boundary behind this contract.
 ---
@@ -101,7 +103,7 @@ initialized project until the command preflight has passed.
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
-| CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. |
+| CI | GitLab jobs for Ruff checks, formatting, tox, YAML linting, Kingfisher secret scanning, type checking, and ShellCheck. The source repository may use a project-only dependency image to accelerate its own CI; generated projects do not inherit its registry configuration or credentials. |
 | Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout
