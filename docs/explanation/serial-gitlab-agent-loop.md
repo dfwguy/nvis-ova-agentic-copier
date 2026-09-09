@@ -13,6 +13,8 @@ related:
     why: Defines the exact command and lifecycle.
   - path: agentic-workflow.md
     why: Explains the roles used by the loop.
+  - path: serial-agent-loop-recovery-design.md
+    why: Proposes the recoverable state machine that would replace this one-shot design.
 ---
 
 # Why the agent loop is serial and GitLab-native

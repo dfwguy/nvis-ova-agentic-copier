@@ -1,0 +1,308 @@
+---
+title: Recoverable serial agent-loop architecture
+type: explanation
+summary: Understand the proposed recoverable state machine for unattended agent work.
+audience: maintainer
+tags: [agent-workflow]
+status: draft
+last_reviewed: 2026-09-09
+related:
+  - path: serial-gitlab-agent-loop.md
+    why: Describes the currently implemented one-shot loop that this proposal would replace.
+---
+
+# Recoverable serial agent-loop architecture
+
+This document proposes a replacement for the current one-shot agent loop. It
+is a reviewed design, not an implemented contract. Until implementation and
+migration are complete, the current [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
+reference, and setup guide remain authoritative.
+
+The systemd scheduler is healthy. The problem is that the workflow contract
+now expects recovery, remediation, and post-publication phases that the runtime
+cannot represent. Further point fixes would preserve the mismatch. The
+replacement makes every activation a bounded segment of an explicit,
+recoverable state machine.
+
+## Evidence and confirmed defects
+
+The design audit on 2026-09-09 found a healthy enabled timer whose latest pass
+completed successfully with no eligible work. GitLab contained 12 historical
+`agent/issue-*` merge requests: 10 merged and two closed. The retained journal
+contained 886 idle results and nine failed work results, while issues 13–16
+were terminally labelled `agent::failed`. All 68 runner tests passed, showing
+that the tests describe the current implementation even where it differs from
+the end-to-end workflow contract.
+
+The audit confirmed these defects:
+
+1. Issue selection contradicts the worker contract. The skill requires an
+   explicitly opted-in issue, but the gateway selects every open,
+   non-confidential issue without a terminal label.
+2. Existing-MR remediation is documented but not implemented. Remediation
+   issues for MR !88 were started on new `agent/issue-*` branches from `main`,
+   so the files they needed were absent.
+3. Expected blockers collapse into misleading publication failures. A
+   dependency on an open MR, an incorrect remediation branch, protected policy
+   work, and an intentional no-op all surface as variants of “worker made no
+   changes to publish.”
+4. Interrupted changes are preserved but cannot be resumed. Checkout cleanup
+   creates recovery stashes, but no subsequent runner path restores them. The
+   audit found an issue-12 stash containing ten changed files.
+5. One ephemeral worker is expected to finish architecture, Red/Green,
+   documentation, all reviews, finalization, and post-publication work, even
+   though trusted publication occurs only after that worker exits.
+6. Python and the Bash wrapper both restore the checkout. The wrapper also
+   uses `logger -s` while systemd captures standard output and standard error,
+   which duplicates journal lines.
+7. Status output omits the phase, stable error code, retry state, and next
+   action. The actionable explanation remains in a large private journal while
+   GitLab receives only a generic failure comment.
+8. Preview refreshes the checkout despite presenting itself as non-mutating;
+   failed default-branch pipeline repair is injected into unrelated issue
+   work; stale local branches can terminally fail an issue; closed issues keep
+   stale terminal labels; and the timer interval is measured from activation,
+   not completion.
+
+These observations motivate the design; they do not authorize the design to
+rewrite historical issues, branches, labels, stashes, or services.
+
+## State model
+
+GitLab remains the shared queue projection. A small local ledger stores the
+recoverable execution detail that does not belong in labels.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Ready: human adds agent::ready
+    Ready --> Preparing: claim and reconcile
+    Preparing --> Executing: durable worktree ready
+    Executing --> RetryWait: transient failure
+    RetryWait --> Executing: retry becomes due
+    Executing --> Publishing: worker result is ready_to_publish
+    Publishing --> Observing: exact MR evidence verified
+    Observing --> Repair: pipeline or MR needs repair
+    Repair --> Publishing: repair result is ready_to_publish
+    Observing --> AwaitingHuman: required receipts are ready
+    Preparing --> Blocked: human action required
+    Executing --> Blocked: worker result is needs_human
+    Repair --> Blocked: automatic repair is unsafe
+    Blocked --> Ready: human resolves and opts in again
+    AwaitingHuman --> [*]: human merges or closes
+```
+
+GitLab labels have deliberately coarse meanings:
+
+| Label | Meaning |
+| --- | --- |
+| `agent::ready` | A human explicitly authorized unattended processing. |
+| `agent::running` | Work is active or automatically resumable. |
+| `agent::awaiting-human` | The exact MR and required receipts are ready for human review. |
+| `agent::blocked` | A documented human action is necessary before work can continue. |
+| `agent::failed` | An exceptional unrecoverable condition prevented safe reconciliation or recording. |
+
+The ledger refines `agent::running` into `preparing`, `executing`,
+`retry-wait`, `publishing`, `observing`, and `repair`. It also records terminal
+details for `blocked`, `awaiting-human`, and exceptional `failed` outcomes.
+Labels communicate operator-visible ownership; they are not the transaction
+log.
+
+## State-machine segment
+
+Every timer activation performs at most one bounded segment:
+
+1. Acquire the single-project local lock.
+2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
+   the local ledger.
+3. Resume recoverable `agent::running` work before selecting new work.
+4. Select only the oldest open, non-confidential `agent::ready` issue.
+5. Classify it before claiming it as ordinary issue work, existing-MR
+   remediation, merge-conflict repair, or protected policy work that requires
+   the manual lane.
+6. Persist transition intent before the corresponding external mutation, then
+   record the observed result. Reconciliation completes or compensates any
+   transition interrupted between those writes.
+7. Run one bounded worker segment in the issue's durable worktree.
+8. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
+   `needs_human`.
+9. Publish idempotently and verify exact same-project MR, branch, target, tip,
+   and closing-issue evidence.
+10. Record one safe, actionable outcome and exit.
+
+The timer schedules segments; it does not own workflow state or perform
+checkout cleanup.
+
+## Durable ledger and worktrees
+
+State lives below an XDG state directory, keyed by the configured GitLab host
+and numeric project ID. Each active issue owns one durable worktree and one
+ledger record. A record contains at least:
+
+- schema version, project identity, issue IID, and work kind;
+- state, phase, attempt number, retry deadline, and last transition time;
+- base, source, and target branches plus observed commit IDs;
+- merge-request identity and last verified publication evidence;
+- worker protocol version, latest result kind, and required receipts;
+- a stable error code, redacted summary, and explicit next action; and
+- transition intent needed to reconcile an interrupted external mutation.
+
+The ledger stores no GitLab token, agent credential, issue-body authority, or
+unredacted worker transcript. Writes use atomic replacement and restrictive
+permissions. Corrupt or unsupported records become `agent::blocked` when the
+runner can still safely record that outcome; they become `agent::failed` only
+when safe reconciliation or recording is impossible.
+
+Worktrees, commits, and verified remote refs are normal persistence. Stashes
+are emergency evidence only. The runner inventories a recovery stash and
+associates it with an issue, but never applies or drops it automatically.
+
+## Invariants
+
+The implementation must maintain these invariants:
+
+- At most one local segment holds the project lock.
+- No new issue is claimed while resumable running work exists.
+- Only an explicitly labelled `agent::ready` issue enters unattended work.
+- One issue maps to one durable worktree and one authoritative source branch.
+- Existing-MR remediation uses the verified MR source branch and never creates
+  a second MR.
+- A transition is replayable: its intent is durable before an external write,
+  and reconciliation is safe after interruption at either side of that write.
+- Publication is idempotent and accepted only from exact GitLab and Git
+  evidence.
+- The full repository workflow remains intact, but a worker segment performs
+  only the next resumable phase or phase group.
+- Expected durable outcomes do not make the systemd unit fail.
+- The runner never approves or merges and never widens authority from issue
+  text, labels, comments, or worker output.
+
+## Worker protocol and workflow receipts
+
+The one-shot merge-request draft becomes a versioned result envelope. The
+envelope identifies the issue, expected ledger transition, completed workflow
+phase, receipts produced, result kind, redacted diagnostic, and proposed next
+action. The trusted runner validates it against the current record and Git
+evidence before changing state.
+
+`ready_to_publish` means the bounded segment produced validated changes or a
+validated repair that the trusted runner may publish. `retryable` names a
+transient category and retry deadline. `needs_human` names the blocked reason
+and a concrete action without treating a deliberate stop as failure.
+
+Architecture, Red/Green, documentation, review, finalization,
+post-publication observation, and repair remain required according to
+`AGENTS.md`. Their receipts are persisted between segments. Publication no
+longer prevents later post-publication phases because `observing` and `repair`
+are durable states.
+
+## Failure taxonomy and process exits
+
+Failures are classified before labels or exit codes are chosen:
+
+| Category | Examples | Durable outcome |
+| --- | --- | --- |
+| Idle | No running or ready issue | Successful `idle` |
+| Retryable | Timeout, temporary API failure, transient runner contention | `retry-wait`; up to three automatic attempts |
+| Human-blocked | Ambiguous request, unmet dependency, protected policy lane, unsafe recovery evidence | `agent::blocked` with exact next action |
+| Awaiting review | Exact MR and required receipts verified | `agent::awaiting-human` |
+| Unrecoverable | Ledger cannot be safely read or written, irreconcilable identity conflict | `agent::failed` where safely recordable |
+
+Idle, retry scheduled, blocked, and awaiting-human outcomes exit successfully
+from systemd. Exit `1` means the runner could not safely record or reconcile
+state. CLI-usage errors remain distinct from runtime failure, and lock
+contention remains a temporary outcome for interactive callers. The eventual
+reference update will define the exact CLI, JSON schema, and full exit-code
+table after implementation fixes those interfaces.
+
+## Recovery and reconciliation
+
+Reconciliation treats ledger intent plus external evidence as the source for a
+safe next transition:
+
+- A `running` issue with a valid ledger and worktree resumes its recorded
+  phase, regardless of the process that created it.
+- A persisted transition intent is checked against GitLab and Git; an already
+  completed external mutation is recorded, while an absent idempotent mutation
+  may be retried.
+- A missing worktree may be recreated only from recorded and verified commits
+  when no uncommitted evidence can be lost.
+- A dirty durable worktree remains in place for its next segment. It is not
+  cleaned or stashed during normal shutdown.
+- An orphan worktree, branch, label, or stash is inventoried and blocked for a
+  human decision when ownership cannot be proved.
+- Closed issues are reconciled by removing stale queue projections after the
+  closure and associated MR evidence are verified.
+- Retryable work uses at most three bounded automatic attempts. Exhaustion
+  moves it to `agent::blocked`, not `agent::failed`.
+
+## Security and authority boundaries
+
+GitLab issue text and worker results remain untrusted task data. They cannot
+select a different project, grant credentials, relax sandboxing, modify
+approval policy, or authorize approval or merge. Every API operation stays
+under the configured numeric project ID, and every Git/MR identity is verified
+against that project.
+
+The ledger and worktrees are local durability, not a distributed lock or a
+same-user security boundary. Exactly one host owns unattended processing for a
+project. Secrets stay in the existing credential providers and are never
+copied into the ledger or journal.
+
+Protected agent-policy changes use a human-directed lane unless a separate
+secure cross-agent design is reviewed. The state machine records that boundary
+as `agent::blocked`; it does not weaken the sandbox or reinterpret the issue as
+authority.
+
+## Migration and rollout
+
+Migration is evidence-preserving and begins only after the implementation is
+reviewed:
+
+1. Stop the timer and confirm no segment holds the project lock.
+2. Inventory current running, awaiting-human, failed, and closed issues;
+   `agent/issue-*` branches and MRs; worktrees; and recovery stashes.
+3. Run a non-mutating migration preview that proposes ledger records, label
+   transitions, retained evidence, and human decisions.
+4. Review the preview. Never apply, drop, relabel, close, or delete ambiguous
+   evidence automatically.
+5. Apply approved migrations idempotently and verify the resulting ledger,
+   worktrees, labels, branches, and MRs.
+6. Run one explicitly opted-in canary issue through recovery, publication,
+   observation, and human handoff.
+7. Re-enable the timer only after the canary and operational status output are
+   verified.
+
+Implementation should proceed in reviewable slices: ledger and reconciliation;
+explicit ready selection and classification; durable worktrees and versioned
+worker segments; idempotent publication and existing-MR remediation;
+post-publication observation and repair; then wrapper, timer, status, and
+operational-documentation updates. Each slice follows the full coding
+workflow.
+
+## Approved design decisions
+
+1. Replace implicit one-shot execution with an explicit recoverable state
+   machine, using GitLab as its shared projection and a small local ledger for
+   execution detail.
+2. Make each systemd activation one bounded segment that reconciles and resumes
+   existing work before selecting the oldest `agent::ready` issue.
+3. Store durable state below the XDG state directory and use one worktree per
+   active issue.
+4. Preserve the complete repository workflow while splitting it into
+   resumable segments with durable receipts.
+5. Allow three bounded automatic retries by default, then transition to
+   `agent::blocked`.
+6. Schedule the next pass 20 minutes after the previous pass finishes.
+7. Treat protected agent-policy changes as a human-directed lane unless a
+   separate secure cross-agent mechanism is designed and reviewed.
+8. Implement the existing-MR remediation contract instead of removing it.
+9. Migrate existing labels, branches, worktrees, and stashes only after a
+   dry-run inventory and human review.
+
+## Out of scope for the design MR
+
+This design MR does not change Python or Bash code, tests, systemd units,
+labels, issues, branches other than its own feature branch, stashes, worktrees,
+credentials, or current operator documentation. It does not repair historical
+issues or define current behavior. Those changes require separate coding
+workflow MRs after this proposal is reviewed.
