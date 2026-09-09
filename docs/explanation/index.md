@@ -15,6 +15,7 @@ workflow. They explain design choices, boundaries, and trade-offs.
 - [Why coding standards exist](coding-standards.md) — Understand the rationale for the generated development conventions.
 
 ### Agent workflow
+- [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Understand the proposed recoverable state machine for unattended agent work.
 - [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
 - [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand serial polling, checkout locking, and human publication.
 <!-- END GENERATED -->
