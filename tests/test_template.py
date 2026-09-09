@@ -573,6 +573,35 @@ def test_canonical_project_context_is_rendered(generated_project: Path) -> None:
     assert not (generated_project / ".claude" / "project.md").exists()
 
 
+def test_project_context_defines_pipeline_execution_budget_defaults(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Each project owns explicit queue-free pipeline execution budgets."""
+    expected = {
+        "pipeline_execution_preferred_seconds": 60,
+        "pipeline_execution_hard_limit_seconds": 120,
+    }
+
+    for root in (project_root, template_dir, generated_project):
+        project_context_path = root / ".agents" / "project.md"
+        if root == template_dir:
+            project_context_path = project_context_path.with_suffix(".md.jinja")
+        project_context = project_context_path.read_text()
+        budget_block = re.search(
+            r"^## Pipeline Performance Budget\n\n"
+            r"```yaml\n(?P<budget>.*?)\n```$",
+            project_context,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        assert budget_block is not None
+        budget = yaml.safe_load(budget_block.group("budget"))
+        assert budget == expected
+        assert all(type(value) is int for value in budget.values())
+
+
 def test_generated_project_documents_filesystem_structure_defaults(
     generated_project: Path,
 ) -> None:
@@ -1524,6 +1553,75 @@ def test_pipeline_performance_judge_is_the_single_live_pipeline_owner(
         assert "The agent owns the entire live-pipeline lifecycle" in agent_content
         assert "Do not push, retry, cancel, approve, or merge" in agent_content
         assert "model-tier: balanced" in skill_content
+
+
+def test_pipeline_agent_enforces_the_project_owned_execution_budget(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Only the live-pipeline owner interprets configurable execution limits."""
+    preferred_field = "pipeline_execution_preferred_seconds"
+    hard_field = "pipeline_execution_hard_limit_seconds"
+
+    for root in (project_root, template_dir, generated_project):
+        agent = (
+            root / ".agents" / "agents" / "pipeline-performance-judge.md"
+        ).read_text()
+        normalized_agent = " ".join(agent.split())
+
+        for requirement in (
+            ".agents/project.md",
+            "Pipeline Performance Budget",
+            preferred_field,
+            hard_field,
+            "finite numeric",
+            "booleans",
+            "greater than zero",
+            "preferred budget must be less than or equal to the hard limit",
+            "pipeline `duration`",
+            "queue time is excluded",
+            "Preferred target: met",
+            "Hard limit: passed",
+            "Hard limit: exceeded",
+            "Direct feedback: Reject → `$tdd-green`; no issue required",
+            "needs verification",
+        ):
+            assert requirement in normalized_agent
+
+        assert re.search(r"duration.*less than or equal to.*preferred", agent)
+        assert re.search(r"duration.*greater than.*hard limit", agent)
+        assert not re.search(rf"{preferred_field}:\s*10\b", agent)
+        assert not re.search(rf"{hard_field}:\s*60\b", agent)
+
+
+def test_pipeline_budget_has_no_unrelated_workflow_plumbing(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Other roles remain unaware of the project-owned pipeline thresholds."""
+    fields = (
+        "pipeline_execution_preferred_seconds",
+        "pipeline_execution_hard_limit_seconds",
+    )
+    unrelated_paths = (
+        Path("AGENTS.md"),
+        Path("README.md"),
+        Path(".agents/agents/judge-cicd.md"),
+        Path(".agents/agents/findings-triage.md"),
+        Path(".agents/agents/tdd-finalizer.md"),
+        Path(".agents/skills/git-flow/SKILL.md"),
+    )
+
+    for root in (project_root, template_dir, generated_project):
+        for relative_path in unrelated_paths:
+            path = root / relative_path
+            if root == template_dir and relative_path == Path("README.md"):
+                path = path.with_suffix(".md.jinja")
+            content = path.read_text()
+            for field in fields:
+                assert field not in content, relative_path
 
 
 def test_pipeline_agent_owns_bounded_interruptible_wait_until_terminal(
