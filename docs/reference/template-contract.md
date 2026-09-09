@@ -98,12 +98,12 @@ initialized project until the command preflight has passed.
 
 | Area | Provided configuration |
 | --- | --- |
-| Python | Requires Python 3.11 or newer. Local tox runs Python 3.11 and 3.14; CI creates locked Python 3.11 and 3.14.3 environments. |
+| Python | Requires Python 3.11 or newer. Local tox runs test Python 3.11 and 3.14; CI creates locked Python 3.11 and 3.14.3 environments. |
 | Dependencies | UV-managed project, test, and development dependency groups. |
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
-| CI | One portable `validation (8 gates)` job performs dependency setup once, runs Ruff checks, formatting, separate Python 3.11 and 3.14.3 pytest suites, YAML linting, Kingfisher, type checking, and ShellCheck, and publishes named gate and test reports. Generated projects do not require private registry configuration or credentials. Mutually exclusive workflow rules suppress a duplicate branch pipeline while a merge request is open. |
+| CI | Root CI lists eight native jobs: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and `shellcheck`. They extend the single root `.base_uv` definition, which pins the project-only image as `<registry>/<project>/validation@sha256:<digest>`. The image supplies the interpreter, system tools, and locked dependencies, so root jobs perform no `apt-get`, `uv python install`, or `uv sync` bootstrap. There is no synthetic aggregate root validation job or aggregate JUnit gate suite; each check is investigated through its named job. The root pytest jobs retain separate JUnit and coverage reports. The generated template instead retains its portable `validation (8 gates)` aggregate job, which bootstraps dependencies once and retains its aggregate gate suite and separate pytest reports. Local tox remains the supported-matrix runner outside CI. Generated projects do not inherit the root image's registry configuration, digest pin, or credentials. Both configurations use mutually exclusive workflow rules: merge-request pipelines run, while duplicate branch pipelines are suppressed when the merge request is open. |
 | Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout
