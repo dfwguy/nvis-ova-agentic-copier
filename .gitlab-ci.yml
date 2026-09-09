@@ -1,6 +1,13 @@
 stages:
   - ci-image
-  - build
+  - validate
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: $CI_COMMIT_BRANCH
 
 .ci_image_builder:
   stage: ci-image
@@ -78,123 +85,122 @@ ci-image:publish:
           - uv.lock
     - when: never
 
-.uv_cache:
-  cache: &uv_cache
-    key:
-      files:
-        - uv.lock
-    paths:
-      - .cache/uv/
-
 .base_uv:
-  stage: build
+  stage: validate
   interruptible: true
-  image:
-    name: ghcr.io/astral-sh/uv:0.7.3-python3.13-bookworm-slim
-  variables:
-    UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
-  before_script:
-    - cd $CI_PROJECT_DIR
-    - uv --version
-  rules:
-    - if: $CI_COMMIT_BRANCH
-
-ruff_check:
-  extends: .base_uv
+  needs: []
   tags:
     - size/medium
+  image:
+    name: gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521
+  before_script:
+    - cd "$CI_PROJECT_DIR"
+
+ruff-check:
+  extends: .base_uv
   script:
-    - uv run ruff --version
-    - echo "Checking all Python files"
-    - uv run ruff check --output-format=gitlab . > code-quality-report.json
+    - uv run --no-sync ruff check --output-format=gitlab . > ruff-code-quality-report.json
   artifacts:
     reports:
-      codequality: $CI_PROJECT_DIR/code-quality-report.json
+      codequality: ruff-code-quality-report.json
     when: always
 
-ruff_format:
+ruff-format:
   extends: .base_uv
-  tags:
-    - size/medium
   script:
-    - uv run ruff --version
-    - echo "Formatting all Python files"
-    - uv run ruff format --diff . > format-changes.diff
+    - uv run --no-sync ruff format --check --diff . > format-changes.diff
   artifacts:
     paths:
       - format-changes.diff
     when: always
 
-pytest:
+.pytest:
   extends: .base_uv
-  tags:
-    - size/medium
-  cache:
-    <<: *uv_cache
-    policy: pull-push
-  after_script:
-    - uv cache prune --ci
-  before_script:
-    - !reference [.base_uv, before_script]
-    - apt-get update -qq && apt-get install -y --no-install-recommends git jq
   script:
-    - echo "Running tox with coverage"
-    - uv run tox
+    - |
+      case "$TEST_ENVIRONMENT" in
+          py311) python_environment="$CI_PY311_ENVIRONMENT" ;;
+          py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
+          *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
+      esac
+      PYTHONPATH="$CI_PROJECT_DIR/src" \
+          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT" \
+          UV_PROJECT_ENVIRONMENT="$python_environment" \
+          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
+              --cov \
+              --cov-fail-under=85 \
+              --cov-report="xml:coverage-$TEST_ENVIRONMENT.xml" \
+              --junitxml="test-results-$TEST_ENVIRONMENT.xml" \
+              -o "junit_suite_name=$TEST_ENVIRONMENT" \
+              -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT"
   artifacts:
     reports:
-      junit: test-results.xml
+      junit: test-results-$TEST_ENVIRONMENT.xml
       coverage_report:
         coverage_format: cobertura
-        path: coverage.xml
+        path: coverage-$TEST_ENVIRONMENT.xml
     paths:
-      - htmlcov/
+      - coverage-$TEST_ENVIRONMENT.xml
     when: always
+
+pytest-py311:
+  extends: .pytest
+  variables:
+    TEST_ENVIRONMENT: py311
+
+pytest-py314:
+  extends: .pytest
+  variables:
+    TEST_ENVIRONMENT: py314
 
 yamllint:
   extends: .base_uv
-  tags:
-    - size/medium
   script:
-    - uv run yamllint --version
-    - echo "Running yamllint"
     - |
-      uv run yamllint -d '{"extends": "default", "rules": {"line-length": "disable", "document-start": "disable"}}' -f parsable . | \
-      uv run python tests/helpers/yamllint_to_json.py | tee yamllint-report.json
+      uv run --no-sync yamllint \
+          -d '{"extends": "default", "rules": {"line-length": "disable", "document-start": "disable"}}' \
+          -f parsable . \
+          | uv run --no-sync python tests/helpers/yamllint_to_json.py \
+              > yamllint-code-quality-report.json
   artifacts:
     reports:
-      codequality: yamllint-report.json
+      codequality: yamllint-code-quality-report.json
     when: always
 
 kingfisher:
   extends: .base_uv
-  tags:
-    - size/medium
   script:
-    - uv run kingfisher --version
-    - echo "Scanning working tree for secrets"
-    - uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .cache --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
+    - uv run --no-sync kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .cache --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
 
-type_check:
+type-check:
   extends: .base_uv
-  tags:
-    - size/medium
   script:
-    - uv run ty --version
-    - echo "Running type checking"
-    - uv run ty check
-  allow_failure: false
+    - uv run --no-sync ty check
 
 shellcheck:
-  stage: build
-  interruptible: true
-  image:
-    name: docker.io/koalaman/shellcheck-alpine:stable
-    entrypoint: [""]
-  tags:
-    - size/medium
-  rules:
-    - if: $CI_COMMIT_BRANCH
+  extends: .base_uv
   script:
-    - shellcheck --version
-    - echo "Linting all shell scripts"
-    - find . -type f -not -path './.git/*' -not -path './.venv/*' -not -path './.tox/*' -exec sh -c 'case "$1" in *.sh) shellcheck "$1";; *) if head -n1 "$1" | grep -Eq "^#!.*(ba)?sh"; then shellcheck "$1"; fi;; esac' _ {} \;
+    - |
+      file_list=$(mktemp)
+      trap 'rm -f "$file_list"' 0 HUP INT TERM
+      find . -type f \
+          -not -path './.git/*' \
+          -not -path './.cache/*' \
+          -not -path './.venv/*' \
+          -not -path './.tox/*' \
+          -not -path './.pytest_cache/*' \
+          -not -path './.ruff_cache/*' \
+          -print0 > "$file_list"
+      status=0
+      while IFS= read -r -d '' file; do
+          case "$file" in
+              *.sh) shellcheck "$file" || status=1 ;;
+              *)
+                  IFS= read -r first_line < "$file" || true
+                  if [[ "$first_line" =~ ^#!.*(ba)?sh ]]; then
+                      shellcheck "$file" || status=1
+                  fi
+                  ;;
+          esac
+      done < "$file_list"
+      exit "$status"

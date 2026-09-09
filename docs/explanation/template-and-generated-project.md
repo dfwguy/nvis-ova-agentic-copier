@@ -41,12 +41,21 @@ can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—
 one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
 
-Generated projects retain one portable `validation (8 gates)` job. It performs
-dependency setup once, runs the eight checks with named evidence, and reports
-the Python 3.11 and 3.14.3 suites separately. Keeping this behavior in the
-template avoids coupling generated projects to this repository's private
-registry or credentials. The generated workflow also avoids duplicate push and
-merge-request pipelines for the same commit.
+The root repository also has an internal CI boundary. Its `.base_uv` definition
+pins one project-only image by immutable digest, and eight native jobs extend
+it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
+`kingfisher`, `type-check`, and `shellcheck`. The image holds the jobs'
+interpreter, system tools, and locked dependencies, so they do not install them
+again. That optimization belongs only to this repository. Generated projects
+instead retain their single portable `validation (8 gates)` job, which performs
+dependency bootstrap once and reports the aggregate checks without the private
+registry image or its credentials. When root dependencies change, maintainers
+publish a new image digest and deliberately update the one `.base_uv` pin
+rather than relying on a mutable image tag.
+
+Both CI configurations prefer a merge-request pipeline and suppress the
+duplicate branch pipeline while that merge request is open. A branch pipeline
+still runs when no merge request is open.
 
 The update model intentionally preserves files that are commonly customized,
 such as a project's README, dependencies, CI pipeline, package initializer, and

@@ -142,8 +142,30 @@ def _ci_job_script(configuration: dict[str, Any], job_name: str) -> list[str]:
     return configuration[job["extends"]]["script"]
 
 
+def test_ci_exposes_each_validation_gate_as_a_parallel_job(
+    project_root: Path,
+) -> None:
+    """Every root gate has an honest, independently visible status."""
+    configuration = _ci_configuration(project_root)
+    visible_gates = {
+        name
+        for name, value in configuration.items()
+        if name in _VALIDATION_JOBS and isinstance(value, dict)
+    }
+
+    assert visible_gates == _VALIDATION_JOBS
+    assert "validation (8 gates)" not in configuration
+    for job_name in _VALIDATION_JOBS:
+        job = configuration[job_name]
+        assert "needs" not in job
+        assert "dependencies" not in job
+        assert _ci_job_script(configuration, job_name)
+        assert "run-ci-checks.sh" not in str(_ci_job_script(configuration, job_name))
+
+
 def test_ci_avoids_duplicate_push_and_merge_request_pipelines(
     generated_project: Path,
+    project_root: Path,
     template_dir: Path,
 ) -> None:
     """An open merge request suppresses the duplicate branch pipeline."""
@@ -155,7 +177,7 @@ def test_ci_avoids_duplicate_push_and_merge_request_pipelines(
         },
         {"if": "$CI_COMMIT_BRANCH"},
     ]
-    for root in (template_dir, generated_project):
+    for root in (project_root, template_dir, generated_project):
         assert _ci_configuration(root)["workflow"]["rules"] == expected_rules
 
 
@@ -214,25 +236,97 @@ def test_portable_ci_keeps_one_shared_setup_job(
         assert (root / "tests" / "helpers" / "run-ci-checks.sh").exists()
 
 
-def test_portable_ci_publishes_gate_and_test_reports(
-    generated_project: Path,
-    template_dir: Path,
+@pytest.mark.parametrize("shellcheck_fails", (False, True))
+def test_ci_shellcheck_job_propagates_scan_failures(
+    project_root: Path,
+    tmp_path: Path,
+    *,
+    shellcheck_fails: bool,
 ) -> None:
-    """The portable aggregate retains named gate and per-version evidence."""
-    for root in (template_dir, generated_project):
-        reports = _ci_configuration(root)["validation (8 gates)"]["artifacts"][
-            "reports"
-        ]
-        assert reports["junit"] == [
-            "ci-gates.xml",
-            "test-results-py311.xml",
-            "test-results-py314.xml",
-        ]
-        assert reports["coverage_report"] == {
-            "coverage_format": "cobertura",
-            "path": "coverage-py314.xml",
+    """A ShellCheck violation makes its independently visible job fail."""
+    configuration = _ci_configuration(project_root)
+    scan_script = next(
+        command
+        for command in configuration["shellcheck"]["script"]
+        if "find ." in command
+    )
+    checked_file = tmp_path / "check.sh"
+    checked_file.write_text("#!/usr/bin/env bash\nprintf 'checked\\n'\n")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "invocations.log"
+    _write_command(
+        fake_bin / "shellcheck",
+        """printf 'shellcheck %s\\n' "$*" >> "$INVOCATIONS"
+if [ "$FAIL_SHELLCHECK" = 1 ] && [ "$1" = ./check.sh ]; then exit 7; fi""",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FAIL_SHELLCHECK": str(int(shellcheck_fails)),
+            "INVOCATIONS": str(invocations),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
         }
-        assert reports["codequality"] == "code-quality-report.json"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", scan_script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert (result.returncode != 0) is shellcheck_fails
+    assert "shellcheck ./check.sh" in invocations.read_text()
+
+
+def test_ci_jobs_run_one_direct_gate_command(
+    project_root: Path,
+) -> None:
+    """Each visible root job owns one validation command."""
+    expected_commands = {
+        "ruff-check": "uv run --no-sync ruff check",
+        "ruff-format": "uv run --no-sync ruff format --check",
+        "pytest-py311": "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "pytest-py314": "uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest",
+        "yamllint": "uv run --no-sync yamllint",
+        "kingfisher": "uv run --no-sync kingfisher scan",
+        "type-check": "uv run --no-sync ty check",
+        "shellcheck": "shellcheck",
+    }
+    configuration = _ci_configuration(project_root)
+    for job_name, command in expected_commands.items():
+        assert command in "\n".join(_ci_job_script(configuration, job_name))
+    assert "tox run" not in str(configuration)
+
+
+def test_ci_jobs_publish_independent_reports(
+    project_root: Path,
+) -> None:
+    """Each reporting root job owns only its matching GitLab evidence."""
+    configuration = _ci_configuration(project_root)
+    pytest_template = configuration[".pytest"]
+    assert pytest_template["artifacts"]["reports"] == {
+        "junit": "test-results-$TEST_ENVIRONMENT.xml",
+        "coverage_report": {
+            "coverage_format": "cobertura",
+            "path": "coverage-$TEST_ENVIRONMENT.xml",
+        },
+    }
+    assert pytest_template["artifacts"]["when"] == "always"
+    for environment in ("py311", "py314"):
+        assert configuration[f"pytest-{environment}"]["variables"] == {
+            "TEST_ENVIRONMENT": environment,
+        }
+    assert configuration["ruff-check"]["artifacts"]["reports"] == {
+        "codequality": "ruff-code-quality-report.json"
+    }
+    assert configuration["yamllint"]["artifacts"]["reports"] == {
+        "codequality": "yamllint-code-quality-report.json"
+    }
+    assert configuration["ruff-format"]["artifacts"]["paths"] == ["format-changes.diff"]
 
 
 def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
@@ -243,10 +337,12 @@ def test_root_tox_enforces_coverage_for_each_python(project_root: Path) -> None:
         command = config["tool"]["tox"]["env"][environment]["commands"][0]
         assert "--cov" in command
         assert "--cov-fail-under=85" in command
+        assert f"junit_suite_name={environment}" in command
 
 
 def test_parallel_tox_environments_use_distinct_report_paths(
     generated_project: Path,
+    project_root: Path,
     template_dir: Path,
 ) -> None:
     """Parallel tox environments cannot overwrite one another's reports."""
@@ -263,7 +359,7 @@ def test_parallel_tox_environments_use_distinct_report_paths(
         },
     }
 
-    for root in (generated_project,):
+    for root in (project_root, generated_project):
         config = tomllib.loads((root / "pyproject.toml").read_text())
         for environment, paths in expected_paths.items():
             tox_env = config["tool"]["tox"]["env"][environment]
@@ -284,10 +380,11 @@ def test_parallel_tox_environments_use_distinct_report_paths(
 
 def test_parallel_test_artifacts_are_ignored_everywhere(
     generated_project: Path,
+    project_root: Path,
     template_dir: Path,
 ) -> None:
     """Environment-specific reports stay out of source control."""
-    for root in (template_dir, generated_project):
+    for root in (project_root, template_dir, generated_project):
         ignore_lines = set((root / ".gitignore").read_text().splitlines())
 
         assert "coverage-*.xml" in ignore_lines
@@ -295,6 +392,11 @@ def test_parallel_test_artifacts_are_ignored_everywhere(
         assert "format-changes.diff" in ignore_lines
         assert "*-code-quality-report.json" in ignore_lines
 
+    root_ignore = set((project_root / ".gitignore").read_text().splitlines())
+    assert "ci-gates.xml" not in root_ignore
+    assert "ci-gates.tsv" not in root_ignore
+    assert "ci-logs/" not in root_ignore
+    assert "code-quality-report.json" not in root_ignore
     template_ignore = set((template_dir / ".gitignore").read_text().splitlines())
     assert "ci-gates.xml" in template_ignore
     assert "ci-gates.tsv" in template_ignore
