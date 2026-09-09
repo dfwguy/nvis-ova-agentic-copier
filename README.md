@@ -62,33 +62,43 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - UV-managed Python, Ruff, ty, pytest, tox, pre-commit, and GitLab CI.
 - A `src/<package>/` project layout with starter tests and documentation.
 - Bash syntax and ShellCheck validation when a project contains Bash.
-- A portable, test-driven, human-gated agent workflow rooted in `.agents/skills`.
+- A portable, human-gated agent workflow rooted in `.agents/skills`, with
+  separate coding and documentation/agent-policy lanes.
 - A serial GitLab issue loop that creates merge requests but never approves or
   merges them.
 
 ## Agent workflow
 
-Generated projects follow this workflow. `AGENTS.md` is the authoritative
-manifest for exact skill routing and conditional instruction loading. Read [how
-the agent workflow works](docs/explanation/agentic-workflow.md) for its design,
+Generated projects classify each whole change into a coding lane or a
+documentation and agent-policy lane. `AGENTS.md` is the authoritative manifest
+for exact skill routing and conditional instruction loading. Read [how the
+agent workflow works](docs/explanation/agentic-workflow.md) for its design,
 lifecycle, role boundaries, and validation details.
 
 ```mermaid
 flowchart TD
-    branch[Feature branch] --> architect[Architect]
+    branch[Feature branch] --> classify{Classify whole diff}
+    classify --> architect[Architect: coding lane]
     architect --> tests[Test Writer]
-    architect --> docs[Documentation Writer]
+    architect --> docs[Diátaxis Writer]
     tests --> implementer[Implementer]
     docs --> implementer
     implementer --> nonfunctional[Non-functional Reviewer]
     nonfunctional --> implementation[Implementation Judge]
-    nonfunctional --> documentation[Documentation Judge]
+    nonfunctional --> documentation[Diátaxis Judge]
     implementation --> final_gates[Final review gates]
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
+    classify --> policy_architect[Architect: policy design or N/A]
+    policy_architect --> policy_writer[Documentation Writer]
+    policy_writer --> policy_docs[Diátaxis Judge]
+    policy_writer --> policy_review[Agent Policy Judge]
+    policy_docs --> policy_finalizer[Documentation Finalizer]
+    policy_review --> policy_finalizer
+    policy_finalizer --> mr
     mr --> performance[Pipeline Performance Judge]
-    mr -->|Phase 4–6 Minor findings| triage[Findings Triage]
+    mr -->|Pre-publication Minor findings| triage[Findings Triage]
     performance --> human[Human approval and merge]
     triage --> human
 ```
@@ -96,11 +106,11 @@ flowchart TD
 After publication, one Pipeline Performance Judge invocation exclusively owns
 live GitLab CI observation and its feedback issues. Findings Triage
 independently handles the prepublication judges' Minor findings. Other workflow
-roles do not inspect or interpret live CI. GitLab lists all eight validation
-gates as native jobs with individual green or red status indicators. The root
-jobs use the repository's immutable prebuilt validation image without runtime
-dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs, and
-coverage reports.
+roles do not inspect or interpret live CI. Coding-lane GitLab validation lists
+its eight gates as native jobs with individual green or red status indicators.
+The root jobs use the repository's immutable prebuilt validation image without
+runtime dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs,
+and coverage reports.
 
 ### Merge requests are the source of truth
 

@@ -65,10 +65,12 @@ locked project dependencies. They must not run `apt-get`, `uv python install`,
 Run the consumer pipeline and inspect the eight named root jobs directly; do
 not look for a root synthetic aggregate validation job or JUnit gate suite. The
 two pytest jobs retain separate JUnit and coverage reports. Apply the project
-budget to the overall queue-excluded pipeline duration: prefer at most 60
-seconds and reject execution over 120 seconds. If the image needs another
-dependency, refresh and publish the image first, then repeat this pin-update
-procedure; do not restore bootstrap work to root validation.
+budget to the longest executed terminal job with a numeric duration: prefer at
+most 60 seconds and reject execution over 120 seconds. Report skipped,
+canceled, or manual jobs, the overall pipeline span, and queue time separately;
+runner scheduling does not count against the execution budget. If the image
+needs another dependency, refresh and publish the image first, then repeat this
+pin-update procedure; do not restore bootstrap work to root validation.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership

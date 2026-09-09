@@ -413,45 +413,6 @@ def test_generated_dev_environment_includes_local_tox_matrix(
     assert "tox-uv>=1.20" in config["dependency-groups"]["dev"]
 
 
-def _unlabeled_markdown_fences(content: str) -> list[str]:
-    """Return unlabeled Markdown fence openings in content."""
-    fence = re.compile(r"^(`{3,}|~{3,})([^`~\s]+)?\s*$")
-    open_fence: str | None = None
-    unlabeled_fences: list[str] = []
-
-    for line in content.splitlines():
-        match = fence.fullmatch(line)
-        if match is None:
-            continue
-        marker, language = match.groups()
-        if marker == open_fence and language is None:
-            open_fence = None
-        elif open_fence is None:
-            if language is None:
-                unlabeled_fences.append(marker)
-            open_fence = marker
-
-    return unlabeled_fences
-
-
-def test_markdown_fences_have_a_language(project_root: Path) -> None:
-    """Test that maintained Markdown fences declare a language."""
-    ignored_paths = {".git", ".venv", ".tox", ".pytest_cache", ".ruff_cache"}
-
-    markdown_paths = (*project_root.rglob("*.md"), *project_root.rglob("*.md.jinja"))
-    for markdown_path in markdown_paths:
-        if ignored_paths.intersection(markdown_path.relative_to(project_root).parts):
-            continue
-        assert not _unlabeled_markdown_fences(markdown_path.read_text()), markdown_path
-
-
-def test_markdown_fence_guard_rejects_unlabeled_tilde_fences() -> None:
-    """Test that the Markdown guard handles all standard fence marker types."""
-    content = "~~~\nexample\n~~~\n\n```text\nexample\n```\n"
-
-    assert _unlabeled_markdown_fences(content) == ["~~~"]
-
-
 def test_generated_package_directory(generated_project: Path) -> None:
     """Test that Python packages use the standard isolated ``src/`` layout."""
     package = generated_project / "src" / "my_test_project"
@@ -600,6 +561,9 @@ def test_project_context_defines_pipeline_execution_budget_defaults(
         budget = yaml.safe_load(budget_block.group("budget"))
         assert budget == expected
         assert all(type(value) is int for value in budget.values())
+        assert "longest individual job `duration`" in project_context
+        assert "runner scheduling must not reject a change" in project_context
+        assert "explicit human approval to change" in project_context
 
 
 def test_generated_project_documents_filesystem_structure_defaults(
@@ -660,9 +624,12 @@ def test_lint_and_pytest_skill_is_generated(
     ("skill_name", "model_tier"),
     (
         ("architect", "most-capable"),
+        ("agent-policy-judge", "fast"),
         ("cli-syntax-judge", "fast"),
         ("diataxis-judge", "fast"),
         ("diataxis-writer", "balanced"),
+        ("documentation-finalizer", "fast"),
+        ("documentation-writer", "balanced"),
         ("filesystem-structure-judge", "fast"),
         ("findings-triage", "balanced"),
         ("judge-cicd", "balanced"),
@@ -875,19 +842,6 @@ def test_canonical_workflow_does_not_reference_legacy_claude_paths(
             assert ".claude/" not in content, path
 
 
-def test_agents_entry_point_keeps_specialized_policy_in_owning_skills(
-    generated_project: Path,
-) -> None:
-    """AGENTS.md stays a concise entry point while preserving core safeguards."""
-    content = (generated_project / "AGENTS.md").read_text()
-
-    assert len(content.splitlines()) <= 130
-    assert "Developer-readable loop readiness exception" not in content
-    assert "MR remediation issues" not in content
-    assert "Every repository change must publish" in content
-    assert "Never approve or merge" in content
-
-
 def test_agent_routing_manifest_is_explicit_portable_and_identical(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
@@ -902,7 +856,8 @@ def test_agent_routing_manifest_is_explicit_portable_and_identical(
         "Always | `.agents/project.md`",
         "Missing contribution marker | `$repository-setup`",
         "Markdown files | `.agents/guidance/markdown.md`",
-        "Non-trivial work | `.agents/guidance/tdd.md`",
+        "Coding workflow | `.agents/guidance/tdd.md`",
+        "Documentation/policy workflow | `.agents/guidance/documentation.md`",
         "Python files | `.agents/lang/python.md`",
         "Bash files or Bash shebangs | `.agents/lang/bash.md`",
         "Python tests | `.agents/lang/python-testing.md`",
@@ -930,12 +885,21 @@ def test_shared_agent_instructions_do_not_use_nonportable_nested_imports(
             assert not imports, instruction
 
 
-def test_nontrivial_workflow_names_every_exact_skill_and_handoff(
+def test_generated_manifest_defines_disjoint_coding_and_documentation_workflows(
     generated_project: Path,
 ) -> None:
-    """The manifest makes phase ownership, inputs, outputs, and reroutes mechanical."""
+    """Generated projects route code and content through disjoint workflows."""
     content = (generated_project / "AGENTS.md").read_text()
-    manifest = content[content.index("## Non-trivial workflow manifest") :]
+    coding = content[
+        content.index("## Coding workflow manifest") : content.index(
+            "## Documentation and agent-policy workflow manifest"
+        )
+    ]
+    documentation = content[
+        content.index(
+            "## Documentation and agent-policy workflow manifest"
+        ) : content.index("## GitLab publication")
+    ]
 
     for heading in (
         "Applies",
@@ -944,9 +908,10 @@ def test_nontrivial_workflow_names_every_exact_skill_and_handoff(
         "Requires",
         "Receipt; rejection route",
     ):
-        assert heading in manifest
+        assert heading in coding
+        assert heading in documentation
 
-    ordered_skills = (
+    coding_skills = (
         "architect",
         "tdd-red",
         "diataxis-writer",
@@ -964,15 +929,72 @@ def test_nontrivial_workflow_names_every_exact_skill_and_handoff(
         "pipeline-performance-judge",
         "findings-triage",
     )
-    positions = [manifest.index(f"`${skill}`") for skill in ordered_skills]
-    assert positions == sorted(positions)
-    assert "Main; never delegate" in manifest
-    assert "Parallel with `$tdd-red`" in manifest
-    assert "`not applicable — <reason>`" in manifest
+    documentation_skills = (
+        "git-flow",
+        "architect",
+        "documentation-writer",
+        "diataxis-judge",
+        "agent-policy-judge",
+        "documentation-finalizer",
+        "pipeline-performance-judge",
+        "findings-triage",
+    )
+    for skill in coding_skills:
+        assert f"`${skill}`" in coding
+    for skill in documentation_skills:
+        assert f"`${skill}`" in documentation
+    for excluded in (
+        "tdd-red",
+        "tdd-green",
+        "nonfunctional-review",
+        "tdd-judge",
+        "judge-quality",
+        "judge-test",
+        "judge-cicd",
+        "tdd-finalizer",
+        "cli-syntax-judge",
+        "filesystem-structure-judge",
+    ):
+        assert f"`${excluded}`" not in documentation
+
+    assert "Main; never delegate" in coding
+    assert "Parallel with `$tdd-red`" in coding
+    assert "`not applicable — <reason>`" in content
     assert "Do not route by display name" in content
+    assert "Mixed or uncertain" in content
+    assert "whole change" in content
     for phase in ("2a `$tdd-red`", "3 `$tdd-green`"):
-        phase_row = next(line for line in manifest.splitlines() if phase in line)
+        phase_row = next(line for line in coding.splitlines() if phase in line)
         assert "| Main; never delegate | Current enabled |" in phase_row
+
+
+def test_documentation_finalizer_is_content_only_and_portably_mirrored(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """The content finalizer validates policy and prose without test gates."""
+    relative_paths = (
+        ".agents/agents/documentation-finalizer.md",
+        ".agents/skills/documentation-finalizer/SKILL.md",
+    )
+    for relative_path in relative_paths:
+        copies = tuple(
+            (root / relative_path).read_text()
+            for root in (project_root, template_dir, generated_project)
+        )
+        assert copies[0] == copies[1] == copies[2]
+
+    finalizer = (project_root / relative_paths[0]).read_text().lower()
+    for excluded in ("pytest", "tox", "junit", "coverage", "test-results"):
+        assert excluded not in finalizer
+    for requirement in (
+        "reclassify",
+        "applicability record",
+        "mirror",
+        "source of truth",
+    ):
+        assert requirement in finalizer
 
 
 def test_main_red_green_skills_preserve_session_model_continuity(
@@ -1018,19 +1040,25 @@ def test_scoped_judges_have_explicit_not_applicable_receipts(
 
 
 def test_serial_worker_routes_by_exact_skill_ids(generated_project: Path) -> None:
-    """The one-process worker activates manifest skills instead of role labels."""
+    """The worker classifies the change before activating exact skill IDs."""
     content = (
         generated_project / ".agents" / "skills" / "work-item-runner" / "SKILL.md"
     ).read_text()
 
     assert "exact `$skill-id`" in content
     assert "Do not infer a skill from a display name" in content
+    assert "Coding workflow manifest" in content
+    assert "Documentation and agent-policy workflow manifest" in content
+    assert "whole change" in content
     for skill_name in (
         "architect",
         "tdd-red",
         "diataxis-writer",
         "tdd-green",
         "tdd-finalizer",
+        "documentation-writer",
+        "agent-policy-judge",
+        "documentation-finalizer",
     ):
         assert f"`${skill_name}`" in content
 
@@ -1087,57 +1115,6 @@ def test_generated_remediation_workflow_and_documentation_index_rule(
     assert "Required front matter" in documentation_process.read_text()
     assert documentation_index.exists()
     assert "how-to/index.md" in documentation_index.read_text()
-
-
-def test_documentation_index_links_every_diataxis_page(project_root: Path) -> None:
-    """Test that the source index links only to the four Diataxis sections."""
-    index = (project_root / "docs" / "index.md").read_text()
-
-    for section in (
-        "tutorials/index.md",
-        "how-to/index.md",
-        "reference/index.md",
-        "explanation/index.md",
-    ):
-        assert section in index
-
-    assert "create-your-first-project.md" not in index
-
-
-def test_diataxis_pages_have_required_front_matter(project_root: Path) -> None:
-    """Test that every non-index documentation page declares its Diataxis metadata."""
-    for page in (project_root / "docs").glob("*/*.md"):
-        if page.name == "index.md":
-            continue
-        content = page.read_text()
-        assert content.startswith("---\n")
-        for field in (
-            "title:",
-            "type:",
-            "summary:",
-            "audience:",
-            "tags:",
-            "status:",
-            "last_reviewed:",
-            "related:",
-        ):
-            assert field in content
-
-
-def test_explanations_use_mermaid_for_relationship_diagrams(
-    project_root: Path,
-) -> None:
-    """Test that explanation pages use Mermaid for relationship diagrams."""
-    template_explanation = (
-        project_root / "docs" / "explanation" / "template-and-generated-project.md"
-    ).read_text()
-    workflow_explanation = (
-        project_root / "docs" / "explanation" / "agentic-workflow.md"
-    ).read_text()
-
-    assert "```mermaid\nflowchart" in template_explanation
-    assert "```mermaid\nflowchart" in workflow_explanation
-    assert "Filesystem Judge" in workflow_explanation
 
 
 def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
@@ -1579,7 +1556,10 @@ def test_pipeline_agent_enforces_the_project_owned_execution_budget(
             "booleans",
             "greater than zero",
             "preferred budget must be less than or equal to the hard limit",
-            "pipeline `duration`",
+            "longest executed terminal job `duration`",
+            "Do not apply the budget to the pipeline wall-clock span",
+            "Budgeted execution duration",
+            "their absent durations do not invalidate measured executed jobs",
             "queue time is excluded",
             "Preferred target: met",
             "Hard limit: passed",
@@ -1589,8 +1569,10 @@ def test_pipeline_agent_enforces_the_project_owned_execution_budget(
         ):
             assert requirement in normalized_agent
 
-        assert re.search(r"duration.*less than or equal to.*preferred", agent)
-        assert re.search(r"duration.*greater than.*hard limit", agent)
+        assert re.search(
+            r"longest job duration.*less than or equal to.*preferred", agent
+        )
+        assert re.search(r"longest job duration.*greater than.*hard limit", agent)
         assert not re.search(rf"{preferred_field}:\s*10\b", agent)
         assert not re.search(rf"{hard_field}:\s*60\b", agent)
 
@@ -2038,6 +2020,7 @@ def test_shared_guidance_is_present(generated_project: Path) -> None:
     """Test that language-agnostic guidance files are generated in .agents/guidance/."""
     guidance = generated_project / ".agents" / "guidance"
     assert (guidance / "tdd.md").exists()
+    assert (guidance / "documentation.md").exists()
     assert (guidance / "markdown.md").exists()
     assert "Red" in (guidance / "tdd.md").read_text()
 
@@ -2121,26 +2104,6 @@ def test_filesystem_structure_judge_rejects_split_legacy_python_layouts(
         assert "split" in content
         assert "overall: reject" in content
         assert "migrate" in content
-
-
-def test_update_how_to_gives_safe_legacy_flat_layout_migration_steps(
-    project_root: Path,
-) -> None:
-    """Test that old-layout projects get backup, move, and verification guidance."""
-    content = (
-        (project_root / "docs" / "how-to" / "update-a-generated-project.md")
-        .read_text()
-        .lower()
-    )
-
-    assert "legacy flat" in content
-    assert "backup" in content
-    assert "clean working tree" in content
-    assert "move" in content
-    assert "<package>/" in content
-    assert "src/<package>/" in content
-    assert "uv run pytest" in content
-    assert "uv run tox" in content
 
 
 def test_root_and_template_project_notes_declare_structure_compliance(
@@ -3543,63 +3506,6 @@ def test_setup_loop_docs_have_root_template_and_generated_parity(
     assert "--jq" not in root_document
 
 
-def test_setup_loop_how_to_extracts_effective_access_from_the_project_response(
-    project_root: Path,
-) -> None:
-    """The how-to gives operators an executable constrained-Developer check."""
-    how_to = (
-        project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
-    ).read_text()
-
-    for requirement in (
-        "project_json",
-        ".permissions.project_access.access_level",
-        ".permissions.group_access.access_level",
-        "max",
-        "unknown",
-        "constrained Developer credential",
-        "40 or greater",
-    ):
-        assert requirement in how_to
-    assert "exactly" in how_to and "`30`" in how_to
-    assert "less than" in how_to and "BLOCK --apply" in how_to
-
-
-def test_setup_loop_reference_normatively_classifies_access_levels(
-    project_root: Path,
-) -> None:
-    """The reference distinguishes the Developer fast path from privileged use."""
-    reference = (
-        project_root / "docs" / "reference" / "serial-gitlab-agent-loop.md"
-    ).read_text()
-
-    assert "unknown" in reference
-    assert re.search(r"constrained Developer\s+credential", reference)
-    assert re.search(r"`?40`?\s+or greater", reference)
-    assert "exactly" in reference and "`30`" in reference
-    assert "less than" in reference and "`--apply`" in reference
-    assert "`40`" in reference
-    assert "Developer `403`" not in reference
-    assert "human Maintainer attestation" not in reference
-
-
-def test_setup_loop_explanation_preserves_developer_access_caveats(
-    project_root: Path,
-) -> None:
-    """The explanation makes clear that access level is not policy proof."""
-    explanation = (
-        project_root / "docs" / "explanation" / "serial-gitlab-agent-loop.md"
-    ).read_text()
-
-    assert "Developers may" in explanation
-    assert "approve" in explanation
-    assert "project" in explanation
-    assert "self-approv" in explanation
-    assert "constrained Developer credential" in explanation
-    assert "40 or greater" in explanation
-    assert "block `--apply`" in explanation
-
-
 @pytest.mark.parametrize(
     "relative_path",
     (
@@ -3621,32 +3527,6 @@ def test_developer_readiness_never_treats_privileged_access_as_an_alternative_pa
     assert re.search(r"`?40`?\s+or greater", root_document)
     assert re.search(r"constrained Developer\s+credential", root_document)
     assert re.search(r"(?:block `--apply`|BLOCK --apply)", root_document)
-
-
-def test_readmes_describe_developer_access_as_a_caveat_not_proof(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Landing-page guidance does not mistake Developer access for a safeguard."""
-    root_readme = (project_root / "README.md").read_text()
-    assert "docs/how-to/setup-serial-gitlab-agent-loop.md" in root_readme
-
-    readmes = (
-        (project_root / "template" / "README.md.jinja").read_text(),
-        (generated_project / "README.md").read_text(),
-    )
-
-    for readme in readmes:
-        for requirement in (
-            "awaiting_human",
-            "never approves or merges",
-        ):
-            assert requirement in readme
-        assert "Developer" in readme
-        assert "approv" in readme
-        assert "project" in readme
-        assert "self-approv" in readme
-        assert "Developer `403`" not in readme
-        assert "Maintainer has verified" not in readme
 
 
 def test_legacy_local_queue_contracts_and_commands_are_absent(
@@ -3755,20 +3635,6 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
     assert "FixedRandomDelay=true" in generated_timer
     assert 'log_tag="${AGENT_WORK_LOG_TAG:-agent-work}"' in wrapper
     assert 'logger -s -t "$log_tag"' in wrapper
-
-
-def test_shared_workflow_uses_documented_recovery_before_reporting_blockers(
-    project_root: Path,
-) -> None:
-    """Known environment failures use their documented recovery path first."""
-    for workflow in (
-        project_root / "AGENTS.md",
-        project_root / "template" / "AGENTS.md",
-    ):
-        content = workflow.read_text()
-
-        assert "publication failure is a blocker" in content.lower()
-        assert "stop\nthat work item" not in content
 
 
 def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:

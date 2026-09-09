@@ -21,16 +21,20 @@ checkout. The coding agent edits and validates only uncommitted working-tree
 changes and emits one delimited merge-request draft; it must not commit, push,
 or create a merge request.
 
-Use the non-trivial workflow manifest in `AGENTS.md` as an executable routing
-contract. For each phase, read and activate the exact `$skill-id`.
+Classify the whole change, then use either the Coding workflow manifest or the
+Documentation and agent-policy workflow manifest in `AGENTS.md` as the routing
+contract. Mixed or uncertain work uses the coding workflow. For each phase,
+read and activate the exact `$skill-id`.
 Do not infer a skill from a display name or from a rolled-up label such as
 "final judges."
-The mandatory route includes `$architect`, main-agent `$tdd-red`, parallel
+The coding route includes `$architect`, main-agent `$tdd-red`, parallel
 `$diataxis-writer`, main-agent `$tdd-green`, the listed reviewers and judges,
-and `$tdd-finalizer`. Keep the applicability record and every phase receipt in
-the worker context. A conditional skill may be skipped only with the manifest's
-exact `not applicable — <reason>` receipt. The worker exception changes who
-publishes; it does not shorten or reinterpret the technical workflow.
+and `$tdd-finalizer`. The content route includes `$documentation-writer`,
+conditional `$diataxis-judge` and `$agent-policy-judge`, and
+`$documentation-finalizer`. Keep the applicability record and every phase
+receipt in the worker context. A conditional skill may be skipped only with
+the manifest's exact `not applicable — <reason>` receipt. The worker exception
+changes who publishes; it does not shorten or reinterpret either workflow.
 
 ## MR remediation issue exception
 

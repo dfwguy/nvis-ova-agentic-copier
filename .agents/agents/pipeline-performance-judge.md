@@ -33,6 +33,12 @@ merge during observation, but the captured source-SHA evidence remains the
 target. In Copier repositories, compare relevant root and `template/`
 CI/tooling files when diagnosing a configuration defect.
 
+Also receive the selected workflow lane. For documentation and agent-policy
+changes, reconcile the jobs that actually ran and return their terminal status.
+Do not require a test-timing artifact that the content workflow does not
+produce; report timing optimization as not applicable when no relevant timing
+evidence exists. A failed pipeline remains a rejection regardless of lane.
+
 ## Project-owned execution budget
 
 Read the `Pipeline Performance Budget` section in the repository root
@@ -47,20 +53,31 @@ Both values must be present, finite numeric values (not strings, `null`,
 must be less than or equal to the hard limit. Missing or invalid configuration
 is `needs verification`; never substitute a hidden default.
 
-Apply the budget to the GitLab pipeline `duration` field. Runner queue time is excluded
-from both thresholds and remains a separate diagnostic:
+Apply the budget to the longest executed terminal job `duration` (normally a
+job with `success` or `failed` status and a numeric duration). Job duration is
+the queue-free repository execution unit for both the root's parallel native
+jobs and a generated project's aggregate validation job. Do not apply the
+budget to the pipeline wall-clock span: staggered runner scheduling can extend
+that span without increasing repository execution time. Pipeline `duration`
+and every `queued_duration` remain separate diagnostics. Report skipped,
+canceled, and manual jobs separately; their absent durations do not invalidate
+measured executed jobs. Runner queue time is excluded from both thresholds:
 
-- When duration is less than or equal to the preferred budget, report
+- When the longest job duration is less than or equal to the preferred budget,
+  report
   `Preferred target: met` and `Hard limit: passed`.
-- When duration is greater than the preferred budget and less than or equal to
-  the hard limit, report `Preferred target: missed` and `Hard limit: passed`.
-- When duration is greater than the hard limit, report `Preferred target:
-  missed` and `Hard limit: exceeded`. This is a current-change defect even
-  when GitLab reports success: use `Direct feedback: Reject → $tdd-green; no
-  issue required`.
+- When the longest job duration is greater than the preferred budget and less
+  than or equal to the hard limit, report `Preferred target: missed` and `Hard
+  limit: passed`.
+- When the longest job duration is greater than the hard limit, report
+  `Preferred target: missed` and `Hard limit: exceeded`. This is a
+  current-change defect even
+  when GitLab reports success. Route coding work to `$tdd-green` and
+  documentation or agent-policy work to `$documentation-writer`; no issue is
+  required.
 
-If GitLab `duration` is unavailable, the budget result and pipeline health are
-`needs verification`.
+If no executed terminal job has a numeric `duration`, the budget result and
+pipeline health are `needs verification`.
 
 Use these numeric-project endpoints:
 
@@ -116,12 +133,13 @@ portion for a failed or unexplained slow job, and never reproduce secrets.
   separately as diagnostics. Never add job `queued_duration` values or job
   durations and call the sum elapsed because jobs can overlap.
 - **Execution budget:** report the configured preferred and hard values,
-  whether each threshold was met, and the queue-free `duration` used.
+  whether each threshold was met, and the longest job `duration` used.
 - **Attribution:** distinguish runner queue/capacity from image/bootstrap,
   dependency installation, tests/checks, cache, and artifact work.
-- **Optimization assessment:** always choose `improvement available`, `no
-  evidenced improvement`, or `needs verification`, and state the dominant
-  evidence plus a safe next action.
+- **Optimization assessment:** choose `improvement available`, `no evidenced
+  improvement`, or `needs verification` when relevant timing evidence exists.
+  For documentation and agent-policy changes without relevant timing evidence,
+  report `not applicable`. State the dominant evidence plus a safe next action.
 - **Baseline comparison:** when a named comparable pipeline is supplied,
   report its ID, signed wall-time delta, and percentage. Otherwise report the
   baseline as unavailable; never invent a budget or comparison.
@@ -137,9 +155,10 @@ Choose exactly one feedback path for a concrete repository-actionable defect
 or remaining optimization:
 
 - A failure caused by the current source SHA uses **Direct feedback: Reject →
-  `$tdd-green`; no issue required**. Do not create an issue while that active
-  repair route owns the work; doing both would race the repair and leave a
-  stale source-SHA issue.
+  `$tdd-green`; no issue required** for coding work, or **Direct feedback:
+  Reject → `$documentation-writer`; no issue required** for documentation and
+  agent-policy work. Do not create an issue while that active repair route owns
+  the work; doing both would race the repair and leave a stale source-SHA issue.
 - A successful run with an evidenced, safe repository optimization is a
   non-blocking `Minor`. Create or reuse one ordinary issue for that deferred
   work so the serial loop will use a new issue branch rather than mutate the
@@ -190,16 +209,18 @@ Formula: finished_at - created_at
 GitLab duration: <seconds or unavailable>
 GitLab queued duration: <seconds or unavailable>
 Execution budget: preferred <seconds>, hard <seconds>, queue excluded
+Budgeted execution duration: <longest job name and ID, seconds, or unavailable>
 Preferred target: met | missed | needs verification
 Hard limit: passed | exceeded | needs verification
-Optimization assessment: improvement available | no evidenced improvement | needs verification
+Optimization assessment: improvement available | no evidenced improvement | needs verification | not applicable
 Dominant evidence: <job, queue, bootstrap, cache, or artifact evidence>
 Baseline comparison: <pipeline ID, signed seconds and percentage, or unavailable>
-Feedback: Direct feedback: Reject → `$tdd-green`; no issue required | created <URL> | reused <URL> | unfiled <error and loop-ready fallback> | No pipeline feedback issue required
+Feedback: Direct feedback: Reject → `$tdd-green`; no issue required | Direct feedback: Reject → `$documentation-writer`; no issue required | created <URL> | reused <URL> | unfiled <error and loop-ready fallback> | No pipeline feedback issue required
 Limitations and next action: <explicit>
 ```
 
-`success` is `Pass` only when the hard limit passes, unless other
+`success` is `Pass` only when the longest job duration passes the hard limit,
+unless other
 repository-actionable evidence requires a Minor feedback issue. A hard-limit
 exceedance, current-change `failed` result, or root/template contract mismatch
 is `Reject`. Unrelated infrastructure failure, `canceled`, or `skipped` is

@@ -47,7 +47,9 @@ Route to the Architect before starting any work that involves:
    - Dependency boundaries — every injection point named explicitly (see Output Format)
    - What is explicitly out of scope
 5. **State assumptions** — list anything you assumed that the user should validate
-6. **Hand off** — specify what the Test Writer should write tests for and what the Implementer should build
+6. **Hand off by lane** — coding designs specify Red tests and implementation;
+   documentation/policy designs specify content boundaries, sources of truth,
+   mirrors, and structural validation without inventing behavior tests.
 
 ## Output Format
 
@@ -79,6 +81,9 @@ If a function calls something external and the design does not name an injection
 
 ### Handoff to Test Writer
 <what behaviors need tests, in priority order>
+
+For a documentation/policy design, replace this section with `Handoff to
+Documentation Writer` and list content, mirror, and validation boundaries.
 
 ### CLI Contract (when applicable)
 <entry point, subcommands, flags, dry-run behavior, JSON schema, stdout/stderr,
