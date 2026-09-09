@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-08
 related:
   - path: serial-gitlab-agent-loop.md
     why: Describes the issue workflow that uses these roles.
@@ -78,9 +78,10 @@ flowchart TD
     documentation --> final_gates
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
-    mr --> performance[Pipeline Performance Judge]
-    performance --> triage[Findings Triage]
-    triage --> human[Human approval and merge]
+    mr --> pipeline[Pipeline Performance Judge]
+    mr -->|Phase 4–6 Minor findings| triage[Findings Triage]
+    pipeline --> human[Human approval and merge]
+    triage --> human
 ```
 
 For non-trivial work, the manifest names every phase rather than rolling them
@@ -111,26 +112,25 @@ validates every required completion and every permitted not-applicable receipt
 before it allows publication. This preserves a complete record without running
 a judge against a change that cannot affect its contract or layout.
 
-The Pipeline Performance Judge is deliberately post-publication: it examines
-the current merge request's pipeline only after GitLab has produced job timing
-and status evidence. It verifies the branch tip, separates runner queue time
-from bootstrap, execution, cache, and artifact work, and inspects traces only
-as needed for a failed or unexplained slow job. It does not busy-poll a running
-pipeline, edit CI, retry work, approve, or merge. A later bounded
-reconciliation supplies `needs verification` when the pipeline is not yet
-terminal.
+## Pipeline reconciliation has one owner
 
-Findings Triage runs last, after the Finalizer, publication, and terminal
-pipeline review. It receives accumulated Minor records from every judge,
-deduplicates them with a stable marker, and creates the corresponding GitLab
-Bug issues. Those issues are normal eligible input for the serial agent loop;
-the triage role never edits the current change or invokes the loop itself.
+Publication crosses an opaque boundary: `Publish MR → Pipeline Performance
+Judge → human review`. One invocation of the Pipeline Performance Judge
+exclusively owns live GitLab pipeline reconciliation and any evidence-based
+feedback from it. Other workflow roles neither inspect nor interpret a live
+pipeline; they continue to own only their local design, implementation,
+documentation, or validation receipts.
 
-For a finding against an open merge request, the issue's marker records the
-verified MR IID and source tip. The later remediation worker re-verifies the
-open same-project MR, resumes its source branch, and updates that MR rather
-than opening another one. This makes an issue a durable follow-up record while
-preserving one review thread and its human approval boundary.
+This separation keeps GitLab-specific observation, duration analysis, and
+follow-up authority out of the shared change workflow. The Pipeline Performance
+Judge's skill and role reference define its detailed behavior, including its
+duration report and when it creates or routes feedback. The general workflow
+needs only its boundary and its human approval rule: agents never approve or
+merge.
+
+Findings Triage is independent of that boundary. It records actionable Minor
+findings produced by the pre-publication judges as deduplicated GitLab issues;
+it does not inspect the live pipeline or control its reconciliation.
 
 ## Merge requests are the shared record
 
@@ -162,9 +162,9 @@ approval and merge boundary.
 | Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
-| CI/CD Judge | Checks CI configuration and pipeline health | Edit CI configuration or retry pipelines |
-| Pipeline Performance Judge | After publication, diagnoses the current MR pipeline's health, queue, timing, image, cache, and bootstrap evidence | Edit code or CI, retry/cancel jobs, approve, or merge |
-| Findings Triage | After terminal pipeline review, creates deduplicated GitLab Bug issues for actionable Minor findings from every judge | Edit code, run validation, commit, push, approve, or merge |
+| CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
+| Pipeline Performance Judge | Exclusively owns post-publication live CI reconciliation, timing diagnosis, and its feedback issues | Edit code or CI, retry/cancel jobs, approve, or merge |
+| Findings Triage | After publication, creates deduplicated GitLab Bug issues for actionable Minor findings from review Phases 4–6 | Edit code, run validation, commit, push, approve, or merge |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |

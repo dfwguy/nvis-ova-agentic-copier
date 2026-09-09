@@ -88,9 +88,16 @@ flowchart TD
     final_gates --> finalizer[Finalizer]
     finalizer --> mr[Publish or update merge request]
     mr --> performance[Pipeline Performance Judge]
-    performance --> triage[Findings Triage]
-    triage --> human[Human approval and merge]
+    mr -->|Phase 4–6 Minor findings| triage[Findings Triage]
+    performance --> human[Human approval and merge]
+    triage --> human
 ```
+
+After publication, one Pipeline Performance Judge invocation exclusively owns
+live GitLab CI observation and its feedback issues. Findings Triage
+independently handles the prepublication judges' Minor findings. Other workflow
+roles do not inspect or interpret live CI. CI runs its tox environments in
+parallel.
 
 ### Merge requests are the source of truth
 

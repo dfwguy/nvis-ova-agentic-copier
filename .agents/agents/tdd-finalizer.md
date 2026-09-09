@@ -86,8 +86,8 @@ contains `$cli-syntax-judge`: `not applicable — <reason>`, and
 
 Commit, push, and merge-request creation happen through `$git-flow` in the
 **orchestrator** (main thread) after you return. Preserve the accumulated judge
-handoffs for the terminal post-publication Pipeline Performance Judge and
-Findings Triage steps. **Do not** stage, commit, run `git push`, call `glab api`,
+handoffs for the post-publication Findings Triage step. **Do not** stage,
+commit, run `git push`, call `glab api`,
 or perform any other remote-touching command yourself. Stop after returning the
 final validation receipt.
 
