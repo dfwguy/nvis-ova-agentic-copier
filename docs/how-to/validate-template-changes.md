@@ -5,10 +5,12 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-08
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
+  - path: refresh-ci-image.md
+    why: Publishes the dependency image used to accelerate these checks.
 ---
 
 # Validate template changes
