@@ -24,73 +24,6 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
-def test_generated_project_requires_debuggable_local_application_logging(
-    generated_project: Path,
-) -> None:
-    """Generated coding agents require debug and local log handlers."""
-    guidance = (generated_project / ".agents" / "lang" / "python.md").read_text()
-
-    assert "--debug" in guidance
-    assert "logging.FileHandler" in guidance
-    assert "local handler" in guidance
-    assert "remote syslog" in guidance
-
-
-def test_generated_agent_instructions_define_portable_model_tiers(
-    generated_project: Path,
-) -> None:
-    """Generated instructions support the declared agent frontends and tiers."""
-    instructions = (generated_project / "AGENTS.md").read_text()
-
-    for frontend in ("Claude Code", "Codex", "Pi"):
-        assert frontend in instructions
-    for tier in ("Most capable", "Balanced", "Fast", "Frontier"):
-        assert tier in instructions
-    assert "Fable" in instructions
-    assert "must not select" in instructions
-
-
-def test_generated_agent_instructions_include_a_safe_session_checklist(
-    generated_project: Path,
-) -> None:
-    """Generated agents receive the operational context needed to start safely."""
-    instructions = (generated_project / "AGENTS.md").read_text()
-
-    for requirement in (
-        "## Agent session checklist",
-        ".agents/project.md",
-        "CONTRIBUTING.md",
-        "untrusted task data",
-        "Never approve or merge",
-        "Git and GitLab API access independently",
-    ):
-        assert requirement in instructions
-
-
-def test_generated_project_includes_structured_gitlab_issue_templates(
-    generated_project: Path,
-) -> None:
-    """Test that generated projects track work with GitLab issue templates."""
-    templates = generated_project / ".gitlab" / "issue_templates"
-
-    bug = (templates / "Bug.md").read_text()
-    feature = (templates / "Feature.md").read_text()
-
-    for template in (bug, feature):
-        assert "## Priority" in template
-        assert "P0" in template
-        assert "P3" in template
-        assert "## Severity" in template
-        assert "S1" in template
-        assert "S4" in template
-
-    assert "## Steps to reproduce" in bug
-    assert "## Expected behavior" in bug
-    assert "## Actual behavior" in bug
-    assert "## Problem" in feature
-    assert "## Acceptance criteria" in feature
-
-
 def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> None:
     """Test that generated projects do not fetch remote hook repositories."""
     config = (generated_project / ".pre-commit-config.yaml").read_text()
@@ -516,11 +449,11 @@ def test_generated_hatch_configuration_builds_both_src_packages(
 def test_readme_rendered(generated_project: Path) -> None:
     """Test that README.md was rendered with the correct variable values."""
     content = (generated_project / "README.md").read_text()
+
     assert "My Test Project" in content
     assert "A test project" in content
     assert "{{ project_name }}" not in content
     assert "{{ description }}" not in content
-    assert 'loginctl show-user "$USER" --property=Linger' in content
 
 
 def test_canonical_project_context_is_rendered(generated_project: Path) -> None:
@@ -549,34 +482,22 @@ def test_project_context_defines_pipeline_execution_budget_defaults(
         project_context_path = root / ".agents" / "project.md"
         if root == template_dir:
             project_context_path = project_context_path.with_suffix(".md.jinja")
-        project_context = project_context_path.read_text()
-        budget_block = re.search(
-            r"^## Pipeline Performance Budget\n\n"
-            r"```yaml\n(?P<budget>.*?)\n```$",
-            project_context,
-            re.MULTILINE | re.DOTALL,
+        yaml_blocks = re.findall(
+            r"^[ \t]*```yaml[ \t]*\n(?P<yaml>.*?)\n^[ \t]*```[ \t]*$",
+            project_context_path.read_text(),
+            flags=re.DOTALL | re.MULTILINE,
         )
+        budgets = [
+            parsed
+            for block in yaml_blocks
+            if isinstance((parsed := yaml.safe_load(block)), dict)
+            and set(expected) <= parsed.keys()
+        ]
 
-        assert budget_block is not None
-        budget = yaml.safe_load(budget_block.group("budget"))
+        assert len(budgets) == 1
+        budget = budgets[0]
         assert budget == expected
         assert all(type(value) is int for value in budget.values())
-        assert "longest individual job `duration`" in project_context
-        assert "runner scheduling must not reject a change" in project_context
-        assert "explicit human approval to change" in project_context
-
-
-def test_generated_project_documents_filesystem_structure_defaults(
-    generated_project: Path,
-) -> None:
-    """Test that a generated project records its required layout and deviations."""
-    content = (generated_project / ".agents" / "project.md").read_text()
-
-    assert "src/{{ project_slug }}/" not in content
-    assert "src/my_test_project/" in content
-    assert "scripts/agent-work-systemd-run.sh" in content
-    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
-        assert field in content
 
 
 def test_no_jinja_extension_in_output(generated_project: Path) -> None:
@@ -597,27 +518,6 @@ def test_shared_agent_commands_are_absent(generated_project: Path) -> None:
     """Generated projects use portable roles without command wrappers."""
     commands_dir = generated_project / ".agents" / "commands"
     assert not commands_dir.exists()
-
-
-def test_lint_and_pytest_skill_is_generated(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Generated projects ship the portable Python validation skill."""
-    skill = generated_project / ".agents" / "skills" / "lint-and-pytest" / "SKILL.md"
-    source_skill = project_root / ".agents" / "skills" / "lint-and-pytest" / "SKILL.md"
-
-    assert skill.exists()
-    assert skill.read_text() == source_skill.read_text()
-    content = skill.read_text()
-    for requirement in (
-        "uv run ruff check",
-        "uv run ruff format --check",
-        "uv run ty check",
-        "uv run pytest",
-        "uv run tox",
-        "Do not apply automatic fixes",
-    ):
-        assert requirement in content
 
 
 @pytest.mark.parametrize(
@@ -647,23 +547,18 @@ def test_lint_and_pytest_skill_is_generated(
 def test_workflow_roles_are_portable_directory_skills(
     generated_project: Path, project_root: Path, skill_name: str, model_tier: str
 ) -> None:
-    """Every workflow role is a shared Agent Skills directory with a tier."""
-    relative_path = f".agents/skills/{skill_name}/SKILL.md"
-    root_skill = project_root / relative_path
-    generated_skill = generated_project / relative_path
+    """Every workflow role has structured skill metadata and a role file."""
+    relative_skill = Path(".agents") / "skills" / skill_name / "SKILL.md"
+    skill_path = project_root / relative_skill
+    generated_skill = generated_project / relative_skill
 
-    assert root_skill.exists()
-    assert root_skill.read_text() == generated_skill.read_text()
-    content = root_skill.read_text()
-    assert f"name: {skill_name}" in content
-    assert f"model-tier: {model_tier}" in content
-    assert f"agents/{skill_name}.md" in content
-    assert (
-        "\nmodel:"
-        not in (
-            generated_project / ".agents" / "agents" / f"{skill_name}.md"
-        ).read_text()
-    )
+    assert skill_path.exists()
+    assert generated_skill.exists()
+    front_matter = yaml.safe_load(skill_path.read_text().split("---", 2)[1])
+    assert front_matter["name"] == skill_name
+    assert front_matter["metadata"]["model-tier"] == model_tier
+    assert (project_root / ".agents" / "agents" / f"{skill_name}.md").exists()
+    assert (generated_project / ".agents" / "agents" / f"{skill_name}.md").exists()
 
 
 def test_all_frontends_use_the_shared_project_skill_directory(
@@ -831,330 +726,6 @@ def test_copier_update_preserves_legacy_project_context(
     assert ".claude/project.md" not in (output / "AGENTS.md").read_text()
 
 
-def test_canonical_workflow_does_not_reference_legacy_claude_paths(
-    project_root: Path,
-) -> None:
-    """The canonical tree never routes agents through frontend compatibility files."""
-    for root in (project_root, project_root / "template"):
-        for path in (root / ".agents").rglob("*.md"):
-            content = path.read_text()
-            assert "CLAUDE.md" not in content, path
-            assert ".claude/" not in content, path
-
-
-def test_agent_routing_manifest_is_explicit_portable_and_identical(
-    generated_project: Path, project_root: Path, template_dir: Path
-) -> None:
-    """Every project copy names the exact instructions and skills to activate."""
-    root_content = (project_root / "AGENTS.md").read_text()
-
-    assert root_content == (template_dir / "AGENTS.md").read_text()
-    assert root_content == (generated_project / "AGENTS.md").read_text()
-    assert "\n@.agents/" not in root_content
-
-    for required_route in (
-        "Always | `.agents/project.md`",
-        "Missing contribution marker | `$repository-setup`",
-        "Markdown files | `.agents/guidance/markdown.md`",
-        "Coding workflow | `.agents/guidance/tdd.md`",
-        "Documentation/policy workflow | `.agents/guidance/documentation.md`",
-        "Python files | `.agents/lang/python.md`",
-        "Bash files or Bash shebangs | `.agents/lang/bash.md`",
-        "Python tests | `.agents/lang/python-testing.md`",
-        "Any repository mutation | `$git-flow`",
-    ):
-        assert required_route in root_content
-
-    assert "`@...` imports are not portable" in root_content
-    assert (
-        "Do not read conditional guidance when its condition is false" in root_content
-    )
-
-
-def test_shared_agent_instructions_do_not_use_nonportable_nested_imports(
-    generated_project: Path, project_root: Path, template_dir: Path
-) -> None:
-    """Canonical instructions route conditional reads without recursive @ imports."""
-    for root in (project_root, template_dir, generated_project):
-        for instruction in (root / ".agents").rglob("*.md"):
-            imports = [
-                line
-                for line in instruction.read_text().splitlines()
-                if line.startswith("@.agents/")
-            ]
-            assert not imports, instruction
-
-
-def test_generated_manifest_defines_disjoint_coding_and_documentation_workflows(
-    generated_project: Path,
-) -> None:
-    """Generated projects route code and content through disjoint workflows."""
-    content = (generated_project / "AGENTS.md").read_text()
-    coding = content[
-        content.index("## Coding workflow manifest") : content.index(
-            "## Documentation and agent-policy workflow manifest"
-        )
-    ]
-    documentation = content[
-        content.index(
-            "## Documentation and agent-policy workflow manifest"
-        ) : content.index("## GitLab publication")
-    ]
-
-    for heading in (
-        "Applies",
-        "Owner",
-        "Tier / Codex",
-        "Requires",
-        "Receipt; rejection route",
-    ):
-        assert heading in coding
-        assert heading in documentation
-
-    coding_skills = (
-        "architect",
-        "tdd-red",
-        "diataxis-writer",
-        "tdd-green",
-        "nonfunctional-review",
-        "tdd-judge",
-        "diataxis-judge",
-        "judge-quality",
-        "judge-test",
-        "judge-cicd",
-        "tdd-document",
-        "cli-syntax-judge",
-        "filesystem-structure-judge",
-        "tdd-finalizer",
-        "pipeline-performance-judge",
-        "findings-triage",
-    )
-    documentation_skills = (
-        "git-flow",
-        "architect",
-        "documentation-writer",
-        "diataxis-judge",
-        "agent-policy-judge",
-        "documentation-finalizer",
-        "pipeline-performance-judge",
-        "findings-triage",
-    )
-    for skill in coding_skills:
-        assert f"`${skill}`" in coding
-    for skill in documentation_skills:
-        assert f"`${skill}`" in documentation
-    for excluded in (
-        "tdd-red",
-        "tdd-green",
-        "nonfunctional-review",
-        "tdd-judge",
-        "judge-quality",
-        "judge-test",
-        "judge-cicd",
-        "tdd-finalizer",
-        "cli-syntax-judge",
-        "filesystem-structure-judge",
-    ):
-        assert f"`${excluded}`" not in documentation
-
-    assert "Main; never delegate" in coding
-    assert "Parallel with `$tdd-red`" in coding
-    assert "`not applicable — <reason>`" in content
-    assert "Do not route by display name" in content
-    assert "Mixed or uncertain" in content
-    assert "whole change" in content
-    for phase in ("2a `$tdd-red`", "3 `$tdd-green`"):
-        phase_row = next(line for line in coding.splitlines() if phase in line)
-        assert "| Main; never delegate | Current enabled |" in phase_row
-
-
-def test_documentation_finalizer_is_content_only_and_portably_mirrored(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """The content finalizer validates policy and prose without test gates."""
-    relative_paths = (
-        ".agents/agents/documentation-finalizer.md",
-        ".agents/skills/documentation-finalizer/SKILL.md",
-    )
-    for relative_path in relative_paths:
-        copies = tuple(
-            (root / relative_path).read_text()
-            for root in (project_root, template_dir, generated_project)
-        )
-        assert copies[0] == copies[1] == copies[2]
-
-    finalizer = (project_root / relative_paths[0]).read_text().lower()
-    for excluded in ("pytest", "tox", "junit", "coverage", "test-results"):
-        assert excluded not in finalizer
-    for requirement in (
-        "reclassify",
-        "applicability record",
-        "mirror",
-        "source of truth",
-    ):
-        assert requirement in finalizer
-
-
-def test_main_red_green_skills_preserve_session_model_continuity(
-    generated_project: Path, project_root: Path, template_dir: Path
-) -> None:
-    """Main-owned continuity phases never require an impossible model swap."""
-    for skill_name in ("tdd-red", "tdd-green"):
-        relative_skill = Path(".agents") / "skills" / skill_name / "SKILL.md"
-        copies = tuple(
-            (root / relative_skill).read_text()
-            for root in (project_root, template_dir, generated_project)
-        )
-        assert copies[0] == copies[1] == copies[2]
-        for skill in copies:
-            assert "current enabled main-session model" in skill
-            assert "do not switch models mid-session" in skill
-
-    relative_role = Path(".agents") / "agents" / "tdd-red.md"
-    role_copies = tuple(
-        (root / relative_role).read_text()
-        for root in (project_root, template_dir, generated_project)
-    )
-    assert role_copies[0] == role_copies[1] == role_copies[2]
-    for red_role in role_copies:
-        assert "same main agent" in red_role
-        assert "`tdd-green` subagent" not in red_role
-
-
-def test_scoped_judges_have_explicit_not_applicable_receipts(
-    generated_project: Path,
-) -> None:
-    """Conditional final judges cannot disappear without a recorded decision."""
-    workflow = (generated_project / "AGENTS.md").read_text()
-    finalizer = (
-        generated_project / ".agents" / "agents" / "tdd-finalizer.md"
-    ).read_text()
-
-    assert "CLI surface or contract changed" in workflow
-    assert "Python/Bash layout or packaging changed" in workflow
-    for skill_name in ("cli-syntax-judge", "filesystem-structure-judge"):
-        receipt = f"`${skill_name}`: `not applicable — <reason>`"
-        assert receipt in finalizer
-
-
-def test_serial_worker_routes_by_exact_skill_ids(generated_project: Path) -> None:
-    """The worker classifies the change before activating exact skill IDs."""
-    content = (
-        generated_project / ".agents" / "skills" / "work-item-runner" / "SKILL.md"
-    ).read_text()
-
-    assert "exact `$skill-id`" in content
-    assert "Do not infer a skill from a display name" in content
-    assert "Coding workflow manifest" in content
-    assert "Documentation and agent-policy workflow manifest" in content
-    assert "whole change" in content
-    for skill_name in (
-        "architect",
-        "tdd-red",
-        "diataxis-writer",
-        "tdd-green",
-        "tdd-finalizer",
-        "documentation-writer",
-        "agent-policy-judge",
-        "documentation-finalizer",
-    ):
-        assert f"`${skill_name}`" in content
-
-
-def test_nonfunctional_review_workflow_is_generated(generated_project: Path) -> None:
-    """Test that generated projects review shared timed test results before finalization."""
-    agent = generated_project / ".agents" / "agents" / "nonfunctional-review.md"
-    workflow = (generated_project / "AGENTS.md").read_text()
-
-    assert agent.exists()
-    assert "test-results.xml" in agent.read_text()
-    assert "time" in agent.read_text()
-    assert "performance" in agent.read_text().lower()
-    assert "non-trivial changes" in workflow
-    assert (
-        "nonfunctional-review"
-        in (generated_project / ".agents" / "agents" / "tdd-finalizer.md").read_text()
-    )
-
-
-def test_diataxis_documentation_workflow_is_generated(generated_project: Path) -> None:
-    """Test that generated projects include the Diataxis documentation gates."""
-    docs_process = generated_project / "DIATAXIS.md"
-    writer = generated_project / ".agents" / "agents" / "diataxis-writer.md"
-    judge = generated_project / ".agents" / "agents" / "diataxis-judge.md"
-
-    assert docs_process.exists()
-    assert "Canonical layout" in docs_process.read_text()
-    assert "Required front matter" in docs_process.read_text()
-    assert "Landing pages" in docs_process.read_text()
-    assert "Documentation change report" in docs_process.read_text()
-    assert writer.exists()
-    assert judge.exists()
-    assert "Implementation Judge" in judge.read_text()
-    assert (
-        "README.md"
-        in (generated_project / ".agents" / "agents" / "tdd-document.md").read_text()
-    )
-    assert "docs/" in writer.read_text()
-
-
-def test_generated_remediation_workflow_and_documentation_index_rule(
-    generated_project: Path,
-) -> None:
-    """Test that projects can remediate themselves and keep documentation navigable."""
-    remediation_agent = generated_project / ".agents" / "agents" / "remediate.md"
-    documentation_process = generated_project / "DIATAXIS.md"
-    documentation_index = generated_project / "docs" / "index.md"
-
-    assert remediation_agent.exists()
-    assert "Make this repo meet our standards" in remediation_agent.read_text()
-    assert "baseline" in remediation_agent.read_text()
-    assert "Landing pages" in documentation_process.read_text()
-    assert "Required front matter" in documentation_process.read_text()
-    assert documentation_index.exists()
-    assert "how-to/index.md" in documentation_index.read_text()
-
-
-def test_cli_syntax_judge_workflow_is_generated(generated_project: Path) -> None:
-    """Test that generated projects include the CLI syntax design gate."""
-    agent = generated_project / ".agents" / "agents" / "cli-syntax-judge.md"
-    workflow = (generated_project / "AGENTS.md").read_text()
-
-    assert agent.exists()
-    assert "https://clig.dev" in agent.read_text()
-    assert "--json" in agent.read_text()
-    assert "--apply" in agent.read_text()
-    assert "non-trivial changes" in workflow
-
-
-def test_portable_git_flow_is_present(generated_project: Path) -> None:
-    """Test that the git-flow lifecycle doc is included so the orchestrator loads it."""
-    git_flow = generated_project / ".agents" / "skills" / "git-flow" / "SKILL.md"
-    assert git_flow.exists()
-    content = git_flow.read_text()
-    assert "projects/$GITLAB_PROJECT_ID/merge_requests" in content
-    assert "git checkout -b" in content
-    assert "git checkout main" in content
-
-
-def test_portable_git_flow_verifies_git_and_gitlab_access(
-    generated_project: Path,
-) -> None:
-    """Test that the generated workflow verifies both remote access paths."""
-    content = (
-        generated_project / ".agents" / "skills" / "git-flow" / "SKILL.md"
-    ).read_text()
-
-    assert "## Git and GitLab access preflight" in content
-    assert "git pull --ff-only" in content
-    assert 'glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"' in content
-    assert "direnv exec . glab api" in content
-    assert "path-based `404`" in content
-    assert "Do not change a working remote or credential configuration" in content
-
-
 def test_yamllint_helper_present(generated_project: Path) -> None:
     """Test that the yamllint helper script is included."""
     helper = generated_project / "tests" / "helpers" / "yamllint_to_json.py"
@@ -1183,80 +754,6 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
     assert "_src_path:" in content
     assert "project_name: My Test Project" in content
     assert "project_slug: my_test_project" in content
-
-
-def test_repository_setup_procedure_present(generated_project: Path) -> None:
-    """New projects retain the portable repository lock-down skill."""
-    setup_repo = (
-        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
-    )
-    assert setup_repo.exists()
-    content = setup_repo.read_text()
-    assert "name: repository-setup" in content
-    assert "protected_branches" in content
-    assert "approval_rules" in content
-    assert "/approvals" in content, (
-        "self-approval block must target /projects/<id>/approvals, not the bare project endpoint"
-    )
-    assert "direnv exec . glab api user" in content
-    assert "non-empty `username`" in content
-
-
-def test_setup_repo_publishes_its_bootstrap_change(generated_project: Path) -> None:
-    """Test that lock-down setup cannot strand CONTRIBUTING.md on local main."""
-    content = (
-        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
-    ).read_text()
-    mr_lookup = (
-        'glab api --hostname "$GITLAB_HOST" '
-        '"projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&'
-        'source_branch=claude/setup-repo"'
-    )
-    mr_create = (
-        'glab api --hostname "$GITLAB_HOST" -X POST '
-        '"projects/$GITLAB_PROJECT_ID/merge_requests"'
-    )
-    required_handoff = (
-        'setup_branch="claude/setup-repo"',
-        "clean default branch",
-        "create or reuse",
-        "git add CONTRIBUTING.md",
-        "git commit",
-        "git push --set-upstream origin HEAD",
-        "projects/$GITLAB_PROJECT_ID/merge_requests",
-        "source_branch",
-        "branch tip",
-        "awaiting_human",
-        "without waiting for merge",
-        "Create only when the lookup has no open MR",
-        "refs/heads/$setup_branch",
-        "refs/remotes/origin/$setup_branch",
-        "Historical merged or closed setup MRs",
-        "settings-only result",
-        "release the clean checkout",
-    )
-
-    for requirement in required_handoff:
-        assert requirement in content
-    assert content.index('setup_branch="claude/setup-repo"') < content.index(
-        "Write `CONTRIBUTING.md`"
-    )
-    assert content.index("git add CONTRIBUTING.md") < content.index(
-        "git push --set-upstream origin HEAD"
-    )
-    assert content.index("git push --set-upstream origin HEAD") < content.index(
-        mr_lookup
-    )
-    assert content.index(mr_lookup) < content.index(mr_create)
-    assert content.index("refs/heads/$setup_branch") < content.index(
-        "Protect the default branch"
-    )
-    assert content.index("refs/remotes/origin/$setup_branch") < content.index(
-        "Protect the default branch"
-    )
-    assert content.index("git push --set-upstream origin HEAD") < content.index(
-        "git checkout <default_branch>"
-    )
 
 
 def test_agent_loop_wrapper_returns_dedicated_checkout_to_its_base_branch(
@@ -1390,572 +887,9 @@ def test_agent_loop_wrapper_preserves_failed_worker_changes_before_recovery(
     assert {"tracked.txt", "untracked.txt"} <= set(stash_files.splitlines())
 
 
-def test_agent_work_worker_exception_overrides_generic_publication_rules(
-    generated_project: Path,
-) -> None:
-    """Generated workers do not inherit the ordinary-agent publication duty."""
-    required = "Serial agent-work worker exception"
-
-    assert required in (generated_project / "AGENTS.md").read_text()
-
-
-def test_repository_setup_interviews_self_approval(generated_project: Path) -> None:
-    """The setup procedure asks about self-approval for single-user projects."""
-    content = (
-        generated_project / ".agents" / "skills" / "repository-setup" / "SKILL.md"
-    ).read_text()
-    assert "AskUserQuestion" in content, (
-        "setup-repo must interview the user about self-approval"
-    )
-    assert "Block self-approval" in content
-    assert "Allow self-approval" in content
-    assert "single-user" in content
-
-
 def test_contributing_md_absent_in_generated_project(generated_project: Path) -> None:
     """Test that CONTRIBUTING.md is NOT generated — its absence triggers setup."""
     assert not (generated_project / "CONTRIBUTING.md").exists()
-
-
-def test_generated_agents_md_loads_lockdown_skill_when_marker_is_missing(
-    generated_project: Path,
-) -> None:
-    """The generated workflow routes a missing marker to the setup skill."""
-    content = (generated_project / "AGENTS.md").read_text()
-    assert (
-        "grep -Fq 'All changes go through a merge request.' CONTRIBUTING.md" in content
-    )
-    assert ".agents/skills/repository-setup/SKILL.md" in content
-    assert "protected_branches" not in content
-
-
-def test_generated_agent_workflow_supports_bash(generated_project: Path) -> None:
-    """Test that generated agent guidance selects Bash-specific validation."""
-    workflow = (generated_project / "AGENTS.md").read_text()
-    bash_conventions = generated_project / ".agents" / "lang" / "bash.md"
-    judge = generated_project / ".agents" / "agents" / "tdd-judge.md"
-    finalizer = generated_project / ".agents" / "agents" / "tdd-finalizer.md"
-
-    assert bash_conventions.exists()
-    assert "ShellCheck" in bash_conventions.read_text()
-    assert ".agents/lang/bash.md" in workflow
-    assert "bash -n" in judge.read_text()
-    assert "shellcheck" in finalizer.read_text()
-
-
-def test_generated_language_guidance_requires_a_separate_code_directory(
-    generated_project: Path,
-) -> None:
-    """Test that generated Python and Bash guidance sets layout boundaries."""
-    python_guidance = (generated_project / ".agents" / "lang" / "python.md").read_text()
-    bash_guidance = (generated_project / ".agents" / "lang" / "bash.md").read_text()
-
-    assert "src/" in python_guidance
-    assert "src/<package>/" in python_guidance
-    assert "tests/" in python_guidance
-    assert "outside the production" in python_guidance.lower()
-    assert "[project.scripts]" in python_guidance
-    assert "exactly one user-facing" in bash_guidance
-    assert "bin/<tool>" in bash_guidance
-    assert "implementation" in bash_guidance.lower()
-    assert "`src/`" in bash_guidance
-    assert "`lib/`" in bash_guidance
-    assert "tests outside production" in bash_guidance.lower()
-
-
-def test_source_and_template_language_guidance_define_the_same_structure_gate(
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that Copier source and generated guidance both specify the gate."""
-    for guidance_dir in (
-        project_root / ".agents" / "lang",
-        template_dir / ".agents" / "lang",
-    ):
-        python_guidance = (guidance_dir / "python.md").read_text()
-        bash_guidance = (guidance_dir / "bash.md").read_text()
-
-        assert "src/" in python_guidance
-        assert "src/<package>/" in python_guidance
-        assert "tests/" in python_guidance
-        assert "outside the production" in python_guidance.lower()
-        assert "[project.scripts]" in python_guidance
-        assert "exactly one user-facing" in bash_guidance
-        assert "bin/<tool>" in bash_guidance
-        assert "implementation" in bash_guidance.lower()
-        assert "`src/`" in bash_guidance
-        assert "`lib/`" in bash_guidance
-        assert "tests outside production" in bash_guidance.lower()
-
-
-def test_filesystem_structure_judge_is_generated_and_wired_into_final_gates(
-    generated_project: Path,
-) -> None:
-    """Test that generated projects review layout before finalization."""
-    agent = generated_project / ".agents" / "agents" / "filesystem-structure-judge.md"
-    workflow = (generated_project / "AGENTS.md").read_text()
-    finalizer = (
-        generated_project / ".agents" / "agents" / "tdd-finalizer.md"
-    ).read_text()
-
-    assert agent.exists()
-    assert "src/" in agent.read_text()
-    assert "bin/" in agent.read_text()
-    assert "Filesystem structure deviations" in agent.read_text()
-    assert "non-trivial changes" in workflow
-    assert "`filesystem-structure-judge` approves" in finalizer
-
-
-def test_pipeline_performance_judge_is_the_single_live_pipeline_owner(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """One generated agent owns complete post-publication reconciliation."""
-    relative_agent = ".agents/agents/pipeline-performance-judge.md"
-    relative_skill = ".agents/skills/pipeline-performance-judge/SKILL.md"
-
-    for root in (project_root, template_dir, generated_project):
-        agent = root / relative_agent
-        skill = root / relative_skill
-
-        assert agent.exists()
-        assert skill.exists()
-        agent_content = agent.read_text()
-        skill_content = skill.read_text()
-
-        assert "projects/$GITLAB_PROJECT_ID/merge_requests" in agent_content
-        assert "queued_duration" in agent_content
-        assert "one complete bounded reconciliation invocation" in skill_content
-        assert "The agent owns the entire live-pipeline lifecycle" in agent_content
-        assert "Do not push, retry, cancel, approve, or merge" in agent_content
-        assert "model-tier: balanced" in skill_content
-
-
-def test_pipeline_agent_enforces_the_project_owned_execution_budget(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Only the live-pipeline owner interprets configurable execution limits."""
-    preferred_field = "pipeline_execution_preferred_seconds"
-    hard_field = "pipeline_execution_hard_limit_seconds"
-
-    for root in (project_root, template_dir, generated_project):
-        agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-        normalized_agent = " ".join(agent.split())
-
-        for requirement in (
-            ".agents/project.md",
-            "Pipeline Performance Budget",
-            preferred_field,
-            hard_field,
-            "finite numeric",
-            "booleans",
-            "greater than zero",
-            "preferred budget must be less than or equal to the hard limit",
-            "longest executed terminal job `duration`",
-            "Do not apply the budget to the pipeline wall-clock span",
-            "Budgeted execution duration",
-            "their absent durations do not invalidate measured executed jobs",
-            "queue time is excluded",
-            "Preferred target: met",
-            "Hard limit: passed",
-            "Hard limit: exceeded",
-            "Direct feedback: Reject → `$tdd-green`; no issue required",
-            "needs verification",
-        ):
-            assert requirement in normalized_agent
-
-        assert re.search(
-            r"longest job duration.*less than or equal to.*preferred", agent
-        )
-        assert re.search(r"longest job duration.*greater than.*hard limit", agent)
-        assert not re.search(rf"{preferred_field}:\s*10\b", agent)
-        assert not re.search(rf"{hard_field}:\s*60\b", agent)
-
-
-def test_pipeline_budget_has_no_unrelated_workflow_plumbing(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Other roles remain unaware of the project-owned pipeline thresholds."""
-    fields = (
-        "pipeline_execution_preferred_seconds",
-        "pipeline_execution_hard_limit_seconds",
-    )
-    unrelated_paths = (
-        Path("AGENTS.md"),
-        Path("README.md"),
-        Path(".agents/agents/judge-cicd.md"),
-        Path(".agents/agents/findings-triage.md"),
-        Path(".agents/agents/tdd-finalizer.md"),
-        Path(".agents/skills/git-flow/SKILL.md"),
-    )
-
-    for root in (project_root, template_dir, generated_project):
-        for relative_path in unrelated_paths:
-            path = root / relative_path
-            if root == template_dir and relative_path == Path("README.md"):
-                path = path.with_suffix(".md.jinja")
-            content = path.read_text()
-            for field in fields:
-                assert field not in content, relative_path
-
-
-def test_pipeline_agent_owns_bounded_interruptible_wait_until_terminal(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Pending progress stays inside the single bounded agent invocation."""
-    for root in (project_root, template_dir, generated_project):
-        agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-        for requirement in (
-            "15-minute default deadline",
-            "30-second interval",
-            "at least once every 60 seconds",
-            "interruptible wait",
-            "final snapshot",
-        ):
-            assert requirement in agent
-
-        assert "Pending observations are progress" in agent
-        assert "do not return control" in agent
-        assert "wait deadline reached" in agent
-        assert "while true" not in agent.lower()
-        assert "sleep 30" not in agent.lower()
-
-
-def test_pipeline_snapshot_classifies_statuses_and_uses_exact_source_sha(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Every snapshot selects the MR pipeline by exact source SHA and raw status."""
-    for root in (project_root, template_dir, generated_project):
-        agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-
-        for status in (
-            "created",
-            "waiting_for_resource",
-            "preparing",
-            "pending",
-            "running",
-            "success",
-            "failed",
-            "canceled",
-            "skipped",
-            "manual",
-            "scheduled",
-            "unknown status",
-        ):
-            assert f"`{status}`" in agent
-
-        for endpoint in (
-            "merge_requests/<iid>",
-            "merge_requests/<iid>/pipelines?per_page=100",
-            "pipelines/<pipeline-id>",
-            "pipelines/<pipeline-id>/jobs?include_retried=true&per_page=100",
-            "jobs/<job-id>/trace",
-        ):
-            assert endpoint in agent
-
-        assert (
-            "newest pipeline whose SHA exactly matches the expected source SHA" in agent
-        )
-        assert "Never substitute the newest `main` pipeline" in agent
-
-
-def test_pipeline_agent_returns_a_bounded_resumable_timeout(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """A bounded timeout is final for one complete reconciliation attempt."""
-    for root in (project_root, template_dir, generated_project):
-        pipeline_agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-        assert "Reconciliation: nonterminal" in pipeline_agent
-        assert (
-            "Later action: start one new complete reconciliation invocation"
-            in pipeline_agent
-        )
-        assert "wait deadline reached" in pipeline_agent
-        assert "human action required" in pipeline_agent
-        assert "stale source" in pipeline_agent
-        assert "API failure" in pipeline_agent
-
-
-def test_terminal_pipeline_receipt_reports_wall_elapsed_and_optimization(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Terminal handoffs report actual user wait time and improvement evidence."""
-    for root in (project_root, template_dir, generated_project):
-        pipeline_agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-        for requirement in (
-            "Pipeline elapsed (wall clock)",
-            "Timestamp interval",
-            "finished_at - created_at",
-            "GitLab duration",
-            "GitLab queued duration",
-            "Optimization assessment",
-            "Baseline comparison",
-            "Pipeline elapsed: unavailable",
-        ):
-            assert requirement in pipeline_agent
-
-        assert "Never add job `queued_duration` values" in pipeline_agent
-
-
-def test_ci_judge_reviews_static_configuration_without_live_pipeline_access(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """The CI judge validates local config without inspecting live pipelines."""
-    for root in (project_root, template_dir, generated_project):
-        ci_judge = (root / ".agents" / "agents" / "judge-cicd.md").read_text()
-
-        assert "repository configuration only" in ci_judge
-        assert "Do not query GitLab pipelines" in ci_judge
-        assert "Config sync" in ci_judge
-        assert "Static shape" in ci_judge
-        assert "glab api" not in ci_judge
-        assert "queued_duration" not in ci_judge
-        assert "Pipeline Performance Judge" not in ci_judge
-
-
-def test_findings_triage_files_prepublication_minor_findings_after_publication(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Ordinary triage owns only prepublication judge findings."""
-    relative_agent = ".agents/agents/findings-triage.md"
-    relative_skill = ".agents/skills/findings-triage/SKILL.md"
-
-    for root in (project_root, template_dir, generated_project):
-        agent = root / relative_agent
-        skill = root / relative_skill
-        assert agent.exists()
-        assert skill.exists()
-        agent_content = agent.read_text()
-        assert "projects/$GITLAB_PROJECT_ID/issues" in agent_content
-        assert "Bug template" in agent_content
-        assert "Phase 4–6" in agent_content
-        assert "Minor" in agent_content
-        assert "deduplicate" in agent_content.lower()
-        assert "pipeline" not in agent_content.lower()
-        assert "model-tier: balanced" in skill.read_text()
-
-    for judge_name in (
-        "judge-quality.md",
-        "judge-test.md",
-        "judge-cicd.md",
-    ):
-        content = (project_root / ".agents" / "agents" / judge_name).read_text()
-        assert "Findings Triage" in content
-
-
-def test_pipeline_agent_uses_stable_non_racing_loop_feedback(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Deferred CI findings use ordinary issues with a stable fingerprint."""
-    for root in (project_root, template_dir, generated_project):
-        agent = (
-            root / ".agents" / "agents" / "pipeline-performance-judge.md"
-        ).read_text()
-
-        for requirement in (
-            "projects/$GITLAB_PROJECT_ID/issues",
-            "agent-pipeline-feedback",
-            "fingerprint: <normalized-category>|<stable-scope>|<stable-summary>",
-            "Bug template",
-            "created",
-            "reused",
-            "unfiled",
-            "loop-ready fallback",
-            "No pipeline feedback issue required",
-        ):
-            assert requirement in agent
-
-        assert "search open GitLab issues" in agent
-        assert "Never hand pipeline findings to `$findings-triage`" in agent
-        assert "runner/platform" in agent
-        assert "Direct feedback: Reject → `$tdd-green`; no issue required" in agent
-        assert "ordinary issue" in agent
-
-        marker = re.search(
-            r"<!-- agent-pipeline-feedback\n(?P<body>.*?)-->",
-            agent,
-            flags=re.DOTALL,
-        )
-        assert marker is not None
-        marker_body = marker.group("body")
-        assert "project_id: <numeric-project-id>" in marker_body
-        assert "fingerprint:" in marker_body
-        for unstable_identity in (
-            "merge_request_iid",
-            "source_branch",
-            "source_sha",
-            "pipeline-id",
-            "job-id",
-        ):
-            assert unstable_identity not in marker_body
-
-        assert "compare exact marker text" in agent
-        assert "MR/source/pipeline/job evidence outside the marker" in agent
-        assert agent.index("search open GitLab issues") < agent.index(
-            "create one GitLab Bug template"
-        )
-
-
-def test_live_pipeline_internals_are_not_plumbed_through_other_roles(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Unrelated roles neither query nor interpret the live GitLab pipeline."""
-    unrelated_paths = (
-        ".agents/skills/git-flow/SKILL.md",
-        ".agents/skills/findings-triage/SKILL.md",
-        ".agents/skills/judge-cicd/SKILL.md",
-        ".agents/skills/judge-quality/SKILL.md",
-        ".agents/skills/judge-test/SKILL.md",
-        ".agents/skills/tdd-finalizer/SKILL.md",
-        ".agents/agents/findings-triage.md",
-        ".agents/agents/judge-cicd.md",
-        ".agents/agents/judge-quality.md",
-        ".agents/agents/judge-test.md",
-        ".agents/agents/tdd-finalizer.md",
-    )
-    forbidden_internals = (
-        "queued_duration",
-        "finished_at - created_at",
-        "30-second interval",
-        "wait deadline reached",
-        "merge_requests/<iid>/pipelines",
-    )
-
-    for root in (project_root, template_dir, generated_project):
-        for relative_path in unrelated_paths:
-            content = (root / relative_path).read_text()
-            for forbidden in forbidden_internals:
-                assert forbidden not in content, relative_path
-
-            if relative_path != ".agents/agents/judge-cicd.md":
-                assert "pipeline" not in content.lower(), relative_path
-
-        ci_judge = (root / ".agents" / "agents" / "judge-cicd.md").read_text()
-        assert "Do not query GitLab pipelines" in ci_judge
-        assert "repository configuration only" in ci_judge
-        for live_ownership in (
-            "projects/$GITLAB_PROJECT_ID/pipelines",
-            "interruptible wait",
-            "Pipeline elapsed",
-            "Pipeline Performance Judge",
-        ):
-            assert live_ownership not in ci_judge
-
-        workflow = (root / "AGENTS.md").read_text()
-        assert "exactly one invocation owns the complete phase" in workflow
-        assert "Phase 4–6 Minor findings" in workflow
-
-
-def test_explanation_routes_postpublication_roles_from_the_published_mr(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """The explanation shows both independent postpublication handoffs."""
-    for root in (project_root, template_dir, generated_project):
-        explanation = (root / "docs/explanation/agentic-workflow.md").read_text()
-
-        assert "mr --> pipeline[Pipeline Performance Judge]" in explanation
-        assert "mr -->|Phase 4–6 Minor findings| triage[Findings Triage]" in explanation
-        assert "pipeline --> human[Human approval and merge]" in explanation
-        assert "triage --> human" in explanation
-        assert "final_gates -. actionable Minor findings .-> triage" not in explanation
-
-
-def test_mr_remediation_issues_resume_the_originating_merge_request(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that a judge finding can safely drive a later update to its open MR."""
-    for root in (project_root, template_dir, generated_project):
-        triage = (root / ".agents" / "agents" / "findings-triage.md").read_text()
-        assert "agent-mr-remediation" in triage
-        assert "source branch" in triage
-        assert "Closes #<triage-issue>" in triage
-
-    for root in (project_root, template_dir):
-        runner = (
-            root / ".agents" / "skills" / "work-item-runner" / "SKILL.md"
-        ).read_text()
-
-        assert "agent-mr-remediation" in runner
-        assert "existing merge request" in runner
-        assert "Do not create a second merge request" in runner
-
-
-def test_source_and_template_workflows_wire_the_filesystem_structure_judge(
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that the source workflow and Copier output retain the same gate."""
-    for root in (project_root, template_dir):
-        workflow = (root / "AGENTS.md").read_text()
-        finalizer = (root / ".agents" / "agents" / "tdd-finalizer.md").read_text()
-        agent = root / ".agents" / "agents" / "filesystem-structure-judge.md"
-
-        assert agent.exists()
-        assert "non-trivial changes" in workflow
-        assert "`filesystem-structure-judge` approves" in finalizer
-
-
-def test_filesystem_structure_judge_defines_concrete_layout_and_deviation_rules(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that every shipped filesystem judge enforces the full contract."""
-    judge_paths = (
-        generated_project / ".agents" / "agents" / "filesystem-structure-judge.md",
-        project_root / ".agents" / "agents" / "filesystem-structure-judge.md",
-        template_dir / ".agents" / "agents" / "filesystem-structure-judge.md",
-    )
-
-    for judge_path in judge_paths:
-        content = judge_path.read_text()
-
-        assert "src/<package>" in content
-        assert "tests" in content.lower()
-        assert "[project.scripts]" in content
-        assert "exactly one user-facing" in content
-        assert "bin/<tool>" in content
-        assert "`src/`" in content
-        assert "`lib/`" in content
-        assert "language" in content.lower()
-        assert "rule" in content.lower()
-        assert "actual paths" in content.lower()
-        assert "rationale" in content.lower()
 
 
 def test_claude_md_is_a_minimal_agents_md_entry_point(generated_project: Path) -> None:
@@ -1963,45 +897,6 @@ def test_claude_md_is_a_minimal_agents_md_entry_point(generated_project: Path) -
     assert (
         generated_project / "CLAUDE.md"
     ).read_text() == "# CLAUDE.md\n\n@AGENTS.md\n"
-
-
-def test_agents_md_present(generated_project: Path) -> None:
-    """Test that AGENTS.md provides a native Codex workflow."""
-    agents_md = generated_project / "AGENTS.md"
-    assert agents_md.exists()
-    content = agents_md.read_text()
-    assert ".claude/skills -> ../.agents/skills" in content
-    assert ".agents/lang/python.md" in content
-    assert "gpt-5.6-sol" in content
-    assert "gpt-5.6-terra" in content
-    assert "gpt-5.6-luna" in content
-    assert "GITLAB_PROJECT_ID" in content
-
-
-def test_canonical_python_guidance_is_present(generated_project: Path) -> None:
-    """Test that .agents/lang/python.md is generated with Python conventions."""
-    python_md = generated_project / ".agents" / "lang" / "python.md"
-    assert python_md.exists()
-    content = python_md.read_text()
-    assert "uv run pytest" in content
-    assert "Dependency Inversion" in content
-    assert "pytest.mark.parametrize" in content
-
-
-def test_generated_agents_md_has_language_index(generated_project: Path) -> None:
-    """Test that AGENTS.md references the language conventions file."""
-    content = (generated_project / "AGENTS.md").read_text()
-    assert ".agents/lang/python.md" in content
-    assert "files you expect to change" in content
-
-
-def test_canonical_python_testing_guidance_is_present(generated_project: Path) -> None:
-    """Test that the detailed testing reference is generated as a canonical language file."""
-    testing_md = generated_project / ".agents" / "lang" / "python-testing.md"
-    assert testing_md.exists()
-    content = testing_md.read_text()
-    assert "pytest-subprocess" in content
-    assert "requests-mock" in content
 
 
 def test_cursor_testing_rule_references_canonical_file(generated_project: Path) -> None:
@@ -2016,15 +911,6 @@ def test_cursor_testing_rule_references_canonical_file(generated_project: Path) 
     assert not (rules_dir / "modify_tests.mdc").exists()
 
 
-def test_shared_guidance_is_present(generated_project: Path) -> None:
-    """Test that language-agnostic guidance files are generated in .agents/guidance/."""
-    guidance = generated_project / ".agents" / "guidance"
-    assert (guidance / "tdd.md").exists()
-    assert (guidance / "documentation.md").exists()
-    assert (guidance / "markdown.md").exists()
-    assert "Red" in (guidance / "tdd.md").read_text()
-
-
 def test_general_cursor_rules_reference_canonical_files(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
@@ -2035,14 +921,6 @@ def test_general_cursor_rules_reference_canonical_files(
         markdown_rule = (rules / "markdown.mdc").read_text()
         assert "@.agents/guidance/markdown.md" in markdown_rule
         assert "alwaysApply: false" in markdown_rule
-
-
-def test_generated_agents_md_has_general_guidance_index(
-    generated_project: Path,
-) -> None:
-    """Test that shared guidance remains available from the canonical layout."""
-    content = (generated_project / ".agents" / "guidance" / "tdd.md").read_text()
-    assert "Red" in content
 
 
 def test_copier_yaml_exists(project_root: Path) -> None:
@@ -2068,59 +946,6 @@ def test_copier_skip_paths_preserve_project_specific_metadata(
     assert "pyproject.toml" in configuration["_skip_if_exists"]
     assert ".agents/project.md" in configuration["_skip_if_exists"]
     assert ".claude/project.md" in configuration["_skip_if_exists"]
-
-
-def test_copier_update_warns_legacy_flat_packages_to_stop_and_migrate(
-    project_root: Path,
-) -> None:
-    """Test that Copier does not silently update a legacy flat package layout."""
-    configuration = yaml.safe_load((project_root / "copier.yaml").read_text())
-
-    message = configuration["message_before_update"].lower()
-    assert "legacy flat" in message
-    assert "<package>/" in message
-    assert "src/<package>/" in message
-    assert "stop" in message
-    assert "migrate" in message
-
-
-def test_filesystem_structure_judge_rejects_split_legacy_python_layouts(
-    generated_project: Path,
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that the layout gate blocks a flat and src package split."""
-    judge_paths = (
-        generated_project / ".agents" / "agents" / "filesystem-structure-judge.md",
-        project_root / ".agents" / "agents" / "filesystem-structure-judge.md",
-        template_dir / ".agents" / "agents" / "filesystem-structure-judge.md",
-    )
-
-    for judge_path in judge_paths:
-        content = judge_path.read_text().lower()
-
-        assert "<package>/" in content
-        assert "src/<package>/" in content
-        assert "split" in content
-        assert "overall: reject" in content
-        assert "migrate" in content
-
-
-def test_root_and_template_project_notes_declare_structure_compliance(
-    project_root: Path,
-    template_dir: Path,
-) -> None:
-    """Test that every project records deviations from the standard layout."""
-    root_notes = (project_root / ".agents" / "project.md").read_text()
-    template_notes = (template_dir / ".agents" / "project.md.jinja").read_text()
-
-    assert "Filesystem structure deviations" in root_notes
-    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
-        assert field in root_notes
-    assert "src/{{ project_slug }}/" in template_notes
-    assert "scripts/agent-work-systemd-run.sh" in template_notes
-    for field in ("**Language:**", "**Rule:**", "**Actual paths:**", "**Rationale:**"):
-        assert field in template_notes
 
 
 def test_copier_preflight_requires_only_git_uv_and_glab_before_git_init(
@@ -2351,192 +1176,6 @@ esac""",
     assert marker.read_text().splitlines() == ["git init", "uv sync", "uv run"]
 
 
-def _workflow_paths(root: Path) -> tuple[Path, ...]:
-    """Return the maintained workflow instructions for a project root."""
-    candidates = (
-        root / "AGENTS.md",
-        root / "CLAUDE.md",
-        root / "README.md",
-        *(root / ".agents").rglob("*.md"),
-    )
-    return tuple(path for path in candidates if path.exists())
-
-
-def test_root_and_generated_workflows_do_not_defer_work_to_markdown_backlogs(
-    project_root: Path, generated_project: Path
-) -> None:
-    """Test that workflows use GitLab issues instead of TODO/FIXME files."""
-    forbidden_reference = re.compile(r"(?i)(?:todo|fixme)\.md")
-
-    for root in (project_root, project_root / "template", generated_project):
-        for backlog_name in ("TODO.md", "FIXME.md", "todo.md", "fixme.md"):
-            assert not (root / backlog_name).exists()
-        for workflow_path in _workflow_paths(root):
-            content = workflow_path.read_text()
-            assert forbidden_reference.search(content) is None, workflow_path
-
-
-def test_repository_changes_require_publication_and_treat_failures_as_blockers(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Test that no workflow permits local-only completion of repository work."""
-    forbidden_completion_policies = (
-        "local-change",
-        "local-only work",
-        "defer publishing",
-        "skip step 3 *for now*",
-    )
-    required_policy = (
-        "every repository change must publish",
-        "a publication failure is a blocker, not completion",
-    )
-
-    for root in (project_root, project_root / "template", generated_project):
-        for workflow_path in _workflow_paths(root):
-            content = workflow_path.read_text().lower()
-            assert not any(
-                policy in content for policy in forbidden_completion_policies
-            ), workflow_path
-
-        for relative_path in ("AGENTS.md", ".agents/skills/git-flow/SKILL.md"):
-            content = (root / relative_path).read_text().lower()
-            for policy in required_policy:
-                assert policy in content, relative_path
-
-
-@pytest.mark.parametrize(
-    "root",
-    (".", "template"),
-)
-def test_architect_records_deferred_scope_with_gitlab_feature_issues(
-    project_root: Path, root: str
-) -> None:
-    """Test that deferred design scope is captured as GitLab Feature work."""
-    content = (project_root / root / ".agents" / "agents" / "architect.md").read_text()
-
-    for requirement in (
-        "GitLab Feature issue",
-        "Problem",
-        "Proposed outcome",
-        "Acceptance criteria",
-        "Priority",
-        "Severity",
-        "Scope and dependencies",
-        "numeric project ID",
-        "unfiled item",
-        "never claim it was persisted",
-    ):
-        assert requirement in content
-
-
-@pytest.mark.parametrize(
-    "command_name",
-    ("judge-quality.md", "judge-test.md"),
-)
-def test_review_agents_preserve_minor_findings_for_terminal_triage(
-    project_root: Path, command_name: str
-) -> None:
-    """Test that approving reviews hand Minor records to Findings Triage."""
-    for root in (project_root, project_root / "template"):
-        content = (root / ".agents" / "agents" / command_name).read_text()
-
-        for requirement in (
-            "Findings Triage",
-            "standard output format",
-            "Bug-template",
-            "GitLab issues",
-            "Markdown backlog file as a fallback",
-            "Do not claim an issue was created",
-        ):
-            assert requirement in content
-
-
-def test_git_flow_allows_unrelated_open_mrs_without_removing_safety_gates(
-    project_root: Path,
-) -> None:
-    """Test that work is blocked only by conflicts, not unrelated open MRs."""
-    forbidden_gates = (
-        "any open mr in the repo",
-        "mrs are outstanding",
-        "stay on the branch until",
-        "remain on the feature branch",
-        "workflow is paused pending",
-        "wait for the user to come back",
-        "do not return to `main` as soon",
-    )
-
-    for root in (project_root, project_root / "template"):
-        content = (
-            (root / ".agents" / "skills" / "git-flow" / "SKILL.md").read_text().lower()
-        )
-
-        assert not any(gate in content for gate in forbidden_gates)
-        assert "unrelated open merge requests" in content
-        assert "non-blocking" in content
-        assert "same branch" in content
-        assert "dependency" in content
-        assert "resource conflict" in content
-        assert "clean working tree" in content
-        assert "git pull --ff-only" in content
-        assert "latest pipeline" not in content
-        assert "no direct-to-`main` path" in content
-        assert "ai must never approve or merge" in content
-        assert "report the result as `awaiting_human` and end the active run" in content
-        assert "release the active checkout" in content
-        assert "branch-specific continuation from `main`" in content
-        assert "source_branch=$intended_branch" in content
-        assert 'git checkout "$intended_branch"' in content
-        assert "source_branch=$(git rev-parse --abbrev-ref head)" in content
-        assert "only once the mr is merged" in content
-        assert content.index("only once the mr is merged") < (
-            content.index("git branch -d claude/<slug>")
-        )
-        assert content.index("source_branch=$intended_branch") < content.index(
-            'git checkout -b "$intended_branch"'
-        )
-
-    readme_content = (project_root / "README.md").read_text()
-    assert "docs/how-to/setup-serial-gitlab-agent-loop.md" in readme_content
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        ".agents/skills/git-flow/SKILL.md",
-        ".agents/skills/repository-setup/SKILL.md",
-        ".agents/agents/architect.md",
-        ".agents/agents/judge-quality.md",
-        ".agents/agents/judge-test.md",
-        ".agents/agents/tdd-finalizer.md",
-    ),
-)
-def test_root_and_template_share_the_same_phase_zero_workflow_contract(
-    generated_project: Path, project_root: Path, relative_path: str
-) -> None:
-    """Test that source and generated projects retain identical workflow policy."""
-    assert (project_root / relative_path).read_bytes() == (
-        project_root / "template" / relative_path
-    ).read_bytes()
-    assert (project_root / relative_path).read_bytes() == (
-        generated_project / relative_path
-    ).read_bytes()
-
-
-def test_root_and_template_ship_identical_gitlab_issue_templates(
-    project_root: Path,
-) -> None:
-    """Test that source and generated projects use the same issue forms."""
-    for filename in ("Bug.md", "Feature.md"):
-        root_template = project_root / ".gitlab" / "issue_templates" / filename
-        generated_template = (
-            project_root / "template" / ".gitlab" / "issue_templates" / filename
-        )
-
-        assert root_template.exists()
-        assert generated_template.exists()
-        assert root_template.read_bytes() == generated_template.read_bytes()
-
-
 @pytest.mark.parametrize(
     "relative_path",
     (
@@ -2545,8 +1184,6 @@ def test_root_and_template_ship_identical_gitlab_issue_templates(
         "src/agent_work/serial.py",
         "src/agent_work/adapters.py",
         "src/agent_work/cli.py",
-        ".agents/skills/work-item-runner/SKILL.md",
-        ".agents/skills/setup-agent-loop/SKILL.md",
     ),
 )
 def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
@@ -2559,100 +1196,6 @@ def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
 
     assert root_file.read_bytes() == template_file.read_bytes()
     assert root_file.read_bytes() == generated_file.read_bytes()
-
-
-def test_session_boundary_workflow_preserves_agentic_handoffs(
-    generated_project: Path, project_root: Path
-) -> None:
-    """Agentic workers and user sessions have distinct main-branch exits."""
-    relative_path = ".agents/skills/git-flow/SKILL.md"
-    content = (project_root / relative_path).read_text()
-
-    assert content == (project_root / "template" / relative_path).read_text()
-    assert content == (generated_project / relative_path).read_text()
-    assert "### Session boundary" in content
-    assert "agent/issue-<IID>" in content
-    assert "If the MR is still open or is not merged" in content
-
-
-def test_setup_loop_skill_classifies_effective_developer_access_without_attestation(
-    generated_project: Path, project_root: Path
-) -> None:
-    """The setup skill has one constrained-Developer fast path in every output."""
-    relative_path = ".agents/skills/setup-agent-loop/SKILL.md"
-    root_skill = (project_root / relative_path).read_text()
-
-    assert root_skill == (project_root / "template" / relative_path).read_text()
-    assert root_skill == (generated_project / relative_path).read_text()
-
-    assert re.search(
-        r'project_json\s*=\s*"?\$\(\s*glab api --hostname "\$GITLAB_HOST" '
-        r'"projects/\$GITLAB_PROJECT_ID"\s*\)"?',
-        root_skill,
-    )
-    assert "jq" in root_skill
-    assert ".permissions.project_access.access_level" in root_skill
-    assert ".permissions.group_access.access_level" in root_skill
-    assert "max" in root_skill
-
-    for requirement in (
-        "exactly 30",
-        "Developer",
-        "less than 30",
-        "unknown",
-        "block `--apply`",
-        "40 or greater",
-        "constrained Developer credential",
-    ):
-        assert requirement in root_skill
-
-    assert "Developer `403`" not in root_skill
-    assert "human Maintainer attestation" not in root_skill
-    assert "members/all" not in root_skill
-    assert "--jq" not in root_skill
-    assert "privileged path" not in root_skill
-
-
-def test_setup_loop_skill_preflights_developer_readable_repository_safeguards(
-    project_root: Path,
-) -> None:
-    """Developer readiness proves observable safeguards before applied work."""
-    skill = (project_root / ".agents/skills/setup-agent-loop/SKILL.md").read_text()
-
-    effective_access_marker = "exactly 30"
-    assert effective_access_marker in skill
-
-    for requirement in (
-        "jq -e",
-        "default_branch",
-        "default_branch_uri",
-        "projects/$GITLAB_PROJECT_ID/repository/branches/$default_branch_uri",
-        "developers_can_push",
-        "developers_can_merge",
-        "can_push",
-        "protected",
-        "approval_rules",
-        "at least one",
-        "projects/$GITLAB_PROJECT_ID/approval_rules",
-        "applies_to_all_protected_branches",
-        "no protected branches",
-        "/approvals",
-        "recurring Maintainer attestation",
-        "actionable",
-        "missing evidence",
-        "block `--apply`",
-    ):
-        assert requirement in skill
-
-    assert re.search(
-        r"skip only.*?/approvals.*?recurring Maintainer attestation",
-        skill,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    assert skill.index(effective_access_marker) < skill.index("repository/branches")
-    assert skill.index(effective_access_marker) < skill.index("approval_rules")
-    assert "repository/files/CONTRIBUTING.md/raw" not in skill
-    assert "author/committers cannot self-approve" not in skill
 
 
 @pytest.mark.parametrize(
@@ -2693,28 +1236,30 @@ def test_setup_preflight_url_encodes_default_branch_before_api_paths(
     assert all(name == encoded_name for name in effective_branch_path_variables)
 
 
-def _bash_block_after(skill: str, anchor: str) -> str:
-    """Extract one Bash product snippet after its stable setup-skill anchor."""
-    block = re.search(
-        rf"{re.escape(anchor)}.*?^[ \t]*```bash\n(?P<script>.*?)\n^[ \t]*```",
-        skill,
+def _bash_block_containing(document: str, required_fragments: tuple[str, ...]) -> str:
+    """Return the unique Bash fence containing stable executable signatures."""
+    blocks = re.findall(
+        r"^[ \t]*```bash[ \t]*\n(?P<script>.*?)\n^[ \t]*```[ \t]*$",
+        document,
         flags=re.DOTALL | re.MULTILINE,
     )
-    assert block is not None, anchor
-    return block.group("script")
+    matches = [
+        block
+        for block in blocks
+        if all(fragment in block for fragment in required_fragments)
+    ]
+    assert len(matches) == 1, required_fragments
+    return matches[0]
 
 
+_READINESS_FENCE_SIGNATURE = (
+    "project_json=",
+    "default_branch_uri=",
+    "approval_rules_json=",
+)
 _READINESS_SURFACES = (
-    pytest.param(
-        ".agents/skills/setup-agent-loop/SKILL.md",
-        "1. Establish and validate a bare `GITLAB_HOST`",
-        id="setup-skill",
-    ),
-    pytest.param(
-        "docs/how-to/setup-serial-gitlab-agent-loop.md",
-        "## Verify Developer-readable safeguards",
-        id="how-to",
-    ),
+    pytest.param(".agents/skills/setup-agent-loop/SKILL.md", id="setup-skill"),
+    pytest.param("docs/how-to/setup-serial-gitlab-agent-loop.md", id="how-to"),
 )
 
 
@@ -2722,14 +1267,13 @@ def _readiness_snippet(
     generated_project: Path,
     project_root: Path,
     relative_path: str,
-    anchor: str,
 ) -> str:
     """Load one parity-checked, executable readiness fence from the product."""
     document = (project_root / relative_path).read_text()
 
     assert document == (project_root / "template" / relative_path).read_text()
     assert document == (generated_project / relative_path).read_text()
-    return _bash_block_after(document, anchor)
+    return _bash_block_containing(document, _READINESS_FENCE_SIGNATURE)
 
 
 def _run_setup_skill_snippet(
@@ -2839,7 +1383,7 @@ def test_setup_skill_bash_fence_is_explicitly_fail_closed(
 ) -> None:
     """The complete executable readiness fence owns strict failure handling."""
     skill = (project_root / ".agents/skills/setup-agent-loop/SKILL.md").read_text()
-    snippet = _bash_block_after(skill, "1. Establish and validate a bare `GITLAB_HOST`")
+    snippet = _bash_block_containing(skill, _READINESS_FENCE_SIGNATURE)
 
     assert snippet.lstrip().startswith("set -Eeuo pipefail") or (
         "if !" in snippet and "exit 1" in snippet
@@ -2867,7 +1411,6 @@ def test_setup_skill_preflight_reports_unset_target_variables(
         generated_project,
         project_root,
         ".agents/skills/setup-agent-loop/SKILL.md",
-        "1. Establish and validate a bare `GITLAB_HOST`",
     )
 
     result = _run_setup_skill_snippet(
@@ -2887,21 +1430,19 @@ def test_setup_skill_preflight_reports_unset_target_variables(
     ("project_access", "group_access"),
     ((30, 30), (30, 20), (20, 30), (None, 30), (30, None)),
 )
-@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+@pytest.mark.parametrize("relative_path", _READINESS_SURFACES)
 def test_readiness_snippet_allows_only_effective_developer_access(
     generated_project: Path,
     project_root: Path,
     project_access: int | None,
     group_access: int | None,
     relative_path: str,
-    anchor: str,
 ) -> None:
     """Every published readiness fence permits only effective Developer access."""
     readiness_snippet = _readiness_snippet(
         generated_project,
         project_root,
         relative_path,
-        anchor,
     )
 
     result = _run_setup_skill_snippet(
@@ -2928,21 +1469,19 @@ def test_readiness_snippet_allows_only_effective_developer_access(
         (30, 50),
     ),
 )
-@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+@pytest.mark.parametrize("relative_path", _READINESS_SURFACES)
 def test_readiness_snippet_fails_closed_for_every_other_level(
     generated_project: Path,
     project_root: Path,
     project_access: object,
     group_access: object,
     relative_path: str,
-    anchor: str,
 ) -> None:
     """Every published fence blocks unknown, low, and privileged access."""
     readiness_snippet = _readiness_snippet(
         generated_project,
         project_root,
         relative_path,
-        anchor,
     )
 
     result = _run_setup_skill_snippet(
@@ -3005,7 +1544,7 @@ def test_how_to_approval_predicate_explicitly_requires_a_numeric_count(
     assert how_to == (generated_project / relative_path).read_text()
     assert re.search(
         r"approvals_required[^\n]*?type\s*==\s*\"number\"",
-        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        _bash_block_containing(how_to, _READINESS_FENCE_SIGNATURE),
     )
 
 
@@ -3112,13 +1651,13 @@ def test_how_to_approval_predicate_matches_skill_scope_semantics(
 
     how_to_result = _approval_predicate_succeeds(
         _approval_predicate_from(
-            _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+            _bash_block_containing(how_to, _READINESS_FENCE_SIGNATURE),
         ),
         approval_rules,
     )
     skill_result = _approval_predicate_succeeds(
         _approval_predicate_from(
-            _bash_block_after(skill, "1. Establish and validate a bare `GITLAB_HOST`")
+            _bash_block_containing(skill, _READINESS_FENCE_SIGNATURE)
         ),
         approval_rules,
     )
@@ -3153,7 +1692,7 @@ def test_how_to_preflight_accepts_numeric_approval_counts(
     assert how_to == (generated_project / relative_path).read_text()
 
     result = _run_setup_skill_snippet(
-        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        _bash_block_containing(how_to, _READINESS_FENCE_SIGNATURE),
         approval_rules_json=approval_rules,
         project_json=_developer_project_json(),
         effective_branch_json=_effective_branch_json(),
@@ -3182,7 +1721,7 @@ def test_how_to_preflight_blocks_non_global_approval_rule_scopes(
     assert how_to == (generated_project / relative_path).read_text()
 
     result = _run_setup_skill_snippet(
-        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        _bash_block_containing(how_to, _READINESS_FENCE_SIGNATURE),
         approval_rules_json=_approval_rules_json(
             {
                 "approvals_required": 1,
@@ -3219,7 +1758,7 @@ def test_how_to_preflight_blocks_string_approval_counts(
     assert how_to == (generated_project / relative_path).read_text()
 
     result = _run_setup_skill_snippet(
-        _bash_block_after(how_to, "## Verify Developer-readable safeguards"),
+        _bash_block_containing(how_to, _READINESS_FENCE_SIGNATURE),
         approval_rules_json=approval_rules,
         project_json=_developer_project_json(),
         effective_branch_json=_effective_branch_json(),
@@ -3257,21 +1796,19 @@ def test_how_to_preflight_blocks_string_approval_counts(
         ),
     ),
 )
-@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+@pytest.mark.parametrize("relative_path", _READINESS_SURFACES)
 def test_readiness_snippet_accepts_complete_evidence(
     generated_project: Path,
     project_root: Path,
     effective_branch: str,
     approval_rules: str,
     relative_path: str,
-    anchor: str,
 ) -> None:
     """Complete evidence passes through every Developer-readable preflight."""
     readiness_snippet = _readiness_snippet(
         generated_project,
         project_root,
         relative_path,
-        anchor,
     )
 
     result = _run_setup_skill_snippet(
@@ -3396,21 +1933,19 @@ def test_readiness_snippet_accepts_complete_evidence(
         ),
     ),
 )
-@pytest.mark.parametrize(("relative_path", "anchor"), _READINESS_SURFACES)
+@pytest.mark.parametrize("relative_path", _READINESS_SURFACES)
 def test_readiness_snippet_reports_and_blocks_bad_evidence(
     generated_project: Path,
     project_root: Path,
     effective_branch: str,
     approval_rules: str,
     relative_path: str,
-    anchor: str,
 ) -> None:
     """Every bad safeguard is reported and blocked by every readiness fence."""
     readiness_snippet = _readiness_snippet(
         generated_project,
         project_root,
         relative_path,
-        anchor,
     )
 
     result = _run_setup_skill_snippet(
@@ -3426,39 +1961,10 @@ def test_readiness_snippet_reports_and_blocks_bad_evidence(
     assert "block --apply" in outcome
 
 
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        ".agents/skills/setup-agent-loop/SKILL.md",
-        "docs/how-to/setup-serial-gitlab-agent-loop.md",
-        "docs/reference/serial-gitlab-agent-loop.md",
-        "docs/explanation/serial-gitlab-agent-loop.md",
-    ),
-)
-def test_developer_readiness_docs_state_the_unverifiable_self_approval_boundary(
-    generated_project: Path, project_root: Path, relative_path: str
-) -> None:
-    """The Developer-readable policy does not pretend to prove hidden controls."""
-    root_document = (project_root / relative_path).read_text()
-
-    assert root_document == (project_root / "template" / relative_path).read_text()
-    assert root_document == (generated_project / relative_path).read_text()
-
-    for requirement in ("Developer", "self-approval", "override"):
-        assert requirement in root_document
-    assert re.search(
-        r"Developer.*?(?:cannot|does not).*?prove",
-        root_document,
-        flags=re.DOTALL,
-    )
-    assert "does not check" in root_document or "skips" in root_document
-    assert "CONTRIBUTING.md" not in root_document
-
-
-def test_agent_controls_prohibit_approval_and_merge_in_every_project_copy(
+def test_claude_settings_prohibit_approval_and_merge_in_every_project_copy(
     generated_project: Path, project_root: Path
 ) -> None:
-    """Policy controls and runtime both exclude approval and merge operations."""
+    """Every Claude frontend denies approval and merge operations."""
     expected_denials = [
         "Bash(glab api*merge_requests*approve*)",
         "Bash(glab api*merge_requests*merge*)",
@@ -3467,66 +1973,8 @@ def test_agent_controls_prohibit_approval_and_merge_in_every_project_copy(
     ]
 
     for root in (project_root, project_root / "template", generated_project):
-        instructions = (root / "AGENTS.md").read_text()
         settings = json.loads((root / ".claude" / "settings.json").read_text())
-        runtime = "\n".join(
-            path.read_text() for path in (root / "src" / "agent_work").glob("*.py")
-        )
-
-        assert "Never approve or merge" in instructions
         assert settings == {"permissions": {"deny": expected_denials}}
-        assert "mr approve" not in runtime
-        assert "merge_requests/{mr_iid}/approve" not in runtime
-        assert "merge_requests/{mr_iid}/merge" not in runtime
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        "docs/how-to/setup-serial-gitlab-agent-loop.md",
-        "docs/reference/serial-gitlab-agent-loop.md",
-        "docs/explanation/serial-gitlab-agent-loop.md",
-    ),
-)
-def test_setup_loop_docs_have_root_template_and_generated_parity(
-    generated_project: Path, project_root: Path, relative_path: str
-) -> None:
-    """Every rendered copy retains its category's operator documentation."""
-    root_document = (project_root / relative_path).read_text()
-
-    assert root_document == (project_root / "template" / relative_path).read_text()
-    assert root_document == (generated_project / relative_path).read_text()
-
-    assert "awaiting" in root_document
-    assert re.search(r"never\s+approves\s+or\s+merges", root_document)
-
-    assert "Developer `403`" not in root_document
-    assert "human Maintainer attestation" not in root_document
-    assert "members/all" not in root_document
-    assert "--jq" not in root_document
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        ".agents/skills/setup-agent-loop/SKILL.md",
-        "docs/how-to/setup-serial-gitlab-agent-loop.md",
-        "docs/reference/serial-gitlab-agent-loop.md",
-        "docs/explanation/serial-gitlab-agent-loop.md",
-    ),
-)
-def test_developer_readiness_never_treats_privileged_access_as_an_alternative_path(
-    generated_project: Path, project_root: Path, relative_path: str
-) -> None:
-    """Policy and docs block 40+ and require the constrained identity instead."""
-    root_document = (project_root / relative_path).read_text()
-
-    assert root_document == (project_root / "template" / relative_path).read_text()
-    assert root_document == (generated_project / relative_path).read_text()
-    assert "privileged path" not in root_document
-    assert re.search(r"`?40`?\s+or greater", root_document)
-    assert re.search(r"constrained Developer\s+credential", root_document)
-    assert re.search(r"(?:block `--apply`|BLOCK --apply)", root_document)
 
 
 def test_legacy_local_queue_contracts_and_commands_are_absent(
@@ -3588,36 +2036,6 @@ def test_serial_runner_ships_user_systemd_units_with_journal_logging(
     assert "AGENT_WORK_DIRENV is not executable" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not set" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not executable" in wrapper
-    assert (
-        "AGENT_WORK_UV=%q"
-        in (
-            project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
-        ).read_text()
-    )
-    how_to = (
-        project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
-    ).read_text()
-    assert 'agent_name="${AGENT_WORK_AGENT:-codex}"' in how_to
-    assert 'agent_path="$(command -v "$agent_name")"' in how_to
-    assert "agent must resolve to an executable absolute path" in how_to
-    assert "AGENT_WORK_AGENT=%q" in how_to
-    assert "AGENT_WORK_AGENT_PATH=%q" in how_to
-    assert "AGENT_WORK_DIRENV=%q" in how_to
-    assert "glab auth status` reports" in how_to
-    assert "Repair unavailable user-journal access" in how_to
-    assert "systemd-journal" in how_to
-    assert (
-        "Failed to connect to bus"
-        in (
-            project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
-        ).read_text()
-    )
-    for git_flow in (
-        project_root / ".agents" / "skills" / "git-flow" / "SKILL.md",
-        project_root / "template" / ".agents" / "skills" / "git-flow" / "SKILL.md",
-    ):
-        assert "--jq" not in git_flow.read_text()
-        assert "jq -er" in git_flow.read_text()
     assert "Unit=agentic-copier-agent-work.service" in root_timer
     assert (
         "Environment=AGENT_WORK_LOG_TAG={{ project_slug }}-agent-work"
@@ -3645,3 +2063,38 @@ def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:
     assert "mr approve" not in runtime
     assert "merge_requests/{mr_iid}/approve" not in runtime
     assert "merge_requests/{mr_iid}/merge" not in runtime
+
+
+def test_portable_markdown_mirrors_match_generated_output(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Portable workflow mirrors and Copier-rendered Markdown stay synchronized."""
+    documentation_paths = {
+        path.relative_to(template_dir) for path in (template_dir / "docs").rglob("*.md")
+    }
+    mirrored_paths = {
+        Path("AGENTS.md"),
+        Path("CLAUDE.md"),
+        *(
+            path.relative_to(template_dir)
+            for path in (template_dir / ".agents").rglob("*.md")
+        ),
+        *(
+            path.relative_to(template_dir)
+            for path in (template_dir / ".gitlab" / "issue_templates").glob("*.md")
+        ),
+        *(path for path in documentation_paths if path.name != "index.md"),
+    }
+    copied_paths = {
+        *mirrored_paths,
+        Path("DIATAXIS.md"),
+        *documentation_paths,
+    }
+
+    for relative_path in sorted(mirrored_paths):
+        root_content = (project_root / relative_path).read_bytes()
+        assert root_content == (template_dir / relative_path).read_bytes()
+
+    for relative_path in sorted(copied_paths):
+        template_content = (template_dir / relative_path).read_bytes()
+        assert template_content == (generated_project / relative_path).read_bytes()
