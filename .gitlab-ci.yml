@@ -88,6 +88,7 @@ ci-image:publish:
 .base_uv:
   stage: validate
   interruptible: true
+  needs: []
   tags:
     - size/medium
   image:

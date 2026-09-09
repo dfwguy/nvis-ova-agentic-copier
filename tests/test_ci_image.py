@@ -196,6 +196,7 @@ def test_root_validation_consumes_the_published_image_without_bootstrap(
     )
 
     assert base["image"]["name"] == _PUBLISHED_VALIDATION_IMAGE
+    assert base["needs"] == []
     assert base["before_script"] == ['cd "$CI_PROJECT_DIR"']
     for runtime_setup in ("apt-get", "uv python install", "uv sync"):
         assert runtime_setup not in before_script

@@ -15,10 +15,11 @@ related:
 
 # Refresh the CI dependency image
 
-Use this procedure after changing the CI image definition, `pyproject.toml`,
-or `uv.lock`. The image is a project-only root-repository dependency: root
-validation consumes its already-published contents by immutable digest and
-does no `apt` or UV bootstrap. Generated Copier projects keep their own
+Use this procedure after changing `Dockerfile`, `pyproject.toml`, or `uv.lock`.
+They are all image-build inputs. The image is a project-only root-repository
+dependency: root validation consumes its already-published contents by
+immutable digest and does no `apt` or UV bootstrap. Locked dependency changes
+must update and commit `uv.lock`. Generated Copier projects keep their own
 portable CI bootstrap and do not inherit this registry location, image pin, or
 credentials.
 
@@ -29,6 +30,12 @@ the image with rootless BuildKit and validates the result, but does not push to
 the registry. Review the build and validation evidence before a human merges
 the merge request.
 
+The root validation jobs use the currently pinned published image. Their empty
+`needs` declaration starts them immediately in parallel with `ci-image:validate`
+rather than waiting for that image-validation stage. This keeps the image build
+off the root validation critical path while retaining its evidence in the same
+pipeline.
+
 Do not print registry credentials, tokens, or generated authentication files
 in job output. The validation path must use GitLab-provided credentials only
 where the CI configuration requires them.
@@ -36,7 +43,7 @@ where the CI configuration requires them.
 ## 2. Publish after the human merge
 
 After the merge reaches the default branch, the publication job runs only when
-the image definition, `pyproject.toml`, or `uv.lock` changed. It publishes the
+`Dockerfile`, `pyproject.toml`, or `uv.lock` changed. It publishes the
 project-only image and records its immutable digest as a pipeline artifact.
 
 Retrieve that artifact and confirm that it records `CI_IMAGE` in the form
