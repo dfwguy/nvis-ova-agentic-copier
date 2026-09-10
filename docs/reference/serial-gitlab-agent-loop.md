@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-10
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -44,24 +44,24 @@ credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction
-record. Only the oldest open, non-confidential `agent::ready` issue is eligible
-for unattended selection. Each segment reconciles and resumes existing
-`agent::running` work before selecting new work.
+record. Project-level loop enablement authorizes unattended selection. After
+resuming existing `agent::running` work, the runner selects the oldest open,
+non-confidential issue that has no lifecycle projection and no ledger record.
+Unrelated labels do not affect eligibility.
 
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
-| `agent::ready` | ready | A human explicitly opted in to unattended work. |
 | `agent::running` | preparing, executing, retry-wait, publishing, observing, or repair | Work is active or safely resumable. |
 | `agent::awaiting-human` | awaiting-human | Exact MR evidence and required receipts await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
 
-The durable sequence is `ready → preparing → executing`; execution may enter
+The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication
 enters `observing`, which can enter `repair`, return to `publishing`, or finish
-at `awaiting-human`. A human-blocked condition becomes `blocked`; a human
-resolves it and explicitly opts in again. Human merge or closure ends an
-awaiting-human record.
+at `awaiting-human`. A human-blocked condition becomes `blocked`; after the
+recorded action is complete, an operator explicitly retries that IID. Human
+merge or closure ends an awaiting-human record.
 
 Pipeline rejection or an exact-MR conflict enters `repair` at `coding-green`.
 A successful `$tdd-green` repair re-enters the normal downstream chain at
@@ -132,7 +132,9 @@ with an actionable error; a conflict enters durable repair on the same branch.
 
 The initial attempt plus at most three retry attempts are bounded segments.
 `retry-wait` records its deadline; exhaustion becomes `agent::blocked`, never
-`agent::failed`.
+`agent::failed`. A blocked item never becomes eligible through labels: after
+the recorded human action, `loop retry --issue-iid IID --apply` explicitly
+resumes it.
 
 Worker exits, timeouts, and transient GitLab or transport failures carry stable
 error codes and retry timing. The XDG `agent-work.log` records redacted

@@ -142,14 +142,14 @@ class GitLabGateway:
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid issue data") from error
 
-    def list_ready(self) -> tuple[GitLabIssue, ...]:
-        """Return only explicitly opted-in issues, oldest first."""
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        """Return open, non-confidential, unprojected issues oldest first."""
         return tuple(
             issue
-            for issue in self._issues(state="opened", labels="agent::ready")
+            for issue in self._issues(state="opened")
             if issue.state == "opened"
             and not issue.confidential
-            and set(issue.labels).intersection(LIFECYCLE_LABELS) == {"agent::ready"}
+            and not set(issue.labels).intersection(LIFECYCLE_LABELS)
         )
 
     def list_projected(self) -> tuple[GitLabIssue, ...]:

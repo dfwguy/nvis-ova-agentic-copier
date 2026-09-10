@@ -386,11 +386,14 @@ def dispatch(
                 records=active[:1],
                 project=identity,
             )
-        ready = gitlab.list_ready()
+        record_iids = {record.issue_iid for record in ledger.list_records()}
+        eligible = tuple(
+            issue for issue in gitlab.list_eligible() if issue.iid not in record_iids
+        )
         return _report(
             request,
             applied=False,
-            outcome="ready" if ready else "idle",
+            outcome="eligible" if eligible else "idle",
             project=identity,
         )
     with wired.lock():

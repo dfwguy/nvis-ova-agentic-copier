@@ -5,7 +5,7 @@ summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-10
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -18,8 +18,9 @@ related:
 # Set up the recoverable serial GitLab agent loop
 
 Use one dedicated checkout and one user timer for one GitLab project. The loop
-works only on explicitly opted-in `agent::ready` issues, never approves or
-merges, and never applies or drops a recovery stash.
+is authorized by enabling the project-level timer. It selects eligible open,
+non-confidential issues without a lifecycle projection or ledger record, never
+approves or merges, and never applies or drops a recovery stash.
 
 ## Check prerequisites and Developer-readable safeguards
 
@@ -240,7 +241,8 @@ uv run agent-work loop retry --issue-iid IID --apply --json
 
 The initial attempt plus three retries are automatic bounded segments. When
 they are exhausted, the issue is `agent::blocked`; follow its recorded next
-action, then retry that exact IID after a human has resolved the condition.
+action, then explicitly retry that exact IID after a human has resolved the
+condition. Do not change labels to resume blocked work.
 Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
@@ -272,11 +274,12 @@ uv run agent-work loop status --json
 
 ## Canary and re-enable
 
-Choose one open, non-confidential issue, verify that its request is suitable
-for the normal repository workflow, and have a human add `agent::ready`. Run
-bounded segments until status reports `agent::awaiting-human` with exact merge
-request evidence and all required receipts. Human review, approval, and merge
-remain outside the loop.
+Choose one open, non-confidential issue with no `agent::running`,
+`agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no
+ledger record. Verify that its request is suitable for the normal repository
+workflow, then run bounded segments until status reports
+`agent::awaiting-human` with exact merge-request evidence and all required
+receipts. Human review, approval, and merge remain outside the loop.
 
 ```bash
 uv run agent-work loop run --apply --json

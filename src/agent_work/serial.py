@@ -75,7 +75,7 @@ def _due(record: LedgerRecord, now: datetime) -> bool:
 def select_record(
     ledger: LedgerPort, gitlab: GitLabPort, *, now: datetime
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
-    """Reconcile and resume durable work before selecting the oldest ready issue."""
+    """Reconcile durable work before selecting the oldest eligible issue."""
     project = gitlab.verify_project()
     records = ledger.list_records()
     if any(record.project_id != project.id for record in records):
@@ -105,12 +105,7 @@ def select_record(
             return record, issue
     record_iids = {record.issue_iid for record in records}
     orphan = next(
-        (
-            issue
-            for issue in gitlab.list_projected()
-            if issue.iid not in record_iids
-            and set(issue.labels).intersection(lifecycle) != {"agent::ready"}
-        ),
+        (issue for issue in gitlab.list_projected() if issue.iid not in record_iids),
         None,
     )
     if orphan is not None:
@@ -129,10 +124,12 @@ def select_record(
             ),
             orphan,
         )
-    ready = gitlab.list_ready()
-    if not ready:
+    eligible = tuple(
+        issue for issue in gitlab.list_eligible() if issue.iid not in record_iids
+    )
+    if not eligible:
         return None, None
-    issue = ready[0]
+    issue = eligible[0]
     return (
         _new_record(issue, project_id=project.id, state_root=ledger.state_root),
         issue,

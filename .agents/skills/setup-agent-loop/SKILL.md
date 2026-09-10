@@ -164,8 +164,10 @@ before checking repository safeguards.
    `uv run agent-work migration preview --json`; apply only the exact reviewed
    plan, then validate one canary before re-enabling the timer.
 
-The loop selects only the oldest open `agent::ready` issue, projects active or
-automatically resumable work as `agent::running`, and then uses
+Enabling the guarded loop authorizes it to select the oldest open,
+non-confidential issue without a lifecycle projection or ledger record. It
+ignores unrelated labels, projects active or automatically resumable work as
+`agent::running`, and then uses
 `agent::awaiting-human` only after exact same-project MR evidence, matching
 local/remote branch tips, default target, and `Closes #IID`. Expected human
 action uses `agent::blocked`; `agent::failed` is reserved for exceptional,

@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-10
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -39,9 +39,8 @@ the end-to-end workflow contract.
 
 The audit confirmed these defects:
 
-1. Issue selection contradicts the worker contract. The skill requires an
-   explicitly opted-in issue, but the gateway selects every open,
-   non-confidential issue without a terminal label.
+1. Issue selection contradicted the documented contract. The gateway selected
+   open, non-confidential issues without a coherent durable queue rule.
 2. Existing-MR remediation is documented but not implemented. Remediation
    issues for MR !88 were started on new `agent/issue-*` branches from `main`,
    so the files they needed were absent.
@@ -78,8 +77,7 @@ recoverable execution detail that does not belong in labels.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Ready: human adds agent::ready
-    Ready --> Preparing: claim and reconcile
+    [*] --> Preparing: claim eligible issue and reconcile
     Preparing --> Executing: durable worktree ready
     Executing --> RetryWait: transient failure
     RetryWait --> Executing: retry becomes due
@@ -91,7 +89,7 @@ stateDiagram-v2
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
     Repair --> Blocked: automatic repair is unsafe
-    Blocked --> Ready: human resolves and opts in again
+    Blocked --> Preparing: explicit retry after human action
     AwaitingHuman --> [*]: human merges or closes
 ```
 
@@ -99,7 +97,6 @@ GitLab labels have deliberately coarse meanings:
 
 | Label | Meaning |
 | --- | --- |
-| `agent::ready` | A human explicitly authorized unattended processing. |
 | `agent::running` | Work is active or automatically resumable. |
 | `agent::awaiting-human` | The exact MR and required receipts are ready for human review. |
 | `agent::blocked` | A documented human action is necessary before work can continue. |
@@ -119,7 +116,8 @@ Every timer activation performs at most one bounded segment:
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
    the local ledger.
 3. Resume recoverable `agent::running` work before selecting new work.
-4. Select only the oldest open, non-confidential `agent::ready` issue.
+4. Select the oldest open, non-confidential issue with no lifecycle projection
+   and no ledger record. Unrelated labels do not affect eligibility.
 5. Classify it before claiming it as ordinary issue work, existing-MR
    remediation, merge-conflict repair, or protected policy work that requires
    the manual lane.
@@ -166,7 +164,10 @@ The implementation must maintain these invariants:
 
 - At most one local segment holds the project lock.
 - No new issue is claimed while resumable running work exists.
-- Only an explicitly labelled `agent::ready` issue enters unattended work.
+- Project-level loop enablement authorizes unattended work. A new issue is
+  eligible only when it is open, non-confidential, has none of
+  `agent::running`, `agent::awaiting-human`, `agent::blocked`, or
+  `agent::failed`, and has no ledger record.
 - One issue maps to one durable worktree and one authoritative source branch.
 - Existing-MR remediation uses the verified MR source branch and never creates
   a second MR.
@@ -205,7 +206,7 @@ Failures are classified before labels or exit codes are chosen:
 
 | Category | Examples | Durable outcome |
 | --- | --- | --- |
-| Idle | No running or ready issue | Successful `idle` |
+| Idle | No resumable record or eligible issue | Successful `idle` |
 | Retryable | Timeout, temporary API failure, transient runner contention | `retry-wait`; up to three automatic attempts |
 | Human-blocked | Ambiguous request, unmet dependency, protected policy lane, unsafe recovery evidence | `agent::blocked` with exact next action |
 | Awaiting review | Exact MR and required receipts verified | `agent::awaiting-human` |
@@ -271,13 +272,13 @@ Migration is evidence-preserving:
 5. Apply approved migrations idempotently only while the plan and inventory
    remain exact and no ledger record already exists; verify the resulting
    ledger, worktrees, labels, branches, and MRs.
-6. Run one explicitly opted-in canary issue through recovery, publication,
+6. Run one eligible, unprojected canary issue through recovery, publication,
    observation, and human handoff.
 7. Re-enable the timer only after the canary and operational status output are
    verified.
 
 The implementation is maintained in reviewable slices: ledger and
-reconciliation; explicit ready selection and classification; durable worktrees
+reconciliation; deterministic selection and classification; durable worktrees
 and versioned worker segments; idempotent publication and existing-MR
 remediation; post-publication observation and repair; then wrapper, timer,
 status, and operational-documentation updates. Each slice follows the full

@@ -178,7 +178,10 @@ def plan_retry(record: LedgerRecord, *, now: datetime) -> PlannedOutcome:
                 retry_at=None,
                 error_code=ErrorCode.RETRY_EXHAUSTED,
                 summary="Automatic retry budget exhausted.",
-                next_action="Resolve the blocker and re-add agent::ready.",
+                next_action=(
+                    "Resolve the blocker, then run agent-work loop retry --issue-iid "
+                    f"{record.issue_iid} --apply."
+                ),
             )
         )
     return PlannedOutcome(

@@ -64,8 +64,9 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - Bash syntax and ShellCheck validation when a project contains Bash.
 - A portable, human-gated agent workflow rooted in `.agents/skills`, with
   separate coding and documentation/agent-policy lanes.
-- A recoverable serial GitLab issue loop for explicitly opted-in `agent::ready`
-  work that creates merge requests but never approves or merges them.
+- A recoverable serial GitLab issue loop that selects the oldest eligible open,
+  non-confidential issue without a lifecycle projection or durable-ledger record;
+  it creates merge requests but never approves or merges them.
 
 ## Agent workflow
 
