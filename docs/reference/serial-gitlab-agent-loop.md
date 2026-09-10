@@ -107,6 +107,14 @@ with the completed phase, receipts, diagnostic, and next action. The trusted
 runner validates it against the ledger, configured numeric project, Git
 evidence, and required workflow receipts before changing state.
 
+For ordinary issue work, coding and content finalizers may enter
+`ready_to_publish` only when the envelope returns, or the ledger already
+retains, a `merge_request_draft`. Existing-MR remediation may omit a draft
+because it publishes only to the verified existing MR. A legacy ordinary
+`PUBLISHING` or `READY_TO_PUBLISH` record with `source_sha`, no draft, and
+`intent=null` is recovered side-effect-free to its lane finalizer; the runner
+never synthesizes a draft from issue text.
+
 A rejected phase supplies its required `rejection_route`; the runner durably
 returns to that recorded owner phase rather than retrying or guessing a route.
 Receipts must match the exact completed-phase requirements. Required

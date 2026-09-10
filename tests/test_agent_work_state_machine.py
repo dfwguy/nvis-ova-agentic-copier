@@ -250,3 +250,35 @@ def test_discovery_must_establish_a_known_workflow_lane() -> None:
 
     with pytest.raises(ValueError, match="receipt"):
         apply_worker_result(record, result, now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("lane", "phase", "receipt"),
+    [
+        (
+            WorkflowLane.CODING,
+            WorkflowPhase.CODING_FINALIZE,
+            "$tdd-finalizer: approved",
+        ),
+        (
+            WorkflowLane.CONTENT,
+            WorkflowPhase.CONTENT_FINALIZE,
+            "$documentation-finalizer: approved",
+        ),
+    ],
+)
+def test_ordinary_finalizer_cannot_publish_without_merge_request_metadata(
+    lane: WorkflowLane, phase: WorkflowPhase, receipt: str
+) -> None:
+    record = _record().model_copy(update={"workflow_lane": lane, "phase": phase})
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": phase,
+            "completed_phase": phase,
+            "workflow_lane": lane,
+            "receipts": (receipt,),
+        }
+    )
+
+    with pytest.raises(ValueError, match="publication metadata"):
+        apply_worker_result(record, result, now=NOW)

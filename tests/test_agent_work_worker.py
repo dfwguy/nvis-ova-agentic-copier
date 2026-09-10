@@ -7,7 +7,11 @@ import json
 import pytest
 
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase
-from agent_work.worker import WorkerProtocolError, parse_worker_result
+from agent_work.worker import (
+    WorkerProtocolError,
+    build_worker_prompt,
+    parse_worker_result,
+)
 
 
 def _envelope(**updates: object) -> dict[str, object]:
@@ -73,3 +77,26 @@ def test_worker_protocol_rejects_identity_mismatch() -> None:
             expected_issue_iid=12,
             expected_revision=3,
         )
+
+
+def test_worker_prompt_requires_publication_metadata_from_ordinary_finalizer() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "coding-finalize",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        issue_title="Untrusted title",
+        issue_description="Untrusted body",
+    )
+
+    assert (
+        "When ordinary work completes coding-finalize or content-finalize and the "
+        "durable record has no merge_request_draft, a successful result must include "
+        "merge_request_draft with non-empty title and description fields."
+    ) in prompt
+    assert "Do not commit, push, approve, or merge" in prompt
+    assert "exactly one protocol_version=1 JSON object" in prompt

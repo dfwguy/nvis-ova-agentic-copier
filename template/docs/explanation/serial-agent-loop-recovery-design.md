@@ -194,6 +194,13 @@ validated repair that the trusted runner may publish. `retryable` names a
 transient category and retry deadline. `needs_human` names the blocked reason
 and a concrete action without treating a deliberate stop as failure.
 
+For ordinary issue work, the coding or content finalizer may return
+`ready_to_publish` only with a returned or ledger-retained
+`merge_request_draft`. This prevents the trusted runner from reconstructing a
+publication request from untrusted issue text. Existing-MR remediation is the
+intentional exception: its verified MR supplies the publication target, so no
+new draft is required.
+
 Architecture, Red/Green, documentation, review, finalization,
 post-publication observation, and repair remain required according to
 `AGENTS.md`. Their receipts are persisted between segments. Publication no
@@ -228,6 +235,10 @@ safe next transition:
 - A persisted transition intent is checked against GitLab and Git; an already
   completed external mutation is recorded, while an absent idempotent mutation
   may be retried.
+- A legacy ordinary `PUBLISHING` or `READY_TO_PUBLISH` record with
+  `source_sha`, no `merge_request_draft`, and `intent=null` returns
+  side-effect-free to its lane finalizer. Reconciliation never fabricates a
+  draft from issue text.
 - A missing worktree may be recreated only from recorded and verified commits
   when no uncommitted evidence can be lost.
 - A dirty durable worktree remains in place for its next segment. It is not

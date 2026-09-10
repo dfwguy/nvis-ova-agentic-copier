@@ -11,6 +11,7 @@ from .domain import (
     LIFECYCLE_LABELS,
     ErrorCode,
     RunnerState,
+    WorkflowLane,
     WorkflowPhase,
     WorkKind,
     label_for_state,
@@ -471,8 +472,26 @@ def _publish(
         WorkKind.EXISTING_MR_REMEDIATION,
         WorkKind.MERGE_CONFLICT_REPAIR,
     }
-    if baseline_sha is None or (not remediation and draft is None):
+    if baseline_sha is None:
         raise SegmentError("worker did not provide exact publication metadata")
+    if not remediation and draft is None:
+        if record.intent is not None:
+            raise SegmentError("worker did not provide exact publication metadata")
+        finalizer = {
+            WorkflowLane.CODING: WorkflowPhase.CODING_FINALIZE,
+            WorkflowLane.CONTENT: WorkflowPhase.CONTENT_FINALIZE,
+        }.get(record.workflow_lane)
+        if finalizer is None:
+            raise SegmentError("worker did not provide exact publication metadata")
+        return ledger.persist(
+            transition_record(
+                record,
+                RunnerState.EXECUTING,
+                phase=finalizer,
+                summary="Publication metadata is missing; finalization must be replayed.",
+                next_action="Rerun the lane finalizer to produce exact merge request metadata.",
+            )
+        )
     replaying = record.intent is not None
     if not replaying:
         protected = tuple(

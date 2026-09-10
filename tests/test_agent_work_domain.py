@@ -35,6 +35,7 @@ def test_terminal_and_handoff_states_have_distinct_projections() -> None:
     [
         (RunnerState.PREPARING, RunnerState.EXECUTING),
         (RunnerState.EXECUTING, RunnerState.PUBLISHING),
+        (RunnerState.PUBLISHING, RunnerState.EXECUTING),
         (RunnerState.PUBLISHING, RunnerState.OBSERVING),
         (RunnerState.OBSERVING, RunnerState.REPAIR),
         (RunnerState.REPAIR, RunnerState.PUBLISHING),
@@ -53,7 +54,6 @@ def test_required_transition_edges_are_explicit(
     [
         (RunnerState.PREPARING, RunnerState.OBSERVING),
         (RunnerState.EXECUTING, RunnerState.OBSERVING),
-        (RunnerState.PUBLISHING, RunnerState.EXECUTING),
         (RunnerState.BLOCKED, RunnerState.EXECUTING),
         (RunnerState.FAILED, RunnerState.PREPARING),
         (RunnerState.COMPLETE, RunnerState.EXECUTING),
