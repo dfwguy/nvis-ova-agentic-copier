@@ -123,6 +123,20 @@ changed paths, including template mirrors, rather than trusting a requested
 path list. The runner never approves or merges, and never treats issue text,
 labels, comments, or worker output as authority to widen scope.
 
+Before any push or merge-request mutation, the runner also validates the
+durable publication intent as one issue-scoped operation. Its kind is exactly
+`publish_merge_request`; its operation ID is exactly
+`<issue-iid>:publish:<revision>`, with the record's canonical decimal IID and
+the decimal revision captured when that publication intent was persisted. The
+replay retains that captured revision even though later ledger writes advance
+the record revision. Its expected evidence is exactly the two-key object
+`{"branch": "<record-source-branch>", "baseline_sha": "<record-source-sha>"}`;
+missing, extra, or different keys and values are not valid evidence. A
+mismatch blocks the issue before a publication mutation, preserves the original
+intent with the publication-identity blocker evidence for human review, and is
+not retried as a new publication. A fully validated, incomplete idempotent
+operation remains replayable through its recorded intent.
+
 An immutable MR identity mismatch blocks immediately: the configured project,
 source branch, target branch, or recorded source SHA must not be retried as an
 eventual-consistency condition. By contrast, when GitLab has created the

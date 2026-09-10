@@ -103,6 +103,7 @@ class FakeGitLab:
         self.existing_mr: MergeRequestEvidence | None = None
         self.create_error: RuntimeError | None = None
         self.created_merge_requests = 0
+        self.closing_reference_updates = 0
         self.fetched_merge_requests: list[int] = []
         self.fetch_merge_request_error: GitLabError | None = None
         self.pipeline_error: GitLabError | None = None
@@ -175,6 +176,7 @@ class FakeGitLab:
         self, mr: MergeRequestEvidence, issue_iid: int
     ) -> MergeRequestEvidence:
         del issue_iid
+        self.closing_reference_updates += 1
         return mr
 
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
@@ -819,7 +821,7 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
-    ledger.persist(
+    pending = ledger.persist(
         _record(
             tmp_path,
             state=RunnerState.PUBLISHING,
@@ -832,11 +834,15 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
                 "intent": TransitionIntentRecord(
                     operation_id="12:publish:1",
                     kind="publish_merge_request",
-                    expected_evidence={"branch": "agent/issue-12"},
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                    },
                 ),
             }
         )
     )
+    ledger.persist(pending.model_copy(update={"summary": "Retry publication."}))
     gitlab = FakeGitLab()
     gitlab.existing_mr = _mr()
 
@@ -852,6 +858,205 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
     assert outcome.intent is None
     assert gitlab.created_merge_requests == 0
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        TransitionIntentRecord(
+            operation_id="12:publish:1",
+            kind="prepare_worktree",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:1",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-13",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:1",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "b" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="13:publish:1",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="012:publish:0",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:create:0",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:0:extra",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:01",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+            },
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:0",
+            kind="publish_merge_request",
+            expected_evidence={"branch": "agent/issue-12"},
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:0",
+            kind="publish_merge_request",
+            expected_evidence={"baseline_sha": "a" * 40},
+        ),
+        TransitionIntentRecord(
+            operation_id="12:publish:0",
+            kind="publish_merge_request",
+            expected_evidence={
+                "branch": "agent/issue-12",
+                "baseline_sha": "a" * 40,
+                "merge_request_iid": 88,
+            },
+        ),
+    ],
+    ids=(
+        "kind",
+        "branch",
+        "baseline",
+        "issue-operation",
+        "noncanonical-issue-iid",
+        "wrong-action",
+        "missing-revision",
+        "extra-operation-component",
+        "noncanonical-revision",
+        "missing-baseline-evidence",
+        "missing-branch-evidence",
+        "additional-evidence",
+    ),
+)
+def test_publication_rejects_inconsistent_replay_intent_before_mutation(
+    tmp_path: Path, intent: TransitionIntentRecord
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+                "intent": intent,
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert outcome.intent == intent
+    assert ledger.load(12) == outcome
+    assert repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+    assert gitlab.closing_reference_updates == 0
+
+
+@pytest.mark.parametrize("operation_revision", [1, 2])
+def test_publication_rejects_intent_not_older_than_durable_record(
+    tmp_path: Path, operation_revision: int
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    intent = TransitionIntentRecord(
+        operation_id=f"12:publish:{operation_revision}",
+        kind="publish_merge_request",
+        expected_evidence={
+            "branch": "agent/issue-12",
+            "baseline_sha": "a" * 40,
+        },
+    )
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+                "intent": intent,
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert outcome.intent == intent
+    assert ledger.load(12) == outcome
+    assert repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+    assert gitlab.closing_reference_updates == 0
 
 
 def test_delayed_publication_closing_evidence_schedules_retry(
