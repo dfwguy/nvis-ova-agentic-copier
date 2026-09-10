@@ -12,6 +12,7 @@ from typing import Literal
 import pytest
 
 from agent_work.domain import (
+    LIFECYCLE_LABELS,
     CommandRequest,
     ErrorCode,
     RunnerState,
@@ -55,7 +56,7 @@ def _issue(
         iid=iid,
         title="Work",
         description=description,
-        labels=("agent::ready",),
+        labels=(),
         state=state,
     )
 
@@ -109,15 +110,21 @@ class FakeGitLab:
     def verify_project(self) -> GitLabProject:
         return _project()
 
-    def list_ready(self) -> tuple[GitLabIssue, ...]:
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
         return (
             (self.issue,)
-            if self.issue.state == "opened" and "agent::ready" in self.issue.labels
+            if self.issue.state == "opened"
+            and not self.issue.confidential
+            and not set(self.issue.labels).intersection(LIFECYCLE_LABELS)
             else ()
         )
 
     def list_projected(self) -> tuple[GitLabIssue, ...]:
-        return (self.issue,)
+        return (
+            (self.issue,)
+            if set(self.issue.labels).intersection(LIFECYCLE_LABELS)
+            else ()
+        )
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         del iid
@@ -298,12 +305,13 @@ def _record(
     )
 
 
-def test_new_ready_issue_is_claimed_and_prepared_without_running_worker(
-    tmp_path: Path,
+@pytest.mark.parametrize("labels", [(), ("customer::priority",)])
+def test_new_eligible_issue_is_claimed_and_prepared_without_running_worker(
+    tmp_path: Path, labels: tuple[str, ...]
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
-    gitlab = FakeGitLab()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": labels}))
     repository = FakeRepository(config)
 
     record = run_segment(
@@ -1054,10 +1062,10 @@ def test_resumed_worker_requires_the_recorded_branch_and_baseline(
     assert outcome.error_code is ErrorCode.WORKTREE_OWNERSHIP_AMBIGUOUS
 
 
-def test_invalid_ready_plus_running_projection_becomes_blocked(tmp_path: Path) -> None:
+def test_multiple_lifecycle_projections_become_blocked(tmp_path: Path) -> None:
     config = _config(tmp_path)
     gitlab = FakeGitLab(
-        _issue().model_copy(update={"labels": ("agent::ready", "agent::running")})
+        _issue().model_copy(update={"labels": ("agent::blocked", "agent::running")})
     )
 
     outcome = run_segment(
@@ -1071,6 +1079,50 @@ def test_invalid_ready_plus_running_projection_becomes_blocked(tmp_path: Path) -
 
     assert outcome is not None and outcome.state is RunnerState.BLOCKED
     assert outcome.error_code is ErrorCode.MISSING_LEDGER
+
+
+def test_terminal_ledger_issue_is_not_selected_as_fresh_work(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    completed = ledger.persist(
+        _record(tmp_path, state=RunnerState.COMPLETE, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue())
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is None
+    assert ledger.load(12) == completed
+    preview = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+    assert preview.outcome == "idle"
+
+
+def test_run_preview_reports_eligible_unprojected_work(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(
+            config,
+            JsonLedger(config.state_root),
+            FakeGitLab(_issue()),
+            FakeRepository(config),
+        ),
+    )
+
+    assert report.outcome == "eligible"
 
 
 def test_complete_record_with_stale_label_only_removes_the_projection(
@@ -1480,7 +1532,7 @@ def test_migration_replays_only_exact_pending_intent_after_projection_removed(
         )
     )
     conflicting_gitlab = FakeGitLab(
-        issue.model_copy(update={"labels": ("agent::ready",)})
+        issue.model_copy(update={"labels": ("agent::awaiting-human",)})
     )
     conflicting_repository = FakeRepository(conflicting_config)
     conflicting_repository.inventory_result = (("agent/issue-12",), (), ())

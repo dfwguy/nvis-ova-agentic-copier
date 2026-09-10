@@ -7,14 +7,11 @@ from agent_work.migration import build_migration_plan
 from agent_work.models import MigrationObservation
 
 
-def test_migration_preview_leaves_unlabelled_and_ready_issues_untouched() -> None:
+def test_migration_preview_leaves_unlabelled_issues_untouched() -> None:
     plan = build_migration_plan(
         MigrationObservation(
             project_id=310967,
-            issues=(
-                {"iid": 1, "state": "opened", "labels": []},
-                {"iid": 2, "state": "opened", "labels": ["agent::ready"]},
-            ),
+            issues=({"iid": 1, "state": "opened", "labels": []},),
         )
     )
 

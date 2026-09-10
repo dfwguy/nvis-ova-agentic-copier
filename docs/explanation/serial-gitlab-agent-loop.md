@@ -5,7 +5,7 @@ summary: Understand why bounded recovery segments use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-10
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -26,8 +26,7 @@ the same issue before it considers new work.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Ready: human opts in
-    Ready --> Preparing
+    [*] --> Preparing: select eligible issue
     Preparing --> Executing
     Executing --> RetryWait: transient failure
     RetryWait --> Executing: retry due
@@ -39,14 +38,15 @@ stateDiagram-v2
     Preparing --> Blocked
     Executing --> Blocked
     Repair --> Blocked
+    Blocked --> Preparing: explicit retry after human action
 ```
 
-GitLab is the shared, operator-visible projection: a human places
-`agent::ready` on an issue, active or resumable work is `agent::running`, an
-exact verified merge-request handoff is `agent::awaiting-human`, and a required
-decision is `agent::blocked`. `agent::failed` is reserved for an exceptional
-condition the runner cannot safely reconcile or record. Labels deliberately do
-not carry the transaction history; the local ledger does.
+GitLab is the shared, operator-visible projection: active or resumable work is
+`agent::running`, an exact verified merge-request handoff is
+`agent::awaiting-human`, and a required decision is `agent::blocked`.
+`agent::failed` is reserved for an exceptional condition the runner cannot
+safely reconcile or record. Labels deliberately do not carry the transaction
+history; the local ledger does.
 
 The ledger fills the gap GitLab labels cannot safely represent. It remembers
 the selected issue, phase, attempt, retry deadline, durable worktree, branch
@@ -65,8 +65,10 @@ so retries and recovery do not overlap a still-running worker.
 GitLab remains preferable to a webhook receiver or a filesystem queue because
 it already supplies the human work record and MR handoff. The local ledger is
 not a second shared queue; it is durability for the host that owns execution.
-Only explicitly opted-in, open, non-confidential `agent::ready` issues may enter
-unattended work, and resumable running work always has priority.
+Enabling the project-level loop authorizes open, non-confidential issues with
+no lifecycle projection and no ledger record; unrelated labels are irrelevant.
+Resumable running work always has priority. A blocked item resumes only through
+an explicit retry after its recorded human action.
 
 The worker is intentionally less trusted than the runner. It reports a
 versioned `ready_to_publish`, `retryable`, or `needs_human` envelope; the

@@ -69,7 +69,6 @@ class ErrorCode(StrEnum):
     MULTIPLE_RUNNING_PROJECTIONS = "multiple_running_projections"
     MISSING_LEDGER = "missing_ledger"
     ORPHAN_EVIDENCE = "orphan_evidence"
-    READY_PROJECTION_INVALID = "ready_projection_invalid"
     REMEDIATION_MARKER_INVALID = "remediation_marker_invalid"
     REMEDIATION_MR_MISMATCH = "remediation_mr_mismatch"
     PROTECTED_POLICY_MANUAL = "protected_policy_manual"
@@ -104,7 +103,6 @@ ACTIVE_STATES = frozenset(
 )
 
 LIFECYCLE_LABELS: Final = (
-    "agent::ready",
     "agent::running",
     "agent::awaiting-human",
     "agent::blocked",

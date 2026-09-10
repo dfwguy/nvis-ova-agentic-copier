@@ -67,7 +67,7 @@ def _mr_payload(description: str = "") -> dict[str, object]:
 class ApiStub:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
-        self.issue = _issue_payload(labels=["agent::ready"])
+        self.issue = _issue_payload(labels=["customer::priority"])
 
     def __call__(self, command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         self.commands.append(command)
@@ -138,15 +138,24 @@ def test_gitlab_lifecycle_transition_never_requests_target_removal(
         assert f"add_labels={target}" in update
 
 
-def test_gitlab_gateway_enforces_ready_selection_and_exact_evidence(
+def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     tmp_path: Path,
 ) -> None:
     api = ApiStub()
     gateway = GitLabGateway(_config(tmp_path), api)
 
     assert gateway.verify_project().id == 310967
-    assert [issue.iid for issue in gateway.list_ready()] == [12]
-    assert {issue.iid for issue in gateway.list_projected()} == {12, 13}
+    assert [issue.iid for issue in gateway.list_eligible()] == [12]
+    issue_list_calls = [
+        command
+        for command in api.commands
+        if command[command.index("-X") + 2].endswith("/issues")
+    ]
+    assert all(
+        not any(part.startswith("labels=") for part in command)
+        for command in issue_list_calls
+    )
+    assert {issue.iid for issue in gateway.list_projected()} == {13}
     assert gateway.fetch_issue(12).description == ""
     assert gateway.transition_labels(12, "agent::running").labels == ("agent::running",)
     assert gateway.fetch_merge_request(88).iid == 88
@@ -171,6 +180,60 @@ def test_gitlab_gateway_enforces_ready_selection_and_exact_evidence(
         "projects/310967" in command[command.index("-X") + 2]
         for command in api.commands
     )
+
+
+@pytest.mark.parametrize(
+    ("labels", "state", "confidential", "eligible"),
+    [
+        ([], "opened", False, True),
+        (["customer::priority"], "opened", False, True),
+        (["agent::running"], "opened", False, False),
+        (["agent::awaiting-human"], "opened", False, False),
+        (["agent::blocked"], "opened", False, False),
+        (["agent::failed"], "opened", False, False),
+        ([], "opened", True, False),
+        ([], "closed", False, False),
+    ],
+)
+def test_gitlab_eligibility_excludes_every_ineligible_issue_kind(
+    tmp_path: Path,
+    labels: list[str],
+    state: str,
+    *,
+    confidential: bool,
+    eligible: bool,
+) -> None:
+    payload = _issue_payload(labels=labels)
+    payload.update({"state": state, "confidential": confidential})
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert "state=opened" in command
+        assert "order_by=created_at" in command
+        assert "sort=asc" in command
+        assert not any(part.startswith("labels=") for part in command)
+        return CommandResult(0, json.dumps([payload]), "")
+
+    issues = GitLabGateway(_config(tmp_path), fake).list_eligible()
+
+    assert bool(issues) is eligible
+
+
+def test_gitlab_eligible_inventory_reads_every_oldest_first_page(
+    tmp_path: Path,
+) -> None:
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        page_field = next(part for part in command if part.startswith("page="))
+        page = int(page_field.removeprefix("page="))
+        payload = (
+            [_issue_payload(iid) for iid in range(1, 101)]
+            if page == 1
+            else [_issue_payload(101)]
+        )
+        return CommandResult(0, json.dumps(payload), "")
+
+    issues = GitLabGateway(_config(tmp_path), fake).list_eligible()
+
+    assert [issue.iid for issue in issues] == list(range(1, 102))
 
 
 def test_gitlab_projected_inventory_reads_every_issue_page(tmp_path: Path) -> None:

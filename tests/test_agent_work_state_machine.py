@@ -74,6 +74,8 @@ def test_fourth_retryable_result_blocks_instead_of_failing() -> None:
 
     assert outcome.record.state is RunnerState.BLOCKED
     assert outcome.record.error_code is ErrorCode.RETRY_EXHAUSTED
+    assert "loop retry" in outcome.record.next_action
+    assert "label" not in outcome.record.next_action
 
 
 def test_needs_human_result_becomes_a_documented_block() -> None:

@@ -5,9 +5,9 @@
 ## Start the GitLab issue loop
 
 After the repository safeguards are ready, install the runner and enable its
-single user-level systemd timer. The loop processes only the oldest explicitly
-opted-in `agent::ready` issue and never approves or merges its human-gated
-merge request.
+single user-level systemd timer. The loop processes the oldest eligible open,
+non-confidential issue without lifecycle or ledger state and never approves or
+merges its human-gated merge request.
 
 ```bash
 uv run agent-work loop run --json
@@ -32,10 +32,10 @@ pass with temporary-failure exit `75`.
 
 ## Serial GitLab agent loop
 
-This project uses GitLab-only polling for one opted-in issue at a time. The
+This project uses GitLab-only polling for one eligible issue at a time. The
 runner derives its checkout and GitLab project from the current repository,
 then confirms both Git and GitLab access before work begins. A Developer account
-can poll `agent::ready` issues, so no webhook or inbound service is required:
+can poll open, unprojected issues, so no webhook or inbound service is required:
 
 ```bash
 uv run agent-work loop run --json
