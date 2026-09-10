@@ -172,7 +172,12 @@ class GitLabGateway:
 
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
         """Project exactly one lifecycle label and verify the result."""
-        fields: list[str] = [f"remove_labels={','.join(LIFECYCLE_LABELS)}"]
+        removed_labels = tuple(
+            lifecycle_label
+            for lifecycle_label in LIFECYCLE_LABELS
+            if lifecycle_label != label
+        )
+        fields: list[str] = [f"remove_labels={','.join(removed_labels)}"]
         if label is not None:
             fields.append(f"add_labels={label}")
         self._call(

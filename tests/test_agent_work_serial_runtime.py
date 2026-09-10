@@ -1388,3 +1388,158 @@ def test_migration_replays_its_intent_after_partial_gitlab_failure(
     completed = ledger.load(12)
     assert completed is not None and completed.intent is None
     assert gitlab.labels[-1] == "agent::blocked"
+
+
+def test_migration_replays_only_exact_pending_intent_after_projection_removed(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    seed_ledger = JsonLedger(config.state_root)
+    issue = _issue().model_copy(update={"labels": ("agent::failed",)})
+    seed_gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.inventory_result = (("agent/issue-12",), (), ())
+    seed_dependencies = _dependencies(config, seed_ledger, seed_gitlab, repository)
+    preview = dispatch(
+        CommandRequest(command="migration.preview"),
+        apply=False,
+        dependencies=seed_dependencies,
+    )
+    plan_file = tmp_path / "migration-plan.json"
+    plan_file.write_text(preview.model_dump_json())
+    seed_gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="label"):
+        dispatch(
+            CommandRequest(command="migration.apply", plan_file=plan_file),
+            apply=True,
+            dependencies=seed_dependencies,
+        )
+
+    pending = seed_ledger.load(12)
+    assert pending is not None and pending.intent is not None
+    variants = {
+        "exact": pending.intent,
+        "missing": None,
+        "operation": pending.intent.model_copy(update={"operation_id": "migration:13"}),
+        "kind": pending.intent.model_copy(update={"kind": "other"}),
+        "evidence": pending.intent.model_copy(
+            update={"expected_evidence": {"label": "agent::failed"}}
+        ),
+    }
+
+    for name, intent in variants.items():
+        case_root = tmp_path / name
+        case_config = _config(case_root)
+        case_ledger = JsonLedger(case_config.state_root)
+        case_ledger.persist(
+            pending.model_copy(
+                update={
+                    "revision": 0,
+                    "intent": intent,
+                    "worktree": case_config.state_root / "worktrees" / "12",
+                }
+            )
+        )
+        case_issue = issue.model_copy(update={"labels": ()})
+        case_gitlab = FakeGitLab(case_issue)
+        case_repository = FakeRepository(case_config)
+        case_repository.inventory_result = (("agent/issue-12",), (), ())
+        dependencies = _dependencies(
+            case_config, case_ledger, case_gitlab, case_repository
+        )
+
+        if name == "exact":
+            report = dispatch(
+                CommandRequest(command="migration.apply", plan_file=plan_file),
+                apply=True,
+                dependencies=dependencies,
+            )
+            assert report.outcome == "migration_applied"
+            assert case_gitlab.labels == ["agent::blocked"]
+            completed = case_ledger.load(12)
+            assert completed is not None and completed.intent is None
+        else:
+            with pytest.raises(RuntimeError):
+                dispatch(
+                    CommandRequest(command="migration.apply", plan_file=plan_file),
+                    apply=True,
+                    dependencies=dependencies,
+                )
+            assert case_gitlab.labels == []
+
+    conflicting_root = tmp_path / "conflicting"
+    conflicting_config = _config(conflicting_root)
+    conflicting_ledger = JsonLedger(conflicting_config.state_root)
+    conflicting_ledger.persist(
+        pending.model_copy(
+            update={
+                "revision": 0,
+                "worktree": conflicting_config.state_root / "worktrees" / "12",
+            }
+        )
+    )
+    conflicting_gitlab = FakeGitLab(
+        issue.model_copy(update={"labels": ("agent::ready",)})
+    )
+    conflicting_repository = FakeRepository(conflicting_config)
+    conflicting_repository.inventory_result = (("agent/issue-12",), (), ())
+
+    with pytest.raises(RuntimeError):
+        dispatch(
+            CommandRequest(command="migration.apply", plan_file=plan_file),
+            apply=True,
+            dependencies=_dependencies(
+                conflicting_config,
+                conflicting_ledger,
+                conflicting_gitlab,
+                conflicting_repository,
+            ),
+        )
+    assert conflicting_gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    ("reviewed_state", "changed_state"),
+    [("opened", "closed"), ("closed", "opened")],
+)
+def test_migration_rejects_pending_replay_when_issue_state_changed(
+    tmp_path: Path, reviewed_state: str, changed_state: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    issue = _issue(state=reviewed_state).model_copy(
+        update={"labels": ("agent::failed",)}
+    )
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.inventory_result = (("agent/issue-12",), (), ())
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    preview = dispatch(
+        CommandRequest(command="migration.preview"),
+        apply=False,
+        dependencies=dependencies,
+    )
+    plan_file = tmp_path / "migration-plan.json"
+    plan_file.write_text(preview.model_dump_json())
+    gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="label"):
+        dispatch(
+            CommandRequest(command="migration.apply", plan_file=plan_file),
+            apply=True,
+            dependencies=dependencies,
+        )
+    pending = ledger.load(12)
+    assert pending is not None and pending.intent is not None
+    gitlab.issue = issue.model_copy(update={"labels": (), "state": changed_state})
+
+    with pytest.raises(RuntimeError, match="migration evidence changed"):
+        dispatch(
+            CommandRequest(command="migration.apply", plan_file=plan_file),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert gitlab.labels == []
+    assert ledger.load(12) == pending
