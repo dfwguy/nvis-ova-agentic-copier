@@ -113,7 +113,8 @@ performs the publication handoff after it validates that draft.
 
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
-test -d "$(git rev-parse --show-toplevel)/.git"
+git rev-parse --git-dir >/dev/null
+git rev-parse --git-common-dir >/dev/null
 project_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID")"
 expected_origin="$(jq -er '.http_url_to_repo' <<<"$project_json")"
 test "$(git remote get-url origin)" = "$expected_origin"
@@ -133,9 +134,9 @@ git rev-parse --abbrev-ref HEAD
 ```
 
 - **On a mechanically verified runner `agent/issue-<iid>` branch** → use the
-  checks above to prove the dedicated `.git` directory, configured project
+  checks above to prove the durable Git worktree, configured project
   origin, and configured default branch. Then continue the runner-selected
-  workflow on this branch. `agent-work run-next --apply` is the parent
+  workflow phase on this branch. `agent-work loop run --apply` is the parent
   invocation that selected it; never invoke `agent-work` recursively.
 
 - **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:

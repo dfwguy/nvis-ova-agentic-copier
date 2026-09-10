@@ -52,7 +52,8 @@ This repository is a Copier template, whose generated-project payload is under
 - **Actual paths:** the systemd-only wrapper and entry point is
   `scripts/agent-work-systemd-run.sh`, mirrored in `template/scripts/`; its
   service units are in `systemd/` and `template/systemd/`, and its behavior is
-  tested from `tests/test_template.py`.
+  tested from `tests/test_template.py`. Recoverable records, the project lock,
+  and durable issue worktrees live below the XDG state directory.
 - **Rationale:** this wrapper is a systemd integration boundary, not an
   interactive user CLI or sourceable library. Its stable `scripts/` path is
   referenced by the installed service unit.

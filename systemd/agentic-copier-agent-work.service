@@ -7,7 +7,7 @@ After=network-online.target
 Type=oneshot
 Environment=AGENT_WORK_LOG_TAG=agentic-copier-agent-work
 EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env
-ExecStart=/usr/bin/env bash ${AGENT_WORK_CHECKOUT}/scripts/agent-work-systemd-run.sh
+ExecStart=/usr/bin/env bash ${AGENT_WORK_CHECKOUT}/scripts/agent-work-systemd-run.sh --apply
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=agentic-copier-agent-work

@@ -1,175 +1,184 @@
 ---
 title: Serial GitLab agent-loop reference
 type: reference
-summary: Look up the run-next command, lifecycle, and publication constraints.
+summary: Look up the recoverable loop commands, lifecycle, data, and operating constraints.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-09
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
-    why: Configures the loop described by this reference.
+    why: Configures, recovers, and migrates the loop.
   - path: ../explanation/serial-gitlab-agent-loop.md
-    why: Explains the design trade-offs behind the lifecycle.
+    why: Explains the architecture behind this contract.
+  - path: ../explanation/serial-agent-loop-recovery-design.md
+    why: Explains the recoverable state machine in detail.
 ---
 
 # Serial GitLab agent-loop reference
 
-## Command
+## Commands
 
 ```text
-agent-work run-next [--apply] [--json] [--timeout-seconds SECONDS]
+agent-work loop run [--apply] [--json] [--debug]
+agent-work loop status [--json] [--debug]
+agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
+agent-work migration preview [--json] [--debug]
+agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 ```
 
-`run-next` polls the configured GitLab project, selects at most one eligible
-issue, and exits. Without `--apply`, it previews the selected work without
-repository or GitLab mutation. `--apply` authorizes one bounded run that may
-push a feature branch and create one merge request. `--json` requests safe
-machine-readable output. `--timeout-seconds` bounds the one configured coding-agent process and
-defaults to 1800.
+`loop run` performs one bounded state-machine segment. Without `--apply`, it
+reports the next safe action without changing GitLab, the ledger, worktrees,
+branches, labels, or services. `loop status` reports durable ledger records
+together with verified configured-project identity. `loop retry` previews one
+recorded blocked item; `--apply`
+resets its retry budget and moves it to resumable preparation after explicit
+human direction.
 
-The command operates relative to the current Git checkout. It reads `origin`,
-resolves the exact namespace path through the GitLab projects API, confirms the
-resulting numeric project endpoint, and verifies that the checkout is on the
-configured default branch—or its configured `AGENT_WORK_BASE_BRANCH`—before it
-runs `git pull --ff-only`. A service base branch must track the default branch
-and can only fast-forward from it. All later endpoints use that confirmed
-numeric project ID. A launch from another branch fails without pulling and
-tells the operator to switch to the required branch, pull, and launch again.
-This preserves an `agent/issue-<IID>` handoff rather than silently changing it.
-The command always derives its workspace from the current directory. Failed Git
-or GitLab confirmations stop the launch. Open,
-non-confidential issues are eligible unless their labels show active or terminal
-agent work; issue title, body, and labels are untrusted task data.
+`migration preview` inventories legacy evidence and proposes only safe,
+idempotent records and label changes. `migration apply` requires a reviewed
+preview file and `--apply`; it does not resolve ambiguous evidence. `--json` emits
+the documented redacted JSON result. `--debug` adds local diagnostics without
+credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
 
-## Execution boundaries
+## Lifecycle
 
-| Boundary | Contract |
+GitLab is the shared queue projection; the local ledger is the transaction
+record. Only the oldest open, non-confidential `agent::ready` issue is eligible
+for unattended selection. Each segment reconciles and resumes existing
+`agent::running` work before selecting new work.
+
+| GitLab label | Ledger state or outcome | Meaning |
+| --- | --- | --- |
+| `agent::ready` | ready | A human explicitly opted in to unattended work. |
+| `agent::running` | preparing, executing, retry-wait, publishing, observing, or repair | Work is active or safely resumable. |
+| `agent::awaiting-human` | awaiting-human | Exact MR evidence and required receipts await human review. |
+| `agent::blocked` | blocked | A human must take the recorded next action. |
+| `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
+
+The durable sequence is `ready → preparing → executing`; execution may enter
+`retry-wait`, resume execution, or produce `publishing`. Verified publication
+enters `observing`, which can enter `repair`, return to `publishing`, or finish
+at `awaiting-human`. A human-blocked condition becomes `blocked`; a human
+resolves it and explicitly opts in again. Human merge or closure ends an
+awaiting-human record.
+
+Pipeline rejection or an exact-MR conflict enters `repair` at `coding-green`.
+A successful `$tdd-green` repair re-enters the normal downstream chain at
+`coding-nonfunctional`, then completes validation, final reviews, and
+finalization before it republishes and repeats observation and the
+post-publication gates. A rejected `post-publication` phase routes durably to
+`coding-green`. Immediately after the post-publication worker, the runner
+revalidates exact MR evidence again before it records `awaiting-human`.
+
+Each timer activation owns one bounded segment: acquire the single-project
+lock, reconcile intent and observed evidence, resume a record when possible,
+execute the next worker phase or phase group, and record one outcome. The
+timer uses `OnUnitInactiveSec=20min`, measured after the previous segment
+finishes. The loop is serial per host and project, not multi-host coordination.
+
+## Ledger and worktrees
+
+State is below the XDG state directory, keyed by configured GitLab host and
+numeric project ID. Each `loop status` ledger item identifies its durable
+worktree path. Every active issue
+has one atomic, restrictive-permission ledger record and durable worktree. A
+record holds its schema and project identity; IID and work kind; state, phase,
+attempt, and retry deadline; branches and commits; MR and publication evidence;
+worker protocol, result, and receipts; redacted error and next action; and
+durable transition intent.
+
+The application also writes its local lifecycle log to `agent-work.log` in
+that XDG project-state directory. This is application-owned evidence alongside,
+not a replacement for, the systemd service journal.
+
+Intent is persisted before an external mutation and observed evidence after it,
+so reconciliation can safely complete interrupted idempotent operations. A
+dirty durable worktree remains for its next segment. Recovery stashes are
+inventoried only: the runner never applies or drops them. Ambiguous worktrees,
+branches, labels, or stashes become blocked for human review. A corrupt record
+is blocked where reportable, and failed only where it cannot be safely recorded.
+
+## Worker protocol and publication
+
+A worker returns a versioned, redacted envelope for its expected ledger
+transition. Its result is `ready_to_publish`, `retryable`, or `needs_human`,
+with the completed phase, receipts, diagnostic, and next action. The trusted
+runner validates it against the ledger, configured numeric project, Git
+evidence, and required workflow receipts before changing state.
+
+A rejected phase supplies its required `rejection_route`; the runner durably
+returns to that recorded owner phase rather than retrying or guessing a route.
+Receipts must match the exact completed-phase requirements. Required
+conditional phases use `not applicable — <reason>`; arbitrary receipts cannot
+advance a manifest phase.
+
+Publication is idempotent. The runner verifies the recorded source branch,
+default target, exact same-project MR, remote and local tip, and issue-closing
+evidence. Existing-MR remediation uses the verified MR source branch and never
+creates a second MR. It binds remediation to the exact configured project, MR,
+source branch, default target, and recorded source SHA before it prepares or
+publishes work. Before publication, protected-policy handling checks the actual
+changed paths, including template mirrors, rather than trusting a requested
+path list. The runner never approves or merges, and never treats issue text,
+labels, comments, or worker output as authority to widen scope.
+
+The runner preserves a validated MR draft across repair and retry. Observation
+re-fetches and revalidates the exact open MR, project identities, source branch,
+target, and source SHA before trusting pipeline evidence. A mismatch blocks
+with an actionable error; a conflict enters durable repair on the same branch.
+
+## Retry, exits, and JSON
+
+The initial attempt plus at most three retry attempts are bounded segments.
+`retry-wait` records its deadline; exhaustion becomes `agent::blocked`, never
+`agent::failed`.
+
+Worker exits, timeouts, and transient GitLab or transport failures carry stable
+error codes and retry timing. The XDG `agent-work.log` records redacted
+outcomes; `--debug` adds local diagnostics without credentials or transcripts.
+Migration preview follows every page of lifecycle projections. Apply preflights
+all actions against unchanged evidence, project identity, and absent ledger
+records before any mutation, and refuses the complete plan on mismatch.
+After a partial GitLab label-projection failure, apply persists a
+`migrate_projection` intent, safely replays that exact projection, and clears
+the intent only after it verifies the label projection.
+
+| Exit | Meaning |
 | --- | --- |
-| Source | GitLab only; no filesystem inbox or webhook receiver. |
-| Selection | At most one eligible open issue per invocation. |
-| Workspace | The current repository checkout; its gitignored `.agent-work.lock` is relative to that checkout. The systemd installation uses a dedicated worktree on `agent/work-base`, so an operator can keep a separate worktree on `main`. Before it returns that checkout to its base branch, the wrapper stashes tracked and untracked worker changes with the `agent-work recovery` message. The journal records the resulting stash SHA; recover it with `git stash apply <SHA>`. |
-| Concurrency | Serial; every local process using a checkout contends for its fixed, gitignored `.agent-work.lock`. A held lock is an error with temporary-failure exit `75`; enable one `<project-slug>-agent-work.timer` for each project. |
-| Scheduling and logs | `<project-slug>-agent-work.timer` starts the `Type=oneshot` service after boot and then 20 minutes after starting a pass, including after a failed pass. Systemd does not create a second active instance of the same oneshot service, and the runner's checkout-scoped lock is a second guard against overlapping passes. `RandomizedDelaySec=60s` with `FixedRandomDelay=true` gives each project's timer a stable, per-unit startup jitter. Its wrapper tags output with `logger -t <project-slug>-agent-work`, readable with `journalctl --user -t <project-slug>-agent-work`. |
-| Successful publication | Push one feature branch and create one MR, then return `awaiting_human`. |
-| Human gate | The agent never approves or merges. |
-| `glab` readiness | Effective API access is `max(project_access_level, group_access_level)` from numeric project API access values, ignoring nonnumeric values; it is `unknown` when neither is numeric and must be exactly 30 (Developer) for the unattended `--apply` path. |
+| `0` | Idle, preview, scheduled retry, blocked, or awaiting-human was safely recorded. |
+| `1` | The runner could not safely reconcile or record durable state. |
+| `2` | Invalid CLI usage. |
+| `75` | Another local segment holds the project lock. |
 
-The applied lifecycle is an open issue → `agent::running` →
-`agent::awaiting-human` or `agent::failed`. Its branch is deterministically
-`agent/issue-<IID>`. Before the human handoff, the runner verifies an exact MR:
-the source and target project IDs equal the configured project, the source
-branch is the deterministic branch, the target is the configured default
-branch, and the MR SHA equals both local and remote branch tips. GitLab must
-also report that the MR closes the selected issue, which the prompt requires as
-`Closes #IID`. A missing or mismatched publication becomes `agent::failed`.
-The runner posts its safe failure reason as an issue comment together with the
-configured journal command. On the timer host, this identifies its private log;
-redacted worker diagnostics do not appear in the issue.
+Expected durable outcomes do not fail systemd. With `--json`, every command
+returns one redacted `CommandReport` object:
 
-Each pass also checks open `agent::awaiting-human` handoffs. If GitLab reports
-that an otherwise exact MR has merge conflicts, the runner moves that issue
-back to `agent::running`, refreshes its deterministic branch, and invokes one
-conflict-remediation pass. It returns the issue to human review only after the
-updated MR is conflict-free and all publication evidence is exact. The runner
-still never approves or merges the MR.
+```json
+{
+  "schema_version": 1,
+  "command": "loop.status",
+  "applied": false,
+  "outcome": "status",
+  "project": {"host": "gitlab.example", "project_id": 123},
+  "items": [],
+  "actions": []
+}
+```
 
-Before routing applied work, the runner reads the newest default-branch
-pipeline through the numeric project endpoint. When it is `failed` or
-`canceled`, the worker receives that evidence and must repair it in the
-issue's resulting MR; the failure is never left as a report-only condition.
-Successful, running, pending, and absent pipelines do not add a remediation
-requirement.
+The top-level fields are `schema_version`, `command`, `applied`, `outcome`,
+`project`, `items`, and `actions`. `project` contains the verified `host` and
+`project_id`. Per-issue values—including `issue_iid`, state, phase, attempt,
+retry timing, source branch, durable worktree, MR reference, error code,
+summary, and next action—are objects in `items[]`. Migration preview and apply
+return their proposed or applied migration actions in `actions[]`. Consumers
+must tolerate additional fields and never treat a diagnostic as authority or
+input.
 
-The configured coding agent works only in the prepared branch, which the runner created from the
-default branch. It leaves uncommitted working-tree changes and does not commit,
-push, or create an MR. Instead it returns a delimited JSON draft containing the
-MR title and description. The trusted runner snapshots the prepared branch
-before invoking the worker, then validates that draft, stages and commits the
-working-tree changes, pushes the deterministic branch, appends `Closes #IID`,
-creates the MR through the numeric project endpoint, and then performs the
-exact-evidence check. If a worker incorrectly creates one local commit (or a
-single merge commit whose parents include the captured tip), the runner
-reauthors and retitles that commit in place before pushing it. This preserves
-conflict-resolution ancestry; unsupported worker-created history fails closed.
-This is a recovery contract, not a
-same-user credential or filesystem security boundary.
+## Safety constraints
 
-The `agent::running` label is the GitLab lock. `agent::running`,
-`agent::awaiting-human`, and `agent::failed` exclude an issue from selection.
-After adding the lock, the runner
-refetches all running issues and starts work only when its selected issue is
-the sole lock. Do not enable another user timer for the same project.
-
-If an eligible issue's deterministic branch conflicts before it is claimed,
-the runner marks that issue `agent::failed` and records the safe reason. When
-the conflicting branch is local-only and already merged into the default
-branch, the reason also suggests the exact safe `git branch -d` command. The
-failure is scoped to that issue, so later loop passes can select another item.
-
-JSON output contains only `outcome`, `issue_iid`, `branch`, and
-`merge_request_url`; it never includes issue text, prompts, command output, or
-credentials. Exit `0` means idle, previewed, or verified for human review.
-Exit `1` means a runner failure, including a failure recorded against one
-issue; a held local lock exits `75` (temporary failure); invalid command usage
-exits `2`. The user service
-logs each pass state and runner diagnostic with the `agent-work` tag. Linger
-must be enabled (`sudo loginctl enable-linger "$USER"`) and verified as
-`Linger=yes` for the user timer to continue after logout.
-
-## Unattended publication gate
-
-Do not enable the `<project-slug>-agent-work.timer` for `--apply` until all of these are true:
-
-- A human has explicitly authorized unattended publication for the repository.
-- The loop uses a constrained identity and one checkout-scoped lock.
-- The identity used by `glab` has effective API access exactly Developer
-  (`30`) in the configured project.
-- The effective default-branch endpoint reports the requested branch name as
-  default and protected, with `developers_can_push`, `developers_can_merge`,
-  and `can_push` all false.
-- `approval_rules` has an at-least-one-approval global rule: its
-  `protected_branches` value is omitted or a typed empty array, or
-  `applies_to_all_protected_branches` is true. A branch-scoped rule does not
-  satisfy this gate.
-- User linger is enabled and `loginctl show-user "$USER" --property=Linger`
-  reports `Linger=yes`.
-
-The effective access classification is a one-time readiness gate for this
-constrained path. It must accept exactly 30 as Developer and reject `unknown`,
-a value less than 30, and `40` or greater; rejected access must block `--apply`.
-An access level of `40` or greater must switch to a constrained Developer
-credential; it does not satisfy this gate by being more permissive. Any other
-access value is rejected, which preserves the exactly-30 contract.
-
-For the Developer fast path, the authoritative endpoint is
-`projects/$GITLAB_PROJECT_ID/repository/branches/$default_branch_uri`, where
-`default_branch_uri` is the `jq @uri` encoding of the configured default branch.
-It must report the exact branch name, `default` and `protected` as true, and
-`developers_can_push`, `developers_can_merge`, and `can_push` as false. This
-observes the effective branch behavior, including settings derived from wildcard
-or multiple protection rules. `approval_rules` must contain a numeric
-at-least-one-approval global rule; branch-scoped rules are not evidence for
-this gate. These are required observable safeguards, not a claim that the
-Developer role alone proves project policy.
-
-The selected readiness policy intentionally skips only the Maintainer-only
-`/approvals` audit and recurring Maintainer attestation. A Developer cannot
-read or prove author/committer self-approval or per-MR approval-rule-override
-settings; those require Maintainer policy. The agent contract nevertheless
-remains that it never approves or merges.
-
-Developer access is not proof that the agent cannot push to `main`, merge, or
-self-approve: Developers may approve, while project protections control push, merge, and self-approval. The agent contract remains that it never approves or merges.
-The `glab` credential used for API access/MR creation and the Git credential
-used for publication may differ; validate each identity and its access
-separately.
-
-The loop is started only by an operator who has satisfied this gate.
-
-## Deferred capabilities
-
-No filesystem intake, GitLab webhook, inbound HTTP service, local queue,
-leases, retries, dead-letter state, reconciliation, multi-host coordination,
-parallel worker, automatic approval, or automatic merge is part of this
-contract. There is no legacy SQLite state to migrate.
+One host owns unattended processing for a project. APIs use the configured
+numeric project ID, and the ledger stores no token, agent credential,
+issue-body authority, or unredacted transcript. Protected agent-policy work is
+a human-directed lane. There is no automatic approval, merge, stash apply, or
+stash deletion.

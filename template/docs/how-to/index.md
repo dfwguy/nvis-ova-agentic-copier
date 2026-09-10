@@ -9,5 +9,5 @@ Use these recipes when you know the practical outcome you need.
 
 <!-- BEGIN GENERATED -->
 ### Agent workflow
-- [Set up the serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Configure one checkout and guarded user timer for issue work.
+- [Set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Install, inspect, recover, migrate, and enable one serial agent loop.
 <!-- END GENERATED -->

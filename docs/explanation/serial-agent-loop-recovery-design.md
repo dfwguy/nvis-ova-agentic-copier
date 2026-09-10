@@ -1,22 +1,25 @@
 ---
 title: Recoverable serial agent-loop architecture
 type: explanation
-summary: Understand the proposed recoverable state machine for unattended agent work.
+summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
-status: draft
+status: current
 last_reviewed: 2026-09-09
 related:
   - path: serial-gitlab-agent-loop.md
-    why: Describes the currently implemented one-shot loop that this proposal would replace.
+    why: Explains the operational model implemented by this architecture.
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the implemented command and state contract.
+  - path: ../how-to/setup-serial-gitlab-agent-loop.md
+    why: Guides installation, recovery, and migration.
 ---
 
 # Recoverable serial agent-loop architecture
 
-This document proposes a replacement for the current one-shot agent loop. It
-is a reviewed design, not an implemented contract. Until implementation and
-migration are complete, the current [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
-reference, and setup guide remain authoritative.
+This document explains the recoverable architecture used by the serial agent
+loop. The [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
+reference, and setup guide describe its operator-facing behavior.
 
 The systemd scheduler is healthy. The problem is that the workflow contract
 now expects recovery, remediation, and post-publication phases that the runtime
@@ -64,8 +67,9 @@ The audit confirmed these defects:
    stale terminal labels; and the timer interval is measured from activation,
    not completion.
 
-These observations motivate the design; they do not authorize the design to
-rewrite historical issues, branches, labels, stashes, or services.
+These observations motivated the recovery architecture. Historical issues,
+branches, labels, stashes, and services remain evidence until an operator
+reviews a migration preview.
 
 ## State model
 
@@ -210,9 +214,8 @@ Failures are classified before labels or exit codes are chosen:
 Idle, retry scheduled, blocked, and awaiting-human outcomes exit successfully
 from systemd. Exit `1` means the runner could not safely record or reconcile
 state. CLI-usage errors remain distinct from runtime failure, and lock
-contention remains a temporary outcome for interactive callers. The eventual
-reference update will define the exact CLI, JSON schema, and full exit-code
-table after implementation fixes those interfaces.
+contention remains a temporary outcome for interactive callers. The reference
+defines the exact CLI, JSON schema, and full exit-code table.
 
 ## Recovery and reconciliation
 
@@ -250,59 +253,32 @@ copied into the ledger or journal.
 
 Protected agent-policy changes use a human-directed lane unless a separate
 secure cross-agent design is reviewed. The state machine records that boundary
-as `agent::blocked`; it does not weaken the sandbox or reinterpret the issue as
-authority.
+as `agent::blocked`. The publication boundary checks the paths actually changed
+in the durable worktree, including template mirrors; it does not weaken the
+sandbox or reinterpret the issue as authority.
 
 ## Migration and rollout
 
-Migration is evidence-preserving and begins only after the implementation is
-reviewed:
+Migration is evidence-preserving:
 
 1. Stop the timer and confirm no segment holds the project lock.
-2. Inventory current running, awaiting-human, failed, and closed issues;
-   `agent/issue-*` branches and MRs; worktrees; and recovery stashes.
+2. Inventory current running, awaiting-human, failed, blocked, and closed
+   projections; exact branch, MR, worktree, and recovery-stash evidence.
 3. Run a non-mutating migration preview that proposes ledger records, label
    transitions, retained evidence, and human decisions.
 4. Review the preview. Never apply, drop, relabel, close, or delete ambiguous
    evidence automatically.
-5. Apply approved migrations idempotently and verify the resulting ledger,
-   worktrees, labels, branches, and MRs.
+5. Apply approved migrations idempotently only while the plan and inventory
+   remain exact and no ledger record already exists; verify the resulting
+   ledger, worktrees, labels, branches, and MRs.
 6. Run one explicitly opted-in canary issue through recovery, publication,
    observation, and human handoff.
 7. Re-enable the timer only after the canary and operational status output are
    verified.
 
-Implementation should proceed in reviewable slices: ledger and reconciliation;
-explicit ready selection and classification; durable worktrees and versioned
-worker segments; idempotent publication and existing-MR remediation;
-post-publication observation and repair; then wrapper, timer, status, and
-operational-documentation updates. Each slice follows the full coding
-workflow.
-
-## Approved design decisions
-
-1. Replace implicit one-shot execution with an explicit recoverable state
-   machine, using GitLab as its shared projection and a small local ledger for
-   execution detail.
-2. Make each systemd activation one bounded segment that reconciles and resumes
-   existing work before selecting the oldest `agent::ready` issue.
-3. Store durable state below the XDG state directory and use one worktree per
-   active issue.
-4. Preserve the complete repository workflow while splitting it into
-   resumable segments with durable receipts.
-5. Allow three bounded automatic retries by default, then transition to
-   `agent::blocked`.
-6. Schedule the next pass 20 minutes after the previous pass finishes.
-7. Treat protected agent-policy changes as a human-directed lane unless a
-   separate secure cross-agent mechanism is designed and reviewed.
-8. Implement the existing-MR remediation contract instead of removing it.
-9. Migrate existing labels, branches, worktrees, and stashes only after a
-   dry-run inventory and human review.
-
-## Out of scope for the design MR
-
-This design MR does not change Python or Bash code, tests, systemd units,
-labels, issues, branches other than its own feature branch, stashes, worktrees,
-credentials, or current operator documentation. It does not repair historical
-issues or define current behavior. Those changes require separate coding
-workflow MRs after this proposal is reviewed.
+The implementation is maintained in reviewable slices: ledger and
+reconciliation; explicit ready selection and classification; durable worktrees
+and versioned worker segments; idempotent publication and existing-MR
+remediation; post-publication observation and repair; then wrapper, timer,
+status, and operational-documentation updates. Each slice follows the full
+coding workflow.

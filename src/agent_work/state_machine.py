@@ -1,0 +1,283 @@
+"""Pure transition planning for recoverable agent work."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from types import MappingProxyType
+from typing import Final
+
+from .domain import (
+    ErrorCode,
+    RunnerState,
+    WorkflowLane,
+    WorkflowPhase,
+    next_workflow_phase,
+)
+from .models import LedgerRecord, WorkerResultEnvelope, WorkflowReceiptRecord
+
+ALLOWED_TRANSITIONS: Final = MappingProxyType(
+    {
+        RunnerState.PREPARING: frozenset(
+            {
+                RunnerState.EXECUTING,
+                RunnerState.RETRY_WAIT,
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.EXECUTING: frozenset(
+            {
+                RunnerState.EXECUTING,
+                RunnerState.RETRY_WAIT,
+                RunnerState.PUBLISHING,
+                RunnerState.BLOCKED,
+                RunnerState.AWAITING_HUMAN,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.RETRY_WAIT: frozenset(
+            {
+                RunnerState.EXECUTING,
+                RunnerState.PUBLISHING,
+                RunnerState.OBSERVING,
+                RunnerState.REPAIR,
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.PUBLISHING: frozenset(
+            {
+                RunnerState.OBSERVING,
+                RunnerState.RETRY_WAIT,
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.OBSERVING: frozenset(
+            {
+                RunnerState.OBSERVING,
+                RunnerState.EXECUTING,
+                RunnerState.REPAIR,
+                RunnerState.AWAITING_HUMAN,
+                RunnerState.RETRY_WAIT,
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.REPAIR: frozenset(
+            {
+                RunnerState.EXECUTING,
+                RunnerState.PUBLISHING,
+                RunnerState.RETRY_WAIT,
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.BLOCKED: frozenset({RunnerState.PREPARING, RunnerState.COMPLETE}),
+        RunnerState.AWAITING_HUMAN: frozenset(
+            {RunnerState.REPAIR, RunnerState.COMPLETE, RunnerState.BLOCKED}
+        ),
+        RunnerState.FAILED: frozenset({RunnerState.COMPLETE}),
+        RunnerState.COMPLETE: frozenset(),
+    }
+)
+
+REQUIRED_RECEIPTS: Final = MappingProxyType(
+    {
+        WorkflowPhase.DISCOVERY: ("$architect",),
+        WorkflowPhase.CODING_RED_DOCS: ("$tdd-red", "$diataxis-writer"),
+        WorkflowPhase.CODING_GREEN: ("$tdd-green",),
+        WorkflowPhase.CODING_NONFUNCTIONAL: ("$nonfunctional-review",),
+        WorkflowPhase.CODING_VALIDATION: ("$tdd-judge", "$diataxis-judge"),
+        WorkflowPhase.CODING_FINAL_REVIEW: (
+            "$judge-quality",
+            "$judge-test",
+            "$judge-cicd",
+            "$tdd-document",
+            "$cli-syntax-judge",
+            "$filesystem-structure-judge",
+        ),
+        WorkflowPhase.CODING_FINALIZE: ("$tdd-finalizer",),
+        WorkflowPhase.CONTENT_WRITE: ("$documentation-writer",),
+        WorkflowPhase.CONTENT_REVIEW: ("$diataxis-judge", "$agent-policy-judge"),
+        WorkflowPhase.CONTENT_FINALIZE: ("$documentation-finalizer",),
+        WorkflowPhase.POST_PUBLICATION: (
+            "$pipeline-performance-judge",
+            "$findings-triage",
+        ),
+    }
+)
+
+REJECTION_ROUTES: Final = MappingProxyType(
+    {
+        WorkflowPhase.CODING_RED_DOCS: frozenset(
+            {WorkflowPhase.DISCOVERY, WorkflowPhase.CODING_RED_DOCS}
+        ),
+        WorkflowPhase.CODING_GREEN: frozenset({WorkflowPhase.CODING_RED_DOCS}),
+        WorkflowPhase.CODING_NONFUNCTIONAL: frozenset({WorkflowPhase.CODING_GREEN}),
+        WorkflowPhase.CODING_VALIDATION: frozenset({WorkflowPhase.CODING_GREEN}),
+        WorkflowPhase.CODING_FINAL_REVIEW: frozenset(
+            {
+                WorkflowPhase.DISCOVERY,
+                WorkflowPhase.CODING_RED_DOCS,
+                WorkflowPhase.CODING_GREEN,
+            }
+        ),
+        WorkflowPhase.CODING_FINALIZE: frozenset(
+            {
+                WorkflowPhase.CODING_RED_DOCS,
+                WorkflowPhase.CODING_GREEN,
+                WorkflowPhase.CODING_VALIDATION,
+                WorkflowPhase.CODING_FINAL_REVIEW,
+            }
+        ),
+        WorkflowPhase.CONTENT_REVIEW: frozenset({WorkflowPhase.CONTENT_WRITE}),
+        WorkflowPhase.CONTENT_FINALIZE: frozenset(
+            {WorkflowPhase.CONTENT_WRITE, WorkflowPhase.CONTENT_REVIEW}
+        ),
+        WorkflowPhase.POST_PUBLICATION: frozenset({WorkflowPhase.CODING_GREEN}),
+    }
+)
+
+
+@dataclass(frozen=True)
+class PlannedOutcome:
+    """One pure durable-record update."""
+
+    record: LedgerRecord
+
+
+def validate_transition(source: RunnerState, target: RunnerState) -> bool:
+    """Return whether one lifecycle edge is declared."""
+    return target in ALLOWED_TRANSITIONS[source]
+
+
+def transition_record(
+    record: LedgerRecord, target: RunnerState, **updates: object
+) -> LedgerRecord:
+    """Return one validated state transition with its accompanying updates."""
+    if not validate_transition(record.state, target):
+        raise ValueError(f"undeclared transition: {record.state} -> {target}")
+    return record.model_copy(update={"state": target, **updates})
+
+
+def plan_retry(record: LedgerRecord, *, now: datetime) -> PlannedOutcome:
+    """Schedule a bounded retry or block after the retry budget is exhausted."""
+    if record.retry_count >= 3:
+        return PlannedOutcome(
+            transition_record(
+                record,
+                RunnerState.BLOCKED,
+                retry_at=None,
+                error_code=ErrorCode.RETRY_EXHAUSTED,
+                summary="Automatic retry budget exhausted.",
+                next_action="Resolve the blocker and re-add agent::ready.",
+            )
+        )
+    return PlannedOutcome(
+        transition_record(
+            record,
+            RunnerState.RETRY_WAIT,
+            prior_state=record.state,
+            prior_phase=record.phase,
+            retry_count=record.retry_count + 1,
+            retry_at=now + timedelta(minutes=20),
+            error_code=None,
+            summary="Transient failure; retry scheduled.",
+            next_action="Resume when the retry deadline is due.",
+        )
+    )
+
+
+def apply_worker_result(
+    record: LedgerRecord, result: WorkerResultEnvelope, *, now: datetime
+) -> PlannedOutcome:
+    """Apply one validated worker result to a durable record."""
+    if result.result_kind == "retryable":
+        return plan_retry(record, now=now)
+    if result.result_kind == "needs_human":
+        return PlannedOutcome(
+            transition_record(
+                record,
+                RunnerState.BLOCKED,
+                error_code=result.error_code,
+                summary=result.redacted_summary or result.change_summary,
+                next_action=result.next_action,
+            )
+        )
+    required = REQUIRED_RECEIPTS.get(record.phase, ())
+    receipt_skills = tuple(receipt.partition(":")[0] for receipt in result.receipts)
+    has_receipts = (
+        len(receipt_skills) == len(required)
+        and set(receipt_skills) == set(required)
+        and len(set(receipt_skills)) == len(receipt_skills)
+    )
+    if (
+        result.completed_phase is not record.phase
+        or not result.receipts
+        or not has_receipts
+        or (
+            record.workflow_lane is not WorkflowLane.UNKNOWN
+            and result.workflow_lane is not record.workflow_lane
+        )
+        or (
+            record.phase is WorkflowPhase.DISCOVERY
+            and result.workflow_lane is WorkflowLane.UNKNOWN
+        )
+    ):
+        raise ValueError(
+            "worker result receipt is not coherent with the recorded phase"
+        )
+    receipt = WorkflowReceiptRecord(
+        phase=result.completed_phase,
+        verdict=result.phase_status,
+        detail="\n".join(result.receipts),
+    )
+    if result.phase_status == "rejected":
+        route = result.rejection_route
+        if route is None or route not in REJECTION_ROUTES.get(
+            record.phase, frozenset()
+        ):
+            raise ValueError("worker rejection route is invalid for the recorded phase")
+        return PlannedOutcome(
+            transition_record(
+                record,
+                RunnerState.EXECUTING,
+                phase=route,
+                receipts=(*record.receipts, receipt),
+                summary=result.change_summary,
+                next_action=result.next_action,
+                error_code=result.error_code,
+            )
+        )
+    next_phase = next_workflow_phase(record.phase, result.workflow_lane)
+    next_state = (
+        RunnerState.AWAITING_HUMAN
+        if record.phase is WorkflowPhase.POST_PUBLICATION
+        else (
+            RunnerState.PUBLISHING
+            if next_phase is WorkflowPhase.READY_TO_PUBLISH
+            else RunnerState.EXECUTING
+        )
+    )
+    return PlannedOutcome(
+        transition_record(
+            record,
+            next_state,
+            phase=next_phase,
+            workflow_lane=result.workflow_lane,
+            receipts=(*record.receipts, receipt),
+            merge_request_draft=result.merge_request_draft
+            or record.merge_request_draft,
+            summary=result.change_summary,
+            next_action=result.next_action,
+            error_code=None,
+        )
+    )

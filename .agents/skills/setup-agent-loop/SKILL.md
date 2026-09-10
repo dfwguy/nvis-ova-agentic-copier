@@ -5,7 +5,7 @@ description: Configure one guarded, serial GitLab polling loop; not webhooks, qu
 
 # Set up agent loop
 
-Use this skill to configure one GitLab project for the serial `run-next` loop.
+Use this skill to configure one GitLab project for the recoverable `loop run` state machine.
 It neither installs a webhook nor implicitly authorizes unattended publication.
 Its Developer-readable readiness path permits exactly 30 effective API access
 before checking repository safeguards.
@@ -97,9 +97,10 @@ before checking repository safeguards.
 2. Create a clean dedicated checkout that is not an operator's active checkout.
    Run the runner from that checkout. It derives the checkout and GitLab project
    from the current directory and `origin`.
-   The local lock is always the fixed, gitignored
-   `<checkout>/.agent-work.lock`; it is not configurable.
-3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, `logger`, and user-level `systemd`, then run `uv run agent-work run-next --json` from the
+   Durable state, the single-project lock, and one worktree per active issue
+   live below the XDG state directory, outside the checkout. Stashes are
+   emergency evidence only and are never the normal persistence mechanism.
+3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, and user-level `systemd`, then run `uv run agent-work loop run --json` from the
    dedicated checkout as a preview smoke test. Do not use a separately installed
    bare `agent-work` executable, which can be stale. Install and enable the
    documented project-named user-level timer only after explicit authorization.
@@ -111,10 +112,10 @@ before checking repository safeguards.
    The user manager does not inherit interactive `direnv` variables; never put
    the token in the environment file or use `glab auth status` to test this
    credential route, because it reports only stored `glab` logins.
-   Its service wrapper uses `logger` with the matching `<project-slug>-agent-work`
-   tag, so operators use `journalctl --user -t <project-slug>-agent-work` for pass
-   output and failures. The timer uses a stable randomized delay to spread
-   start times across repositories. Require linger
+   The wrapper emits once to stdout/stderr and systemd records that output, so
+   operators use `journalctl --user -u <project-slug>-agent-work.service`.
+   The timer schedules 20 minutes after the previous service completion and
+   uses a stable randomized delay to spread starts. Require linger
    with `sudo loginctl enable-linger "$USER"`, then verify `Linger=yes` using
    `loginctl show-user "$USER" --property=Linger`.
 4. Do not make a second project request or query membership. The step 1
@@ -158,13 +159,18 @@ before checking repository safeguards.
    differ. Preserve the one-time authorization, constrained identity,
    dedicated checkout and origin checks, and preview; never approve or merge.
 8. Stop the user timer before changing the checkout, credentials, or GitLab
-   labels: `systemctl --user disable --now <project-slug>-agent-work.timer`. No legacy SQLite
-   state migration is needed.
+   labels: `systemctl --user disable --now <project-slug>-agent-work.timer`.
+   Inventory legacy labels, branches, worktrees, and stashes with
+   `uv run agent-work migration preview --json`; apply only the exact reviewed
+   plan, then validate one canary before re-enabling the timer.
 
-The loop projects an eligible open issue to `agent::running`, then to
+The loop selects only the oldest open `agent::ready` issue, projects active or
+automatically resumable work as `agent::running`, and then uses
 `agent::awaiting-human` only after exact same-project MR evidence, matching
-local/remote branch tips, default target, and `Closes #IID`; otherwise it uses
-`agent::failed`. Branches are deterministic: `agent/issue-<IID>`. The local
-lock returns exit `75` on contention. This is intentionally single-host and
-does not provide a distributed GitLab compare-and-set claim. Never approve or
-merge a resulting MR.
+local/remote branch tips, default target, and `Closes #IID`. Expected human
+action uses `agent::blocked`; `agent::failed` is reserved for exceptional,
+unrecoverable cases. Ordinary branches are deterministic: `agent/issue-<IID>`.
+Expected durable outcomes exit zero; exit one means state could not be safely
+recorded or reconciled, and exit two means invalid CLI usage. The lock is
+single-host and is not a distributed GitLab compare-and-set claim. Never
+approve or merge a resulting MR.

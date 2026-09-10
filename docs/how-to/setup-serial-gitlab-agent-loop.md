@@ -1,44 +1,39 @@
 ---
-title: Set up the serial GitLab agent loop
+title: Set up the recoverable serial GitLab agent loop
 type: how-to
-summary: Configure one checkout and guarded user timer for issue work.
+summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-09
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
-    why: Defines the command and lifecycle configured here.
+    why: Defines the commands, lifecycle, JSON, and exit contract.
   - path: ../explanation/serial-gitlab-agent-loop.md
-    why: Explains why this loop is serial and GitLab-native.
+    why: Explains why the loop uses durable serial recovery.
+  - path: ../explanation/serial-agent-loop-recovery-design.md
+    why: Explains the state machine and migration rationale.
 ---
 
-# Set up the serial GitLab agent loop
+# Set up the recoverable serial GitLab agent loop
 
-Use this procedure to configure one serial agent loop for one GitLab project.
-It uses Developer-compatible polling, not a webhook, and it does not authorize
-unattended publication until the explicit gate below is complete.
+Use one dedicated checkout and one user timer for one GitLab project. The loop
+works only on explicitly opted-in `agent::ready` issues, never approves or
+merges, and never applies or drops a recovery stash.
 
-## Check prerequisites and confirm the current checkout
+## Check prerequisites and Developer-readable safeguards
 
-Run the loop from the repository it should operate on. The runner itself confirms Git
-access with `git pull --ff-only`, derives the GitLab host and project path from
-`origin`, resolves that exact path through the GitLab API, and confirms the
-numeric project endpoint. Do not print, export, or put tokens in this setup.
+Run the loop from the repository it operates on. It confirms Git access,
+derives the GitLab host and project from `origin`, resolves the numeric project
+endpoint, and stores durable state below `XDG_STATE_HOME` (or the platform
+default). Do not print, export, or put tokens in this setup.
 
-Choose one supported coding agent: `codex` (the default), `claude`, or `pi`.
-Check that agent, Git, and `glab`, then verify that the active credential route
-can call the GitLab API. This supports either a stored
-`glab` login or a directory-scoped token such as `GITLAB_TOKEN`:
-
-To use Claude Code or Pi for this installation or repair, set the non-secret
-profile before running the applicable block:
+Choose `codex` (default), `claude`, or `pi`; verify Git, `glab`, `jq`, and the
+selected agent. A stored `glab` login or directory-scoped `GITLAB_TOKEN` is
+supported. Git and the API can use separate credentials.
 
 ```bash
 export AGENT_WORK_AGENT=claude  # Or: pi. Omit for the codex default.
-```
-
-```bash
 agent_name="${AGENT_WORK_AGENT:-codex}"
 case "$agent_name" in codex|claude|pi) ;; *) exit 2;; esac
 command -v git glab "$agent_name" jq
@@ -47,31 +42,15 @@ git pull --ff-only
 git remote get-url origin
 ```
 
-If any confirmation fails, repair the repository's Git remote/credential,
-active GitLab API credential route, or selected agent authentication, then
-rerun the command. A Developer
-account can poll eligible issues; it does not need permission to install a
-webhook or an inbound service.
+Run `codex login status` or `claude auth status` before enabling `--apply`.
+Pi has no equivalent non-secret status command; verify its provider credential
+with Pi. The unattended path requires exactly Developer access (`30`) for the
+`glab` identity. This is a fail-closed readiness check, not a claim that a role
+alone proves repository policy.
 
-Run `codex login status` or `claude auth status` for those profiles before the
-readiness block. Pi has no equivalent non-secret status command; verify its
-configured provider credential with Pi before enabling `--apply`.
+### Verify Developer-readable safeguards
 
-The fail-closed readiness block obtains the numeric
-project representation once. It classifies the `glab` identity from the maximum
-numeric project/group access value; no numeric value is `unknown`. Only exactly
-30 (Developer) can continue. This check concerns the `glab` credential only;
-Git may use a different credential and is checked with `git ls-remote`.
-
-The runner uses the current checkout and stores its fixed, gitignored
-`.agent-work.lock` alongside it. Start only one loop for a checkout. The
-checkout must be dedicated: the service returns it to its configured agent base
-branch after each pass, so never use it for interactive development or another
-agent session.
-
-## Verify Developer-readable safeguards
-
-Before enabling `--apply`, paste this one guarded block. It exits nonzero and
+Before enabling `--apply`, paste this guarded block. It exits nonzero and
 prints actionable missing evidence whenever applied operation must be blocked:
 
 ```bash
@@ -145,312 +124,209 @@ printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval au
 )
 ```
 
-The selected Developer readiness policy deliberately skips only the
-Maintainer-only `/approvals` audit and recurring Maintainer attestation. A
-Developer cannot read or prove GitLab's author/committer self-approval or
-per-MR approval-rule-override settings; those remain Maintainer policy. This is
-not a role-only claim: the observable checks above must pass, while the
-workflow and runtime never approve or merge. The parentheses isolate the strict
-shell options, function, and failure exit from the operator's shell while
-preserving this block's nonzero status.
+The policy deliberately skips only Maintainer-only `/approvals` audit and
+recurring Maintainer attestation. The observable branch and global approval
+checks above must pass; the runtime independently never approves or merges.
+The parentheses isolate strict shell options and preserve the block's status.
 
-## Install and start the systemd user timer
+## Install and inspect
 
-Create a dedicated worktree before installing the timer. Its local
-`agent/work-base` branch tracks `origin/main`; your interactive checkout can
-remain on `main`. The runner fast-forwards this base before every pass and
-creates each `agent/issue-<IID>` branch from `origin/main`.
+From the dedicated checkout, ensure Git, `glab`, the selected coding agent,
+and UV are available. Confirm Git and GitLab API access without exposing a
+token, then inspect the recoverable state before enabling a timer:
+
+```bash
+git pull --ff-only
+uv run agent-work loop status --json
+uv run agent-work loop run --json
+```
+
+Install the repository's rendered user service and timer using the project's
+systemd assets. Create a dedicated service checkout first. Its
+`agent/work-base` branch tracks `origin/main`; the FSM creates one durable
+issue worktree below the XDG state directory rather than returning this
+checkout to an issue branch.
 
 ```bash
 agent_checkout="$(dirname "$PWD")/$(basename "$PWD")-agent-work"
 git worktree add -b agent/work-base "$agent_checkout" origin/main
 git -C "$agent_checkout" branch --set-upstream-to=origin/main agent/work-base
 cd "$agent_checkout"
+command -v uv systemctl loginctl
+uv run agent-work loop status --json
 ```
 
-Git worktrees share object storage and references, so this separates working
-files and active branch checkouts but is not a credential or same-user security
-boundary. Do not check out an `agent/issue-<IID>` branch in the interactive
-worktree.
-
-Run the runner through the repository's own UV environment. This prevents one
-repository's version from replacing another repository's runner:
-
-```bash
-command -v uv logger systemctl loginctl
-uv run agent-work --help
-```
-
-The user service manager does not inherit an interactive shell's `PATH`.
-Record the chosen agent and the absolute executable paths for it and `uv` in
-the environment file instead of relying on a later command lookup. The runner
-invokes that recorded absolute agent path directly.
-
-The user service manager also does not inherit a checkout's `direnv` variables.
-When `GITLAB_TOKEN` is supplied through `direnv`, record the absolute `direnv`
-path below. The wrapper then uses `direnv exec` for the runner process only; it
-does not write the token to the environment file. `glab auth status` reports
-only stored `glab` logins, so it is not a valid test for this token route.
-
-Run the read-only preview from that checkout:
-
-```bash
-uv run agent-work run-next --json
-```
-
-The runner has built-in noninteractive profiles for `codex`, `claude`, and
-`pi`. Codex receives its prompt on standard input. Claude Code and Pi receive
-it as one literal argument in print mode with ephemeral session settings. All
-profiles must follow the same prompt contract: edit and validate only the
-prepared branch, never commit, push, approve, or merge, and emit exactly one
-delimited merge-request JSON draft. This worker exception takes precedence over
-the repository-wide publication requirement; the trusted runner remains the
-only publisher.
-
-After a human explicitly authorizes unattended publication, install the
-one-shot service and its five-minute timer. The service runs the repository's
-wrapper, which sends the runner output and lifecycle messages through `logger`
-with the `agent-work` tag.
-
-Use this path only when the readiness check reports effective Developer access
-exactly `30`; it does not replace the documented branch-protection or approval
-evidence.
-
-Set the project-specific systemd unit name:
+The service manager does not inherit an interactive `PATH` or checkout `direnv`
+variables. Record absolute executable paths and, when used, the absolute
+`direnv` path; the wrapper invokes `direnv exec` without writing a token to the
+environment file. Set the rendered unit name, install the units, and create a
+mode-600 environment file:
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
-```
-
-Then capture the executable paths and install the service files:
-
-```bash
 uv_path="$(command -v uv)"
-if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
-  printf '%s\n' 'uv must resolve to an executable absolute path' >&2
-  exit 1
-fi
 agent_name="${AGENT_WORK_AGENT:-codex}"
-base_branch="agent/work-base"
-case "$agent_name" in codex|claude|pi) ;; *)
-  printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
-  exit 1
-  ;;
-esac
 agent_path="$(command -v "$agent_name")"
-if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
-  printf '%s\n' 'agent must resolve to an executable absolute path' >&2
-  exit 1
-fi
 direnv_path="$(command -v direnv || true)"
-if [[ -n "$direnv_path" && ( "$direnv_path" != /* || ! -x "$direnv_path" ) ]]; then
-  printf '%s\n' 'direnv must resolve to an executable absolute path' >&2
-  exit 1
-fi
+[[ "$uv_path" == /* && -x "$uv_path" ]] || exit 1
+case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
+[[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
+[[ -z "$direnv_path" || ( "$direnv_path" == /* && -x "$direnv_path" ) ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" "$base_branch" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
+```
+
+Enable linger for the operator so the user manager survives logout, then reload
+and enable the timer:
+
+```bash
 sudo loginctl enable-linger "$USER"
-loginctl show-user "$USER" --property=Linger
-if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
-  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-fi
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"
+systemctl --user status "$unit_name.timer"
 ```
 
-The linger check must report `Linger=yes`. Linger keeps the user service
-manager available after logout, so the timer can continue to run. Use a
-dedicated checkout, not an operator's active checkout. Its `agent/work-base`
-branch avoids Git's one-worktree-per-local-branch rule, so the active checkout
-can remain on `main`. The rendered unit name is `<project-slug>-agent-work`; this repository's is
-`agentic-copier-agent-work`.
+The timer schedules the next bounded segment 20 minutes after the service
+becomes inactive. Run only one timer host for a project. The service's
+environment and XDG state directory must be writable only by the operator.
+If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
+user-manager socket; do not retry using a different credential, host, or
+environment. Systemd captures standard output and error under its
+project-specific `SyslogIdentifier`; the wrapper does not duplicate output via
+`logger`.
 
-If `systemctl --user` still reports `Failed to connect to bus`, stop the setup:
-the user manager socket is unavailable. Do not retry through another
-credential, host, or execution environment. Report that first non-secret
-diagnostic to the operator.
+### Repair an installed service configuration
 
-### Repair an installation missing the selected agent configuration
+Stop the timer before changing its environment file. Re-run the environment
+file creation block above, then reload and enable the timer. Do not change
+credentials, worktrees, ledger files, branches, or stashes merely to make the
+service start.
 
-For a timer installed by an earlier version, stop it before rewriting its
-environment file, then enable it again:
+## Run and inspect a segment
 
-Set the same project-specific systemd unit name:
+Preview a segment before authorizing mutation. A preview must not change
+GitLab, labels, branches, worktrees, ledger records, or systemd state.
+
+```bash
+uv run agent-work loop run --json
+uv run agent-work loop status --json
+```
+
+After a human has completed the repository's unattended-publication readiness
+gate, run one applied segment or let the timer do so:
+
+```bash
+uv run agent-work loop run --apply --json
+systemctl --user status "$unit_name.service"
+```
+
+Use `--debug` when the redacted status needs local diagnostic context. Do not
+copy debug output containing private operational details into an issue.
+
+## Retry or recover running work
+
+First inspect the recorded state and next action. A retry is appropriate only
+for the named blocked item after explicit human direction; it resets that
+item's retry budget and returns it to resumable preparation.
+
+```bash
+uv run agent-work loop status --json
+uv run agent-work loop retry --issue-iid IID --json
+uv run agent-work loop retry --issue-iid IID --apply --json
+```
+
+The initial attempt plus three retries are automatic bounded segments. When
+they are exhausted, the issue is `agent::blocked`; follow its recorded next
+action, then retry that exact IID after a human has resolved the condition.
+Leave a dirty durable worktree in place. If status inventories a stash,
+preserve it for review: do not use `git stash apply` or `git stash drop` as an
+automated recovery step.
+
+## Migrate existing loop evidence
+
+Stop the timer and ensure no service segment is active before migration. The
+preview inventories running, awaiting-human, failed, blocked, and closed GitLab
+projections; exact branch, worktree, and stash evidence; and the resulting
+safe ledger actions without modifying them.
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
-```
-
-Then stop and restart the timer:
-
-```bash
-if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
-  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-fi
 systemctl --user disable --now "$unit_name.timer"
-uv_path="$(command -v uv)"
-if [[ "$uv_path" != /* || ! -x "$uv_path" ]]; then
-  printf '%s\n' 'uv must resolve to an executable absolute path' >&2
-  exit 1
-fi
-agent_name="${AGENT_WORK_AGENT:-codex}"
-base_branch="agent/work-base"
-case "$agent_name" in codex|claude|pi) ;; *)
-  printf '%s\n' 'AGENT_WORK_AGENT must be codex, claude, or pi' >&2
-  exit 1
-  ;;
-esac
-agent_path="$(command -v "$agent_name")"
-if [[ "$agent_path" != /* || ! -x "$agent_path" ]]; then
-  printf '%s\n' 'agent must resolve to an executable absolute path' >&2
-  exit 1
-fi
-direnv_path="$(command -v direnv || true)"
-if [[ -n "$direnv_path" && ( "$direnv_path" != /* || ! -x "$direnv_path" ) ]]; then
-  printf '%s\n' 'direnv must resolve to an executable absolute path' >&2
-  exit 1
-fi
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" "$base_branch" >"$HOME/.config/$unit_name/agent-work.env"
-chmod 600 "$HOME/.config/$unit_name/agent-work.env"
-systemctl --user daemon-reload
-systemctl --user enable --now "$unit_name.timer"
+systemctl --user status "$unit_name.service"
+uv run agent-work migration preview --json >agent-work-migration-plan.json
 ```
 
-Each pass checks GitLab for `agent::running` and conflicted
-`agent::awaiting-human` merge requests before it claims one eligible open
-issue, and refetches the running list. A conflicted handoff is reclaimed on
-its existing deterministic branch for one remediation pass. It begins work only when
-the selected issue is the sole running lock. Published work becomes
-`agent::awaiting-human`; failures become `agent::failed`. The loop never
-approves or merges an MR.
+Review every proposed record, label transition, retained artifact, and blocked
+decision. Do not apply a preview with ambiguous evidence. Apply refuses a
+stale or tampered plan, changed inventory, a different project, or an existing
+ledger record; it never overwrites that evidence. After human review, apply
+the idempotent migration and inspect the result:
 
-Each applied pass also checks the newest default-branch pipeline. If it is
-`failed` or `canceled`, the worker repairs it in the selected issue's merge
-request instead of leaving it only reported; the runner still never approves
-or merges that MR.
+```bash
+uv run agent-work migration apply --plan-file agent-work-migration-plan.json --apply --json
+uv run agent-work loop status --json
+```
 
-Each failed transition leaves the safe failure reason as an issue comment;
-worker output is tagged in the user journal. Every pass logs its start, worker
-diagnostic, exit status, and waiting state. A runner blocker fails the service
-so its status is visible to systemd; the timer schedules the next pass normally.
-An issue-level failure that the runner has successfully marked as
-`agent::failed` exits `1`, preserving the failure for systemd and the journal.
-The timer continues to schedule future passes. Other runner-level blockers also
-exit nonzero.
-If another local
-process holds `.agent-work.lock`, `run-next` exits `75`; the service records
-the temporary failure and the timer remains enabled.
+## Canary and re-enable
 
-Every bounded pass attempts to leave the dedicated checkout on its base branch
-(`agent/work-base` in the setup above) before the service exits, including a
-pass that failed after creating a local issue commit. The base only
-fast-forwards from `origin/main`, while the issue branch remains available for
-recovery and human review. If the reset fails (for example, because the
-checkout is dirty), the wrapper first creates an `agent-work recovery` stash
-that includes tracked and untracked worker output. It records the stash SHA in
-the journal; restore it with `git stash apply <SHA>`. If stashing fails, the
-service leaves the checkout unchanged and records the diagnostic. A direct
-`agent-work` launch from an issue branch still intentionally fails rather than
-silently changing branches.
+Choose one open, non-confidential issue, verify that its request is suitable
+for the normal repository workflow, and have a human add `agent::ready`. Run
+bounded segments until status reports `agent::awaiting-human` with exact merge
+request evidence and all required receipts. Human review, approval, and merge
+remain outside the loop.
 
-## Restart the loop
+```bash
+uv run agent-work loop run --apply --json
+uv run agent-work loop status --json
+systemctl --user enable --now <project-slug>-agent-work.timer
+```
 
-Restart the loop after a transient user-manager or service failure without
-changing the checkout, credentials, or environment file. If the one-shot
-service is active, let its bounded pass finish before restarting it when
-possible. Stopping an active pass interrupts it; the next pass will use the
-runner's normal running-issue recovery or safe failure handling.
+If the canary blocks or fails, keep the timer disabled, retain all worktrees
+and stashes, and act on the redacted `next_action` from status. See the
+[reference](../reference/serial-gitlab-agent-loop.md) for exit meanings and the
+complete command contract.
 
-Set the unit name, ensure the user-manager bus is reachable, then stop both
-units, reload their definitions, enable the timer again, and start one
-immediate bounded pass:
+## Monitor, restart, or stop the loop
+
+Inspect the timer, service, and redacted state together. Systemd owns service
+logs through the unit's `SyslogIdentifier`; the application also retains its
+local lifecycle log as `agent-work.log` in the XDG project-state directory.
+Inspect both evidence sources; neither replaces the other.
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
-if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
-  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-fi
+journalctl --user -u "$unit_name.service" --since today
+systemctl --user status "$unit_name.timer" "$unit_name.service"
+uv run agent-work loop status --json
+```
+
+To restart after a transient user-manager failure, let an active bounded
+segment finish when possible. Stopping it interrupts the segment; the ledger
+and durable worktree make the next `loop run` reconcile it.
+
+```bash
 systemctl --user stop "$unit_name.timer" "$unit_name.service"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit_name.timer"
 systemctl --user start "$unit_name.service"
-systemctl --user status --no-pager "$unit_name.timer" "$unit_name.service"
 ```
 
-The final `start` runs one pass immediately; the enabled timer schedules later
-passes. If the user-manager bus is unavailable, stop and resolve that first
-non-secret diagnostic rather than attempting a different credential or host.
-
-## Monitor activity and inspect failures
-
-Set the project-specific systemd unit name before querying its logs or status:
+To stop future unattended work, disable the timer and stop an active service.
+This preserves the ledger, worktrees, branches, stashes, environment file, and
+journal for inventory and review.
 
 ```bash
-unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
-```
-
-Follow activity and inspect failures with `journalctl`:
-
-```bash
-journalctl --user -t "$unit_name" -f
-journalctl --user -u "$unit_name.service" --since today
-systemctl --user status "$unit_name.timer" "$unit_name.service"
-```
-
-### Repair unavailable user-journal access
-
-The wrapper writes through `logger`, which stores the unit's messages in the
-host journal. If `journalctl --user` reports insufficient permissions, the
-timer can still be working: the account cannot read the journal files. Inspect
-the logs immediately with sudo:
-
-```bash
-sudo journalctl -t "$unit_name" --since today
-```
-
-To grant the current user lasting journal read access, ask the host
-administrator to add it to `systemd-journal`. This group can read host-wide
-journal messages, not only this unit's logs. Start a new login session after
-the change, then verify the membership and retry the normal commands:
-
-```bash
-sudo usermod -aG systemd-journal "$USER"
-# Log out and back in before continuing.
-id -nG
-journalctl --user -t "$unit_name" --since today
-```
-
-If the new group does not appear in `id -nG`, do not change journald storage
-settings; resolve the account/session membership with the host administrator.
-
-## Stop the loop
-
-Stop the timer to prevent future passes. If a pass is currently active, let it
-finish when possible; stopping the service interrupts that pass, which the
-runner handles through its normal recovery or safe-failure path.
-
-Set the project-specific unit name, ensure the user-manager bus is reachable,
-then disable the timer and stop any active pass:
-
-```bash
-unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
-if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
-  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-fi
 systemctl --user disable --now "$unit_name.timer"
 systemctl --user stop "$unit_name.service"
 systemctl --user show "$unit_name.timer" "$unit_name.service" \
   --property=UnitFileState --property=ActiveState
+uv run agent-work loop status --json
 ```
 
 The timer must report `UnitFileState=disabled` and `ActiveState=inactive`
-before the loop is stopped. This does not delete the dedicated checkout, its
-environment file, branches, or previous journal entries. Re-enable the timer
-using [Restart the loop](#restart-the-loop) when you are ready to resume it.
+before migration or a manual evidence review. If `journalctl --user` access is
+denied, ask the host administrator for the appropriate journal access; do not
+change journald storage settings or use another credential route.

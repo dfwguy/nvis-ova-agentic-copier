@@ -5,19 +5,20 @@
 ## Start the GitLab issue loop
 
 After the repository safeguards are ready, install the runner and enable its
-single user-level systemd timer. Each open issue becomes a branch and
-human-gated merge request; the loop never approves or merges it.
+single user-level systemd timer. The loop processes only the oldest explicitly
+opted-in `agent::ready` issue and never approves or merges its human-gated
+merge request.
 
 ```bash
-uv run agent-work run-next --json
+uv run agent-work loop run --json
 ```
 
-Run it from the repository it should operate on. The runner confirms that
-checkout with `git pull --ff-only`, derives the GitLab host and project from
-`origin`, and confirms that project through GitLab before it selects work. Use
+Run it from the repository it should operate on. This bare command is a
+read-only preview. The runner derives the GitLab host and project from `origin`
+and confirms that project through GitLab before reporting eligible work. Use
 [`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md)
-to install the timer. It sends redacted worker diagnostics through `logger`,
-so they are easy to read with `journalctl --user -t <project-slug>-agent-work`.
+to install the timer. It records redacted lifecycle evidence in the systemd
+journal and the XDG-local `agent-work.log`.
 Enable linger
 and verify it before relying on the timer after logout:
 
@@ -31,17 +32,18 @@ pass with temporary-failure exit `75`.
 
 ## Serial GitLab agent loop
 
-This project uses GitLab-only polling for one open issue at a time. The
+This project uses GitLab-only polling for one opted-in issue at a time. The
 runner derives its checkout and GitLab project from the current repository,
 then confirms both Git and GitLab access before work begins. A Developer account
-can poll eligible issues, so no webhook or inbound service is required:
+can poll `agent::ready` issues, so no webhook or inbound service is required:
 
 ```bash
-uv run agent-work run-next --json
+uv run agent-work loop run --json
 ```
 
-An applied run uses the current repository checkout, opens one MR, and
-stops at `awaiting_human`. It never approves or merges. Enable the user-level
+An applied run advances one bounded, recoverable state-machine segment. Later
+segments publish and verify an MR before stopping at `awaiting-human`; no segment
+approves or merges. Enable the user-level
 systemd timer only after a human explicitly authorizes publication. For a constrained
 identity with effective API access exactly `30` (Developer), the
 Developer-readable readiness preflight uses the authoritative effective

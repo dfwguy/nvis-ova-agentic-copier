@@ -147,7 +147,10 @@ merge. A publication failure is a blocker, not completion.
 
 ### Serial agent-work worker exception
 
-A worker invoked by `agent-work run-next` follows the same loading table and
-workflow manifest but only edits and validates its prepared branch. It must not
-commit, push, create a merge request, approve, or merge; the trusted runner owns
-publication. This exception does not apply to ordinary user-requested work.
+A worker invoked by `agent-work loop run --apply` follows the same loading
+table and workflow manifest but completes only the phase recorded in its
+durable ledger. It edits and validates its prepared per-issue worktree and
+returns one versioned result envelope. It must not commit, push, create a merge
+request, approve, or merge; the trusted runner owns publication and
+post-publication orchestration. This exception does not apply to ordinary
+user-requested work.
