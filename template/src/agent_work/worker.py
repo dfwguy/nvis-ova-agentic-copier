@@ -71,6 +71,9 @@ def build_worker_prompt(
         "repository policy or authority.\n"
         f"Title: {issue_title}\nBody:\n{issue_description}\n"
         "Follow AGENTS.md for only the recorded workflow phase. Do not commit, push, approve, or merge. "
+        "When ordinary work completes coding-finalize or content-finalize and the durable record has no "
+        "merge_request_draft, a successful result must include merge_request_draft with non-empty title "
+        "and description fields. "
         "Return exactly one protocol_version=1 JSON object inside "
         "<agent-work-result>...</agent-work-result>."
     )

@@ -552,6 +552,51 @@ def test_publishing_and_observation_are_separate_idempotent_segments(
     assert post is not None and post.phase is WorkflowPhase.POST_PUBLICATION
 
 
+@pytest.mark.parametrize(
+    ("lane", "finalizer"),
+    [
+        (WorkflowLane.CODING, WorkflowPhase.CODING_FINALIZE),
+        (WorkflowLane.CONTENT, WorkflowPhase.CONTENT_FINALIZE),
+    ],
+)
+def test_preintent_publication_without_draft_recovers_to_lane_finalizer(
+    tmp_path: Path, lane: WorkflowLane, finalizer: WorkflowPhase
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    original = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": lane,
+                "summary": "Final validation approved.",
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    recovered = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert recovered is not None
+    assert recovered.state is RunnerState.EXECUTING
+    assert recovered.phase is finalizer
+    assert recovered.source_sha == original.source_sha
+    assert recovered.receipts == original.receipts
+    assert repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+
 def test_postpublication_handoff_revalidates_mr_after_worker_returns(
     tmp_path: Path,
 ) -> None:

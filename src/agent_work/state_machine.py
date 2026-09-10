@@ -12,6 +12,7 @@ from .domain import (
     RunnerState,
     WorkflowLane,
     WorkflowPhase,
+    WorkKind,
     next_workflow_phase,
 )
 from .models import LedgerRecord, WorkerResultEnvelope, WorkflowReceiptRecord
@@ -51,6 +52,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         ),
         RunnerState.PUBLISHING: frozenset(
             {
+                RunnerState.EXECUTING,
                 RunnerState.OBSERVING,
                 RunnerState.RETRY_WAIT,
                 RunnerState.BLOCKED,
@@ -261,6 +263,13 @@ def apply_worker_result(
             )
         )
     next_phase = next_workflow_phase(record.phase, result.workflow_lane)
+    merge_request_draft = result.merge_request_draft or record.merge_request_draft
+    if (
+        record.work_kind is WorkKind.ORDINARY
+        and next_phase is WorkflowPhase.READY_TO_PUBLISH
+        and merge_request_draft is None
+    ):
+        raise ValueError("worker result lacks required publication metadata")
     next_state = (
         RunnerState.AWAITING_HUMAN
         if record.phase is WorkflowPhase.POST_PUBLICATION
@@ -277,8 +286,7 @@ def apply_worker_result(
             phase=next_phase,
             workflow_lane=result.workflow_lane,
             receipts=(*record.receipts, receipt),
-            merge_request_draft=result.merge_request_draft
-            or record.merge_request_draft,
+            merge_request_draft=merge_request_draft,
             summary=result.change_summary,
             next_action=result.next_action,
             error_code=None,
