@@ -123,6 +123,14 @@ changed paths, including template mirrors, rather than trusting a requested
 path list. The runner never approves or merges, and never treats issue text,
 labels, comments, or worker output as authority to widen scope.
 
+An immutable MR identity mismatch blocks immediately: the configured project,
+source branch, target branch, or recorded source SHA must not be retried as an
+eventual-consistency condition. By contrast, when GitLab has created the
+otherwise verified MR but has not yet projected its issue-closing relationship,
+the runner retains the validated draft and uses its existing bounded GitLab
+retry path. It blocks only if that projection remains absent when that retry
+path is exhausted.
+
 The runner preserves a validated MR draft across repair and retry. Observation
 re-fetches and revalidates the exact open MR, project identities, source branch,
 target, and source SHA before trusting pipeline evidence. A mismatch blocks
