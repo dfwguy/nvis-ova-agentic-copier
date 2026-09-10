@@ -372,9 +372,10 @@ def dispatch(
     if request.command != "loop.run":
         raise RuntimeError("unsupported command")
     if not apply:
+        records = ledger.list_records()
         active = tuple(
             record
-            for record in ledger.list_records()
+            for record in records
             if record.state.value
             not in {"blocked", "awaiting-human", "failed", "complete"}
         )
@@ -386,7 +387,7 @@ def dispatch(
                 records=active[:1],
                 project=identity,
             )
-        record_iids = {record.issue_iid for record in ledger.list_records()}
+        record_iids = {record.issue_iid for record in records}
         eligible = tuple(
             issue for issue in gitlab.list_eligible() if issue.iid not in record_iids
         )
