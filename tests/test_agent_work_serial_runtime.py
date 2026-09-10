@@ -187,6 +187,19 @@ class FakeGitLab:
         return self.pipeline
 
 
+class ChangingSnapshotJsonLedger(JsonLedger):
+    def __init__(self, root: Path, initial_records: tuple[LedgerRecord, ...]) -> None:
+        super().__init__(root)
+        self.initial_records = initial_records
+        self.first_read = True
+
+    def list_records(self) -> tuple[LedgerRecord, ...]:
+        if self.first_read:
+            self.first_read = False
+            return self.initial_records
+        return ()
+
+
 class FakeRepository:
     def __init__(self, config: AgentWorkConfig) -> None:
         self.config = config
@@ -1123,6 +1136,35 @@ def test_run_preview_reports_eligible_unprojected_work(tmp_path: Path) -> None:
     )
 
     assert report.outcome == "eligible"
+
+
+def test_run_preview_uses_initial_ledger_snapshot_for_eligibility(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = ChangingSnapshotJsonLedger(
+        config.state_root,
+        (
+            _record(
+                tmp_path,
+                state=RunnerState.COMPLETE,
+                phase=WorkflowPhase.POST_PUBLICATION,
+            ),
+        ),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(
+            config,
+            ledger,
+            FakeGitLab(_issue()),
+            FakeRepository(config),
+        ),
+    )
+
+    assert report.outcome == "idle"
 
 
 def test_complete_record_with_stale_label_only_removes_the_projection(
