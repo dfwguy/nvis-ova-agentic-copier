@@ -11,6 +11,7 @@ import pytest
 from pytest_subprocess import FakeProcess
 
 from agent_work.cli import main
+from agent_work.domain import LIFECYCLE_LABELS
 from agent_work.gitlab import GitLabError, GitLabGateway
 from agent_work.models import AgentWorkConfig, CommandReport, MergeRequestDraft
 from agent_work.repository import (
@@ -118,6 +119,23 @@ class ApiStub:
         else:
             raise AssertionError(endpoint)
         return CommandResult(0, json.dumps(payload), "")
+
+
+@pytest.mark.parametrize("target", [*LIFECYCLE_LABELS, None])
+def test_gitlab_lifecycle_transition_never_requests_target_removal(
+    tmp_path: Path, target: str | None
+) -> None:
+    api = ApiStub()
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    gateway.transition_labels(12, target)
+
+    update = next(command for command in api.commands if "PUT" in command)
+    remove_field = next(part for part in update if part.startswith("remove_labels="))
+    removed = set(remove_field.removeprefix("remove_labels=").split(","))
+    assert removed == set(LIFECYCLE_LABELS).difference({target})
+    if target is not None:
+        assert f"add_labels={target}" in update
 
 
 def test_gitlab_gateway_enforces_ready_selection_and_exact_evidence(

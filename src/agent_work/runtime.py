@@ -170,13 +170,32 @@ def _migration_record(
 
 
 def _is_matching_migration_record(
-    existing: LedgerRecord, expected: LedgerRecord
+    existing: LedgerRecord,
+    expected: LedgerRecord,
+    expected_intent: TransitionIntentRecord,
 ) -> bool:
     """Return whether a ledger record is safe to replay for the same plan."""
     intent = existing.intent
     return existing.model_copy(update={"revision": 0, "intent": None}) == expected and (
-        intent is None or intent.kind == "migrate_projection"
+        intent is None or intent == expected_intent
     )
+
+
+def _migration_intent(action: MigrationAction) -> TransitionIntentRecord:
+    """Build the canonical replay intent for one migration action."""
+    return TransitionIntentRecord(
+        operation_id=f"migration:{action.issue_iid}",
+        kind="migrate_projection",
+        expected_evidence={"label": label_for_state(action.target_state)},
+    )
+
+
+def _migration_issue_state_matches(action: MigrationAction, issue_state: str) -> bool:
+    """Return whether the issue state still agrees with the reviewed action."""
+    expected_state = (
+        "closed" if action.target_state is RunnerState.COMPLETE else "opened"
+    )
+    return issue_state == expected_state
 
 
 def dispatch(
@@ -268,36 +287,39 @@ def dispatch(
             for action in plan.actions:
                 current_action = current_actions.get(action.issue_iid)
                 issue = issues[action.issue_iid]
+                if not _migration_issue_state_matches(action, issue.state):
+                    raise RuntimeError(
+                        "migration evidence changed; create a new preview"
+                    )
                 expected_label = label_for_state(action.target_state)
                 projected = set(issue.labels).intersection(LIFECYCLE_LABELS)
-                if current_action is None and projected != (
-                    {expected_label} if expected_label else set()
+                existing = existing_records[action.issue_iid]
+                expected_intent = _migration_intent(action)
+                if existing is not None and not _is_matching_migration_record(
+                    existing, expected_records[action.issue_iid], expected_intent
+                ):
+                    raise RuntimeError("migration cannot overwrite a ledger record")
+                expected_projection = {expected_label} if expected_label else set()
+                replaying_empty_projection = (
+                    not projected
+                    and existing is not None
+                    and existing.intent == expected_intent
+                )
+                if (
+                    current_action is None
+                    and projected != expected_projection
+                    and not replaying_empty_projection
                 ):
                     raise RuntimeError(
                         "migration evidence changed; create a new preview"
                     )
-                existing = existing_records[action.issue_iid]
-                if existing is not None and not _is_matching_migration_record(
-                    existing, expected_records[action.issue_iid]
-                ):
-                    raise RuntimeError("migration cannot overwrite a ledger record")
             for action in plan.actions:
                 record = existing_records[action.issue_iid]
                 if record is None:
                     record = expected_records[action.issue_iid]
                 if record.intent is None:
                     record = ledger.persist(
-                        record.model_copy(
-                            update={
-                                "intent": TransitionIntentRecord(
-                                    operation_id=f"migration:{action.issue_iid}",
-                                    kind="migrate_projection",
-                                    expected_evidence={
-                                        "label": label_for_state(action.target_state)
-                                    },
-                                )
-                            }
-                        )
+                        record.model_copy(update={"intent": _migration_intent(action)})
                     )
                 gitlab.transition_labels(
                     action.issue_iid, label_for_state(action.target_state)
