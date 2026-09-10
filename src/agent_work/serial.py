@@ -179,6 +179,33 @@ def _mr_publication_identity_is_exact(
     )
 
 
+def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> bool:
+    """Return whether durable intent authorizes this publication replay."""
+    intent = record.intent
+    if intent is None:
+        return False
+    issue_iid, issue_separator, operation = intent.operation_id.partition(":")
+    action, action_separator, revision = operation.partition(":")
+    record_revision = str(record.revision)
+    revision_is_canonical = revision == "0" or (
+        revision.isascii() and revision.isdecimal() and not revision.startswith("0")
+    )
+    revision_is_older = len(revision) < len(record_revision) or (
+        len(revision) == len(record_revision) and revision < record_revision
+    )
+    return (
+        intent.kind == "publish_merge_request"
+        and issue_iid == str(record.issue_iid)
+        and issue_separator == ":"
+        and action == "publish"
+        and action_separator == ":"
+        and revision_is_canonical
+        and revision_is_older
+        and intent.expected_evidence
+        == {"branch": record.source_branch, "baseline_sha": baseline_sha}
+    )
+
+
 def _mr_evidence_is_exact(
     record: LedgerRecord,
     mr: MergeRequestEvidence,
@@ -493,6 +520,15 @@ def _publish(
             )
         )
     replaying = record.intent is not None
+    if replaying and not _publication_intent_is_exact(
+        record, baseline_sha=baseline_sha
+    ):
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Durable publication intent is not exact.",
+        )
     if not replaying:
         protected = tuple(
             path
