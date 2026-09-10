@@ -19,5 +19,5 @@ practical work in a generated project or this template repository.
 - [Validate template changes](validate-template-changes.md) — Run the checks required before proposing a template change.
 
 ### Agent workflow
-- [Set up the serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Configure one checkout and guarded user timer for issue work.
+- [Set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Install, inspect, recover, migrate, and enable one serial agent loop.
 <!-- END GENERATED -->

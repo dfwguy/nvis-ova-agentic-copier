@@ -9,5 +9,5 @@ Consult this material for exact command and lifecycle behavior.
 
 <!-- BEGIN GENERATED -->
 ### Agent workflow
-- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up the run-next command, lifecycle, and publication constraints.
+- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up the recoverable loop commands, lifecycle, data, and operating constraints.
 <!-- END GENERATED -->

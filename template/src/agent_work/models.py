@@ -1,26 +1,29 @@
-"""Validated GitLab boundaries and small immutable runner values."""
+"""Validated boundary models for recoverable agent work."""
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-PROJECT_LOCK_FILENAME = ".agent-work.lock"
+from .domain import ErrorCode, RunnerState, WorkflowLane, WorkflowPhase, WorkKind
 
 
-class AgentWorkConfig(BaseModel):
-    """Non-secret runner configuration supplied by the environment."""
+class BoundaryModel(BaseModel):
+    """Strict immutable base for data crossing a system boundary."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    host: str
+
+class AgentWorkConfig(BoundaryModel):
+    """Non-secret configuration discovered from a confirmed checkout."""
+
+    host: str = Field(min_length=1)
     project_id: int = Field(gt=0)
     checkout: Path
+    state_root: Path
     default_branch: str = Field(default="main", min_length=1)
     base_branch: str | None = Field(
         default=None, pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$"
@@ -30,61 +33,40 @@ class AgentWorkConfig(BaseModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
-        """Require one bare GitLab hostname."""
-        if not value or "://" in value or "/" in value:
-            raise ValueError("GITLAB_HOST must be a bare hostname")
+        """Require one bare hostname."""
+        if "://" in value or "/" in value:
+            raise ValueError("host must be a bare hostname")
         return value
 
-    @field_validator("checkout")
+    @field_validator("checkout", "state_root")
     @classmethod
     def validate_absolute_path(cls, value: Path) -> Path:
-        """Keep the service checkout target explicit."""
+        """Require explicit absolute paths."""
         if not value.is_absolute():
             raise ValueError("runner paths must be absolute")
         return value
 
-    @property
-    def lock_file(self) -> Path:
-        """Use one fixed, checkout-scoped lock shared by every local runner."""
-        return self.checkout / PROJECT_LOCK_FILENAME
 
-
-class GitLabIssue(BaseModel):
-    """The validated subset of a GitLab issue used by the runner."""
-
-    model_config = ConfigDict(frozen=True)
+class GitLabIssue(BoundaryModel):
+    """Validated GitLab issue fields used by selection."""
 
     iid: int = Field(gt=0)
     title: str = Field(min_length=1)
-    description: str = Field(default="", strict=True)
+    description: str = ""
     labels: tuple[str, ...] = ()
-    state: str = Field(default="opened", min_length=1)
+    state: str = "opened"
     confidential: bool = False
     created_at: str = ""
 
     @field_validator("description", mode="before")
     @classmethod
     def normalize_description(cls, value: object) -> object:
-        """Accept GitLab's nullable issue description."""
-        if value is None:
-            return ""
-        return value
-
-    @field_validator("labels", mode="before")
-    @classmethod
-    def normalize_labels(cls, value: object) -> tuple[str, ...]:
-        """Normalize GitLab's label array to an immutable tuple."""
-        if not isinstance(value, (list, tuple)) or not all(
-            isinstance(label, str) for label in value
-        ):
-            raise ValueError("issue labels must be strings")
-        return tuple(label for label in value if isinstance(label, str))
+        """Accept GitLab's nullable description."""
+        return "" if value is None else value
 
 
-class GitLabProject(BaseModel):
-    """Configured-project metadata used to bind every operation."""
-
-    model_config = ConfigDict(frozen=True)
+class GitLabProject(BoundaryModel):
+    """Configured-project identity returned by GitLab."""
 
     id: int = Field(gt=0)
     host: str
@@ -94,26 +76,8 @@ class GitLabProject(BaseModel):
     ssh_url_to_repo: str = ""
 
 
-class PipelineEvidence(BaseModel):
-    """The latest default-branch pipeline state needed for remediation."""
-
-    model_config = ConfigDict(frozen=True)
-
-    id: int = Field(gt=0)
-    status: str = Field(min_length=1)
-    sha: str = Field(pattern=r"^[0-9a-f]{40}$")
-    web_url: str = Field(min_length=1)
-
-    @property
-    def needs_remediation(self) -> bool:
-        """Return whether this terminal pipeline state requires a repair."""
-        return self.status in {"failed", "canceled"}
-
-
-class MergeRequestEvidence(BaseModel):
-    """The GitLab fields needed to verify one publication."""
-
-    model_config = ConfigDict(frozen=True)
+class MergeRequestEvidence(BoundaryModel):
+    """Exact MR evidence needed for recovery and publication."""
 
     iid: int = Field(gt=0)
     web_url: str = Field(min_length=1)
@@ -124,82 +88,154 @@ class MergeRequestEvidence(BaseModel):
     target_branch: str = Field(min_length=1)
     sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     has_conflicts: bool = False
+    description: str = ""
 
 
-class MergeRequestDraft(BaseModel):
-    """Worker-supplied metadata for trusted merge-request publication."""
+class PipelineEvidence(BoundaryModel):
+    """Pipeline state associated with one exact source SHA."""
 
-    model_config = ConfigDict(frozen=True)
+    id: int = Field(gt=0)
+    status: str = Field(min_length=1)
+    sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    web_url: str = Field(min_length=1)
+
+
+class RemediationMarker(BoundaryModel):
+    """Exact existing-MR remediation metadata from an issue body."""
+
+    project_id: int = Field(gt=0)
+    merge_request_iid: int = Field(gt=0)
+    source_branch: str = Field(min_length=1)
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    finding: str = Field(min_length=1)
+
+
+class MergeRequestDraft(BoundaryModel):
+    """Human-review metadata proposed by a worker."""
 
     title: str = Field(min_length=1, max_length=255)
     description: str = Field(min_length=1, max_length=20_000)
 
 
-@dataclass(frozen=True)
-class GitPublicationEvidence:
-    """Local and remote tips for one deterministic issue branch."""
+class TransitionIntentRecord(BoundaryModel):
+    """Replayable external mutation intent."""
 
-    local_sha: str
-    remote_sha: str
-
-
-@dataclass(frozen=True)
-class AgentInvocation:
-    """Result and redacted diagnostic output from one agent invocation."""
-
-    returncode: int | None
-    stdout: str = ""
-    stderr: str = ""
-
-    @property
-    def diagnostic(self) -> str:
-        """Return a bounded redacted diagnostic in command-stream order."""
-        return "\n".join(
-            _diagnostic_excerpt(part) for part in (self.stdout, self.stderr) if part
-        )
-
-    def merge_request_draft(self) -> MergeRequestDraft:
-        """Parse the sole delimited JSON draft emitted by the worker."""
-        matches = re.findall(
-            r"<agent-work-merge-request>\s*(.*?)\s*</agent-work-merge-request>",
-            self.stdout,
-            flags=re.DOTALL,
-        )
-        if len(matches) != 1:
-            raise ValueError("worker did not return one merge-request draft")
-        try:
-            return MergeRequestDraft.model_validate(json.loads(matches[0]))
-        except (json.JSONDecodeError, ValidationError) as error:
-            raise ValueError(
-                "worker returned an invalid merge-request draft"
-            ) from error
+    operation_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    expected_evidence: dict[str, str | int | bool | None] = Field(default_factory=dict)
 
 
-def _diagnostic_excerpt(output: str, *, limit: int = 12_000) -> str:
-    """Keep journal diagnostics useful without allowing one worker to flood them."""
-    if len(output) <= limit:
-        return output
-    half_limit = limit // 2
-    return (
-        f"{output[:half_limit]}\n"
-        "...[worker diagnostic truncated; retaining beginning and end]...\n"
-        f"{output[-half_limit:]}"
-    )
+class WorkflowReceiptRecord(BoundaryModel):
+    """One durable phase receipt."""
+
+    phase: WorkflowPhase
+    verdict: str = Field(min_length=1)
+    detail: str = Field(min_length=1, max_length=20_000)
 
 
-@dataclass(frozen=True)
-class RunReport:
-    """Safe, non-persistent output from one bounded command."""
+class LedgerRecord(BoundaryModel):
+    """Durable state for one issue."""
 
-    outcome: Literal[
-        "idle",
-        "preview_ready",
-        "preview_running",
-        "awaiting_human",
-        "failed",
-    ]
-    issue_iid: int | None = None
-    branch: str | None = None
+    schema_version: Literal[1] = 1
+    revision: int = Field(default=0, ge=0)
+    project_id: int = Field(gt=0)
+    issue_iid: int = Field(gt=0)
+    state: RunnerState
+    phase: WorkflowPhase
+    workflow_lane: WorkflowLane = WorkflowLane.UNKNOWN
+    work_kind: WorkKind
+    source_branch: str = Field(min_length=1)
+    worktree: Path
+    retry_count: int = Field(default=0, ge=0)
+    retry_at: datetime | None = None
+    prior_state: RunnerState | None = None
+    prior_phase: WorkflowPhase | None = None
+    merge_request_iid: int | None = Field(default=None, gt=0)
     merge_request_url: str | None = None
-    failure_reason: str | None = None
-    agent_diagnostic: str | None = None
+    source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    merge_request_draft: MergeRequestDraft | None = None
+    receipts: tuple[WorkflowReceiptRecord, ...] = ()
+    intent: TransitionIntentRecord | None = None
+    error_code: ErrorCode | None = None
+    summary: str = ""
+    next_action: str = ""
+
+
+class WorkerResultEnvelope(BoundaryModel):
+    """Versioned, identity-bound worker segment result."""
+
+    protocol_version: Literal[1] = 1
+    project_id: int = Field(gt=0)
+    issue_iid: int = Field(gt=0)
+    ledger_revision: int = Field(ge=0)
+    expected_state: RunnerState
+    expected_phase: WorkflowPhase
+    workflow_lane: WorkflowLane
+    result_kind: Literal["ready_to_publish", "retryable", "needs_human"]
+    phase_status: Literal["complete", "rejected"]
+    completed_phase: WorkflowPhase
+    rejection_route: WorkflowPhase | None = None
+    receipts: tuple[str, ...] = ()
+    change_summary: str = Field(min_length=1, max_length=20_000)
+    merge_request_draft: MergeRequestDraft | None = None
+    error_code: ErrorCode | None = None
+    redacted_summary: str = ""
+    next_action: str = Field(min_length=1, max_length=2_000)
+
+
+class MigrationObservation(BoundaryModel):
+    """Read-only legacy evidence used to build a migration plan."""
+
+    project_id: int = Field(gt=0)
+    issues: tuple[dict[str, object], ...] = ()
+    branches: tuple[str, ...] = ()
+    worktrees: tuple[str, ...] = ()
+    stashes: tuple[str, ...] = ()
+
+
+class MigrationAction(BoundaryModel):
+    """One reviewed, preconditioned migration action."""
+
+    issue_iid: int = Field(gt=0)
+    target_state: RunnerState
+    next_action: str = Field(min_length=1)
+    evidence: tuple[str, ...] = ()
+
+
+class MigrationPlan(BoundaryModel):
+    """Versioned dry-run migration plan."""
+
+    schema_version: Literal[1] = 1
+    project_id: int = Field(gt=0)
+    actions: tuple[MigrationAction, ...] = ()
+
+
+class CommandItemReport(BoundaryModel):
+    """Safe operational status for one issue."""
+
+    issue_iid: int = Field(gt=0)
+    state: RunnerState
+    phase: WorkflowPhase
+    work_kind: WorkKind
+    attempt: int = Field(ge=1)
+    retries_remaining: int = Field(ge=0)
+    retry_at: datetime | None = None
+    source_branch: str
+    worktree: Path
+    merge_request_iid: int | None = None
+    merge_request_url: str | None = None
+    error_code: ErrorCode | None = None
+    summary: str = ""
+    next_action: str = ""
+
+
+class CommandReport(BoundaryModel):
+    """Common safe JSON envelope for every CLI action."""
+
+    schema_version: Literal[1] = 1
+    command: str = Field(min_length=1)
+    applied: bool
+    outcome: str = Field(min_length=1)
+    project: dict[str, str | int] | None = None
+    items: tuple[CommandItemReport, ...] = ()
+    actions: tuple[MigrationAction, ...] = ()

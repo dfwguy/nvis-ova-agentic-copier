@@ -13,5 +13,5 @@ serial agent loop. They describe the available interfaces rather than a path.
 - [Template contract](template-contract.md) — Look up template inputs, generated files, setup tasks, and update behavior.
 
 ### Agent workflow
-- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up the run-next command, lifecycle, and publication constraints.
+- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up the recoverable loop commands, lifecycle, data, and operating constraints.
 <!-- END GENERATED -->

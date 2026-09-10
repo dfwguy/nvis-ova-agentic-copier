@@ -1,0 +1,325 @@
+"""Git and durable-worktree boundary for recoverable agent work."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+from pydantic import ValidationError
+
+from .ledger import project_state_path
+from .models import AgentWorkConfig
+from .ports import CommandRunner
+
+
+class RepositoryError(RuntimeError):
+    """A repository operation could not be completed safely."""
+
+
+class RepositoryTransientError(RepositoryError):
+    """A Git transport operation may be retried safely."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Captured output from an argv-only subprocess."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run_subprocess(
+    command: tuple[str, ...],
+    *,
+    stdin: str | None = None,
+    timeout_seconds: float | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run one command without invoking a shell."""
+    try:
+        completed = subprocess.run(
+            command,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=None if environment is None else dict(environment),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RepositoryError("a required command could not be completed") from error
+    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _confirmed(
+    run_command: CommandRunner, command: tuple[str, ...], failure: str
+) -> str:
+    result = run_command(command)
+    if result.returncode != 0:
+        raise RepositoryError(failure)
+    return result.stdout.strip()
+
+
+def _origin_identity(origin: str) -> tuple[str, str]:
+    normalized = origin.strip().removesuffix(".git")
+    parsed = urlparse(normalized)
+    if parsed.hostname and parsed.path.strip("/"):
+        return parsed.hostname, parsed.path.strip("/")
+    match = re.fullmatch(r"(?:[^@]+@)?(?P<host>[^:]+):(?P<path>.+)", normalized)
+    if match is None:
+        raise RepositoryError("checkout origin is not a usable GitLab URL")
+    return match["host"], match["path"].strip("/")
+
+
+def discover_config(
+    *,
+    current_directory: Path,
+    environment: Mapping[str, str],
+    run_command: CommandRunner,
+) -> AgentWorkConfig:
+    """Discover and verify config without mutating the checkout."""
+    start = current_directory.resolve()
+    checkout = Path(
+        _confirmed(
+            run_command,
+            ("git", "-C", str(start), "rev-parse", "--show-toplevel"),
+            "current directory is not inside a Git checkout",
+        )
+    ).resolve()
+    origin = _confirmed(
+        run_command,
+        ("git", "-C", str(checkout), "remote", "get-url", "origin"),
+        "checkout origin could not be read",
+    )
+    origin_host, project_path = _origin_identity(origin)
+    host = environment.get("GITLAB_HOST", "")
+    project_id_text = environment.get("GITLAB_PROJECT_ID", "")
+    if not host or "://" in host or "/" in host:
+        raise RepositoryError("GITLAB_HOST must be a bare hostname")
+    if not project_id_text.isdigit() or int(project_id_text) <= 0:
+        raise RepositoryError("GITLAB_PROJECT_ID must be numeric")
+    project_id = int(project_id_text)
+    numeric = _confirmed(
+        run_command,
+        ("glab", "api", "--hostname", host, f"projects/{project_id}"),
+        "GitLab numeric project confirmation failed",
+    )
+    try:
+        project = json.loads(numeric)
+    except json.JSONDecodeError as error:
+        raise RepositoryError("GitLab returned invalid project metadata") from error
+    if (
+        not isinstance(project, dict)
+        or project.get("id") != project_id
+        or origin_host != host
+        or project.get("path_with_namespace") != project_path
+    ):
+        raise RepositoryError("GitLab project identity did not match the checkout")
+    state_root = project_state_path(
+        host=host, project_id=project_id, environment=environment
+    )
+    try:
+        return AgentWorkConfig(
+            host=host,
+            project_id=project_id,
+            checkout=checkout,
+            state_root=state_root,
+            default_branch=str(project.get("default_branch") or "main"),
+            base_branch=environment.get("AGENT_WORK_BASE_BRANCH") or None,
+            journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
+        )
+    except ValidationError as error:
+        raise RepositoryError("agent-work configuration is invalid") from error
+
+
+class GitRepository:
+    """Own durable worktrees and publication Git operations."""
+
+    def __init__(self, config: AgentWorkConfig, run_command: CommandRunner) -> None:
+        self.config = config
+        self._run_command = run_command
+
+    def _git(
+        self, *arguments: str, cwd: Path | None = None, transient: bool = False
+    ) -> str:
+        result = self._run_command(
+            ("git", "-C", str(cwd or self.config.checkout), *arguments)
+        )
+        if result.returncode != 0:
+            error_type = RepositoryTransientError if transient else RepositoryError
+            raise error_type("Git operation failed")
+        return result.stdout.strip()
+
+    def refresh_base(self) -> None:
+        """Require a clean base checkout and fast-forward it."""
+        expected = self.config.base_branch or self.config.default_branch
+        if self._git("branch", "--show-current") != expected:
+            raise RepositoryError(f"service checkout must be on {expected!r}")
+        if self._git("status", "--porcelain"):
+            raise RepositoryError("service checkout must be clean")
+        self._git("pull", "--ff-only", transient=True)
+
+    def create_issue_worktree(
+        self,
+        issue_iid: int,
+        branch: str,
+        default_branch: str,
+        *,
+        allow_existing_branch: bool = True,
+    ) -> Path:
+        """Create or verify the durable worktree for an ordinary issue."""
+        path = self.config.state_root / "worktrees" / str(issue_iid)
+        if path.exists():
+            actual = self._git("branch", "--show-current", cwd=path)
+            if actual != branch:
+                raise RepositoryError("worktree ownership is ambiguous")
+            return path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        remote_ref = f"refs/remotes/origin/{branch}"
+        local_exists = bool(self._git("branch", "--list", branch))
+        remote = self._run_command(
+            (
+                "git",
+                "-C",
+                str(self.config.checkout),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                remote_ref,
+            )
+        )
+        if (local_exists or remote.returncode == 0) and not allow_existing_branch:
+            raise RepositoryError("branch ownership is ambiguous")
+        if local_exists:
+            self._git("worktree", "add", str(path), branch)
+        elif remote.returncode == 0:
+            self._git("worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+        else:
+            self._git(
+                "worktree", "add", "-b", branch, str(path), f"origin/{default_branch}"
+            )
+        return path
+
+    def worktree_for_existing_branch(
+        self, issue_iid: int, branch: str, expected_sha: str
+    ) -> Path:
+        """Create a durable worktree from an exact existing remote branch."""
+        path = self.config.state_root / "worktrees" / str(issue_iid)
+        if path.exists():
+            if self._git("branch", "--show-current", cwd=path) != branch:
+                raise RepositoryError("worktree ownership is ambiguous")
+            if self._git("rev-parse", "HEAD", cwd=path) != expected_sha:
+                raise RepositoryError(
+                    "worktree does not match recorded merge request SHA"
+                )
+            return path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._git("fetch", "origin", branch, transient=True)
+        if self._git("rev-parse", f"origin/{branch}") != expected_sha:
+            raise RepositoryError(
+                "remote branch does not match recorded merge request SHA"
+            )
+        local_exists = bool(self._git("branch", "--list", branch))
+        if local_exists:
+            if self._git("rev-parse", branch) != expected_sha:
+                raise RepositoryError(
+                    "local branch does not match recorded merge request SHA"
+                )
+            self._git("worktree", "add", str(path), branch)
+        else:
+            self._git("worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+        return path
+
+    def has_changes(self, worktree: Path) -> bool:
+        """Return whether a worktree differs from its index."""
+        return bool(self._git("status", "--porcelain", cwd=worktree))
+
+    def head(self, worktree: Path) -> str:
+        """Return the worktree's exact current commit."""
+        return self._git("rev-parse", "HEAD", cwd=worktree)
+
+    def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+        """Return paths changed relative to the index, including untracked paths."""
+        return tuple(
+            path.removeprefix('"').removesuffix('"')
+            for line in self._git("status", "--porcelain", cwd=worktree).splitlines()
+            if len(line) > 3 and line[3:].strip()
+            for path in line[3:].strip().split(" -> ")
+        )
+
+    def worktree_exists(self, worktree: Path) -> bool:
+        """Return whether the durable worktree directory still exists."""
+        return worktree.is_dir()
+
+    def verify_worktree(self, worktree: Path, branch: str, expected_head: str) -> None:
+        """Verify the durable worktree still owns its recorded baseline."""
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("durable worktree branch changed")
+        if self.head(worktree) != expected_head:
+            raise RepositoryError("durable worktree baseline changed")
+
+    def commit_and_push(
+        self,
+        worktree: Path,
+        branch: str,
+        issue_iid: int,
+        *,
+        expected_head: str,
+        allow_replay: bool = False,
+    ) -> str:
+        """Idempotently publish the worktree and return its exact SHA."""
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("publication worktree is on the wrong branch")
+        current_head = self.head(worktree)
+        changed = self.has_changes(worktree)
+        if current_head == expected_head and changed:
+            self._git("add", "--all", cwd=worktree)
+            self._git("commit", "-m", f"Resolve issue #{issue_iid}", cwd=worktree)
+        elif not (allow_replay and current_head != expected_head and not changed):
+            message = (
+                "worker-created commits cannot be published"
+                if current_head != expected_head
+                else "worker made no changes to publish"
+            )
+            raise RepositoryError(message)
+        sha = self._git("rev-parse", "HEAD", cwd=worktree)
+        self._git(
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+            cwd=worktree,
+            transient=True,
+        )
+        remote_sha = self._git("rev-parse", f"origin/{branch}", cwd=worktree)
+        if sha != remote_sha:
+            raise RepositoryError("published branch SHA could not be verified")
+        return sha
+
+    def inventory(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """Return legacy branches, worktrees, and stash subjects without mutation."""
+        branches = tuple(
+            line.strip()
+            for line in self._git(
+                "for-each-ref", "--format=%(refname:short)", "refs/heads/agent"
+            ).splitlines()
+            if line.strip()
+        )
+        worktree_payload = self._git("worktree", "list", "--porcelain")
+        worktrees = tuple(
+            line.removeprefix("worktree ")
+            for line in worktree_payload.splitlines()
+            if line.startswith("worktree ")
+        )
+        stashes = tuple(
+            line.strip()
+            for line in self._git("stash", "list", "--format=%gs").splitlines()
+            if line.strip()
+        )
+        return branches, worktrees, stashes

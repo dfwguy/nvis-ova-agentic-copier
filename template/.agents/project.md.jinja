@@ -33,7 +33,8 @@ production code and are not additional user entry points.
   `scripts/agent-work-systemd-run.sh`, invoked by
   `systemd/{{ project_slug }}-agent-work.service`. It has no generated-project
   Bash test; the template repository validates it in `tests/test_template.py`
-  before rendering.
+  before rendering. Recoverable records, the project lock, and durable issue
+  worktrees live below the XDG state directory.
 - **Rationale:** this wrapper is a systemd integration boundary, not an
   interactive user CLI or sourceable library. Its stable `scripts/` path is
   referenced by the installed service unit.

@@ -1,0 +1,389 @@
+"""Composition root and command dispatcher for agent-work."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .domain import (
+    LIFECYCLE_LABELS,
+    CommandRequest,
+    ErrorCode,
+    RunnerState,
+    WorkflowPhase,
+    WorkKind,
+    label_for_state,
+    retries_remaining,
+)
+from .gitlab import GitLabGateway
+from .ledger import JsonLedger, XdgProjectLock
+from .migration import build_migration_plan
+from .models import (
+    AgentWorkConfig,
+    CommandItemReport,
+    CommandReport,
+    LedgerRecord,
+    MigrationAction,
+    MigrationObservation,
+    MigrationPlan,
+    TransitionIntentRecord,
+)
+from .ports import (
+    GitLabPort,
+    InvokerPort,
+    LedgerPort,
+    ProjectLockFactory,
+    RepositoryPort,
+)
+from .repository import GitRepository, discover_config, run_subprocess
+from .serial import run_segment
+from .state_machine import transition_record
+from .worker import AgentInvoker
+
+
+def _item(record: LedgerRecord) -> CommandItemReport:
+    return CommandItemReport(
+        issue_iid=record.issue_iid,
+        state=record.state,
+        phase=record.phase,
+        work_kind=record.work_kind,
+        attempt=record.retry_count + 1,
+        retries_remaining=retries_remaining(record.retry_count),
+        retry_at=record.retry_at,
+        source_branch=record.source_branch,
+        worktree=record.worktree,
+        merge_request_iid=record.merge_request_iid,
+        merge_request_url=record.merge_request_url,
+        error_code=record.error_code,
+        summary=record.summary,
+        next_action=record.next_action,
+    )
+
+
+def _report(
+    request: CommandRequest,
+    *,
+    applied: bool,
+    outcome: str,
+    records: tuple[LedgerRecord, ...] = (),
+    actions: tuple[MigrationAction, ...] = (),
+    project: dict[str, str | int] | None = None,
+) -> CommandReport:
+    return CommandReport(
+        command=request.command,
+        applied=applied,
+        outcome=outcome,
+        project=project,
+        items=tuple(_item(record) for record in records),
+        actions=actions,
+    )
+
+
+@dataclass(frozen=True)
+class RuntimeDependencies:
+    """Injected stateful boundaries for command dispatch."""
+
+    config: AgentWorkConfig
+    ledger: LedgerPort
+    gitlab: GitLabPort
+    repository: RepositoryPort
+    invoke: InvokerPort
+    lock: ProjectLockFactory
+    clock: Callable[[], datetime]
+    logger: logging.Logger
+    read_plan: Callable[[Path], bytes]
+
+
+def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
+    """Configure one application-owned local operational log."""
+    config.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    logger = logging.getLogger("agent-work")
+    for existing in tuple(logger.handlers):
+        logger.removeHandler(existing)
+        existing.close()
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    handler = logging.FileHandler(config.state_root / "agent-work.log")
+    handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
+
+
+def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
+    """Wire real process and filesystem boundaries at the composition root."""
+    config = discover_config(
+        current_directory=Path.cwd(), environment=os.environ, run_command=run_subprocess
+    )
+    return RuntimeDependencies(
+        config=config,
+        ledger=JsonLedger(config.state_root),
+        gitlab=GitLabGateway(config, run_subprocess),
+        repository=GitRepository(config, run_subprocess),
+        invoke=AgentInvoker(run_subprocess, environment=os.environ),
+        lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
+        clock=lambda: datetime.now(UTC),
+        logger=_build_local_logger(config, debug=debug),
+        read_plan=lambda path: path.read_bytes(),
+    )
+
+
+def _migration_observation(
+    project_id: int, gitlab: GitLabPort, repository: RepositoryPort
+) -> MigrationObservation:
+    branches, worktrees, stashes = repository.inventory()
+    issues = tuple(issue.model_dump(mode="json") for issue in gitlab.list_projected())
+    return MigrationObservation(
+        project_id=project_id,
+        issues=issues,
+        branches=branches,
+        worktrees=worktrees,
+        stashes=stashes,
+    )
+
+
+def _migration_record(
+    config: AgentWorkConfig,
+    *,
+    project_id: int,
+    issue_iid: int,
+    action: MigrationAction,
+) -> LedgerRecord:
+    """Build the deterministic ledger projection for one migration action."""
+    return LedgerRecord(
+        project_id=project_id,
+        issue_iid=issue_iid,
+        state=action.target_state,
+        phase=WorkflowPhase.DISCOVERY,
+        work_kind=WorkKind.ORDINARY,
+        source_branch=f"agent/issue-{issue_iid}",
+        worktree=config.state_root / "worktrees" / str(issue_iid),
+        error_code=ErrorCode.ORPHAN_EVIDENCE,
+        summary="Legacy evidence requires review.",
+        next_action=action.next_action,
+    )
+
+
+def _is_matching_migration_record(
+    existing: LedgerRecord, expected: LedgerRecord
+) -> bool:
+    """Return whether a ledger record is safe to replay for the same plan."""
+    intent = existing.intent
+    return existing.model_copy(update={"revision": 0, "intent": None}) == expected and (
+        intent is None or intent.kind == "migrate_projection"
+    )
+
+
+def dispatch(
+    request: CommandRequest,
+    *,
+    apply: bool,
+    dependencies: RuntimeDependencies | None = None,
+) -> CommandReport:
+    """Dispatch one command through the single composition boundary."""
+    wired = dependencies or build_runtime_dependencies(debug=request.debug)
+    config = wired.config
+    ledger = wired.ledger
+    gitlab = wired.gitlab
+    repository = wired.repository
+    wired.logger.info("command=%s applied=%s", request.command, apply)
+    wired.logger.debug(
+        "issue_iid=%s timeout_seconds=%s", request.issue_iid, request.timeout_seconds
+    )
+    project = gitlab.verify_project()
+    identity = {"host": config.host, "project_id": project.id}
+
+    if request.command == "loop.status":
+        records = ledger.list_records()
+        if request.issue_iid is not None:
+            records = tuple(r for r in records if r.issue_iid == request.issue_iid)
+        return _report(
+            request, applied=False, outcome="status", records=records, project=identity
+        )
+
+    if request.command == "migration.preview":
+        plan = build_migration_plan(
+            _migration_observation(project.id, gitlab, repository)
+        )
+        return _report(
+            request,
+            applied=False,
+            outcome="preview",
+            actions=plan.actions,
+            project=identity,
+        )
+
+    if request.command == "migration.apply":
+        if not apply or request.plan_file is None:
+            raise RuntimeError("migration apply requires --apply and --plan-file")
+        raw_plan = json.loads(wired.read_plan(request.plan_file))
+        if (
+            isinstance(raw_plan, dict)
+            and raw_plan.get("command") == "migration.preview"
+        ):
+            project_data = raw_plan.get("project")
+            if not isinstance(project_data, dict):
+                raise RuntimeError("migration preview lacks project identity")
+            raw_plan = {
+                "schema_version": raw_plan.get("schema_version"),
+                "project_id": project_data.get("project_id"),
+                "actions": raw_plan.get("actions", []),
+            }
+        plan = MigrationPlan.model_validate(raw_plan)
+        if plan.project_id != project.id:
+            raise RuntimeError("migration plan project does not match")
+        with wired.lock():
+            current = build_migration_plan(
+                _migration_observation(project.id, gitlab, repository)
+            )
+            current_actions = {action.issue_iid: action for action in current.actions}
+            approved_actions = {action.issue_iid: action for action in plan.actions}
+            if any(
+                approved_actions.get(iid) != action
+                for iid, action in current_actions.items()
+            ):
+                raise RuntimeError("migration evidence changed; create a new preview")
+            issues = {
+                action.issue_iid: gitlab.fetch_issue(action.issue_iid)
+                for action in plan.actions
+            }
+            expected_records = {
+                action.issue_iid: _migration_record(
+                    config,
+                    project_id=project.id,
+                    issue_iid=action.issue_iid,
+                    action=action,
+                )
+                for action in plan.actions
+            }
+            existing_records = {
+                action.issue_iid: ledger.load(action.issue_iid)
+                for action in plan.actions
+            }
+            for action in plan.actions:
+                current_action = current_actions.get(action.issue_iid)
+                issue = issues[action.issue_iid]
+                expected_label = label_for_state(action.target_state)
+                projected = set(issue.labels).intersection(LIFECYCLE_LABELS)
+                if current_action is None and projected != (
+                    {expected_label} if expected_label else set()
+                ):
+                    raise RuntimeError(
+                        "migration evidence changed; create a new preview"
+                    )
+                existing = existing_records[action.issue_iid]
+                if existing is not None and not _is_matching_migration_record(
+                    existing, expected_records[action.issue_iid]
+                ):
+                    raise RuntimeError("migration cannot overwrite a ledger record")
+            for action in plan.actions:
+                record = existing_records[action.issue_iid]
+                if record is None:
+                    record = expected_records[action.issue_iid]
+                if record.intent is None:
+                    record = ledger.persist(
+                        record.model_copy(
+                            update={
+                                "intent": TransitionIntentRecord(
+                                    operation_id=f"migration:{action.issue_iid}",
+                                    kind="migrate_projection",
+                                    expected_evidence={
+                                        "label": label_for_state(action.target_state)
+                                    },
+                                )
+                            }
+                        )
+                    )
+                gitlab.transition_labels(
+                    action.issue_iid, label_for_state(action.target_state)
+                )
+                ledger.persist(record.model_copy(update={"intent": None}))
+        return _report(
+            request,
+            applied=True,
+            outcome="migration_applied",
+            actions=plan.actions,
+            project=identity,
+        )
+
+    if request.command == "loop.retry":
+        if request.issue_iid is None:
+            raise RuntimeError("retry requires an issue IID")
+        if not apply:
+            record = ledger.load(request.issue_iid)
+            return _report(
+                request,
+                applied=False,
+                outcome="retry_preview",
+                records=() if record is None else (record,),
+                project=identity,
+            )
+        with wired.lock():
+            record = ledger.load(request.issue_iid)
+            if record is None or record.state is not RunnerState.BLOCKED:
+                raise RuntimeError("only a recorded blocked issue can be retried")
+            resumed = ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.PREPARING,
+                    retry_count=0,
+                    retry_at=None,
+                    error_code=None,
+                    summary="Human-directed retry requested.",
+                    next_action="Reconcile and resume preparation.",
+                )
+            )
+            gitlab.transition_labels(record.issue_iid, label_for_state(resumed.state))
+        return _report(
+            request,
+            applied=True,
+            outcome="retry_scheduled",
+            records=(resumed,),
+            project=identity,
+        )
+
+    if request.command != "loop.run":
+        raise RuntimeError("unsupported command")
+    if not apply:
+        active = tuple(
+            record
+            for record in ledger.list_records()
+            if record.state.value
+            not in {"blocked", "awaiting-human", "failed", "complete"}
+        )
+        if active:
+            return _report(
+                request,
+                applied=False,
+                outcome="resume_available",
+                records=active[:1],
+                project=identity,
+            )
+        ready = gitlab.list_ready()
+        return _report(
+            request,
+            applied=False,
+            outcome="ready" if ready else "idle",
+            project=identity,
+        )
+    with wired.lock():
+        record = run_segment(
+            ledger=ledger,
+            gitlab=gitlab,
+            repository=repository,
+            invoke=wired.invoke,
+            timeout_seconds=request.timeout_seconds,
+            now=wired.clock(),
+        )
+    return _report(
+        request,
+        applied=True,
+        outcome="idle" if record is None else "segment_complete",
+        records=() if record is None else (record,),
+        project=identity,
+    )

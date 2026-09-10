@@ -1,48 +1,28 @@
-"""Red boundary contracts for the serial GitLab-native runner."""
+"""Behavior tests for GitLab, Git, and worker process boundaries."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import subprocess
 from pathlib import Path
-from typing import Any, cast
+from types import SimpleNamespace
 
 import pytest
+from pytest_subprocess import FakeProcess
 
-from agent_work.adapters import (
-    AdapterError,
-    AgentInvoker,
+from agent_work.cli import main
+from agent_work.gitlab import GitLabError, GitLabGateway
+from agent_work.models import AgentWorkConfig, CommandReport, MergeRequestDraft
+from agent_work.repository import (
     CommandResult,
-    GitLabGateway,
-    LockBusy,
-    ProjectLock,
-    ServiceCheckout,
-    build_default_dependencies,
-    discover_checkout_config,
+    GitRepository,
+    RepositoryError,
+    _origin_identity,
+    discover_config,
+    run_subprocess,
 )
-from agent_work.cli import build_parser, main
-from agent_work.models import (
-    AgentInvocation,
-    AgentWorkConfig,
-    GitLabIssue,
-    GitLabProject,
-    MergeRequestDraft,
-    PipelineEvidence,
-    RunReport,
-)
-from agent_work.serial import BranchConflict, RunNextDependencies
-
-
-class _Commands:
-    """Record subprocess calls and return scripted safe results."""
-
-    def __init__(self, results: tuple[CommandResult, ...]) -> None:
-        self.results = iter(results)
-        self.calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-
-    def __call__(self, command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        self.calls.append((command, kwargs))
-        return next(self.results)
+from agent_work.runtime import _build_local_logger
+from agent_work.worker import AgentInvoker, WorkerProtocolError, _agent_command
 
 
 def _config(tmp_path: Path) -> AgentWorkConfig:
@@ -50,1094 +30,405 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         host="gitlab.example.com",
         project_id=310967,
         checkout=tmp_path / "checkout",
+        state_root=tmp_path / "state",
     )
 
 
-def test_config_derives_one_fixed_lock_file_from_the_checkout(
+def _issue_payload(iid: int = 12, labels: list[str] | None = None) -> dict[str, object]:
+    return {
+        "iid": iid,
+        "title": "Work",
+        "description": None,
+        "labels": labels or [],
+        "state": "opened",
+        "confidential": False,
+        "created_at": "2026-01-01T00:00:00Z",
+        "author": {"username": "ignored"},
+    }
+
+
+def _mr_payload(description: str = "") -> dict[str, object]:
+    return {
+        "iid": 88,
+        "web_url": "https://gitlab.example.com/group/project/-/merge_requests/88",
+        "state": "opened",
+        "source_project_id": 310967,
+        "target_project_id": 310967,
+        "source_branch": "agent/issue-12",
+        "target_branch": "main",
+        "sha": "a" * 40,
+        "has_conflicts": False,
+        "description": description,
+        "references": {"short": "!88"},
+    }
+
+
+class ApiStub:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self.issue = _issue_payload(labels=["agent::ready"])
+
+    def __call__(self, command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        self.commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint == "projects/310967":
+            payload: object = {
+                "id": 310967,
+                "host": "ignored",
+                "default_branch": "main",
+                "web_url": "https://gitlab.example.com/group/project",
+                "namespace": {"name": "ignored"},
+            }
+        elif endpoint.endswith("/issues"):
+            payload = [self.issue, _issue_payload(13, ["agent::running"])]
+        elif endpoint.endswith("/issues/12"):
+            if method == "PUT":
+                additions = [
+                    part.removeprefix("add_labels=")
+                    for part in command
+                    if part.startswith("add_labels=")
+                ]
+                self.issue["labels"] = additions
+            payload = self.issue
+        elif endpoint.endswith("/merge_requests"):
+            payload = _mr_payload() if method == "POST" else [_mr_payload()]
+        elif endpoint.endswith("/merge_requests/88"):
+            payload = _mr_payload("Closes #12")
+        elif endpoint.endswith("/closes_issues"):
+            payload = [{"iid": 12, "project_id": 310967}]
+        elif endpoint.endswith("/pipelines"):
+            payload = [
+                {
+                    "id": 3,
+                    "status": "success",
+                    "sha": "a" * 40,
+                    "web_url": "https://pipeline/3",
+                    "ref": "ignored",
+                },
+                {
+                    "id": 2,
+                    "status": "failed",
+                    "sha": "b" * 40,
+                    "web_url": "https://pipeline/2",
+                },
+            ]
+        elif endpoint.endswith("/notes"):
+            payload = {"id": 1}
+        else:
+            raise AssertionError(endpoint)
+        return CommandResult(0, json.dumps(payload), "")
+
+
+def test_gitlab_gateway_enforces_ready_selection_and_exact_evidence(
     tmp_path: Path,
 ) -> None:
-    checkout = tmp_path / "checkout"
-    config = AgentWorkConfig(
-        host="gitlab.example.com", project_id=310967, checkout=checkout
-    )
+    api = ApiStub()
+    gateway = GitLabGateway(_config(tmp_path), api)
 
-    assert config.lock_file == checkout / ".agent-work.lock"
-
-
-def test_trusted_publish_normalizes_an_unexpected_worker_commit(
-    tmp_path: Path,
-) -> None:
-    """The runner reauthors one direct worker commit before publication."""
-    baseline = "a" * 40
-    worker_commit = "b" * 40
-    commands = _Commands(
-        (
-            CommandResult(0, "agent/issue-12\n", ""),
-            CommandResult(0, worker_commit, ""),
-            CommandResult(0, f"{worker_commit} {baseline}\n", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    ServiceCheckout(_config(tmp_path), commands).publish(
-        "agent/issue-12",
-        MergeRequestDraft(title="Worker change", description="Validated."),
-        baseline,
-    )
-
-    assert [call[0] for call in commands.calls] == [
-        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "--abbrev-ref", "HEAD"),
-        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "HEAD"),
-        (
-            "git",
-            "-C",
-            str(tmp_path / "checkout"),
-            "rev-list",
-            "--parents",
-            "-n",
-            "1",
-            "HEAD",
-        ),
-        (
-            "git",
-            "-C",
-            str(tmp_path / "checkout"),
-            "commit",
-            "--amend",
-            "--reset-author",
-            "-m",
-            "Worker change",
-        ),
-        (
-            "git",
-            "-C",
-            str(tmp_path / "checkout"),
-            "push",
-            "--set-upstream",
-            "origin",
-            "agent/issue-12",
-        ),
-    ]
-
-
-def test_trusted_publish_commits_staged_worker_changes(tmp_path: Path) -> None:
-    """The runner publishes a normal uncommitted worker result."""
-    baseline = "a" * 40
-    commands = _Commands(
-        (
-            CommandResult(0, "agent/issue-12\n", ""),
-            CommandResult(0, baseline, ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "AGENTS.md\n", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    ServiceCheckout(_config(tmp_path), commands).publish(
-        "agent/issue-12",
-        MergeRequestDraft(title="Worker change", description="Validated."),
-        baseline,
-    )
-
-    assert [call[0] for call in commands.calls] == [
-        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "--abbrev-ref", "HEAD"),
-        ("git", "-C", str(tmp_path / "checkout"), "rev-parse", "HEAD"),
-        ("git", "-C", str(tmp_path / "checkout"), "add", "--all"),
-        (
-            "git",
-            "-C",
-            str(tmp_path / "checkout"),
-            "diff",
-            "--cached",
-            "--name-only",
-            "--no-renames",
-        ),
-        ("git", "-C", str(tmp_path / "checkout"), "commit", "-m", "Worker change"),
-        (
-            "git",
-            "-C",
-            str(tmp_path / "checkout"),
-            "push",
-            "--set-upstream",
-            "origin",
-            "agent/issue-12",
-        ),
-    ]
-
-
-def test_trusted_publish_names_a_staged_diff_failure(tmp_path: Path) -> None:
-    """A staging validation failure identifies its safe publication boundary."""
-    baseline = "a" * 40
-    commands = _Commands(
-        (
-            CommandResult(0, "agent/issue-12\n", ""),
-            CommandResult(0, baseline, ""),
-            CommandResult(0, "", ""),
-            CommandResult(128, "", "fatal: unavailable index"),
-        )
-    )
-
-    with pytest.raises(
-        AdapterError, match=r"checking staged worker changes failed \(exit 128\)"
-    ):
-        ServiceCheckout(_config(tmp_path), commands).publish(
-            "agent/issue-12",
-            MergeRequestDraft(title="Worker change", description="Validated."),
-            baseline,
-        )
-
-
-def test_trusted_publish_retains_a_bounded_push_stderr_excerpt(tmp_path: Path) -> None:
-    """A trusted push failure preserves its Git diagnostic for safe triage."""
-    baseline = "a" * 40
-    commands = _Commands(
-        (
-            CommandResult(0, "agent/issue-12\n", ""),
-            CommandResult(0, baseline, ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "AGENTS.md\n", ""),
-            CommandResult(0, "", ""),
-            CommandResult(
-                128,
-                "",
-                "remote: pre-receive hook declined\nfatal: unable to access remote",
-            ),
-        )
-    )
-
-    with pytest.raises(
-        AdapterError,
-        match=(
-            "pushing the trusted worker branch failed \\(exit 128\\): "
-            "remote: pre-receive hook declined fatal: unable to access remote"
-        ),
-    ):
-        ServiceCheckout(_config(tmp_path), commands).publish(
-            "agent/issue-12",
-            MergeRequestDraft(title="Worker change", description="Validated."),
-            baseline,
-        )
-
-
-def test_trusted_publish_preserves_worker_merge_parents(tmp_path: Path) -> None:
-    """A conflict-resolution merge is reauthored without flattening it."""
-    baseline = "a" * 40
-    merge_commit = "b" * 40
-    other_parent = "c" * 40
-    commands = _Commands(
-        (
-            CommandResult(0, "agent/issue-12\n", ""),
-            CommandResult(0, merge_commit, ""),
-            CommandResult(0, f"{merge_commit} {baseline} {other_parent}\n", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    ServiceCheckout(_config(tmp_path), commands).publish(
-        "agent/issue-12",
-        MergeRequestDraft(title="Resolve conflict", description="Validated."),
-        baseline,
-    )
-
+    assert gateway.verify_project().id == 310967
+    assert [issue.iid for issue in gateway.list_ready()] == [12]
+    assert {issue.iid for issue in gateway.list_projected()} == {12, 13}
+    assert gateway.fetch_issue(12).description == ""
+    assert gateway.transition_labels(12, "agent::running").labels == ("agent::running",)
+    assert gateway.fetch_merge_request(88).iid == 88
+    assert gateway.find_merge_request_by_branch("agent/issue-12") is not None
+    draft = MergeRequestDraft(title="Change", description="Details")
     assert (
-        "git",
-        "-C",
-        str(tmp_path / "checkout"),
-        "reset",
-        "--mixed",
-        baseline,
-    ) not in [call[0] for call in commands.calls]
-    assert (
-        "git",
-        "-C",
-        str(tmp_path / "checkout"),
-        "commit",
-        "--amend",
-        "--reset-author",
-        "-m",
-        "Resolve conflict",
-    ) in [call[0] for call in commands.calls]
-
-
-def test_default_dependencies_discover_checkout_and_project_without_environment(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    project_payload = json.dumps(
-        {
-            "id": 310967,
-            "path_with_namespace": "group/project",
-            "default_branch": "main",
-            "web_url": "https://gitlab.example.com/group/project",
-            "http_url_to_repo": "https://gitlab.example.com/group/project.git",
-        }
+        gateway.create_merge_request(
+            branch="agent/issue-12", target="main", issue_iid=12, draft=draft
+        ).iid
+        == 88
     )
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, json.dumps([json.loads(project_payload)]), ""),
-            CommandResult(0, project_payload, ""),
-            CommandResult(0, "main\n", ""),
-            CommandResult(0, "", ""),
-        )
+    mr = gateway.ensure_closing_issue_reference(gateway.fetch_merge_request(88), 12)
+    assert mr.description == "Closes #12"
+    assert gateway.mr_closes_issue(88, 12)
+    pipeline = gateway.latest_pipeline_for_sha(88, "a" * 40)
+    assert pipeline is not None and pipeline.status == "success"
+    assert gateway.latest_pipeline_for_sha(88, "c" * 40) is None
+    gateway.comment_outcome(
+        12, error_code="blocked", summary="Safe", next_action="Review"
     )
-
-    dependencies = build_default_dependencies(
-        run_command=commands, current_directory=tmp_path
-    )
-
-    assert dependencies.checkout.path == checkout
-    assert commands.calls == [
-        (("git", "-C", str(tmp_path), "rev-parse", "--show-toplevel"), {}),
-        (("git", "-C", str(checkout), "remote", "get-url", "origin"), {}),
-        (
-            (
-                "glab",
-                "api",
-                "--hostname",
-                "gitlab.example.com",
-                "-X",
-                "GET",
-                "projects?search=project&simple=true&per_page=100",
-            ),
-            {},
-        ),
-        (
-            (
-                "glab",
-                "api",
-                "--hostname",
-                "gitlab.example.com",
-                "-X",
-                "GET",
-                "projects/310967",
-            ),
-            {},
-        ),
-        (("git", "-C", str(checkout), "branch", "--show-current"), {}),
-        (("git", "-C", str(checkout), "pull", "--ff-only"), {}),
-    ]
-
-
-def test_checkout_derivation_uses_the_current_directory(tmp_path: Path) -> None:
-    checkout = tmp_path / "checkout"
-    project = {
-        "id": 310967,
-        "path_with_namespace": "group/project",
-        "default_branch": "main",
-        "web_url": "https://gitlab.example.com/group/project",
-    }
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, json.dumps([project]), ""),
-            CommandResult(0, json.dumps(project), ""),
-            CommandResult(0, "main\n", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    config = discover_checkout_config(
-        current_directory=tmp_path,
-        environment={"AGENT_WORK_LOG_TAG": "project-agent-work"},
-        run_command=commands,
-    )
-
-    assert config.checkout == checkout
-    assert config.journal_tag == "project-agent-work"
-
-
-def test_checkout_derivation_accepts_a_configured_agent_base_branch(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    project = {
-        "id": 310967,
-        "path_with_namespace": "group/project",
-        "default_branch": "main",
-        "web_url": "https://gitlab.example.com/group/project",
-    }
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, json.dumps([project]), ""),
-            CommandResult(0, json.dumps(project), ""),
-            CommandResult(0, "agent/work-base\n", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    config = discover_checkout_config(
-        current_directory=tmp_path,
-        environment={"AGENT_WORK_BASE_BRANCH": "agent/work-base"},
-        run_command=commands,
-    )
-
-    assert config.base_branch == "agent/work-base"
-    assert commands.calls[-1][0] == ("git", "-C", str(checkout), "pull", "--ff-only")
-
-
-def test_checkout_derivation_refuses_to_launch_from_a_feature_branch(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    project = {
-        "id": 310967,
-        "path_with_namespace": "group/project",
-        "default_branch": "main",
-        "web_url": "https://gitlab.example.com/group/project",
-    }
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, json.dumps([project]), ""),
-            CommandResult(0, json.dumps(project), ""),
-            CommandResult(0, "agent/issue-12\n", ""),
-        )
-    )
-
-    with pytest.raises(
-        AdapterError,
-        match=(
-            "agent-work must start on the default branch 'main'; current branch is "
-            "'agent/issue-12'. Switch to 'main', pull --ff-only, then launch "
-            "agent-work again"
-        ),
-    ):
-        discover_checkout_config(current_directory=tmp_path, run_command=commands)
-
-    assert all("pull" not in command for command, _ in commands.calls)
-
-
-def test_checkout_derivation_rejects_an_invalid_agent_base_before_pulling(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    project = {
-        "id": 310967,
-        "path_with_namespace": "group/project",
-        "default_branch": "main",
-        "web_url": "https://gitlab.example.com/group/project",
-    }
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, json.dumps([project]), ""),
-            CommandResult(0, json.dumps(project), ""),
-        )
-    )
-
-    with pytest.raises(AdapterError, match="AGENT_WORK_BASE_BRANCH is invalid"):
-        discover_checkout_config(
-            current_directory=tmp_path,
-            environment={"AGENT_WORK_BASE_BRANCH": "main"},
-            run_command=commands,
-        )
-
     assert all(
-        "branch" not in command and "pull" not in command
-        for command, _ in commands.calls
+        "projects/310967" in command[command.index("-X") + 2]
+        for command in api.commands
     )
 
 
-def test_service_checkout_fast_forwards_the_configured_agent_base_branch(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    config = AgentWorkConfig(
-        host="gitlab.example.com",
-        project_id=310967,
-        checkout=checkout,
-        base_branch="agent/work-base",
-    )
-    commands = _Commands(
-        (
-            CommandResult(0, str(checkout), ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
-            CommandResult(0, "", ""),
+def test_gitlab_projected_inventory_reads_every_issue_page(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        page_field = next(
+            (part for part in command if part.startswith("page=")), "page=1"
         )
-    )
-    project = GitLabProject(
-        id=310967,
-        host="gitlab.example.com",
-        default_branch="main",
-        web_url="https://gitlab.example.com/group/project",
-        http_url_to_repo="https://gitlab.example.com/group/project.git",
-    )
+        page = int(page_field.removeprefix("page="))
+        payload = (
+            [_issue_payload(iid, ["agent::running"]) for iid in range(1, 101)]
+            if page == 1
+            else [_issue_payload(101, ["agent::running"])]
+        )
+        return CommandResult(0, json.dumps(payload), "")
 
-    ServiceCheckout(config, commands).applied_preflight(project)
+    issues = GitLabGateway(config, fake).list_projected()
 
-    assert commands.calls[4][0] == (
-        "git",
-        "-C",
-        str(checkout),
-        "switch",
-        "agent/work-base",
-    )
-    assert commands.calls[5][0] == (
-        "git",
-        "-C",
-        str(checkout),
-        "merge",
-        "--ff-only",
-        "origin/main",
-    )
+    assert len(issues) == 101
+    assert issues[-1].iid == 101
 
 
 @pytest.mark.parametrize(
-    ("failure_at", "message"),
-    (
-        (5, "git pull --ff-only failed"),
-        (2, "GitLab project lookup failed"),
-    ),
+    ("result", "message"),
+    [
+        (CommandResult(1, "secret", "secret"), "request failed"),
+        (CommandResult(0, "not-json", ""), "invalid JSON"),
+    ],
 )
-def test_default_dependencies_name_the_failed_confirmation(
-    tmp_path: Path, failure_at: int, message: str
+def test_gitlab_gateway_redacts_failed_or_invalid_responses(
+    tmp_path: Path, result: CommandResult, message: str
 ) -> None:
-    results = [
-        CommandResult(0, str(tmp_path), ""),
-        CommandResult(0, "https://gitlab.example.com/group/project.git\n", ""),
-        CommandResult(
-            0,
-            json.dumps(
-                [
-                    {
-                        "id": 310967,
-                        "path_with_namespace": "group/project",
-                        "default_branch": "main",
-                        "web_url": "https://gitlab.example.com/group/project",
-                    }
-                ]
-            ),
-            "",
+    gateway = GitLabGateway(_config(tmp_path), lambda *_args, **_kwargs: result)
+    with pytest.raises(GitLabError, match=message):
+        gateway.verify_project()
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        (
+            "https://gitlab.example.com/group/project.git",
+            ("gitlab.example.com", "group/project"),
         ),
-        CommandResult(
+        (
+            "git@gitlab.example.com:group/project.git",
+            ("gitlab.example.com", "group/project"),
+        ),
+    ],
+)
+def test_origin_identity_accepts_https_and_scp(
+    origin: str, expected: tuple[str, str]
+) -> None:
+    assert _origin_identity(origin) == expected
+
+
+def test_origin_identity_rejects_an_unusable_remote() -> None:
+    with pytest.raises(RepositoryError):
+        _origin_identity("local-path")
+
+
+def test_discover_config_is_read_only_and_confirms_numeric_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkout"
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        if "rev-parse" in command:
+            return CommandResult(0, str(checkout), "")
+        if "get-url" in command:
+            return CommandResult(0, "https://gitlab.example.com/group/project.git", "")
+        return CommandResult(
             0,
             json.dumps(
                 {
                     "id": 310967,
                     "default_branch": "main",
-                    "web_url": "https://gitlab.example.com/group/project",
+                    "path_with_namespace": "group/project",
                 }
             ),
             "",
-        ),
-        CommandResult(0, "main\n", ""),
-        CommandResult(0, "", ""),
-    ]
-    results[failure_at] = CommandResult(1, "", "connection failed")
-
-    with pytest.raises(AdapterError, match=message):
-        build_default_dependencies(
-            run_command=_Commands(tuple(results)),
-            current_directory=tmp_path,
         )
 
-
-def test_gitlab_selection_uses_only_the_numeric_project_endpoint(
-    tmp_path: Path,
-) -> None:
-    payload = json.dumps(
-        [
-            {
-                "iid": 3,
-                "title": "Oldest public issue",
-                "description": None,
-                "labels": [],
-                "state": "opened",
-                "confidential": False,
-                "created_at": "2026-08-01T00:00:00Z",
-            }
-        ]
+    config = discover_config(
+        current_directory=tmp_path,
+        environment={
+            "XDG_STATE_HOME": str(tmp_path / "xdg"),
+            "GITLAB_HOST": "gitlab.example.com",
+            "GITLAB_PROJECT_ID": "310967",
+        },
+        run_command=fake,
     )
-    commands = _Commands((CommandResult(0, payload, ""),))
-
-    issues = GitLabGateway(_config(tmp_path), commands).list_eligible()
-
-    assert [issue.iid for issue in issues] == [3]
-    command, _ = commands.calls[0]
-    assert "projects/310967/issues" in command
-    assert "state=opened" in command
-    assert "confidential=false" in command
-    assert "not[labels]=agent::running,agent::awaiting-human,agent::failed" in command
-    assert "per_page=1" in command
-    assert "order_by=created_at" in command
-    assert "sort=asc" in command
-    assert not any("group/project" in argument for argument in command)
+    assert config.project_id == 310967
+    assert config.state_root.parent.name == "projects"
+    assert not any("pull" in command for command in calls)
 
 
-def test_gitlab_open_selection_filters_eligibility_in_one_bounded_query(
-    tmp_path: Path,
+def test_run_subprocess_captures_output_and_wraps_timeouts(fp: FakeProcess) -> None:
+    fp.register(["printf", "ok"], stdout="ok")
+    assert run_subprocess(("printf", "ok")).stdout == "ok"
+
+    def timeout(_process: object) -> None:
+        raise subprocess.TimeoutExpired(("slow-command",), 1)
+
+    fp.register(["slow-command"], callback=timeout)
+    with pytest.raises(RepositoryError, match="required command"):
+        run_subprocess(("slow-command",), timeout_seconds=0.001)
+
+
+def test_repository_prepares_publishes_and_inventories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    eligible = {
-        "iid": 101,
-        "title": "Eligible issue",
-        "description": "",
-        "labels": [],
-        "state": "opened",
-        "confidential": False,
-    }
-    commands = _Commands((CommandResult(0, json.dumps([eligible]), ""),))
+    config = _config(tmp_path)
+    config.checkout.mkdir()
+    responses: dict[tuple[str, ...], CommandResult] = {}
+    calls: list[tuple[str, ...]] = []
 
-    issues = GitLabGateway(_config(tmp_path), commands).list_eligible()
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        args = command[3:]
+        if args in responses:
+            return responses[args]
+        if args == ("branch", "--show-current"):
+            branch = "main" if Path(command[2]) == config.checkout else "agent/issue-12"
+            return CommandResult(0, f"{branch}\n", "")
+        if args == ("status", "--porcelain"):
+            return CommandResult(0, "M file\n", "")
+        if args == ("rev-parse", "HEAD") or args == (
+            "rev-parse",
+            "origin/agent/issue-12",
+        ):
+            return CommandResult(0, "a" * 40, "")
+        if args[:2] == ("for-each-ref", "--format=%(refname:short)"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if args[:2] == ("worktree", "list"):
+            return CommandResult(0, f"worktree {config.checkout}\n", "")
+        if args[:2] == ("stash", "list"):
+            return CommandResult(0, "agent-work recovery issue-12\n", "")
+        return CommandResult(0, "", "")
 
-    assert [issue.iid for issue in issues] == [101]
-    assert len(commands.calls) == 1
-    command = commands.calls[0][0]
-    assert "confidential=false" in command
-    assert "not[labels]=agent::running,agent::awaiting-human,agent::failed" in command
-    assert "per_page=1" in command
-
-
-def test_gitlab_running_selection_includes_closed_issues(tmp_path: Path) -> None:
-    closed_running = {
-        "iid": 3,
-        "title": "Merged while transition was interrupted",
-        "description": "",
-        "labels": ["agent::running"],
-        "state": "closed",
-        "confidential": False,
-    }
-    commands = _Commands((CommandResult(0, json.dumps([closed_running]), ""),))
-
-    issues = GitLabGateway(_config(tmp_path), commands).list_running()
-
-    assert [issue.iid for issue in issues] == [3]
-    assert "state=all" in commands.calls[0][0]
-    assert "per_page=2" in commands.calls[0][0]
-
-
-def test_gitlab_reads_the_latest_default_branch_pipeline_by_numeric_project_id(
-    tmp_path: Path,
-) -> None:
-    payload = json.dumps(
-        [
-            {
-                "id": 42,
-                "status": "failed",
-                "sha": "a" * 40,
-                "web_url": "https://gitlab.example.com/group/project/-/pipelines/42",
-            }
-        ]
-    )
-    commands = _Commands((CommandResult(0, payload, ""),))
-    pipeline = GitLabGateway(_config(tmp_path), commands).latest_default_pipeline(
-        GitLabProject(
-            id=310967,
-            host="gitlab.example.com",
-            default_branch="main",
-            web_url="https://gitlab.example.com/group/project",
+    repository = GitRepository(config, fake)
+    with pytest.raises(RepositoryError, match="clean"):
+        repository.refresh_base()
+    responses[("status", "--porcelain")] = CommandResult(0, "", "")
+    repository.refresh_base()
+    worktree = repository.create_issue_worktree(12, "agent/issue-12", "main")
+    assert worktree == config.state_root / "worktrees" / "12"
+    responses[("status", "--porcelain")] = CommandResult(0, "M file\n", "")
+    assert (
+        repository.commit_and_push(
+            worktree, "agent/issue-12", 12, expected_head="a" * 40
         )
+        == "a" * 40
     )
-
-    assert pipeline == PipelineEvidence(
-        id=42,
-        status="failed",
-        sha="a" * 40,
-        web_url="https://gitlab.example.com/group/project/-/pipelines/42",
-    )
-    command = commands.calls[0][0]
-    assert "projects/310967/pipelines" in command
-    assert "ref=main" in command
-    assert "per_page=1" in command
+    branches, worktrees, stashes = repository.inventory()
+    assert branches == ("agent/issue-12",)
+    assert worktrees == (str(config.checkout),)
+    assert stashes == ("agent-work recovery issue-12",)
+    assert any("pull" in command for command in calls)
 
 
-def test_gitlab_rejects_malformed_issue_text_as_a_safe_adapter_error(
-    tmp_path: Path,
-) -> None:
-    payload = json.dumps(
-        [
-            {
-                "iid": 3,
-                "title": "Issue",
-                "description": 42,
-                "labels": [],
-                "state": "opened",
-                "confidential": False,
-            }
-        ]
-    )
-    commands = _Commands((CommandResult(0, payload, ""),))
+def test_existing_mr_worktree_requires_the_recorded_remote_sha(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.checkout.mkdir()
 
-    with pytest.raises(AdapterError, match="invalid issue data"):
-        GitLabGateway(_config(tmp_path), commands).list_eligible()
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--list", "review/existing"):
+            return CommandResult(0, "review/existing\n", "")
+        if arguments == ("rev-parse", "origin/review/existing"):
+            return CommandResult(0, "b" * 40, "")
+        return CommandResult(0, "", "")
 
+    repository = GitRepository(config, fake)
 
-def test_gitlab_label_transition_uses_explicit_add_remove_sets_and_refetches(
-    tmp_path: Path,
-) -> None:
-    issue_payload = json.dumps(
-        {
-            "iid": 3,
-            "title": "Issue",
-            "description": "",
-            "labels": ["agent::running"],
-            "state": "opened",
-            "confidential": False,
-        }
-    )
-    commands = _Commands(
-        (CommandResult(0, issue_payload, ""), CommandResult(0, issue_payload, ""))
-    )
-    issue = GitLabIssue(
-        iid=3,
-        title="Issue",
-        labels=(),
-        state="opened",
-        confidential=False,
-    )
-
-    GitLabGateway(_config(tmp_path), commands).mark_running(issue)
-
-    update, _ = commands.calls[0]
-    assert "projects/310967/issues/3" in update
-    assert "add_labels=agent::running" in update
-    assert "remove_labels=agent::awaiting-human,agent::failed" in update
-    fetch, _ = commands.calls[1]
-    assert "projects/310967/issues/3" in fetch
-
-
-def test_gitlab_failure_comment_uses_the_numeric_issue_notes_endpoint(
-    tmp_path: Path,
-) -> None:
-    commands = _Commands((CommandResult(0, "{}", ""),))
-    issue = GitLabIssue(
-        iid=3,
-        title="Issue",
-        labels=(),
-        state="opened",
-        confidential=False,
-    )
-
-    config = AgentWorkConfig(
-        host="gitlab.example.com",
-        project_id=310967,
-        checkout=tmp_path / "checkout",
-        journal_tag="project-agent-work",
-    )
-
-    GitLabGateway(config, commands).comment_failed(
-        issue, "Codex exited with status 7; no exact published MR evidence"
-    )
-
-    command, _ = commands.calls[0]
-    assert command[:6] == (
-        "glab",
-        "api",
-        "--hostname",
-        "gitlab.example.com",
-        "-X",
-        "POST",
-    )
-    assert "projects/310967/issues/3/notes" in command
-    assert any("agent::failed" in argument for argument in command)
-    assert any(
-        "journalctl --user -t project-agent-work --since today" in argument
-        for argument in command
-    )
+    with pytest.raises(RepositoryError, match="recorded merge request SHA"):
+        repository.worktree_for_existing_branch(12, "review/existing", "a" * 40)
 
 
 @pytest.mark.parametrize(
-    ("agent", "command", "stdin"),
-    (
-        pytest.param(
-            "codex",
-            (
-                "codex",
-                "exec",
-                "-C",
-                "{checkout}",
-                "--sandbox",
-                "workspace-write",
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "--ephemeral",
-                "--color",
-                "never",
-                "-",
-            ),
-            "untrusted prompt",
-            id="codex",
-        ),
-        pytest.param(
-            "claude",
-            (
-                "claude",
-                "--print",
-                "--output-format",
-                "text",
-                "--no-session-persistence",
-                "--permission-mode",
-                "acceptEdits",
-                "--",
-                "untrusted prompt",
-            ),
-            None,
-            id="claude",
-        ),
-        pytest.param(
-            "pi",
-            (
-                "pi",
-                "--print",
-                "--mode",
-                "text",
-                "--no-session",
-                "--skill",
-                "{checkout}/.agents/skills",
-                "untrusted prompt",
-            ),
-            None,
-            id="pi",
-        ),
-    ),
+    ("branch", "head", "status"),
+    [
+        ("other", "a" * 40, "M src/example.py\n"),
+        ("agent/issue-12", "b" * 40, "M src/example.py\n"),
+        ("agent/issue-12", "a" * 40, ""),
+    ],
 )
-def test_supported_agent_is_invoked_once_noninteractively(
-    tmp_path: Path, agent: str, command: tuple[str, ...], stdin: str | None
+def test_publication_rejects_wrong_branch_worker_commits_and_empty_changes(
+    tmp_path: Path, branch: str, head: str, status: str
 ) -> None:
-    commands = _Commands((CommandResult(7, "ignored", "ignored"),))
-    checkout = tmp_path / "checkout"
+    config = _config(tmp_path)
 
-    invocation = AgentInvoker(commands, environment={"AGENT_WORK_AGENT": agent}).invoke(
-        checkout, "untrusted prompt", 45
-    )
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, branch, "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, head, "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, status, "")
+        return CommandResult(0, "", "")
 
-    assert invocation == AgentInvocation(
-        returncode=7, stdout="ignored", stderr="ignored"
-    )
-    assert commands.calls == [
-        (
-            tuple(part.replace("{checkout}", str(checkout)) for part in command),
-            {"stdin": stdin, "timeout_seconds": 45},
-        )
-    ]
+    repository = GitRepository(config, fake)
 
-
-def test_agent_invocation_redacts_known_secret_values_from_diagnostics(
-    tmp_path: Path,
-) -> None:
-    commands = _Commands(
-        (CommandResult(1, "token=top-secret-value", "fatal: top-secret-value"),)
-    )
-
-    invocation = AgentInvoker(
-        commands, environment={"GITLAB_TOKEN": "top-secret-value"}
-    ).invoke(tmp_path, "prompt", 45)
-
-    assert invocation.diagnostic == "token=[REDACTED]\nfatal: [REDACTED]"
-
-
-def test_agent_invocation_rejects_an_unknown_agent(tmp_path: Path) -> None:
-    commands = _Commands(())
-
-    with pytest.raises(AdapterError, match="AGENT_WORK_AGENT"):
-        AgentInvoker(commands, environment={"AGENT_WORK_AGENT": "unsupported"}).invoke(
-            tmp_path, "prompt", 45
+    with pytest.raises(RepositoryError):
+        repository.commit_and_push(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            12,
+            expected_head="a" * 40,
         )
 
 
-def test_agent_invocation_uses_the_configured_absolute_executable(
+def test_agent_profiles_are_argv_only_and_invocation_redacts_secrets(
     tmp_path: Path,
 ) -> None:
-    commands = _Commands((CommandResult(0, "", ""),))
+    for name in ("codex", "claude", "pi"):
+        command, stdin = _agent_command(name, f"/{name}", tmp_path, "prompt")
+        assert command[0] == f"/{name}"
+        assert (stdin == "prompt") is (name == "codex")
+    with pytest.raises(WorkerProtocolError):
+        _agent_command("other", "/other", tmp_path, "prompt")
 
-    AgentInvoker(
-        commands,
-        environment={
-            "AGENT_WORK_AGENT": "claude",
-            "AGENT_WORK_AGENT_PATH": "/opt/claude/bin/claude",
-        },
-    ).invoke(tmp_path, "prompt", 45)
-
-    assert commands.calls[0][0][0] == "/opt/claude/bin/claude"
-
-
-def test_worker_merge_request_draft_requires_one_valid_delimited_json_object() -> None:
-    invocation = AgentInvocation(
-        returncode=0,
-        stdout=(
-            "work complete\n<agent-work-merge-request>\n"
-            '{"title":"fix: publish safely","description":"Validated."}\n'
-            "</agent-work-merge-request>"
+    invoker = AgentInvoker(
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="token-value", stderr="token-value"
         ),
+        environment={"AGENT_WORK_AGENT": "codex", "SECRET_TOKEN": "token-value"},
     )
-
-    assert invocation.merge_request_draft() == MergeRequestDraft(
-        title="fix: publish safely", description="Validated."
-    )
+    result = invoker.invoke(tmp_path, "prompt", 10)
+    assert result.stdout == result.stderr == "[REDACTED]"
 
 
-def test_worker_diagnostic_is_bounded_without_losing_its_end() -> None:
-    invocation = AgentInvocation(returncode=1, stdout="a" * 12_001 + " final detail")
+def test_local_operational_log_keeps_info_and_debug_at_requested_verbosity(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ordinary = _build_local_logger(config, debug=False)
+    ordinary.info("ordinary lifecycle")
+    ordinary.debug("hidden diagnostic")
+    for handler in ordinary.handlers:
+        handler.flush()
+    log_path = config.state_root / "agent-work.log"
+    assert log_path.read_text() == "ordinary lifecycle\n"
 
-    assert len(invocation.diagnostic) < 12_100
+    debug = _build_local_logger(config, debug=True)
+    debug.debug("visible diagnostic")
+    for handler in debug.handlers:
+        handler.flush()
+    assert "visible diagnostic" in log_path.read_text()
+
+
+def test_local_operational_log_records_command_outcomes_and_failures(
+    tmp_path: Path,
+) -> None:
+    logger = _build_local_logger(_config(tmp_path), debug=False)
+
     assert (
-        "[worker diagnostic truncated; retaining beginning and end]"
-        in invocation.diagnostic
-    )
-    assert invocation.diagnostic.endswith(" final detail")
-
-
-def test_checkout_refuses_an_existing_deterministic_local_branch(
-    tmp_path: Path,
-) -> None:
-    commands = _Commands(
-        (
-            CommandResult(0, "a" * 40, ""),
-            CommandResult(2, "", ""),
-            CommandResult(1, "", ""),
+        main(
+            ["loop", "status"],
+            dispatch=lambda *_args, **_kwargs: CommandReport(
+                command="loop.status", applied=False, outcome="status"
+            ),
         )
+        == 0
     )
 
-    with pytest.raises(BranchConflict, match="already exists"):
-        ServiceCheckout(_config(tmp_path), commands).ensure_branch_available(
-            "agent/issue-12", "main"
-        )
+    def fail(*_args: object, **_kwargs: object) -> CommandReport:
+        raise RuntimeError("ledger unavailable")
 
-
-def test_checkout_suggests_deleting_a_stale_merged_local_issue_branch(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout with space"
-    config = AgentWorkConfig(
-        host="gitlab.example.com", project_id=310967, checkout=checkout
-    )
-    commands = _Commands(
-        (
-            CommandResult(0, "a" * 40, ""),
-            CommandResult(2, "", ""),
-            CommandResult(0, "", ""),
-        )
-    )
-
-    with pytest.raises(
-        BranchConflict,
-        match=(
-            rf"already merged and absent from origin.*git -C '{checkout}' branch -d "
-            r"agent/issue-12"
-        ),
-    ):
-        ServiceCheckout(config, commands).ensure_branch_available(
-            "agent/issue-12", "main"
-        )
-
-
-def test_checkout_stops_on_a_merge_base_validation_failure(tmp_path: Path) -> None:
-    commands = _Commands(
-        (
-            CommandResult(0, "a" * 40, ""),
-            CommandResult(2, "", ""),
-            CommandResult(128, "", "fatal: bad revision"),
-        )
-    )
-
-    with pytest.raises(AdapterError, match="checkout validation failed"):
-        ServiceCheckout(_config(tmp_path), commands).ensure_branch_available(
-            "agent/issue-12", "main"
-        )
-
-
-def test_project_lock_is_nonblocking(tmp_path: Path) -> None:
-    first = ProjectLock(tmp_path / "project.lock")
-    second = ProjectLock(tmp_path / "project.lock")
-
-    with first, pytest.raises(LockBusy):
-        second.__enter__()
-
-
-class _UnusedDependency:
-    """Satisfy dependency construction for a CLI report fake."""
-
-
-def test_cli_has_one_safe_by_default_command_and_safe_json_output() -> None:
-    reports: list[dict[str, Any]] = []
-    progress: list[str] = []
-
-    def run(
-        _dependencies: object,
-        *,
-        apply: bool,
-        timeout_seconds: int,
-        report_progress: Callable[[str], None],
-    ) -> RunReport:
-        assert not apply
-        assert timeout_seconds == 1800
-        report_progress("Issue #12 is ready on agent/issue-12.")
-        return RunReport(outcome="preview_ready", issue_iid=12, branch="agent/issue-12")
-
-    dependencies = cast(RunNextDependencies, _UnusedDependency())
-
-    exit_code = main(
-        ["run-next", "--json"],
-        dependencies_factory=lambda: dependencies,
-        run=run,
-        write_stdout=lambda value: reports.append(json.loads(value)),
-        write_stderr=progress.append,
-    )
-
-    assert exit_code == 0
-    assert reports == [
-        {
-            "branch": "agent/issue-12",
-            "issue_iid": 12,
-            "merge_request_url": None,
-            "outcome": "preview_ready",
-        }
-    ]
-    assert progress == [
-        "Checking for next work item...",
-        "Issue #12 is ready on agent/issue-12.",
-    ]
-
-
-def test_cli_reports_progress_before_starting_a_non_json_run() -> None:
-    events: list[str] = []
-    dependencies = cast(RunNextDependencies, _UnusedDependency())
-
-    def dependencies_factory() -> RunNextDependencies:
-        events.append("dependencies")
-        return dependencies
-
-    def run(
-        _dependencies: object,
-        *,
-        apply: bool,
-        timeout_seconds: int,
-        report_progress: Callable[[str], None],
-    ) -> RunReport:
-        del apply, timeout_seconds
-        report_progress("No eligible work items found.")
-        events.append("run")
-        return RunReport(outcome="idle")
-
-    exit_code = main(
-        ["run-next"],
-        dependencies_factory=dependencies_factory,
-        run=run,
-        write_stdout=lambda message: events.append(f"stdout:{message}"),
-        write_stderr=lambda message: events.append(f"stderr:{message}"),
-    )
-
-    assert exit_code == 0
-    assert events == [
-        "stderr:Checking for next work item...",
-        "dependencies",
-        "stderr:No eligible work items found.",
-        "run",
-        "stdout:idle",
-    ]
-
-
-def test_cli_prints_failed_agent_diagnostics_without_putting_them_in_json() -> None:
-    errors: list[str] = []
-    reports: list[dict[str, object]] = []
-    report = RunReport(
-        outcome="failed",
-        issue_iid=3,
-        branch="agent/issue-3",
-        failure_reason="Agent exited with status 7; no exact published MR evidence",
-        agent_diagnostic="Agent could not publish the branch",
-    )
-
-    exit_code = main(
-        ["run-next", "--apply", "--json"],
-        dependencies_factory=lambda: cast(RunNextDependencies, _UnusedDependency()),
-        run=lambda _dependencies, **_kwargs: report,
-        write_stdout=lambda value: reports.append(json.loads(value)),
-        write_stderr=errors.append,
-    )
-
-    assert exit_code == 1
-    assert errors == [
-        "Checking for next work item...",
-        "Failure: Agent exited with status 7; no exact published MR evidence",
-        "Agent diagnostic (redacted):\nAgent could not publish the branch",
-    ]
-    assert reports == [
-        {
-            "branch": "agent/issue-3",
-            "issue_iid": 3,
-            "merge_request_url": None,
-            "outcome": "failed",
-        }
-    ]
-
-
-def test_applied_cli_run_returns_an_owned_issue_checkout_to_its_base() -> None:
-    """Direct applied runs share the systemd wrapper's checkout recovery."""
-    events: list[str] = []
-
-    class _Checkout:
-        def return_to_base(self) -> None:
-            events.append("return_to_base")
-
-    class _Dependencies:
-        checkout = _Checkout()
-
-    dependencies = cast(RunNextDependencies, _Dependencies())
-
-    exit_code = main(
-        ["run-next", "--apply"],
-        dependencies_factory=lambda: dependencies,
-        run=lambda _dependencies, **_kwargs: RunReport(outcome="idle"),
-        write_stdout=lambda _value: None,
-        write_stderr=lambda _value: None,
-    )
-
-    assert exit_code == 0
-    assert events == ["return_to_base"]
-
-
-def test_cli_help_exposes_only_the_serial_run_next_command() -> None:
-    help_text = build_parser().format_help()
-
-    assert "{run-next}" in help_text
-    for removed_command in (
-        "run-issue",
-        "run-file",
-        "run-once",
-        "ingest-file",
-        "reconcile",
-        "status",
-    ):
-        assert removed_command not in help_text
-
-
-def test_cli_returns_temporary_failure_when_the_project_lock_is_busy() -> None:
-    def run(
-        _dependencies: object,
-        *,
-        apply: bool,
-        timeout_seconds: int,
-        report_progress: Callable[[str], None],
-    ) -> RunReport:
-        del apply, timeout_seconds, report_progress
-        raise LockBusy("another run owns the project lock")
-
-    errors: list[str] = []
-
-    exit_code = main(
-        ["run-next", "--apply"],
-        dependencies_factory=lambda: cast(RunNextDependencies, _UnusedDependency()),
-        run=run,
-        write_stderr=errors.append,
-    )
-
-    assert exit_code == 75
-    assert errors == [
-        "Checking for next work item...",
-        "another run owns the project lock",
-    ]
+    assert main(["loop", "status"], dispatch=fail) == 1
+    for handler in logger.handlers:
+        handler.flush()
+    contents = (_config(tmp_path).state_root / "agent-work.log").read_text()
+    assert "outcome=status command=loop.status" in contents
+    assert "failure=ledger unavailable" in contents

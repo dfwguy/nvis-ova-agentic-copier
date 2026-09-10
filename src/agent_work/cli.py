@@ -1,15 +1,17 @@
-"""Command-line entry point for one serial GitLab work-item pass."""
+"""Command-line interface for recoverable agent-work operations."""
 
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
-from .adapters import AdapterError, LockBusy, build_default_dependencies
-from .models import RunReport
-from .serial import RunNextDependencies, RunNextError, run_next
+from .domain import CommandRequest
+from .ledger import LockBusy
+from .models import CommandReport
+from .runtime import dispatch as default_dispatch
 
 
 def _positive_integer(value: str) -> int:
@@ -22,26 +24,42 @@ def _positive_integer(value: str) -> int:
     return number
 
 
+def _common(parser: argparse.ArgumentParser, *, apply: bool = True) -> None:
+    if apply:
+        parser.add_argument("--apply", action="store_true", help="apply the operation")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    parser.add_argument(
+        "--debug", action="store_true", help="show a traceback on failure"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Build the deliberately small public command surface."""
+    """Build the nested resource/action command surface."""
     parser = argparse.ArgumentParser(prog="agent-work")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    command = subparsers.add_parser(
-        "run-next", help="preview or process one GitLab issue"
+    resources = parser.add_subparsers(dest="resource", required=True)
+    loop = resources.add_parser("loop", help="inspect or advance the serial loop")
+    loop_actions = loop.add_subparsers(dest="action", required=True)
+    run = loop_actions.add_parser("run", help="preview or run one bounded segment")
+    _common(run)
+    run.add_argument("--timeout-seconds", type=_positive_integer, default=1800)
+    status = loop_actions.add_parser("status", help="show durable loop state")
+    _common(status, apply=False)
+    status.add_argument("--issue-iid", type=_positive_integer)
+    retry = loop_actions.add_parser("retry", help="preview or retry one blocked item")
+    _common(retry)
+    retry.add_argument("--issue-iid", type=_positive_integer, required=True)
+
+    migration = resources.add_parser("migration", help="inventory legacy evidence")
+    migration_actions = migration.add_subparsers(dest="action", required=True)
+    preview = migration_actions.add_parser(
+        "preview", help="build a read-only migration plan"
     )
-    command.add_argument(
-        "--apply", action="store_true", help="claim and process the selected issue"
+    _common(preview, apply=False)
+    apply_parser = migration_actions.add_parser(
+        "apply", help="apply an exact reviewed plan"
     )
-    command.add_argument(
-        "--json", action="store_true", help="emit one safe JSON report"
-    )
-    command.add_argument(
-        "--timeout-seconds",
-        type=_positive_integer,
-        default=1800,
-        metavar="SECONDS",
-        help="bound the single coding-agent invocation (default: 1800)",
-    )
+    _common(apply_parser)
+    apply_parser.add_argument("--plan-file", type=Path, required=True)
     return parser
 
 
@@ -53,76 +71,54 @@ def _stderr(message: str) -> None:
     sys.stderr.write(f"{message}\n")
 
 
-def _render(report: RunReport, *, as_json: bool) -> str:
-    payload = {
-        "branch": report.branch,
-        "issue_iid": report.issue_iid,
-        "merge_request_url": report.merge_request_url,
-        "outcome": report.outcome,
-    }
+def _render(report: CommandReport, *, as_json: bool) -> str:
     if as_json:
-        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    details: list[str] = [report.outcome]
-    if report.issue_iid is not None:
-        details.append(f"issue=#{report.issue_iid}")
-    if report.branch is not None:
-        details.append(f"branch={report.branch}")
-    if report.merge_request_url is not None:
-        details.append(f"merge_request={report.merge_request_url}")
+        return report.model_dump_json(exclude_none=True)
+    details = [report.outcome]
+    if report.items:
+        item = report.items[0]
+        details.extend(
+            (f"issue=#{item.issue_iid}", f"state={item.state}", f"phase={item.phase}")
+        )
+        if item.next_action:
+            details.append(f"next_action={item.next_action}")
     return " ".join(details)
 
 
 def main(
     arguments: Sequence[str] | None = None,
     *,
-    dependencies_factory: Callable[
-        [], RunNextDependencies
-    ] = build_default_dependencies,
-    run: Callable[..., RunReport] = run_next,
+    dispatch: Callable[..., CommandReport] = default_dispatch,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
-    """Run one preview or applied pass and return its documented exit code."""
+    """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
-    write_stderr("Checking for next work item...")
-    dependencies: RunNextDependencies | None = None
-    report: RunReport | None = None
-    exit_code = 0
+    command = f"{parsed.resource}.{parsed.action}"
+    request = CommandRequest(
+        command=command,
+        issue_iid=getattr(parsed, "issue_iid", None),
+        plan_file=getattr(parsed, "plan_file", None),
+        timeout_seconds=getattr(parsed, "timeout_seconds", 1800),
+        debug=parsed.debug,
+    )
     try:
-        dependencies = dependencies_factory()
-        report = run(
-            dependencies,
-            apply=parsed.apply,
-            timeout_seconds=parsed.timeout_seconds,
-            report_progress=write_stderr,
-        )
+        report = dispatch(request, apply=getattr(parsed, "apply", False))
     except LockBusy as error:
+        logging.getLogger("agent-work").error("failure=%s", error)
         write_stderr(str(error))
-        exit_code = 75
-    except (AdapterError, RunNextError, ValueError) as error:
+        return 75
+    except (RuntimeError, ValueError, OSError) as error:
+        logging.getLogger("agent-work").error("failure=%s", error)
+        if parsed.debug:
+            raise
         write_stderr(str(error))
-        exit_code = 1
-    finally:
-        checkout = getattr(dependencies, "checkout", None)
-        cleanup = (
-            getattr(checkout, "return_to_base", None)
-            if parsed.apply and checkout is not None
-            else None
-        )
-        if callable(cleanup):
-            try:
-                cleanup()
-            except AdapterError as error:
-                write_stderr(str(error))
-                exit_code = 1
-    if report is None:
-        return exit_code
-    if report.failure_reason is not None:
-        write_stderr(f"Failure: {report.failure_reason}")
-    if report.agent_diagnostic is not None:
-        write_stderr(f"Agent diagnostic (redacted):\n{report.agent_diagnostic}")
+        return 1
+    logging.getLogger("agent-work").info(
+        "outcome=%s command=%s", report.outcome, report.command
+    )
     write_stdout(_render(report, as_json=parsed.json))
-    return 1 if report.outcome == "failed" else exit_code
+    return 0
 
 
 if __name__ == "__main__":

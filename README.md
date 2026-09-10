@@ -11,7 +11,7 @@ Check whether the agent can select work without changing the repository
 or GitLab:
 
 ```bash
-uv run agent-work run-next --json
+uv run agent-work loop run --json
 ```
 
 ## Run the agent once
@@ -20,7 +20,7 @@ After a human has authorized unattended publication and the safeguards are in
 place, process one issue in a bounded pass:
 
 ```bash
-uv run agent-work run-next --apply --json
+uv run agent-work loop run --apply --json
 ```
 
 For scheduled operation, safeguards, status checks, and troubleshooting, see
@@ -64,8 +64,8 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - Bash syntax and ShellCheck validation when a project contains Bash.
 - A portable, human-gated agent workflow rooted in `.agents/skills`, with
   separate coding and documentation/agent-policy lanes.
-- A serial GitLab issue loop that creates merge requests but never approves or
-  merges them.
+- A recoverable serial GitLab issue loop for explicitly opted-in `agent::ready`
+  work that creates merge requests but never approves or merges them.
 
 ## Agent workflow
 

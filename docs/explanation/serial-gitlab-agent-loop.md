@@ -1,123 +1,82 @@
 ---
 title: Why the agent loop is serial and GitLab-native
 type: explanation
-summary: Understand serial polling, checkout locking, and human publication.
+summary: Understand why bounded recovery segments use GitLab projection and local durable state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-09
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
-    why: Configures the workflow explained here.
+    why: Configures and operates the loop.
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the exact command and lifecycle.
   - path: agentic-workflow.md
-    why: Explains the roles used by the loop.
+    why: Explains the roles used by worker segments.
   - path: serial-agent-loop-recovery-design.md
-    why: Proposes the recoverable state machine that would replace this one-shot design.
+    why: Provides the detailed state-machine architecture.
 ---
 
 # Why the agent loop is serial and GitLab-native
 
-The agent loop has one source of work: eligible open GitLab issues in one
-configured numeric project. A bounded poll selects at most one issue, prepares
-one checkout, and drives the repository workflow until it opens or
-updates a merge request for human review.
+The agent loop is a recoverable finite-state machine, not a long-running agent
+session. Every systemd activation performs one bounded segment, persists what
+happened, and exits. A later activation reconciles that evidence and resumes
+the same issue before it considers new work.
 
 ```mermaid
-flowchart LR
-    issue[Ready GitLab issue] --> poll[One bounded poll]
-    poll --> checkout[Dedicated checkout]
-    checkout --> workflow[Agent workflow]
-    workflow --> mr[Feature branch and MR]
-    mr --> human[Human approval and merge]
+stateDiagram-v2
+    [*] --> Ready: human opts in
+    Ready --> Preparing
+    Preparing --> Executing
+    Executing --> RetryWait: transient failure
+    RetryWait --> Executing: retry due
+    Executing --> Publishing: validated result
+    Publishing --> Observing
+    Observing --> Repair: repair needed
+    Repair --> Publishing
+    Observing --> AwaitingHuman: evidence verified
+    Preparing --> Blocked
+    Executing --> Blocked
+    Repair --> Blocked
 ```
 
-GitLab already records the issue and merge-request handoff. Keeping that
-boundary avoids a second queue, filesystem inbox, webhook endpoint, and the
-failure-recovery machinery those systems need. The service is deliberately
-serial: one `run-next` invocation processes at most one item and exits, while a
-user-level systemd timer decides when to start another invocation.
+GitLab is the shared, operator-visible projection: a human places
+`agent::ready` on an issue, active or resumable work is `agent::running`, an
+exact verified merge-request handoff is `agent::awaiting-human`, and a required
+decision is `agent::blocked`. `agent::failed` is reserved for an exceptional
+condition the runner cannot safely reconcile or record. Labels deliberately do
+not carry the transaction history; the local ledger does.
 
-Polling works with ordinary Developer access to the project. It has no inbound
-listener or webhook-management requirement. The loop derives its target from
-the current checkout's `origin`, confirms the exact namespace through GitLab,
-then uses the confirmed numeric `projects/<id>` endpoint for all later calls.
-An issue body remains untrusted task data, not authority to
-change the checkout, credentials, sandbox, or repository policy.
+The ledger fills the gap GitLab labels cannot safely represent. It remembers
+the selected issue, phase, attempt, retry deadline, durable worktree, branch
+and MR evidence, workflow receipts, transition intent, and redacted next
+action. Persisting intent before an external mutation makes a partial operation
+replayable after a process, host, or API interruption. A durable worktree keeps
+ordinary uncommitted evidence in place; a stash is emergency evidence that the
+runner inventories but never applies or drops.
 
-The checkout-scoped lock and exact publication evidence make each run's branch
-and publication state clear. A completed mutating run pushes a
-feature branch and opens an MR, then hands off at
-`awaiting_human`. The GitLab projection is an open issue to `agent::running`,
-then `agent::awaiting-human` or `agent::failed`; the deterministic branch is
-`agent/issue-<IID>`. The runner accepts a handoff only after exact same-project
-MR, branch, default-target, local/remote tip, and `Closes #IID` verification.
-The loop never approves or merges that MR. A later pass checks those open
-handoffs for GitLab-reported merge conflicts; a conflicted MR is reclaimed on
-its same deterministic branch for one remediation pass, then returns to human
-review only after it is conflict-free again.
+Serial execution is a local safety boundary. One host owns unattended work for
+a project and a single-project lock prevents overlapping local segments. This
+does not claim distributed coordination: operators must not run a second timer
+for the same project. The 20-minute timer delay starts after a segment finishes,
+so retries and recovery do not overlap a still-running worker.
 
-The timer uses a dedicated worktree on a local `agent/work-base` branch. That
-branch only fast-forwards from `origin/main`, while the operator's worktree can
-remain on local `main`. This avoids Git's rule that one local branch can be
-checked out by only one linked worktree. The worktrees still share Git objects,
-references, and credentials, so this is working-directory isolation rather
-than a same-user security boundary.
+GitLab remains preferable to a webhook receiver or a filesystem queue because
+it already supplies the human work record and MR handoff. The local ledger is
+not a second shared queue; it is durability for the host that owns execution.
+Only explicitly opted-in, open, non-confidential `agent::ready` issues may enter
+unattended work, and resumable running work always has priority.
 
-Serial is a deliberate local safety boundary, not distributed coordination. A
-nonblocking local project lock is an explicit temporary failure: `run-next`
-prints the held-lock error and returns exit `75` when another local run holds
-it. Each project owns a user-level `<project-slug>-agent-work.timer`, which
-starts one bounded service pass at a time. Its fixed randomized delay spreads
-the initial activation for different repositories over a 60-second window.
-The wrapper sends lifecycle and runner output through `logger` with the same
-project-specific tag, which operators can inspect with `journalctl --user -t
-<project-slug>-agent-work`. Linger keeps that user service manager available after logout, so
-operators enable it with `sudo loginctl enable-linger "$USER"` and verify
-`Linger=yes`. There is no GitLab compare-and-set claim, so a second host or
-timer can race label changes; operators must run exactly one timer instance per
-project.
+The worker is intentionally less trusted than the runner. It reports a
+versioned `ready_to_publish`, `retryable`, or `needs_human` envelope; the
+trusted runner validates it against the ledger, Git, required workflow
+receipts, and the configured numeric GitLab project. Publication and
+existing-MR remediation are idempotent. The loop never approves or merges and
+does not let issue text, labels, comments, or worker output widen authority.
 
-Unattended publication is an explicit, one-time operational decision, not an
-effect of installing a timer. Its least-privilege readiness signal is that the
-`glab` identity has effective API access exactly Developer (`30`) in the
-configured project. That value is
-`max(project_access_level, group_access_level)` from the project API response,
-with nonnumeric values ignored. If neither access value is numeric, the
-classification is `unknown`; that result, a value less than 30, and 40 or
-greater must block `--apply`. Exactly 30 is the only accepted Developer
-readiness value. A Maintainer-or-higher identity (40 or greater) is deliberately
-not substituted for the constrained path; use a constrained Developer credential
-instead.
-
-The fast path avoids only the inaccessible Maintainer-only `/approvals` audit
-and recurring attestation; it does not infer that a role proves all policy.
-Instead, it uses safeguards a Developer can read: the numeric API's
-effective branch endpoint must report the exact default branch as default and
-protected, with `developers_can_push`, `developers_can_merge`, and `can_push`
-all false. Unlike a collection of protection rules, that result represents the
-effective behavior after GitLab applies wildcard or multiple rules. An
-`approval_rules` rule must require at least one approval and be global: it must
-apply to all protected branches or omit `protected_branches` or provide a typed
-empty `protected_branches` array. Branch-scoped rules are not evidence for this
-workflow.
-
-This is intentionally narrower than a full policy audit. A Developer cannot
-read or prove author/committer self-approval or per-MR approval-rule-override
-settings, which require Maintainer policy. The selected readiness policy skips
-those inaccessible checks rather than treating a repository document as live
-evidence. Its runtime boundary remains independent: the loop never approves or
-merges, even where GitLab might permit a Developer to approve.
-
-This is a readiness signal, not a proof that every GitLab control is safe.
-Developers may approve, and project protections control push, merge, and self-approval.
-The loop's own boundary is narrower and remains enforceable by its workflow:
-it only publishes feature branches and never approves or merges an MR. Also,
-`glab` and Git can select different credentials, so API/MR identity and Git
-publication identity must each be intentionally constrained and checked.
-
-Filesystem intake, webhooks, durable local queues, retry/reconciliation
-machinery, multiple workers, and automatic approval or merge are intentionally
-deferred. No legacy SQLite migration is required. See the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md)
-for the operator-facing contract.
+Retries are for temporary conditions, not for concealing a decision. The
+initial attempt plus three retries are bounded; exhaustion becomes blocked with
+an actionable next step. The operator-facing commands, JSON contract, exits,
+and migration procedure are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md)
+and [setup guide](../how-to/setup-serial-gitlab-agent-loop.md).
