@@ -73,6 +73,8 @@ def _project() -> GitLabProject:
 def _mr(
     *,
     state: Literal["opened", "closed", "merged", "locked"] = "opened",
+    source_project_id: int = 310967,
+    target_project_id: int = 310967,
     source_branch: str = "agent/issue-12",
     target_branch: str = "main",
     sha: str = "a" * 40,
@@ -82,8 +84,8 @@ def _mr(
         iid=88,
         web_url="https://gitlab.example.com/group/project/-/merge_requests/88",
         state=state,
-        source_project_id=310967,
-        target_project_id=310967,
+        source_project_id=source_project_id,
+        target_project_id=target_project_id,
         source_branch=source_branch,
         target_branch=target_branch,
         sha=sha,
@@ -105,6 +107,7 @@ class FakeGitLab:
         self.fetch_merge_request_error: GitLabError | None = None
         self.pipeline_error: GitLabError | None = None
         self.closing_error: GitLabError | None = None
+        self.closing_results: list[bool] = []
         self.label_failures = 0
 
     def verify_project(self) -> GitLabProject:
@@ -178,7 +181,7 @@ class FakeGitLab:
         del mr_iid, issue_iid
         if self.closing_error is not None:
             raise self.closing_error
-        return True
+        return self.closing_results.pop(0) if self.closing_results else True
 
     def latest_pipeline_for_sha(self, mr_iid: int, sha: str) -> PipelineEvidence | None:
         del mr_iid, sha
@@ -851,6 +854,143 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
     assert gitlab.created_merge_requests == 0
 
 
+def test_delayed_publication_closing_evidence_schedules_retry(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.closing_results = [False]
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.prior_state is RunnerState.PUBLISHING
+    assert outcome.prior_phase is WorkflowPhase.READY_TO_PUBLISH
+    assert outcome.error_code is ErrorCode.GITLAB_RETRYABLE
+    assert outcome.intent is not None
+    assert outcome.merge_request_iid == 88
+    assert outcome.merge_request_url == (
+        "https://gitlab.example.com/group/project/-/merge_requests/88"
+    )
+    assert "agent::blocked" not in gitlab.labels
+    assert gitlab.comments == []
+
+
+def test_delayed_publication_closing_evidence_recovers_without_duplicate_mr(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.closing_results = [False, True]
+    repository = FakeRepository(config)
+
+    waiting = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert waiting is not None and waiting.retry_at is not None
+    gitlab.existing_mr = _mr()
+
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=waiting.retry_at,
+    )
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=waiting.retry_at,
+    )
+
+    assert resumed is not None and resumed.state is RunnerState.PUBLISHING
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert outcome.phase is WorkflowPhase.PIPELINE_WAIT
+    assert gitlab.created_merge_requests == 1
+    assert gitlab.fetched_merge_requests == [88]
+
+
+def test_missing_publication_closing_evidence_exhaustion_blocks(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "retry_count": 3,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.closing_results = [False]
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.RETRY_EXHAUSTED
+    assert gitlab.labels[-1] == "agent::blocked"
+    assert gitlab.comments
+
+
 def test_remediation_publication_reuses_only_its_recorded_merge_request(
     tmp_path: Path,
 ) -> None:
@@ -890,7 +1030,14 @@ def test_remediation_publication_reuses_only_its_recorded_merge_request(
 
 @pytest.mark.parametrize(
     "merge_request",
-    [_mr(state="closed"), _mr(target_branch="other"), _mr(sha="b" * 40)],
+    [
+        _mr(state="closed"),
+        _mr(source_project_id=42),
+        _mr(target_project_id=42),
+        _mr(source_branch="other"),
+        _mr(target_branch="other"),
+        _mr(sha="b" * 40),
+    ],
 )
 def test_publication_mismatch_is_an_actionable_block(
     tmp_path: Path, merge_request: MergeRequestEvidence

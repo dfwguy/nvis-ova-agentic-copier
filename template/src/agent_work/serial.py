@@ -160,6 +160,24 @@ def _record_retry(
     return outcome
 
 
+def _mr_publication_identity_is_exact(
+    record: LedgerRecord,
+    mr: MergeRequestEvidence,
+    *,
+    repository: RepositoryPort,
+    source_sha: str,
+) -> bool:
+    """Verify required merge-request publication identity and state."""
+    return (
+        mr.state == "opened"
+        and mr.source_project_id == record.project_id
+        and mr.target_project_id == record.project_id
+        and mr.source_branch == record.source_branch
+        and mr.target_branch == repository.config.default_branch
+        and mr.sha == source_sha
+    )
+
+
 def _mr_evidence_is_exact(
     record: LedgerRecord,
     mr: MergeRequestEvidence,
@@ -169,15 +187,9 @@ def _mr_evidence_is_exact(
     source_sha: str,
 ) -> bool:
     """Verify the complete merge-request identity and closing relationship."""
-    return (
-        mr.state == "opened"
-        and mr.source_project_id == record.project_id
-        and mr.target_project_id == record.project_id
-        and mr.source_branch == record.source_branch
-        and mr.target_branch == repository.config.default_branch
-        and mr.sha == source_sha
-        and gitlab.mr_closes_issue(mr.iid, record.issue_iid)
-    )
+    return _mr_publication_identity_is_exact(
+        record, mr, repository=repository, source_sha=source_sha
+    ) and gitlab.mr_closes_issue(mr.iid, record.issue_iid)
 
 
 def _block_publication_identity(
@@ -518,22 +530,25 @@ def _publish(
         else:
             if draft is None:
                 raise SegmentError("new merge request lacks publication metadata")
-            mr = gitlab.find_merge_request_by_branch(record.source_branch)
-            if mr is None:
-                mr = gitlab.create_merge_request(
-                    branch=record.source_branch,
-                    target=repository.config.default_branch,
-                    issue_iid=record.issue_iid,
-                    draft=draft,
-                )
-            else:
+            if replaying and record.merge_request_iid is not None:
+                mr = gitlab.fetch_merge_request(record.merge_request_iid)
                 mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
-        exact = _mr_evidence_is_exact(
-            record,
-            mr,
-            gitlab=gitlab,
-            repository=repository,
-            source_sha=sha,
+            else:
+                mr = gitlab.find_merge_request_by_branch(record.source_branch)
+                if mr is None:
+                    mr = gitlab.create_merge_request(
+                        branch=record.source_branch,
+                        target=repository.config.default_branch,
+                        issue_iid=record.issue_iid,
+                        draft=draft,
+                    )
+                else:
+                    mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
+        identity_exact = _mr_publication_identity_is_exact(
+            record, mr, repository=repository, source_sha=sha
+        )
+        closes_issue = identity_exact and gitlab.mr_closes_issue(
+            mr.iid, record.issue_iid
         )
     except (RepositoryTransientError, GitLabError) as error:
         return _record_retry(
@@ -565,12 +580,25 @@ def _publish(
             next_action=blocked.next_action,
         )
         return blocked
-    if not exact:
+    if not identity_exact:
         return _block_publication_identity(
             record,
             ledger=ledger,
             gitlab=gitlab,
             summary="Published merge request evidence is not exact.",
+        )
+    if not closes_issue:
+        return _record_retry(
+            record.model_copy(
+                update={
+                    "merge_request_iid": mr.iid,
+                    "merge_request_url": mr.web_url,
+                }
+            ),
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
         )
     return ledger.persist(
         transition_record(
