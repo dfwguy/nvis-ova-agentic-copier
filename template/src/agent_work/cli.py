@@ -62,13 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout-seconds",
         type=_positive_integer,
         default=1800,
-        help="maximum seconds for each worker segment (default: 1800)",
+        help="maximum seconds for each workflow session (default: 1800)",
     )
     run.add_argument(
         "--max-segments",
         type=_positive_integer,
         default=16,
-        help="maximum persisted segments in one applied activation (default: 16)",
+        help="maximum persisted workflow attempts in one applied activation (default: 16)",
     )
     run.add_argument(
         "--max-activation-seconds",

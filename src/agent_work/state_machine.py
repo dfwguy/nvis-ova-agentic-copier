@@ -117,6 +117,32 @@ REQUIRED_RECEIPTS: Final = MappingProxyType(
     }
 )
 
+WORKFLOW_RECEIPTS: Final = MappingProxyType(
+    {
+        WorkflowLane.CODING: (
+            "$architect",
+            "$tdd-red",
+            "$tdd-green",
+            "$nonfunctional-review",
+            "$tdd-judge",
+            "$diataxis-judge",
+            "$judge-quality",
+            "$judge-test",
+            "$judge-cicd",
+            "$tdd-document",
+            "$cli-syntax-judge",
+            "$filesystem-structure-judge",
+            "$agent-policy-judge",
+            "$tdd-finalizer",
+        ),
+        WorkflowLane.CONTENT: (
+            "$architect",
+            "$documentation-writer",
+            "$documentation-finalizer",
+        ),
+    }
+)
+
 REJECTION_ROUTES: Final = MappingProxyType(
     {
         WorkflowPhase.CODING_RED_DOCS: frozenset(
@@ -217,7 +243,11 @@ def apply_worker_result(
                 next_action=result.next_action,
             )
         )
-    required = REQUIRED_RECEIPTS.get(record.phase, ())
+    required = (
+        WORKFLOW_RECEIPTS.get(result.workflow_lane, ())
+        if record.phase is WorkflowPhase.WORKFLOW
+        else REQUIRED_RECEIPTS.get(record.phase, ())
+    )
     receipt_skills = tuple(receipt.partition(":")[0] for receipt in result.receipts)
     has_receipts = (
         len(receipt_skills) == len(required)

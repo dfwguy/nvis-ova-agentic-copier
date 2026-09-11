@@ -17,10 +17,11 @@ only endpoints below `projects/$GITLAB_PROJECT_ID`. Never infer a project from
 `origin`.
 
 Work only in the runner-provided durable per-issue worktree, never in an
-operator's active checkout. Complete only the workflow phase recorded in the
-ledger. The worker edits and validates uncommitted changes and emits exactly
-one versioned `<agent-work-result>` envelope; it must not commit, push, create
-a merge request, approve, or merge.
+operator's active checkout. Own the complete repository workflow inside one
+live session for the coarse `workflow` phase. The worker edits and validates
+uncommitted changes and emits exactly one versioned `<agent-work-result>`
+envelope; it must not commit, push, call GitLab, create a merge request,
+approve, or merge.
 
 Classify the whole change, then use either the Coding workflow manifest or the
 Documentation and agent-policy workflow manifest in `AGENTS.md` as the routing
@@ -28,15 +29,13 @@ contract. Mixed or uncertain work uses the coding workflow. For each phase,
 read and activate the exact `$skill-id`.
 Do not infer a skill from a display name or from a rolled-up label such as
 "final judges."
-The coding route includes `$architect`, main-agent `$tdd-red`, parallel
-`$diataxis-writer`, main-agent `$tdd-green`, the listed reviewers and judges,
-and `$tdd-finalizer`. The content route includes `$documentation-writer`,
-conditional `$diataxis-judge` and `$agent-policy-judge`, and
-`$documentation-finalizer`. Keep the applicability record and every phase
-receipt in the result envelope so the next bounded segment can resume. A
-conditional skill may be skipped only with
-the manifest's exact `not applicable — <reason>` receipt. The worker exception
-changes who publishes; it does not shorten or reinterpret either workflow.
+Delegate one live `$architect`. For coding, Architect delegates `$tdd-red`,
+then `$tdd-green`; Green alone mutates after Red, fans out all applicable
+read-only judges concurrently, repairs their consolidated findings once, and
+returns to Architect for finalization. For content, Architect delegates one
+sole-mutator `$documentation-writer`, then `$documentation-finalizer`. Keep
+every required or not-applicable receipt in the single result envelope. The
+worker exception changes who publishes; it does not weaken either workflow.
 
 ## MR remediation issue exception
 

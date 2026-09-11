@@ -35,6 +35,10 @@ class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
 
 
+def _has_workflow_receipt(record: LedgerRecord) -> bool:
+    return any(receipt.phase is WorkflowPhase.WORKFLOW for receipt in record.receipts)
+
+
 def _new_record(
     issue: GitLabIssue, *, project_id: int, state_root: Path
 ) -> LedgerRecord:
@@ -58,7 +62,7 @@ def _new_record(
         project_id=project_id,
         issue_iid=issue.iid,
         state=RunnerState.PREPARING,
-        phase=WorkflowPhase.DISCOVERY,
+        phase=WorkflowPhase.WORKFLOW,
         work_kind=classification.kind,
         source_branch=branch,
         worktree=state_root / "worktrees" / str(issue.iid),
@@ -537,19 +541,23 @@ def _publish(
     if not remediation and draft is None:
         if record.intent is not None:
             raise SegmentError("worker did not provide exact publication metadata")
-        finalizer = {
-            WorkflowLane.CODING: WorkflowPhase.CODING_FINALIZE,
-            WorkflowLane.CONTENT: WorkflowPhase.CONTENT_FINALIZE,
-        }.get(record.workflow_lane)
-        if finalizer is None:
+        replay_phase = (
+            WorkflowPhase.WORKFLOW
+            if _has_workflow_receipt(record)
+            else {
+                WorkflowLane.CODING: WorkflowPhase.CODING_FINALIZE,
+                WorkflowLane.CONTENT: WorkflowPhase.CONTENT_FINALIZE,
+            }.get(record.workflow_lane)
+        )
+        if replay_phase is None:
             raise SegmentError("worker did not provide exact publication metadata")
         return ledger.persist(
             transition_record(
                 record,
                 RunnerState.EXECUTING,
-                phase=finalizer,
-                summary="Publication metadata is missing; finalization must be replayed.",
-                next_action="Rerun the lane finalizer to produce exact merge request metadata.",
+                phase=replay_phase,
+                summary="Publication metadata is missing; the workflow must be replayed.",
+                next_action="Resume the workflow to produce exact merge request metadata.",
             )
         )
     replaying = record.intent is not None
@@ -711,6 +719,11 @@ def _observe(
     repository: RepositoryPort,
     now: datetime,
 ) -> LedgerRecord:
+    repair_phase = (
+        WorkflowPhase.WORKFLOW
+        if _has_workflow_receipt(record)
+        else WorkflowPhase.CODING_GREEN
+    )
     if record.merge_request_iid is None or record.source_sha is None:
         raise SegmentError("observation record lacks merge request evidence")
     try:
@@ -727,7 +740,7 @@ def _observe(
                 transition_record(
                     record,
                     RunnerState.REPAIR,
-                    phase=WorkflowPhase.CODING_GREEN,
+                    phase=repair_phase,
                     work_kind=WorkKind.MERGE_CONFLICT_REPAIR,
                     error_code=ErrorCode.MERGE_CONFLICT,
                     summary="The exact merge request has conflicts.",
@@ -766,19 +779,32 @@ def _observe(
             transition_record(
                 record,
                 RunnerState.REPAIR,
-                phase=WorkflowPhase.CODING_GREEN,
+                phase=repair_phase,
                 error_code=ErrorCode.PIPELINE_REJECTED,
                 summary="The exact source-SHA pipeline needs repair.",
                 next_action="Run one bounded post-publication repair segment.",
             )
         )
+    workflow_complete = _has_workflow_receipt(record)
     return ledger.persist(
         transition_record(
             record,
-            RunnerState.EXECUTING,
-            phase=WorkflowPhase.POST_PUBLICATION,
+            (
+                RunnerState.AWAITING_HUMAN
+                if workflow_complete
+                else RunnerState.EXECUTING
+            ),
+            phase=(
+                WorkflowPhase.PIPELINE_WAIT
+                if workflow_complete
+                else WorkflowPhase.POST_PUBLICATION
+            ),
             summary="The exact source-SHA pipeline completed.",
-            next_action="Run post-publication review and triage.",
+            next_action=(
+                "Review and merge the verified merge request."
+                if workflow_complete
+                else "Run post-publication review and triage."
+            ),
         )
     )
 

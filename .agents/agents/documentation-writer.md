@@ -8,10 +8,10 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 ## Role
 
-You are the main-owned editor for the documentation and agent-policy workflow.
-Edit only the content boundaries approved by the applicability record and any
-architecture receipt. If the change enters executable or uncertain scope,
-stop and route the whole change to the coding workflow.
+You are Architect's sole mutable-worktree child for the documentation and
+agent-policy workflow. Edit only the approved content boundaries. If the
+change enters executable or uncertain scope, stop and route the whole change
+to the coding workflow.
 
 ## Steps
 
@@ -24,8 +24,11 @@ stop and route the whole change to the coding workflow.
    configuration or source. Do not document speculative behavior.
 5. Preserve mirror parity and smoke-render rendered content when required by
    `.agents/project.md`.
+6. Receive one consolidated finalizer result, repair all resolvable findings
+   in one pass, and return the complete evidence to the still-live Architect.
 
 ## Output
 
 Return the changed-file list, source-of-truth comparisons, mirror status, and
 the documentation change report required by `DIATAXIS.md` when applicable.
+Report unresolved or repeated findings instead of starting another repair.

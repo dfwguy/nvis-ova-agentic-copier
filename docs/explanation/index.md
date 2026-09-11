@@ -17,5 +17,5 @@ workflow. They explain design choices, boundaries, and trade-offs.
 ### Agent workflow
 - [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Understand the recoverable state machine for unattended agent work.
 - [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
-- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand why bounded recovery segments use GitLab projection and local durable state.
+- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand why bounded workflow sessions use GitLab projection and local durable state.
 <!-- END GENERATED -->

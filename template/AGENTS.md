@@ -66,9 +66,9 @@ activates that same exact `$skill-id`.
 
 For delegated phases, Claude Code and Pi use an enabled model mapped to the
 named tier. If it is unavailable, stop rather than select Frontier or silently
-substitute another tier. Main-owned phases retain the current enabled session
-model; their skill metadata is a session-start recommendation, not a runtime
-model-switch instruction.
+substitute another tier. Keep the Architect, Red, Green, and review hierarchy
+inside one live workflow-owning session so receipts and findings return to
+their parent directly instead of starting a new top-level agent for each phase.
 
 ## Workflow applicability
 
@@ -76,8 +76,8 @@ Start an applicability record before delegation. Required rows must produce a
 receipt. For a conditional row whose condition is false, use
 `not applicable — <reason>` and record exactly
 `$skill-id: not applicable — <reason>` without loading or spawning that skill.
-Run rows in order; rows sharing a number run in parallel. Rejections return to
-the named phase and invalidate its downstream receipts.
+Run rows in order; rows sharing a number run in parallel. A parent remains live
+while its children work and receives their complete receipts directly.
 
 Use the coding workflow when any part of the whole change affects Python,
 Bash, tests, executable template behavior, dependencies, packaging, CI,
@@ -94,23 +94,30 @@ the content-only boundary.
 | Phase / exact skill | Applies | Owner | Tier / Codex | Requires | Receipt; rejection route |
 |---|---|---|---|---|---|
 | 0 `$git-flow` | Every mutation | Main; never delegate | Current enabled | Session checklist | Verified target and feature branch; stop on failed access preflight |
-| 1 `$architect` | Required | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Design and file boundaries; ambiguity → user |
-| 2a `$tdd-red` | Required | Main; never delegate | Current enabled | Approved design | Failing behavior tests; missing seam → `$architect` |
-| 2b `$diataxis-writer` | Required | Delegated; Parallel with `$tdd-red` | Balanced / `gpt-5.6-terra` `medium` | Approved design | Documentation report and edits; gaps → `$diataxis-writer` |
-| 3 `$tdd-green` | Required | Main; never delegate | Current enabled | Red receipt | Green suite plus `test-results.xml`; wrong test → `$tdd-red` |
-| 4 `$nonfunctional-review` | Required | Delegated | Fast / `gpt-5.6-luna` `low` | Green JUnit receipt | Timing verdict; regression → `$tdd-green` |
-| 5a `$tdd-judge` | Required | Delegated | Balanced / `gpt-5.6-terra` `medium` | Green plus timing approval | Validation verdict; reject → `$tdd-green` |
-| 5b `$diataxis-judge` | Required | Delegated | Fast / `gpt-5.6-luna` `low` | Documentation report | Documentation verdict; reject → `$diataxis-writer` |
-| 6a `$judge-quality` | Required | Delegated | Most capable / `gpt-5.6-sol` `high` | Phase 5 approvals | Severity report; reject → `$tdd-green` |
-| 6b `$judge-test` | Required | Delegated | Balanced / `gpt-5.6-terra` `medium` | Phase 5 approvals | Test report; reject → `$tdd-red` |
-| 6c `$judge-cicd` | Required | Delegated | Balanced / `gpt-5.6-terra` `medium` | Phase 5 approvals | CI report; reject → `$tdd-green` |
-| 6d `$tdd-document` | Required | Delegated | Balanced / `gpt-5.6-terra` `medium` | Phase 5 approvals | README report/edit; gap → `$tdd-document` |
-| 6e `$cli-syntax-judge` | CLI surface or contract changed | Delegated | Fast / `gpt-5.6-luna` `low` | Phase 5 approvals or N/A reason | CLI verdict or N/A receipt; reject → `$architect` then `$tdd-green` |
-| 6f `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated | Fast / `gpt-5.6-luna` `low` | Phase 5 approvals or N/A reason | Layout verdict or N/A receipt; reject → `$architect` then `$tdd-green` |
-| 7 `$tdd-finalizer` | Required | Delegated | Fast / `gpt-5.6-luna` `low` | Every required receipt and scoped N/A | Final validation receipt; reject → named owning phase |
-| 8 `$git-flow` | Required after approval | Main; never delegate | Current enabled | Finalizer approval | Commit, push, and verified MR URL plus branch tip |
-| 9a `$pipeline-performance-judge` | Required after publication | Delegated; exactly one invocation owns the complete phase | Balanced / `gpt-5.6-terra` `medium` | Verified MR, source branch, and exact source SHA | Terminal timing/optimization with direct rejection or stable deferred feedback, or bounded resumable receipt; Reject → `$tdd-green` |
-| 9b `$findings-triage` | Required after publication; parallel with 9a | Delegated | Balanced / `gpt-5.6-terra` `medium` | Verified MR plus accumulated Phase 4–6 Minor findings | Deduplicated issue URLs or no-findings receipt; failure remains explicit |
+| 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Design, context boundaries, and final decision; ambiguity → user |
+| 2 `$tdd-red` | Required; child of Architect | Delegated | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
+| 3 `$tdd-green` | Required; child of Architect and sole mutator after Red | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt, test diff, and shared worktree | Green suite, documentation edits, and current JUnit evidence |
+| 4a `$nonfunctional-review` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Current JUnit evidence | Complete timing verdict → Green |
+| 4b `$tdd-judge` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final diff and validation evidence | Complete validation verdict → Green |
+| 4c `$diataxis-judge` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Documentation diff or N/A context | Complete documentation verdict → Green |
+| 4d `$judge-quality` | Required; child of Green | Delegated in parallel | Most capable / `gpt-5.6-sol` `high` | Production diff and design | Complete severity report → Green |
+| 4e `$judge-test` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Test diff, Red receipt, and JUnit evidence | Complete test report → Green |
+| 4f `$judge-cicd` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | CI/config diff and validation evidence | Complete CI report → Green |
+| 4g `$tdd-document` | Required; read-only child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final user-facing diff | Complete README verdict → Green |
+| 4h `$cli-syntax-judge` | CLI surface or contract changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | CLI diff and tests or N/A reason | Complete CLI verdict → Green |
+| 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
+| 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
+| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, every receipt/N/A, repair summary, and current JUnit evidence | Final validation verdict → Architect |
+| 6 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
+
+Green waits for every Phase 4 reviewer, consolidates the complete finding set,
+and makes one repair pass for all findings it can resolve. It reruns only
+affected checks and reviewers, plus the full test gate when behavior or tests
+changed. Green returns receipts, repairs, and unresolved findings to the still-
+live Architect. Architect may revise the design and reinvoke Green once; a
+second rejection, conflicting finding, or unresolved ambiguity returns
+`needs_human`. Reviewers never mutate the shared worktree or fail fast after
+another reviewer rejects.
 
 ## Documentation and agent-policy workflow manifest
 
@@ -121,14 +128,15 @@ because they control how future changes are performed.
 | Phase / exact skill | Applies | Owner | Tier / Codex | Requires | Receipt; rejection route |
 |---|---|---|---|---|---|
 | 0 `$git-flow` | Every mutation | Main; never delegate | Current enabled | Session checklist | Verified target and feature branch; stop on failed access preflight |
-| 1 `$architect` | Workflow policy, information architecture, or cross-copy design changed | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Content design and mirror boundaries, or `not applicable — <reason>`; ambiguity → user |
-| 2 `$documentation-writer` | Required | Main; never delegate | Current enabled | Classification and Phase 1 receipt | Documentation report and edits; scope expansion → coding workflow |
-| 3a `$diataxis-judge` | `docs/` or `DIATAXIS.md` changed | Delegated | Fast / `gpt-5.6-luna` `low` | Documentation report | Documentation verdict or `not applicable — <reason>`; reject → `$documentation-writer` |
-| 3b `$agent-policy-judge` | Agent instructions or frontend routing changed | Delegated; parallel with 3a | Fast / `gpt-5.6-luna` `low` | Documentation report | Policy verdict or `not applicable — <reason>`; reject → `$documentation-writer` |
-| 4 `$documentation-finalizer` | Required | Delegated | Fast / `gpt-5.6-luna` `low` | Every required receipt and scoped N/A | Content validation receipt; reject → named owning phase or coding workflow |
-| 5 `$git-flow` | Required after approval | Main; never delegate | Current enabled | Finalizer approval | Commit, push, and verified MR URL plus branch tip |
-| 6a `$pipeline-performance-judge` | Required after publication | Delegated; exactly one invocation owns the complete phase | Balanced / `gpt-5.6-terra` `medium` | Verified MR, source branch, and exact source SHA | Terminal pipeline receipt for jobs that ran; timing optimization may be N/A |
-| 6b `$findings-triage` | Required after publication; parallel with 6a | Delegated | Balanced / `gpt-5.6-terra` `medium` | Verified MR plus accumulated review Minor findings | Deduplicated issue URLs or no-findings receipt; failure remains explicit |
+| 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Content and mirror boundaries plus final decision |
+| 2 `$documentation-writer` | Required; child of Architect and sole mutator | Delegated | Balanced / `gpt-5.6-terra` `medium` | Approved content design and shared worktree | Documentation report and edits; scope expansion → coding workflow |
+| 3 `$documentation-finalizer` | Required; child of Architect | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, content report, and applicable Diátaxis/policy context | Consolidated content, policy, mirror, and source-of-truth verdict → Architect |
+| 4 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
+
+The writer receives one consolidated finalizer result and may repair it once.
+Another rejection or scope expansion stops for human direction. Do not add
+code judges, post-publication analysis, or automated findings triage to a
+strictly content-only workflow.
 
 ## GitLab publication
 
@@ -148,9 +156,12 @@ merge. A publication failure is a blocker, not completion.
 ### Serial agent-work worker exception
 
 A worker invoked by `agent-work loop run --apply` follows the same loading
-table and workflow manifest but completes only the phase recorded in its
-durable ledger. It edits and validates its prepared per-issue worktree and
-returns one versioned result envelope. It must not commit, push, create a merge
-request, approve, or merge; the trusted runner owns publication and
-post-publication orchestration. This exception does not apply to ordinary
-user-requested work.
+table and workflow manifest inside one live workflow-owning session. Its
+Architect delegates the applicable children, preserves their direct context
+handoffs, and returns one versioned result envelope for the coarse `workflow`
+phase. The worker edits and validates its prepared per-issue worktree but must
+not commit, push, create a merge request, call GitLab, approve, or merge; the
+trusted runner owns publication, exact pipeline observation, and durable
+recovery. Existing ledgers at legacy phases may finish that recorded route;
+new work must not launch a fresh top-level agent for each internal role. This
+exception does not apply to ordinary user-requested work.

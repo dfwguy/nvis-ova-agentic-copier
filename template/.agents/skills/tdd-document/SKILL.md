@@ -1,6 +1,6 @@
 ---
 name: tdd-document
-description: Ensure README.md accurately orients users after a change.
+description: Review whether README.md accurately orients users after a change.
 metadata:
   model-tier: balanced
 ---

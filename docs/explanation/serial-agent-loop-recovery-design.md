@@ -24,8 +24,10 @@ reference, and setup guide describe its operator-facing behavior.
 The systemd scheduler is healthy. The problem is that the workflow contract
 now expects recovery, remediation, and post-publication phases that the runtime
 cannot represent. Further point fixes would preserve the mismatch. The
-replacement makes every activation a bounded sequence of individually durable
-segments in an explicit, recoverable state machine.
+replacement makes every activation a bounded workflow-owning session in an
+explicit, recoverable state machine. Recovery retains the durable worktree and
+a coarse `WORKFLOW` boundary rather than persisting an internal checkpoint for
+every agent phase.
 
 ## Evidence and confirmed defects
 
@@ -108,11 +110,12 @@ details for `blocked`, `awaiting-human`, and exceptional `failed` outcomes.
 Labels communicate operator-visible ownership; they are not the transaction
 log.
 
-## State-machine activation and segments
+## State-machine activation and workflow sessions
 
 Every timer activation acquires the single-project lock, reconciles durable
-evidence, and advances at most one issue through immediately available
-segments. Each segment retains the original recovery boundary:
+evidence, and advances at most one issue through a workflow-owning session.
+The durable recovery boundary surrounds that session, not every internal agent
+handoff:
 
 1. Acquire the single-project local lock.
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
@@ -126,7 +129,7 @@ segments. Each segment retains the original recovery boundary:
 6. Persist transition intent before the corresponding external mutation, then
    record the observed result. Reconciliation completes or compensates any
    transition interrupted between those writes.
-7. Run one bounded worker segment in the issue's durable worktree.
+7. Run one bounded workflow-owning worker in the issue's durable worktree.
 8. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
    `needs_human`.
 9. Publish idempotently and verify exact same-project MR, branch, target, tip,
@@ -134,23 +137,23 @@ segments. Each segment retains the original recovery boundary:
 10. Record one safe, actionable outcome. Continue immediately with the same
     issue when progress is safe, or yield when the activation reaches idle,
     no progress or an external wait, `retry-wait`, a terminal or human-facing
-    state, or its segment or wall-time bound.
+    state, or its workflow or wall-time bound.
 
 Selection of a fresh issue starts at the beginning of its applicable workflow
 and attempts to reach human handoff or another yield condition in that
-activation. Reconciliation of an existing record starts at its durable
-checkpoint and preserves every remaining applicable phase. Rejection routes
-are durable backward transitions and may continue immediately just like
-forward transitions.
+activation. Reconciliation of an existing record restores the worktree and
+re-enters its coarse `WORKFLOW` state. Existing legacy phase-ledger values
+finish their recorded route; the first rollout deliberately adds no sidecar checkpoints for
+Architect, Red, Green, documentation, or judges.
 
-The default activation runs at most 16 segments or 3,600 seconds, and each
-worker has a 1,800-second timeout. The effective timeout passed to each worker
+The default activation runs at most 16 workflow attempts or 3,600 seconds, and
+each workflow-owning worker has a 1,800-second timeout. Its effective timeout
 is capped to the activation time remaining. An exhausted effective timeout is
-handled by the normal durable retry and recovery path. The timer waits 20
-minutes after the complete activation, so that interval controls idle polling
-and external waits rather than spacing internal phases. The systemd service
-allows 90 minutes for the bounded activation and orderly shutdown. The timer
-does not own workflow state or perform checkout cleanup.
+handled by the normal durable-worktree retry and recovery path. The timer waits
+20 minutes after the complete activation, so that interval controls idle
+polling and external waits rather than spacing internal handoffs. The systemd
+service allows 90 minutes for the bounded activation and orderly shutdown. The
+timer does not own workflow state or perform checkout cleanup.
 
 ## Durable ledger and worktrees
 
@@ -159,7 +162,7 @@ and numeric project ID. Each active issue owns one durable worktree and one
 ledger record. A record contains at least:
 
 - schema version, project identity, issue IID, and work kind;
-- state, phase, attempt number, retry deadline, and last transition time;
+- state, coarse workflow phase, attempt number, retry deadline, and last transition time;
 - base, source, and target branches plus observed commit IDs;
 - merge-request identity and last verified publication evidence;
 - worker protocol version, latest result kind, and required receipts;
@@ -193,21 +196,23 @@ The implementation must maintain these invariants:
   and reconciliation is safe after interruption at either side of that write.
 - Publication is idempotent and accepted only from exact GitLab and Git
   evidence.
-- The full repository workflow remains intact, but a worker segment performs
-  only the next resumable phase or phase group.
+- The full repository workflow remains intact inside one workflow-owning
+  session. Green is the sole mutable owner after Red; applicable judges fan out
+  read-only and return their findings to Green, which consolidates them for the
+  Architect's final decision.
 - Expected durable outcomes do not make the systemd unit fail.
 - The runner never approves or merges and never widens authority from issue
   text, labels, comments, or worker output.
 
-## Worker protocol and workflow receipts
+## Workflow protocol and receipts
 
-The one-shot merge-request draft becomes a versioned result envelope. The
-envelope identifies the issue, expected ledger transition, completed workflow
-phase, receipts produced, result kind, redacted diagnostic, and proposed next
+The workflow-owning session returns a versioned result envelope. The envelope
+identifies the issue, expected ledger transition, coarse completed workflow
+state, receipts produced, result kind, redacted diagnostic, and proposed next
 action. The trusted runner validates it against the current record and Git
 evidence before changing state.
 
-`ready_to_publish` means the bounded segment produced validated changes or a
+`ready_to_publish` means the bounded workflow session produced validated changes or a
 validated repair that the trusted runner may publish. `retryable` names a
 transient category and retry deadline. `needs_human` names the blocked reason
 and a concrete action without treating a deliberate stop as failure.
@@ -221,9 +226,11 @@ new draft is required.
 
 Architecture, Red/Green, documentation, review, finalization,
 post-publication observation, and repair remain required according to
-`AGENTS.md`. Their receipts are persisted between segments. Publication no
-longer prevents later post-publication phases because `observing` and `repair`
-are durable states.
+`AGENTS.md`. The Architect carries approved design to Red; Red returns its
+failing-test evidence to Green; Green owns modifications, concurrent read-only
+judge fan-out, repair, and feedback consolidation before the Architect makes
+the final decision. Publication no longer prevents later post-publication work
+because `observing` and `repair` are durable states.
 
 ## Failure taxonomy and process exits
 
@@ -249,7 +256,7 @@ Reconciliation treats ledger intent plus external evidence as the source for a
 safe next transition:
 
 - A `running` issue with a valid ledger and worktree resumes its recorded
-  phase, regardless of the process that created it.
+  coarse workflow state, regardless of the process that created it.
 - A persisted transition intent is checked against GitLab and Git; an already
   completed external mutation is recorded, while an absent idempotent mutation
   may be retried.
@@ -259,7 +266,7 @@ safe next transition:
   draft from issue text.
 - A missing worktree may be recreated only from recorded and verified commits
   when no uncommitted evidence can be lost.
-- A dirty durable worktree remains in place for its next segment. It is not
+- A dirty durable worktree remains in place for its next workflow attempt. It is not
   cleaned or stashed during normal shutdown.
 - An orphan worktree, branch, label, or stash is inventoried and blocked for a
   human decision when ownership cannot be proved.
@@ -308,7 +315,7 @@ Migration is evidence-preserving:
 
 The implementation is maintained in reviewable slices: ledger and
 reconciliation; deterministic selection and classification; durable worktrees
-and versioned worker segments; idempotent publication and existing-MR
+and versioned workflow sessions; idempotent publication and existing-MR
 remediation; post-publication observation and repair; then wrapper, timer,
 status, and operational-documentation updates. Each slice follows the full
 coding workflow.

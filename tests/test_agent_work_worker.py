@@ -118,6 +118,35 @@ def test_worker_prompt_requires_publication_metadata_from_ordinary_finalizer() -
     assert "exactly one protocol_version=1 JSON object" in prompt
 
 
+def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        issue_title="Improve the implementation",
+        issue_description="Keep the workflow fast.",
+    )
+
+    assert "one workflow-owning session" in prompt
+    architect = prompt.index("Delegate Architect")
+    red = prompt.index("delegates Red")
+    green = prompt.index("then delegates Green")
+    fan_out = prompt.index("delegates every applicable independent judge concurrently")
+    repair = prompt.index("Green performs one consolidated repair")
+    feedback = prompt.index("returns all receipts and unresolved findings")
+    assert architect < red < green < fan_out < repair < feedback
+    assert "Green is the sole mutable owner" in prompt
+    assert "Quality Judge receives the architecture" in prompt
+    assert "Test Judge receives the Red receipt" in prompt
+    assert "still-live Architect" in prompt
+    assert "Do not commit, push, approve, or merge" in prompt
+
+
 def _note(
     note_id: int,
     body: str,

@@ -191,11 +191,13 @@ systemctl --user status "$unit_name.timer"
 ```
 
 The timer schedules the next bounded activation 20 minutes after the service
-becomes inactive. Within that activation, the runner advances one issue through
-immediately available, individually persisted segments. The installed service
-allows 90 minutes for an activation. Run only one timer host for a project. The
-service's environment and XDG state directory must be writable only by the
-operator.
+becomes inactive. Within an activation, one worker owns the issue's complete
+workflow session; its Architect, Red, Green, and read-only judges hand context
+directly to one another. The runner recovers only the durable worktree and
+coarse `WORKFLOW` state, not a sidecar checkpoint for each internal role. The
+installed service allows 90 minutes for an activation. Run only one timer host
+for a project. The service's environment and XDG state directory must be
+writable only by the operator.
 If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
 user-manager socket; do not retry using a different credential, host, or
 environment. Systemd captures standard output and error under its
@@ -221,10 +223,12 @@ uv run agent-work loop status --json
 
 After a human has completed the repository's unattended-publication readiness
 gate, run one applied activation or let the timer do so. The defaults permit up
-to 16 segments and 3,600 seconds for the activation, with a 1,800-second limit
-for each worker segment. A fresh issue attempts its complete applicable
-workflow; a recovered issue resumes at its saved checkpoint and completes the
-remaining phases, including any backward rejection route:
+to 16 workflow attempts and 3,600 seconds for the activation, with a
+1,800-second limit for each workflow-owning worker. A fresh issue attempts its
+complete applicable workflow; a recovered issue resumes from its durable
+worktree and coarse `WORKFLOW` state. Existing legacy phase-ledger values
+finish their recorded route; internal Architect, Red, Green, and judge handoffs are not
+separately persisted:
 
 ```bash
 uv run agent-work loop run --apply --json
@@ -235,12 +239,12 @@ Use `--max-segments`, `--max-activation-seconds`, or `--timeout-seconds` to
 apply smaller operational bounds. The activation advances only one issue and
 stops when it is idle, waiting for external progress or a retry deadline,
 reaches a terminal or human-facing state, or exhausts a configured bound. Its
-JSON `items` list records segment results chronologically; `segments_run` and
+JSON `items` list records workflow results chronologically; `segments_run` and
 `stop_reason` summarize the activation.
 
-The runner caps each worker timeout to the activation time that remains. If a
-worker exhausts that effective timeout, inspect the recorded retry or recovery
-outcome in the same way as any other worker timeout.
+The runner caps each workflow session timeout to the activation time that
+remains. If it exhausts that effective timeout, inspect the recorded retry or
+durable-worktree recovery outcome in the same way as any other timeout.
 
 Use `--debug` when the redacted status needs local diagnostic context. Do not
 copy debug output containing private operational details into an issue.
@@ -257,7 +261,7 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-The initial attempt plus three retries are automatic bounded segments. An
+The initial attempt plus three retries are automatic workflow attempts. An
 activation yields when a retry deadline is in the future. When retries are
 exhausted, the issue is `agent::blocked`; follow its recorded next action, then
 explicitly retry that exact IID after a human has resolved the condition. Do

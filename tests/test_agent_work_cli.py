@@ -119,9 +119,9 @@ def test_loop_run_help_documents_preview_apply_and_default_bounds(
     assert raised.value.code == 0
     assert "Preview the next safe action without mutation" in help_text
     assert "omit for a read-only preview" in help_text
-    assert "maximum seconds for each worker segment (default: 1800)" in help_text
+    assert "maximum seconds for each workflow session (default: 1800)" in help_text
     assert (
-        "maximum persisted segments in one applied activation (default: 16)"
+        "maximum persisted workflow attempts in one applied activation (default: 16)"
         in help_text
     )
     assert "maximum seconds for one applied activation (default: 3600)" in help_text

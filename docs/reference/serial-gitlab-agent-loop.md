@@ -29,14 +29,14 @@ agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 ```
 
-An applied `loop run` performs one bounded, recoverable activation. It advances
-only one issue, repeatedly running individually persisted state-machine
-segments until the activation reaches a yield condition. The defaults are 16
-segments, 3,600 seconds for the complete activation, and 1,800 seconds for each
-worker segment. `--max-segments`, `--max-activation-seconds`, and
-`--timeout-seconds` override those respective bounds. Before each worker starts,
-the runner caps its timeout to the activation time that remains. Exhausting
-that effective worker timeout follows the normal retry and recovery contract.
+An applied `loop run` performs one bounded, recoverable activation for one
+issue. The worker owns the complete applicable workflow session. The defaults
+are 16 workflow attempts, 3,600 seconds for the complete activation, and 1,800
+seconds for each workflow session. `--max-segments`,
+`--max-activation-seconds`, and `--timeout-seconds` override those respective
+bounds. The runner caps the workflow session timeout to the activation time
+that remains. Exhausting that effective timeout follows the normal retry and
+durable-worktree recovery contract.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
@@ -75,28 +75,28 @@ recorded action is complete, an operator explicitly retries that IID. Human
 merge or closure ends an awaiting-human record.
 
 A newly selected issue attempts its complete applicable repository workflow in
-the same activation. A durable record instead resumes at its recorded
-checkpoint and must complete every remaining applicable phase. Approval routes
-continue forward, while a rejection follows its recorded backward route; both
-continue inside the same activation until another yield condition is reached.
+the same activation. A durable record resumes from its coarse `WORKFLOW`
+boundary and durable worktree; the first rollout does not add a sidecar
+checkpoint for every role or phase. Existing legacy phase-ledger values finish
+their recorded route; new work uses `WORKFLOW`. Within that session, the Architect hands the approved design to
+Red, Red returns failing-test evidence to Green, Green fans out applicable
+read-only judges and repairs what it can, then returns consolidated feedback to
+the Architect for the final decision.
 
-Pipeline rejection or an exact-MR conflict enters `repair` at `coding-green`.
-A successful `$tdd-green` repair re-enters the normal downstream chain at
-`coding-nonfunctional`, then completes validation, final reviews, and
-finalization before it republishes and repeats observation and the
-post-publication gates. A rejected `post-publication` phase routes durably to
-`coding-green`. Immediately after the post-publication worker, the runner
+Pipeline rejection or an exact-MR conflict enters `repair` at `WORKFLOW` using
+the same durable worktree. Green performs any safe repair inside its workflow
+session, consolidates the follow-up reviews, and returns the result to the
+Architect. Immediately after post-publication observation, the runner
 revalidates exact MR evidence again before it records `awaiting-human`.
 
 Each timer activation acquires the single-project lock and reconciles intent
-and observed evidence. It then repeatedly advances only the selected or
-resumed issue, persisting every segment transition before continuing to the
-next immediately available segment. Recovery semantics apply at every segment
-boundary even though those segments normally run back to back.
+and observed evidence. It then advances only the selected or resumed issue.
+Recovery applies at the worktree and coarse workflow boundary, not at every
+internal agent handoff.
 
 An activation stops when it is idle; makes no progress while waiting for
 external evidence such as a pending pipeline; reaches `retry-wait`, `blocked`,
-`failed`, `awaiting-human`, or completion; or exhausts its segment or wall-time
+`failed`, `awaiting-human`, or completion; or exhausts its workflow or wall-time
 limit. The timer uses `OnUnitInactiveSec=20min`, measured after the complete
 activation finishes, for idle polling and external waits. The service timeout
 is 90 minutes. The loop is serial per host and project, not multi-host
@@ -108,7 +108,8 @@ State is below the XDG state directory, keyed by configured GitLab host and
 numeric project ID. Each `loop status` ledger item identifies its durable
 worktree path. Every active issue
 has one atomic, restrictive-permission ledger record and durable worktree. A
-record holds its schema and project identity; IID and work kind; state, phase,
+record holds its schema and project identity; IID and work kind; state, coarse
+workflow phase,
 attempt, and retry deadline; branches and commits; MR and publication evidence;
 worker protocol, result, and receipts; redacted error and next action; and
 durable transition intent.
@@ -119,18 +120,18 @@ not a replacement for, the systemd service journal.
 
 Intent is persisted before an external mutation and observed evidence after it,
 so reconciliation can safely complete interrupted idempotent operations. A
-dirty durable worktree remains for its next segment. Recovery stashes are
+dirty durable worktree remains for its next workflow attempt. Recovery stashes are
 inventoried only: the runner never applies or drops them. Ambiguous worktrees,
 branches, labels, or stashes become blocked for human review. A corrupt record
 is blocked where reportable, and failed only where it cannot be safely recorded.
 
 ## Worker protocol and publication
 
-A worker returns a versioned, redacted envelope for its expected ledger
-transition. Its result is `ready_to_publish`, `retryable`, or `needs_human`,
-with the completed phase, receipts, diagnostic, and next action. The trusted
-runner validates it against the ledger, configured numeric project, Git
-evidence, and required workflow receipts before changing state.
+A workflow-owning worker returns a versioned, redacted envelope for its
+expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
+`needs_human`, with the coarse completed state, receipts, diagnostic, and next
+action. The trusted runner validates it against the ledger, configured numeric
+project, Git evidence, and required workflow receipts before changing state.
 
 Immediately before each worker execution, the runner retrieves that issue's
 notes through its bounded GitLab retry path. It excludes system notes and both
@@ -153,12 +154,11 @@ because it publishes only to the verified existing MR. A legacy ordinary
 `intent=null` is recovered side-effect-free to its lane finalizer; the runner
 never synthesizes a draft from issue text.
 
-A rejected phase supplies its required `rejection_route`; the runner durably
-returns to that recorded owner phase rather than retrying or guessing a route,
-then continues from that checkpoint in the same activation when safe.
-Receipts must match the exact completed-phase requirements. Required
-conditional phases use `not applicable — <reason>`; arbitrary receipts cannot
-advance a manifest phase.
+The Architect and Green route a rejected internal review to its owning role
+inside the session. The runner resumes only at `WORKFLOW` after interruption;
+it does not guess or persist a role-level checkpoint. Receipts must still match
+the manifest's required work. Required conditional judges use `not applicable
+— <reason>`; arbitrary receipts cannot advance the workflow.
 
 Publication is idempotent. The runner verifies the recorded source branch,
 default target, exact same-project MR, remote and local tip, and issue-closing
@@ -199,7 +199,7 @@ with an actionable error; a conflict enters durable repair on the same branch.
 
 ## Retry, exits, and JSON
 
-The initial attempt plus at most three retry attempts are bounded segments.
+The initial workflow attempt plus at most three retry attempts are bounded.
 `retry-wait` records its deadline; exhaustion becomes `agent::blocked`, never
 `agent::failed`. A blocked item never becomes eligible through labels: after
 the recorded human action, `loop retry --issue-iid IID --apply` explicitly
@@ -240,10 +240,10 @@ returns one redacted `CommandReport` object:
 The common top-level fields are `schema_version`, `command`, `applied`,
 `outcome`, `project`, `items`, and `actions`. `project` contains the verified
 `host` and `project_id`. An applied `loop run` report additionally includes
-`segments_run`, the number of completed segment attempts, and `stop_reason`,
-which identifies why the activation yielded; its `items[]` lists segment
+`segments_run`, the number of completed workflow attempts, and `stop_reason`,
+which identifies why the activation yielded; its `items[]` lists workflow
 results in chronological order. Per-issue values—including `issue_iid`, state,
-phase, attempt, retry timing, source branch, durable worktree, MR reference,
+coarse workflow phase, attempt, retry timing, source branch, durable worktree, MR reference,
 error code, summary, and next action—are objects in `items[]`. Migration
 preview and apply return their proposed or applied migration actions in
 `actions[]`. Consumers must tolerate additional fields and never treat a
