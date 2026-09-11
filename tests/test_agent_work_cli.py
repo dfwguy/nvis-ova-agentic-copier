@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -126,6 +126,37 @@ def test_loop_run_help_documents_preview_apply_and_default_bounds(
     )
     assert "maximum seconds for one applied activation (default: 3600)" in help_text
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("flag", "sentinel"),
+    [
+        ("--timeout-seconds", 1801),
+        ("--max-segments", 17),
+        ("--max-activation-seconds", 3601),
+    ],
+)
+def test_loop_run_help_interpolates_the_current_activation_limit_default(
+    flag: str, sentinel: int
+) -> None:
+    parser = build_parser()
+    resources = cast(
+        Any,
+        next(action for action in parser._actions if getattr(action, "choices", None)),
+    )
+    loop = resources.choices["loop"]
+    loop_actions = next(
+        action for action in loop._actions if getattr(action, "choices", None)
+    )
+    run = loop_actions.choices["run"]
+    activation_limit = next(
+        action for action in run._actions if flag in action.option_strings
+    )
+    activation_limit.default = sentinel
+
+    help_text = " ".join(run.format_help().split())
+
+    assert f"(default: {sentinel})" in help_text
 
 
 @pytest.mark.parametrize(

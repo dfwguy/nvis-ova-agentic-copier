@@ -62,19 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout-seconds",
         type=_positive_integer,
         default=1800,
-        help="maximum seconds for each workflow session (default: 1800)",
+        help="maximum seconds for each workflow session (default: %(default)s)",
     )
     run.add_argument(
         "--max-segments",
         type=_positive_integer,
         default=16,
-        help="maximum persisted workflow attempts in one applied activation (default: 16)",
+        help="maximum persisted workflow attempts in one applied activation (default: %(default)s)",
     )
     run.add_argument(
         "--max-activation-seconds",
         type=_positive_integer,
         default=3600,
-        help="maximum seconds for one applied activation (default: 3600)",
+        help="maximum seconds for one applied activation (default: %(default)s)",
     )
     status = loop_actions.add_parser("status", help="show durable loop state")
     _common(status, apply=False)
