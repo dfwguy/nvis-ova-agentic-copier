@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
+    GitLabIssueNote,
     GitLabProject,
     LedgerRecord,
     MergeRequestDraft,
@@ -52,6 +53,8 @@ class GitLabPort(Protocol):
     def list_projected(self) -> tuple[GitLabIssue, ...]: ...
 
     def fetch_issue(self, iid: int) -> GitLabIssue: ...
+
+    def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]: ...
 
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue: ...
 

@@ -7,10 +7,11 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from .domain import LIFECYCLE_LABELS
+from .domain import AGENT_OUTCOME_NOTE_MARKER, LIFECYCLE_LABELS
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
+    GitLabIssueNote,
     GitLabProject,
     MergeRequestDraft,
     MergeRequestEvidence,
@@ -52,6 +53,9 @@ MR_FIELDS = (
     "description",
 )
 PIPELINE_FIELDS = ("id", "status", "sha", "web_url")
+NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
+NOTE_AUTHOR_FIELDS = ("username",)
+_MAX_NOTE_PAGES = 100
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -169,6 +173,49 @@ class GitLabGateway:
             return GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid issue data") from error
+
+    def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]:
+        """Fetch all validated issue notes in deterministic chronological order."""
+        notes_by_id: dict[int, GitLabIssueNote] = {}
+        for page in range(1, _MAX_NOTE_PAGES + 1):
+            payload = self._call(
+                f"projects/{self._config.project_id}/issues/{iid}/notes",
+                fields=(
+                    "order_by=created_at",
+                    "sort=asc",
+                    "per_page=100",
+                    f"page={page}",
+                ),
+            )
+            try:
+                items = self._items(payload, "issue note list")
+                page_notes = tuple(
+                    GitLabIssueNote.model_validate(
+                        _selected(item, NOTE_FIELDS)
+                        | {
+                            "author": _selected(
+                                cast(dict[str, object], author), NOTE_AUTHOR_FIELDS
+                            )
+                            if isinstance((author := item.get("author")), dict)
+                            else author
+                        }
+                    )
+                    for item in items
+                )
+            except (GitLabError, ValidationError) as error:
+                raise GitLabError("GitLab returned invalid issue note data") from error
+            for note in page_notes:
+                existing = notes_by_id.get(note.id)
+                if existing is not None and existing != note:
+                    raise GitLabError("GitLab returned invalid issue note data")
+                notes_by_id[note.id] = note
+            if len(items) < 100:
+                break
+        else:
+            raise GitLabError("GitLab returned too many issue note pages")
+        return tuple(
+            sorted(notes_by_id.values(), key=lambda note: (note.created_at, note.id))
+        )
 
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
         """Project exactly one lifecycle label and verify the result."""
@@ -305,7 +352,10 @@ class GitLabGateway:
         self, iid: int, *, error_code: str, summary: str, next_action: str
     ) -> None:
         """Record one safe actionable outcome on its issue."""
-        body = f"Agent outcome `{error_code}`: {summary}\n\nNext action: {next_action}"
+        body = (
+            f"{AGENT_OUTCOME_NOTE_MARKER}\n"
+            f"Agent outcome `{error_code}`: {summary}\n\nNext action: {next_action}"
+        )
         self._call(
             f"projects/{self._config.project_id}/issues/{iid}/notes",
             method="POST",

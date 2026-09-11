@@ -378,12 +378,23 @@ def _execute(
     timeout_seconds: int,
     now: datetime,
 ) -> LedgerRecord:
+    try:
+        issue_notes = gitlab.fetch_issue_notes(record.issue_iid)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
     prompt = build_worker_prompt(
         record.model_dump(mode="json"),
         project_id=record.project_id,
         issue_iid=record.issue_iid,
         issue_title=issue.title,
         issue_description=issue.description,
+        issue_notes=issue_notes,
     )
     invocation = invoke.invoke(record.worktree, prompt, timeout_seconds)
     if invocation.returncode != 0:

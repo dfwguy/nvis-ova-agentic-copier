@@ -109,6 +109,8 @@ LIFECYCLE_LABELS: Final = (
     "agent::failed",
 )
 
+AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"
+
 
 @dataclass(frozen=True)
 class WorkClassification:
