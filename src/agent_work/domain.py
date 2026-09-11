@@ -130,6 +130,8 @@ class CommandRequest:
     issue_iid: int | None = None
     plan_file: Path | None = None
     timeout_seconds: int = 1800
+    max_segments: int = 16
+    max_activation_seconds: int = 3600
     debug: bool = False
 
 

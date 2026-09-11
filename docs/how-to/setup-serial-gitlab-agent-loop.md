@@ -1,11 +1,11 @@
 ---
-title: Set up the recoverable serial GitLab agent loop
+title: How to set up the recoverable serial GitLab agent loop
 type: how-to
 summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-10
+last_reviewed: 2026-09-11
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -15,7 +15,7 @@ related:
     why: Explains the state machine and migration rationale.
 ---
 
-# Set up the recoverable serial GitLab agent loop
+# How to set up the recoverable serial GitLab agent loop
 
 Use one dedicated checkout and one user timer for one GitLab project. The loop
 is authorized by enabling the project-level timer. It selects eligible open,
@@ -190,9 +190,12 @@ systemctl --user enable --now "$unit_name.timer"
 systemctl --user status "$unit_name.timer"
 ```
 
-The timer schedules the next bounded segment 20 minutes after the service
-becomes inactive. Run only one timer host for a project. The service's
-environment and XDG state directory must be writable only by the operator.
+The timer schedules the next bounded activation 20 minutes after the service
+becomes inactive. Within that activation, the runner advances one issue through
+immediately available, individually persisted segments. The installed service
+allows 90 minutes for an activation. Run only one timer host for a project. The
+service's environment and XDG state directory must be writable only by the
+operator.
 If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
 user-manager socket; do not retry using a different credential, host, or
 environment. Systemd captures standard output and error under its
@@ -206,9 +209,9 @@ file creation block above, then reload and enable the timer. Do not change
 credentials, worktrees, ledger files, branches, or stashes merely to make the
 service start.
 
-## Run and inspect a segment
+## Run and inspect an activation
 
-Preview a segment before authorizing mutation. A preview must not change
+Preview the next action before authorizing mutation. A preview must not change
 GitLab, labels, branches, worktrees, ledger records, or systemd state.
 
 ```bash
@@ -217,12 +220,27 @@ uv run agent-work loop status --json
 ```
 
 After a human has completed the repository's unattended-publication readiness
-gate, run one applied segment or let the timer do so:
+gate, run one applied activation or let the timer do so. The defaults permit up
+to 16 segments and 3,600 seconds for the activation, with a 1,800-second limit
+for each worker segment. A fresh issue attempts its complete applicable
+workflow; a recovered issue resumes at its saved checkpoint and completes the
+remaining phases, including any backward rejection route:
 
 ```bash
 uv run agent-work loop run --apply --json
 systemctl --user status "$unit_name.service"
 ```
+
+Use `--max-segments`, `--max-activation-seconds`, or `--timeout-seconds` to
+apply smaller operational bounds. The activation advances only one issue and
+stops when it is idle, waiting for external progress or a retry deadline,
+reaches a terminal or human-facing state, or exhausts a configured bound. Its
+JSON `items` list records segment results chronologically; `segments_run` and
+`stop_reason` summarize the activation.
+
+The runner caps each worker timeout to the activation time that remains. If a
+worker exhausts that effective timeout, inspect the recorded retry or recovery
+outcome in the same way as any other worker timeout.
 
 Use `--debug` when the redacted status needs local diagnostic context. Do not
 copy debug output containing private operational details into an issue.
@@ -239,10 +257,11 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-The initial attempt plus three retries are automatic bounded segments. When
-they are exhausted, the issue is `agent::blocked`; follow its recorded next
-action, then explicitly retry that exact IID after a human has resolved the
-condition. Do not change labels to resume blocked work.
+The initial attempt plus three retries are automatic bounded segments. An
+activation yields when a retry deadline is in the future. When retries are
+exhausted, the issue is `agent::blocked`; follow its recorded next action, then
+explicitly retry that exact IID after a human has resolved the condition. Do
+not change labels to resume blocked work.
 Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
@@ -277,7 +296,7 @@ uv run agent-work loop status --json
 Choose one open, non-confidential issue with no `agent::running`,
 `agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no
 ledger record. Verify that its request is suitable for the normal repository
-workflow, then run bounded segments until status reports
+workflow, then run bounded activations until status reports
 `agent::awaiting-human` with exact merge-request evidence and all required
 receipts. Human review, approval, and merge remain outside the loop.
 
@@ -307,8 +326,9 @@ uv run agent-work loop status --json
 ```
 
 To restart after a transient user-manager failure, let an active bounded
-segment finish when possible. Stopping it interrupts the segment; the ledger
-and durable worktree make the next `loop run` reconcile it.
+activation finish when possible. Stopping it can interrupt a segment; the
+ledger and durable worktree make the next `loop run` reconcile the last durable
+boundary.
 
 ```bash
 systemctl --user stop "$unit_name.timer" "$unit_name.service"

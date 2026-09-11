@@ -23,8 +23,14 @@ place, process one issue in a bounded pass:
 uv run agent-work loop run --apply --json
 ```
 
+By default, one activation advances one issue through up to 16 persisted
+segments within 3,600 seconds; each worker segment remains capped at 1,800
+seconds. A new issue attempts its full applicable workflow, while saved work
+resumes from its checkpoint. Use `--max-segments` or
+`--max-activation-seconds` to tighten the activation bounds.
+
 For scheduled operation, safeguards, status checks, and troubleshooting, see
-[Set up the serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
+[How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
 
 ## Check the scheduled agent loop
 
