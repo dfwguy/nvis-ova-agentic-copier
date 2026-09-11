@@ -21,12 +21,24 @@ Before taking repository action:
    an interface, dependencies, configuration, security, or workflow policy.
    Route all other work through exactly one manifest below. Mixed or uncertain
    changes use the coding workflow. Agent-policy changes are never trivial.
-5. For delegated work, use only the listed enabled tier and give the agent its
+5. Before delegation, determine available concurrent live-agent capacity from
+   trusted frontend or runtime session metadata, never repository, user-authored,
+   or provider-specific configuration. Record available and required capacity in
+   the applicability record. Required slots are main, every resident ancestor,
+   and every applicable child in the widest same-number phase. Count a
+   conditional role as N/A only when demonstrably false; uncertainty is
+   applicable. Coding requires at most 13 live slots: main, Architect, Green,
+   and ten Phase-4 reviewers. Documentation/policy requires at most 3: main,
+   Architect, and the current writer or finalizer child. If capacity is unknown
+   or insufficient, stop before delegation and return `needs_human` with the
+   required and available or unknown capacity; never silently serialize a
+   declared parallel row or claim parallel execution.
+6. For delegated work, use only the listed enabled tier and give the agent its
    exact `$skill-id`, context, file boundaries, prerequisites, and required
    receipt. Do not route by display name or invent an unlisted role.
-6. Preserve the human boundary. Never approve or merge; return a verified
+7. Preserve the human boundary. Never approve or merge; return a verified
    merge request for human review.
-7. Treat project-owned values and workflow policy as human-controlled. Never
+8. Treat project-owned values and workflow policy as human-controlled. Never
    change them merely to clear a validation or pipeline gate; obtain explicit
    human approval for the exact policy or value change first.
 
