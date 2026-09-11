@@ -24,9 +24,14 @@ def _positive_integer(value: str) -> int:
     return number
 
 
-def _common(parser: argparse.ArgumentParser, *, apply: bool = True) -> None:
+def _common(
+    parser: argparse.ArgumentParser,
+    *,
+    apply: bool = True,
+    apply_help: str = "apply the operation",
+) -> None:
     if apply:
-        parser.add_argument("--apply", action="store_true", help="apply the operation")
+        parser.add_argument("--apply", action="store_true", help=apply_help)
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     parser.add_argument(
         "--debug", action="store_true", help="show a traceback on failure"
@@ -39,9 +44,38 @@ def build_parser() -> argparse.ArgumentParser:
     resources = parser.add_subparsers(dest="resource", required=True)
     loop = resources.add_parser("loop", help="inspect or advance the serial loop")
     loop_actions = loop.add_subparsers(dest="action", required=True)
-    run = loop_actions.add_parser("run", help="preview or run one bounded segment")
-    _common(run)
-    run.add_argument("--timeout-seconds", type=_positive_integer, default=1800)
+    run = loop_actions.add_parser(
+        "run",
+        help="preview or run one bounded recoverable activation",
+        description=(
+            "Preview the next safe action without mutation, or use --apply to "
+            "advance one bounded recoverable activation."
+        ),
+    )
+    _common(
+        run,
+        apply_help=(
+            "advance one bounded recoverable activation; omit for a read-only preview"
+        ),
+    )
+    run.add_argument(
+        "--timeout-seconds",
+        type=_positive_integer,
+        default=1800,
+        help="maximum seconds for each worker segment (default: 1800)",
+    )
+    run.add_argument(
+        "--max-segments",
+        type=_positive_integer,
+        default=16,
+        help="maximum persisted segments in one applied activation (default: 16)",
+    )
+    run.add_argument(
+        "--max-activation-seconds",
+        type=_positive_integer,
+        default=3600,
+        help="maximum seconds for one applied activation (default: 3600)",
+    )
     status = loop_actions.add_parser("status", help="show durable loop state")
     _common(status, apply=False)
     status.add_argument("--issue-iid", type=_positive_integer)
@@ -75,8 +109,10 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
     if as_json:
         return report.model_dump_json(exclude_none=True)
     details = [report.outcome]
+    if report.stop_reason:
+        details.append(f"stop_reason={report.stop_reason}")
     if report.items:
-        item = report.items[0]
+        item = report.items[-1]
         details.extend(
             (f"issue=#{item.issue_iid}", f"state={item.state}", f"phase={item.phase}")
         )
@@ -100,6 +136,8 @@ def main(
         issue_iid=getattr(parsed, "issue_iid", None),
         plan_file=getattr(parsed, "plan_file", None),
         timeout_seconds=getattr(parsed, "timeout_seconds", 1800),
+        max_segments=getattr(parsed, "max_segments", 16),
+        max_activation_seconds=getattr(parsed, "max_activation_seconds", 3600),
         debug=parsed.debug,
     )
     try:

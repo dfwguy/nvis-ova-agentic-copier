@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .domain import (
+    ACTIVE_STATES,
     LIFECYCLE_LABELS,
     CommandRequest,
     ErrorCode,
@@ -73,6 +75,8 @@ def _report(
     records: tuple[LedgerRecord, ...] = (),
     actions: tuple[MigrationAction, ...] = (),
     project: dict[str, str | int] | None = None,
+    segments_run: int | None = None,
+    stop_reason: str | None = None,
 ) -> CommandReport:
     return CommandReport(
         command=request.command,
@@ -81,6 +85,8 @@ def _report(
         project=project,
         items=tuple(_item(record) for record in records),
         actions=actions,
+        segments_run=segments_run,
+        stop_reason=stop_reason,
     )
 
 
@@ -95,6 +101,7 @@ class RuntimeDependencies:
     invoke: InvokerPort
     lock: ProjectLockFactory
     clock: Callable[[], datetime]
+    monotonic: Callable[[], float]
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
 
@@ -128,6 +135,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         invoke=AgentInvoker(run_subprocess, environment=os.environ),
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
         clock=lambda: datetime.now(UTC),
+        monotonic=time.monotonic,
         logger=_build_local_logger(config, debug=debug),
         read_plan=lambda path: path.read_bytes(),
     )
@@ -397,19 +405,76 @@ def dispatch(
             outcome="eligible" if eligible else "idle",
             project=identity,
         )
+    records: list[LedgerRecord] = []
+    stop_reason = "idle"
+    started = wired.monotonic()
+
+    def remaining_activation_seconds() -> float:
+        return request.max_activation_seconds - (wired.monotonic() - started)
+
     with wired.lock():
-        record = run_segment(
-            ledger=ledger,
-            gitlab=gitlab,
-            repository=repository,
-            invoke=wired.invoke,
-            timeout_seconds=request.timeout_seconds,
-            now=wired.clock(),
+        active = tuple(
+            item for item in ledger.list_records() if item.state in ACTIVE_STATES
         )
+        prior_state = active[0].state if len(active) == 1 else None
+        issue_iid = active[0].issue_iid if len(active) == 1 else None
+        for _segment_number in range(request.max_segments):
+            if remaining_activation_seconds() <= 0:
+                stop_reason = "time_limit"
+                break
+            segment_start_state = prior_state
+            record = run_segment(
+                ledger=ledger,
+                gitlab=gitlab,
+                repository=repository,
+                invoke=wired.invoke,
+                timeout_seconds=request.timeout_seconds,
+                now=wired.clock(),
+                issue_iid=issue_iid,
+                remaining_seconds=remaining_activation_seconds,
+            )
+            if record is None:
+                if remaining_activation_seconds() <= 0:
+                    stop_reason = "time_limit"
+                else:
+                    stop_reason = (
+                        "retry_wait"
+                        if segment_start_state is RunnerState.RETRY_WAIT
+                        else "idle"
+                    )
+                break
+            if issue_iid is None:
+                issue_iid = record.issue_iid
+            elif record.issue_iid != issue_iid:
+                raise RuntimeError("one activation cannot advance multiple issues")
+            records.append(record)
+            prior_state = record.state
+            if record.state in {
+                RunnerState.BLOCKED,
+                RunnerState.FAILED,
+                RunnerState.AWAITING_HUMAN,
+                RunnerState.COMPLETE,
+            }:
+                stop_reason = record.state.value.replace("-", "_")
+                break
+            if record.state is RunnerState.RETRY_WAIT:
+                stop_reason = "retry_wait"
+                break
+            if record.state is RunnerState.OBSERVING:
+                if segment_start_state is RunnerState.PUBLISHING:
+                    continue
+                stop_reason = "pipeline_wait"
+                break
+        else:
+            stop_reason = "segment_limit"
     return _report(
         request,
         applied=True,
-        outcome="idle" if record is None else "segment_complete",
-        records=() if record is None else (record,),
+        outcome="idle"
+        if not records and stop_reason == "idle"
+        else "activation_complete",
+        records=tuple(records),
         project=identity,
+        segments_run=len(records),
+        stop_reason=stop_reason,
     )

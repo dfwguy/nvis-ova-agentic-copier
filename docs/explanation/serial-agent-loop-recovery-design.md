@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-10
+last_reviewed: 2026-09-11
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -24,8 +24,8 @@ reference, and setup guide describe its operator-facing behavior.
 The systemd scheduler is healthy. The problem is that the workflow contract
 now expects recovery, remediation, and post-publication phases that the runtime
 cannot represent. Further point fixes would preserve the mismatch. The
-replacement makes every activation a bounded segment of an explicit,
-recoverable state machine.
+replacement makes every activation a bounded sequence of individually durable
+segments in an explicit, recoverable state machine.
 
 ## Evidence and confirmed defects
 
@@ -108,9 +108,11 @@ details for `blocked`, `awaiting-human`, and exceptional `failed` outcomes.
 Labels communicate operator-visible ownership; they are not the transaction
 log.
 
-## State-machine segment
+## State-machine activation and segments
 
-Every timer activation performs at most one bounded segment:
+Every timer activation acquires the single-project lock, reconciles durable
+evidence, and advances at most one issue through immediately available
+segments. Each segment retains the original recovery boundary:
 
 1. Acquire the single-project local lock.
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
@@ -129,10 +131,26 @@ Every timer activation performs at most one bounded segment:
    `needs_human`.
 9. Publish idempotently and verify exact same-project MR, branch, target, tip,
    and closing-issue evidence.
-10. Record one safe, actionable outcome and exit.
+10. Record one safe, actionable outcome. Continue immediately with the same
+    issue when progress is safe, or yield when the activation reaches idle,
+    no progress or an external wait, `retry-wait`, a terminal or human-facing
+    state, or its segment or wall-time bound.
 
-The timer schedules segments; it does not own workflow state or perform
-checkout cleanup.
+Selection of a fresh issue starts at the beginning of its applicable workflow
+and attempts to reach human handoff or another yield condition in that
+activation. Reconciliation of an existing record starts at its durable
+checkpoint and preserves every remaining applicable phase. Rejection routes
+are durable backward transitions and may continue immediately just like
+forward transitions.
+
+The default activation runs at most 16 segments or 3,600 seconds, and each
+worker has a 1,800-second timeout. The effective timeout passed to each worker
+is capped to the activation time remaining. An exhausted effective timeout is
+handled by the normal durable retry and recovery path. The timer waits 20
+minutes after the complete activation, so that interval controls idle polling
+and external waits rather than spacing internal phases. The systemd service
+allows 90 minutes for the bounded activation and orderly shutdown. The timer
+does not own workflow state or perform checkout cleanup.
 
 ## Durable ledger and worktrees
 
@@ -162,7 +180,7 @@ associates it with an issue, but never applies or drops it automatically.
 
 The implementation must maintain these invariants:
 
-- At most one local segment holds the project lock.
+- At most one local activation holds the project lock.
 - No new issue is claimed while resumable running work exists.
 - Project-level loop enablement authorizes unattended work. A new issue is
   eligible only when it is open, non-confidential, has none of
@@ -273,7 +291,7 @@ sandbox or reinterpret the issue as authority.
 
 Migration is evidence-preserving:
 
-1. Stop the timer and confirm no segment holds the project lock.
+1. Stop the timer and confirm no activation holds the project lock.
 2. Inventory current running, awaiting-human, failed, blocked, and closed
    projections; exact branch, MR, worktree, and recovery-stash evidence.
 3. Run a non-mutating migration preview that proposes ledger records, label

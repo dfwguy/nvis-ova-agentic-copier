@@ -41,8 +41,11 @@ can poll open, unprojected issues, so no webhook or inbound service is required:
 uv run agent-work loop run --json
 ```
 
-An applied run advances one bounded, recoverable state-machine segment. Later
-segments publish and verify an MR before stopping at `awaiting-human`; no segment
+An applied run advances one issue through up to 16 persisted segments within
+3,600 seconds, with each worker capped at 1,800 seconds. Fresh work attempts its
+full applicable workflow; saved work resumes from its durable checkpoint. After
+publication and observation complete, the activation stops at `awaiting-human`;
+otherwise it yields durably for recovery. No segment
 approves or merges. Enable the user-level
 systemd timer only after a human explicitly authorizes publication. For a constrained
 identity with effective API access exactly `30` (Developer), the

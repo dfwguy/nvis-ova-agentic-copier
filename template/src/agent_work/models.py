@@ -261,3 +261,5 @@ class CommandReport(BoundaryModel):
     project: dict[str, str | int] | None = None
     items: tuple[CommandItemReport, ...] = ()
     actions: tuple[MigrationAction, ...] = ()
+    segments_run: int | None = Field(default=None, ge=0)
+    stop_reason: str | None = None

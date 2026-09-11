@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -74,7 +76,11 @@ def _due(record: LedgerRecord, now: datetime) -> bool:
 
 
 def select_record(
-    ledger: LedgerPort, gitlab: GitLabPort, *, now: datetime
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    *,
+    now: datetime,
+    issue_iid: int | None = None,
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
     """Reconcile durable work before selecting the oldest eligible issue."""
     project = gitlab.verify_project()
@@ -84,6 +90,15 @@ def select_record(
     active = tuple(record for record in records if record.state in ACTIVE_STATES)
     if len(active) > 1:
         raise SegmentError("multiple resumable records require reconciliation")
+    if issue_iid is not None:
+        pinned = next(
+            (record for record in active if record.issue_iid == issue_iid), None
+        )
+        if pinned is None:
+            raise SegmentError("pinned issue is not the active durable record")
+        if not _due(pinned, now):
+            return None, None
+        return pinned, gitlab.fetch_issue(pinned.issue_iid)
     issues = {
         record.issue_iid: gitlab.fetch_issue(record.issue_iid) for record in records
     }
@@ -377,7 +392,8 @@ def _execute(
     invoke: InvokerPort,
     timeout_seconds: int,
     now: datetime,
-) -> LedgerRecord:
+    remaining_seconds: Callable[[], float] | None = None,
+) -> LedgerRecord | None:
     try:
         issue_notes = gitlab.fetch_issue_notes(record.issue_iid)
     except GitLabError:
@@ -396,7 +412,13 @@ def _execute(
         issue_description=issue.description,
         issue_notes=issue_notes,
     )
-    invocation = invoke.invoke(record.worktree, prompt, timeout_seconds)
+    worker_timeout = timeout_seconds
+    if remaining_seconds is not None:
+        remaining = remaining_seconds()
+        if remaining <= 0:
+            return None
+        worker_timeout = min(timeout_seconds, max(1, math.ceil(remaining)))
+    invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
     if invocation.returncode != 0:
         return _record_retry(
             record,
@@ -769,9 +791,11 @@ def run_segment(
     invoke: InvokerPort,
     timeout_seconds: int,
     now: datetime,
+    issue_iid: int | None = None,
+    remaining_seconds: Callable[[], float] | None = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
-    record, issue = select_record(ledger, gitlab, now=now)
+    record, issue = select_record(ledger, gitlab, now=now, issue_iid=issue_iid)
     if record is None or issue is None:
         return None
     if issue.state != "opened":
@@ -885,6 +909,7 @@ def run_segment(
             invoke=invoke,
             timeout_seconds=timeout_seconds,
             now=now,
+            remaining_seconds=remaining_seconds,
         )
     if record.state is RunnerState.PUBLISHING:
         return _publish(

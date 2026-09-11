@@ -20,9 +20,16 @@ related:
 # Why the agent loop is serial and GitLab-native
 
 The agent loop is a recoverable finite-state machine, not a long-running agent
-session. Every systemd activation performs one bounded segment, persists what
-happened, and exits. A later activation reconciles that evidence and resumes
-the same issue before it considers new work.
+session. Every systemd activation is bounded, but it normally advances one
+issue through several individually persisted segments back to back. A later
+activation reconciles the last durable boundary and resumes the same issue
+before it considers new work.
+
+For a fresh issue, this means attempting the complete applicable workflow in
+one activation. For recovered work, it means starting at the saved checkpoint
+without skipping any remaining phase. Forward approvals and backward rejection
+routes are both ordinary durable transitions, so either can continue
+immediately while the activation still has budget and can make progress.
 
 ```mermaid
 stateDiagram-v2
@@ -57,10 +64,25 @@ ordinary uncommitted evidence in place; a stash is emergency evidence that the
 runner inventories but never applies or drops.
 
 Serial execution is a local safety boundary. One host owns unattended work for
-a project and a single-project lock prevents overlapping local segments. This
-does not claim distributed coordination: operators must not run a second timer
-for the same project. The 20-minute timer delay starts after a segment finishes,
-so retries and recovery do not overlap a still-running worker.
+a project and a single-project lock prevents overlapping activations. Within
+an activation, persisting each transition preserves the same crash-recovery
+boundary without imposing a scheduling delay between available phases. The
+activation continues only on its current issue; it never consumes a second
+issue merely because capacity remains.
+
+The activation yields for terminal or human-facing states, a future retry, a
+pending external result, lack of progress, or its segment or wall-time limit.
+The 20-minute timer delay begins only after the complete activation finishes,
+so it serves idle polling and external waits rather than pacing internal
+workflow phases. A 90-minute service timeout leaves room for the default
+one-hour activation limit and orderly shutdown. This does not claim distributed
+coordination: operators must not run a second timer for the same project.
+
+The activation deadline also bounds individual work. Before invoking a worker,
+the runner reduces that worker's configured timeout to the activation time
+remaining. If the worker uses that effective timeout, its timeout is recorded
+and processed through the existing retry and recovery path rather than losing
+the checkpoint.
 
 GitLab remains preferable to a webhook receiver or a filesystem queue because
 it already supplies the human work record and MR handoff. The local ledger is

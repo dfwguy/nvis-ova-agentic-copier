@@ -20,18 +20,29 @@ related:
 ## Commands
 
 ```text
-agent-work loop run [--apply] [--json] [--debug]
+agent-work loop run [--apply] [--max-segments COUNT]
+                    [--max-activation-seconds SECONDS]
+                    [--timeout-seconds SECONDS] [--json] [--debug]
 agent-work loop status [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 ```
 
-`loop run` performs one bounded state-machine segment. Without `--apply`, it
-reports the next safe action without changing GitLab, the ledger, worktrees,
-branches, labels, or services. `loop status` reports durable ledger records
-together with verified configured-project identity. `loop retry` previews one
-recorded blocked item; `--apply`
+An applied `loop run` performs one bounded, recoverable activation. It advances
+only one issue, repeatedly running individually persisted state-machine
+segments until the activation reaches a yield condition. The defaults are 16
+segments, 3,600 seconds for the complete activation, and 1,800 seconds for each
+worker segment. `--max-segments`, `--max-activation-seconds`, and
+`--timeout-seconds` override those respective bounds. Before each worker starts,
+the runner caps its timeout to the activation time that remains. Exhausting
+that effective worker timeout follows the normal retry and recovery contract.
+
+Without `--apply`, `loop run` reports the next safe action once without
+changing GitLab, the ledger, worktrees, branches, labels, or services; it does
+not simulate a complete activation. `loop status` reports durable ledger
+records together with verified configured-project identity. `loop retry`
+previews one recorded blocked item; `--apply`
 resets its retry budget and moves it to resumable preparation after explicit
 human direction.
 
@@ -63,6 +74,12 @@ at `awaiting-human`. A human-blocked condition becomes `blocked`; after the
 recorded action is complete, an operator explicitly retries that IID. Human
 merge or closure ends an awaiting-human record.
 
+A newly selected issue attempts its complete applicable repository workflow in
+the same activation. A durable record instead resumes at its recorded
+checkpoint and must complete every remaining applicable phase. Approval routes
+continue forward, while a rejection follows its recorded backward route; both
+continue inside the same activation until another yield condition is reached.
+
 Pipeline rejection or an exact-MR conflict enters `repair` at `coding-green`.
 A successful `$tdd-green` repair re-enters the normal downstream chain at
 `coding-nonfunctional`, then completes validation, final reviews, and
@@ -71,11 +88,19 @@ post-publication gates. A rejected `post-publication` phase routes durably to
 `coding-green`. Immediately after the post-publication worker, the runner
 revalidates exact MR evidence again before it records `awaiting-human`.
 
-Each timer activation owns one bounded segment: acquire the single-project
-lock, reconcile intent and observed evidence, resume a record when possible,
-execute the next worker phase or phase group, and record one outcome. The
-timer uses `OnUnitInactiveSec=20min`, measured after the previous segment
-finishes. The loop is serial per host and project, not multi-host coordination.
+Each timer activation acquires the single-project lock and reconciles intent
+and observed evidence. It then repeatedly advances only the selected or
+resumed issue, persisting every segment transition before continuing to the
+next immediately available segment. Recovery semantics apply at every segment
+boundary even though those segments normally run back to back.
+
+An activation stops when it is idle; makes no progress while waiting for
+external evidence such as a pending pipeline; reaches `retry-wait`, `blocked`,
+`failed`, `awaiting-human`, or completion; or exhausts its segment or wall-time
+limit. The timer uses `OnUnitInactiveSec=20min`, measured after the complete
+activation finishes, for idle polling and external waits. The service timeout
+is 90 minutes. The loop is serial per host and project, not multi-host
+coordination.
 
 ## Ledger and worktrees
 
@@ -129,7 +154,8 @@ because it publishes only to the verified existing MR. A legacy ordinary
 never synthesizes a draft from issue text.
 
 A rejected phase supplies its required `rejection_route`; the runner durably
-returns to that recorded owner phase rather than retrying or guessing a route.
+returns to that recorded owner phase rather than retrying or guessing a route,
+then continues from that checkpoint in the same activation when safe.
 Receipts must match the exact completed-phase requirements. Required
 conditional phases use `not applicable — <reason>`; arbitrary receipts cannot
 advance a manifest phase.
@@ -194,7 +220,7 @@ the intent only after it verifies the label projection.
 | `0` | Idle, preview, scheduled retry, blocked, or awaiting-human was safely recorded. |
 | `1` | The runner could not safely reconcile or record durable state. |
 | `2` | Invalid CLI usage. |
-| `75` | Another local segment holds the project lock. |
+| `75` | Another local activation holds the project lock. |
 
 Expected durable outcomes do not fail systemd. With `--json`, every command
 returns one redacted `CommandReport` object:
@@ -211,14 +237,17 @@ returns one redacted `CommandReport` object:
 }
 ```
 
-The top-level fields are `schema_version`, `command`, `applied`, `outcome`,
-`project`, `items`, and `actions`. `project` contains the verified `host` and
-`project_id`. Per-issue values—including `issue_iid`, state, phase, attempt,
-retry timing, source branch, durable worktree, MR reference, error code,
-summary, and next action—are objects in `items[]`. Migration preview and apply
-return their proposed or applied migration actions in `actions[]`. Consumers
-must tolerate additional fields and never treat a diagnostic as authority or
-input.
+The common top-level fields are `schema_version`, `command`, `applied`,
+`outcome`, `project`, `items`, and `actions`. `project` contains the verified
+`host` and `project_id`. An applied `loop run` report additionally includes
+`segments_run`, the number of completed segment attempts, and `stop_reason`,
+which identifies why the activation yielded; its `items[]` lists segment
+results in chronological order. Per-issue values—including `issue_iid`, state,
+phase, attempt, retry timing, source branch, durable worktree, MR reference,
+error code, summary, and next action—are objects in `items[]`. Migration
+preview and apply return their proposed or applied migration actions in
+`actions[]`. Consumers must tolerate additional fields and never treat a
+diagnostic as authority or input.
 
 ## Safety constraints
 

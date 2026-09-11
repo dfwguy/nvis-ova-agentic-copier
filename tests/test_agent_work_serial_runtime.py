@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import pytest
 
@@ -304,6 +306,7 @@ def _dependencies(
         invoke=FakeInvoker(),
         lock=nullcontext,
         clock=lambda: NOW,
+        monotonic=lambda: 0.0,
         logger=logging.getLogger(f"test-agent-work-{id(ledger)}"),
         read_plan=lambda path: path.read_bytes(),
     )
@@ -319,6 +322,85 @@ class FakeInvoker:
         del checkout, timeout
         self.prompts.append(prompt)
         return WorkerInvocation(self.returncode, self.output, "safe diagnostic")
+
+
+class BatchingInvoker:
+    """Return coherent phase receipts for a complete coding workflow."""
+
+    receipts: ClassVar[dict[str, tuple[str, ...]]] = {
+        "discovery": ("$architect: approved",),
+        "coding-red-docs": ("$tdd-red: complete", "$diataxis-writer: complete"),
+        "coding-green": ("$tdd-green: complete",),
+        "coding-nonfunctional": ("$nonfunctional-review: approved",),
+        "coding-validation": ("$tdd-judge: approved", "$diataxis-judge: approved"),
+        "coding-final-review": (
+            "$judge-quality: approved",
+            "$judge-test: approved",
+            "$judge-cicd: approved",
+            "$tdd-document: accurate",
+            "$cli-syntax-judge: not applicable",
+            "$filesystem-structure-judge: approved",
+        ),
+        "coding-finalize": ("$tdd-finalizer: approved",),
+        "content-write": ("$documentation-writer: complete",),
+        "content-review": (
+            "$diataxis-judge: approved",
+            "$agent-policy-judge: approved",
+        ),
+        "content-finalize": ("$documentation-finalizer: approved",),
+        "post-publication": (
+            "$pipeline-performance-judge: approved",
+            "$findings-triage: no findings",
+        ),
+    }
+
+    def __init__(
+        self,
+        reject_once: tuple[str, str] | None = None,
+        *,
+        lane: str = "coding",
+    ) -> None:
+        self.phases: list[str] = []
+        self.timeouts: list[int] = []
+        self.reject_once = reject_once
+        self.lane = lane
+
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+        del checkout
+        self.timeouts.append(timeout)
+        raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
+        record = ast.literal_eval(raw_record)
+        phase = str(record["phase"])
+        self.phases.append(phase)
+        payload: dict[str, object] = {
+            "protocol_version": 1,
+            "project_id": record["project_id"],
+            "issue_iid": record["issue_iid"],
+            "ledger_revision": record["revision"],
+            "expected_state": record["state"],
+            "expected_phase": phase,
+            "workflow_lane": self.lane,
+            "result_kind": "ready_to_publish",
+            "phase_status": "complete",
+            "completed_phase": phase,
+            "receipts": self.receipts[phase],
+            "change_summary": f"Completed {phase}.",
+            "next_action": "Continue the recoverable workflow.",
+        }
+        if self.reject_once is not None and phase == self.reject_once[0]:
+            payload["phase_status"] = "rejected"
+            payload["rejection_route"] = self.reject_once[1]
+            self.reject_once = None
+        if phase in {"coding-finalize", "content-finalize"}:
+            payload["merge_request_draft"] = {
+                "title": "Complete issue 12",
+                "description": "Validated change.\n\nCloses #12",
+            }
+        return WorkerInvocation(
+            0,
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
+            "",
+        )
 
 
 def _record(
@@ -1604,6 +1686,366 @@ def test_run_preview_reports_eligible_unprojected_work(tmp_path: Path) -> None:
     )
 
     assert report.outcome == "eligible"
+
+
+def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    repository = FakeRepository(config)
+    invoker = BatchingInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository), invoke=invoker
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.outcome == "activation_complete"
+    assert report.stop_reason == "awaiting_human"
+    assert report.segments_run == 11
+    assert len(report.items) == 11
+    assert report.items[-1].state is RunnerState.AWAITING_HUMAN
+    assert invoker.phases == [
+        "discovery",
+        "coding-red-docs",
+        "coding-green",
+        "coding-nonfunctional",
+        "coding-validation",
+        "coding-final-review",
+        "coding-finalize",
+        "post-publication",
+    ]
+    assert gitlab.created_merge_requests == 1
+
+
+def test_apply_batches_the_complete_content_workflow_until_human_handoff(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    invoker = BatchingInvoker(lane="content")
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "awaiting_human"
+    assert report.segments_run == 8
+    assert invoker.phases == [
+        "discovery",
+        "content-write",
+        "content-review",
+        "content-finalize",
+        "post-publication",
+    ]
+
+
+def test_apply_segment_limit_yields_and_next_activation_recovers(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    repository = FakeRepository(config)
+    invoker = BatchingInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository), invoke=invoker
+    )
+
+    first = dispatch(
+        CommandRequest(command="loop.run", max_segments=3, max_activation_seconds=3600),
+        apply=True,
+        dependencies=dependencies,
+    )
+    resumed = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    persisted = ledger.load(12)
+    assert first.stop_reason == "segment_limit"
+    assert first.segments_run == 3
+    assert first.items[-1].phase is WorkflowPhase.CODING_GREEN
+    assert resumed.stop_reason == "awaiting_human"
+    assert resumed.items[0].phase is WorkflowPhase.CODING_NONFUNCTIONAL
+    assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
+
+
+def test_apply_never_reconciles_another_issue_after_pinning_active_work(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    active = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+    )
+    closed_blocked = _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN
+    ).model_copy(
+        update={
+            "issue_iid": 13,
+            "source_branch": "agent/issue-13",
+            "worktree": tmp_path / "state" / "worktrees" / "13",
+        }
+    )
+    ledger.persist(active)
+    closed_blocked = ledger.persist(closed_blocked)
+
+    class MultipleIssueGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.issues = {
+                12: _issue().model_copy(update={"labels": ("agent::running",)}),
+                13: _issue(iid=13, state="closed").model_copy(
+                    update={"labels": ("agent::blocked",)}
+                ),
+            }
+            self.transitions: list[tuple[int, str | None]] = []
+            self.fetches: list[int] = []
+
+        def fetch_issue(self, iid: int) -> GitLabIssue:
+            self.fetches.append(iid)
+            if iid != 12:
+                raise AssertionError("pinned activation fetched an unrelated issue")
+            return self.issues[iid]
+
+        def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+            self.transitions.append((iid, label))
+            return self.issues[iid]
+
+    gitlab = MultipleIssueGitLab()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)),
+        invoke=BatchingInvoker(),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "segment_limit"
+    assert [item.issue_iid for item in report.items] == [12]
+    assert ledger.load(13) == closed_blocked
+    assert gitlab.fetches == [12]
+    assert all(iid == 12 for iid, _label in gitlab.transitions)
+
+
+def test_apply_stops_after_one_pending_pipeline_observation(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.stop_reason == "pipeline_wait"
+    assert report.segments_run == 2
+    assert [item.state for item in report.items] == [
+        RunnerState.OBSERVING,
+        RunnerState.OBSERVING,
+    ]
+    assert gitlab.created_merge_requests == 1
+
+
+def test_apply_respects_activation_time_budget_between_segments(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    readings = iter((0.0, 0.0, 61.0))
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)),
+        monotonic=lambda: next(readings),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=16, max_activation_seconds=60),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "time_limit"
+    assert report.segments_run == 1
+    assert report.items[0].state is RunnerState.EXECUTING
+
+
+def test_apply_caps_the_worker_timeout_to_the_remaining_activation_budget(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    invoker = BatchingInvoker()
+    readings = iter((0.0, 0.0, 30.2, 121.0))
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+        invoke=invoker,
+        monotonic=lambda: next(readings),
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run",
+            timeout_seconds=1800,
+            max_segments=16,
+            max_activation_seconds=120,
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "time_limit"
+    assert invoker.timeouts == [90]
+
+
+def test_apply_continues_after_a_review_routes_work_backward(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    invoker = BatchingInvoker(reject_once=("coding-validation", "coding-green"))
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "awaiting_human"
+    assert invoker.phases.count("coding-green") == 2
+    assert invoker.phases.count("coding-validation") == 2
+
+
+def test_apply_resumes_a_due_retry_and_continues_in_the_same_activation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.RETRY_WAIT,
+            phase=WorkflowPhase.CODING_FINALIZE,
+        ).model_copy(
+            update={
+                "retry_at": NOW,
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.CODING_FINALIZE,
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    invoker = BatchingInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.stop_reason == "pipeline_wait"
+    assert report.items[0].state is RunnerState.EXECUTING
+    assert invoker.phases == ["coding-finalize"]
+
+
+def test_apply_yields_without_mutation_for_a_future_retry(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    waiting = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.RETRY_WAIT,
+            phase=WorkflowPhase.CODING_GREEN,
+        ).model_copy(
+            update={
+                "retry_at": NOW + timedelta(minutes=20),
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.CODING_GREEN,
+            }
+        )
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    assert report.outcome == "activation_complete"
+    assert report.stop_reason == "retry_wait"
+    assert report.segments_run == 0
+    assert ledger.load(12) == waiting
 
 
 def test_run_preview_uses_initial_ledger_snapshot_for_eligibility(
