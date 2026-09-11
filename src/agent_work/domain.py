@@ -26,6 +26,7 @@ class RunnerState(StrEnum):
 class WorkflowPhase(StrEnum):
     """Resumable repository-workflow phases."""
 
+    WORKFLOW = "workflow"
     DISCOVERY = "discovery"
     CODING_RED_DOCS = "coding-red-docs"
     CODING_GREEN = "coding-green"
@@ -155,6 +156,7 @@ def retries_remaining(retry_count: int) -> int:
 def next_workflow_phase(phase: WorkflowPhase, lane: WorkflowLane) -> WorkflowPhase:
     """Advance one successfully completed workflow phase."""
     coding = {
+        WorkflowPhase.WORKFLOW: WorkflowPhase.READY_TO_PUBLISH,
         WorkflowPhase.DISCOVERY: WorkflowPhase.CODING_RED_DOCS,
         WorkflowPhase.CODING_RED_DOCS: WorkflowPhase.CODING_GREEN,
         WorkflowPhase.CODING_GREEN: WorkflowPhase.CODING_NONFUNCTIONAL,
@@ -164,6 +166,7 @@ def next_workflow_phase(phase: WorkflowPhase, lane: WorkflowLane) -> WorkflowPha
         WorkflowPhase.CODING_FINALIZE: WorkflowPhase.READY_TO_PUBLISH,
     }
     content = {
+        WorkflowPhase.WORKFLOW: WorkflowPhase.READY_TO_PUBLISH,
         WorkflowPhase.DISCOVERY: WorkflowPhase.CONTENT_WRITE,
         WorkflowPhase.CONTENT_WRITE: WorkflowPhase.CONTENT_REVIEW,
         WorkflowPhase.CONTENT_REVIEW: WorkflowPhase.CONTENT_FINALIZE,

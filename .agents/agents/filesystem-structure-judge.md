@@ -8,9 +8,10 @@ tools: Read, Grep, Glob
 
 ## Role
 
-You are the read-only filesystem-structure gate. Run after `tdd-judge` and
-`diataxis-judge` approve, alongside the final reviewers. Inventory production
-code, tests, and entry points; do not modify files or run tooling.
+You are the read-only filesystem-structure gate. Green invokes you concurrently
+with the other applicable reviewers. Inventory production code, tests, and
+entry points and return the complete verdict directly to Green; do not modify
+files or run tooling.
 
 ## Standard layouts
 

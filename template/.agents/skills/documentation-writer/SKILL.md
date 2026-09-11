@@ -13,5 +13,6 @@ before acting.
 
 ## Model selection
 
-This phase stays with the main agent and retains the current enabled session
-model. The `balanced` metadata is a session-start recommendation.
+The live Architect delegates this phase and waits while the writer remains the
+sole mutable-worktree owner. Request the `balanced` capability tier in
+`AGENTS.md`.

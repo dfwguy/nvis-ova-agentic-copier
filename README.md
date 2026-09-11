@@ -24,9 +24,10 @@ uv run agent-work loop run --apply --json
 ```
 
 By default, one activation advances one issue through up to 16 persisted
-segments within 3,600 seconds; each worker segment remains capped at 1,800
-seconds. A new issue attempts its full applicable workflow, while saved work
-resumes from its checkpoint. Use `--max-segments` or
+workflow attempts within 3,600 seconds; each workflow session remains capped
+at 1,800 seconds. A new issue attempts its full applicable workflow in one worker
+session, while saved work resumes from its durable worktree and recorded outer
+phase. Use `--max-segments` or
 `--max-activation-seconds` to tighten the activation bounds.
 
 For scheduled operation, safeguards, status checks, and troubleshooting, see
@@ -85,36 +86,29 @@ lifecycle, role boundaries, and validation details.
 ```mermaid
 flowchart TD
     branch[Feature branch] --> classify{Classify whole diff}
-    classify --> architect[Architect: coding lane]
-    architect --> tests[Test Writer]
-    architect --> docs[Diátaxis Writer]
-    tests --> implementer[Implementer]
-    docs --> implementer
-    implementer --> nonfunctional[Non-functional Reviewer]
-    nonfunctional --> implementation[Implementation Judge]
-    nonfunctional --> documentation[Diátaxis Judge]
-    implementation --> final_gates[Final review gates]
-    documentation --> final_gates
-    final_gates --> finalizer[Finalizer]
+    classify --> architect[Live Architect coordinator]
+    architect --> red[Red]
+    red --> green[Green: sole mutator]
+    green --> judges[Concurrent read-only judges]
+    judges --> green
+    green --> architect
+    architect --> finalizer[Finalizer]
+    classify --> policy_architect[Live Architect: content lane]
+    policy_architect --> policy_writer[Documentation Writer: sole mutator]
+    policy_writer --> policy_finalizer[Documentation Finalizer]
+    policy_finalizer --> policy_writer
+    policy_finalizer --> policy_architect
     finalizer --> mr[Publish or update merge request]
-    classify --> policy_architect[Architect: policy design or N/A]
-    policy_architect --> policy_writer[Documentation Writer]
-    policy_writer --> policy_docs[Diátaxis Judge]
-    policy_writer --> policy_review[Agent Policy Judge]
-    policy_docs --> policy_finalizer[Documentation Finalizer]
-    policy_review --> policy_finalizer
-    policy_finalizer --> mr
-    mr --> performance[Pipeline Performance Judge]
-    mr -->|Pre-publication Minor findings| triage[Findings Triage]
-    performance --> human[Human approval and merge]
-    triage --> human
+    policy_architect --> mr
+    mr --> pipeline[Trusted pipeline observation]
+    pipeline --> human[Human approval and merge]
 ```
 
-After publication, one Pipeline Performance Judge invocation exclusively owns
-live GitLab CI observation and its feedback issues. Findings Triage
-independently handles the prepublication judges' Minor findings. Other workflow
-roles do not inspect or interpret live CI. Coding-lane GitLab validation lists
-its eight gates as native jobs with individual green or red status indicators.
+For unattended work, one workflow-owning agent session preserves context from
+Architect through Red, Green, concurrent review, consolidated repair, and
+finalization. The trusted runner alone publishes and observes the exact source-
+SHA pipeline; no post-publication agent invocation delays human handoff. Coding-
+lane GitLab validation lists its eight gates as native jobs with individual green or red status indicators.
 The root jobs use the repository's immutable prebuilt validation image without
 runtime dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs,
 and coverage reports.

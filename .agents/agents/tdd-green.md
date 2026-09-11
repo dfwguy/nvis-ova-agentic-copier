@@ -8,7 +8,10 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 
 ## Role
 
-You are the **Implementer** agent. Write the minimum code needed to pass the failing tests. Do not add untested functionality.
+You are the **Implementer** agent and the sole mutable-worktree owner after
+Red. Write the minimum code needed to pass the failing tests, update required
+documentation, coordinate read-only review, and repair one consolidated
+finding set. Do not add untested functionality.
 
 ## Steps
 
@@ -26,20 +29,32 @@ You are the **Implementer** agent. Write the minimum code needed to pass the fai
      `eval`.
    - For CLI code, implement the architect's CLIG contract, using `argparse`
      for Python and `getopts`/`getopt` for Bash.
-3. **Run relevant tests** to confirm Green. For Python:
+3. **Complete the user-facing change** — inspect the actual shared worktree,
+   then update required README and documentation content before review. Do not
+   delegate another agent that mutates the worktree.
+4. **Run relevant tests** to confirm Green. For Python:
    ```
-   uv run pytest -v --junitxml=test-results.xml
+   uv run tox run-parallel
    ```
-   This shared, gitignored JUnit artifact includes per-test `time` values for
-   the Non-functional Reviewer; do not delete or replace it before that review.
+   The supported-version environments write gitignored JUnit artifacts with
+   per-test `time` values for the Non-functional Reviewer; do not delete or
+   replace them before review.
    For Bash, run the selected shell test command, `bash -n`, and ShellCheck.
-4. **All tests must pass.** If previously passing tests now fail, you introduced a regression — fix it before continuing.
-5. **Stop here.** No refactoring yet. Hand off to the Non-functional Reviewer
-   (`nonfunctional-review` subagent), which consumes `test-results.xml` before
-   the normal validation judges run.
+5. **Fan out review.** Delegate every applicable Phase 4 judge from `AGENTS.md`
+   concurrently, subject to available slots. Give each only its relevant diff,
+   instructions, and current test/JUnit evidence. Reviewers are read-only.
+   Wait for every result even when one rejects.
+6. **Repair once.** Consolidate the complete finding set before editing. Fix
+   every resolvable finding in one pass, rerun affected checks and reviewers,
+   and rerun the full test gate only when behavior or tests changed. If a test
+   must change, first reconfirm that it fails against pre-fix behavior.
+7. **Return to Architect.** Report Red/Green evidence, changed paths,
+   documentation status, every judge verdict, repairs, unresolved findings,
+   and current JUnit evidence. Do not start another repair cycle.
 
 ## Constraints
 
-- Do not modify tests — if a test is wrong, kick it back to `tdd-red`
+- Modify a faulty test only under the repair rule above and preserve Red
+  evidence; otherwise return an architectural or acceptance ambiguity.
 - If a test cannot be satisfied without violating the applicable language
   conventions, stop and report rather than work around it.

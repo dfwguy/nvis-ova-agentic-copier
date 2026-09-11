@@ -14,7 +14,5 @@ skill entry point for Claude Code, Codex, and Pi.
 
 ## Model selection
 
-This continuity-sensitive phase stays with the main agent. Use the current enabled main-session model;
-do not switch models mid-session or delegate Red.
-The `balanced` metadata is the recommendation when a frontend is selecting the
-main model at session start, not an instruction to replace a running model.
+The live Architect delegates this phase and waits for its complete receipt.
+Request the `balanced` capability tier defined in `AGENTS.md`.

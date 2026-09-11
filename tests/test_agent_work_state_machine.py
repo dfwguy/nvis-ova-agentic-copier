@@ -61,6 +61,83 @@ def test_ready_to_publish_advances_a_completed_green_phase() -> None:
     assert outcome.record.phase is WorkflowPhase.CODING_NONFUNCTIONAL
 
 
+def test_complete_coding_workflow_advances_directly_to_publication() -> None:
+    workflow = WorkflowPhase("workflow")
+    record = _record().model_copy(
+        update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
+    )
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": workflow,
+            "completed_phase": workflow,
+            "workflow_lane": WorkflowLane.CODING,
+            "receipts": (
+                "$architect: approved",
+                "$tdd-red: red confirmed",
+                "$tdd-green: green confirmed and findings repaired",
+                "$nonfunctional-review: approved",
+                "$tdd-judge: approved",
+                "$diataxis-judge: approved",
+                "$judge-quality: approved",
+                "$judge-test: approved",
+                "$judge-cicd: approved",
+                "$tdd-document: approved",
+                "$cli-syntax-judge: not applicable — no CLI change",
+                "$filesystem-structure-judge: approved",
+                "$agent-policy-judge: not applicable — no agent policy change",
+                "$tdd-finalizer: approved",
+            ),
+            "merge_request_draft": MergeRequestDraft(
+                title="Complete issue 12", description="Validated.\n\nCloses #12"
+            ),
+        }
+    )
+
+    outcome = apply_worker_result(record, result, now=NOW)
+
+    assert outcome.record.state is RunnerState.PUBLISHING
+    assert outcome.record.phase is WorkflowPhase.READY_TO_PUBLISH
+
+
+@pytest.mark.parametrize(
+    "receipts",
+    [
+        ("$architect: approved",),
+        (
+            "$architect: approved",
+            "$architect: duplicate",
+            "$tdd-red: red confirmed",
+        ),
+        (
+            "$architect: approved",
+            "$documentation-writer: complete",
+            "$documentation-finalizer: approved",
+        ),
+    ],
+)
+def test_incomplete_duplicate_or_wrong_lane_workflow_receipts_fail_closed(
+    receipts: tuple[str, ...],
+) -> None:
+    workflow = WorkflowPhase("workflow")
+    record = _record().model_copy(
+        update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
+    )
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": workflow,
+            "completed_phase": workflow,
+            "workflow_lane": WorkflowLane.CODING,
+            "receipts": receipts,
+            "merge_request_draft": MergeRequestDraft(
+                title="Complete issue 12", description="Validated.\n\nCloses #12"
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="receipt"):
+        apply_worker_result(record, result, now=NOW)
+
+
 def test_retryable_result_schedules_twenty_minutes_after_now() -> None:
     outcome = apply_worker_result(_record(), _result("retryable"), now=NOW)
 

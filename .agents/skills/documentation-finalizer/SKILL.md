@@ -7,9 +7,10 @@ metadata:
 
 # Documentation Finalizer
 
-Use this portable workflow skill after documentation and policy review. Read
-and follow [the role instructions](../../agents/documentation-finalizer.md)
-before acting.
+Use this portable workflow skill after the Documentation Writer returns its
+complete content-only diff. It owns the consolidated documentation and policy
+review. Read and follow
+[the role instructions](../../agents/documentation-finalizer.md) before acting.
 
 ## Model selection
 

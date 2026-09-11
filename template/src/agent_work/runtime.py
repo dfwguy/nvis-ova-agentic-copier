@@ -460,6 +460,12 @@ def dispatch(
             if record.state is RunnerState.RETRY_WAIT:
                 stop_reason = "retry_wait"
                 break
+            if (
+                record.state is RunnerState.REPAIR
+                and record.phase is WorkflowPhase.WORKFLOW
+            ):
+                stop_reason = "repair"
+                break
             if record.state is RunnerState.OBSERVING:
                 if segment_start_state is RunnerState.PUBLISHING:
                     continue

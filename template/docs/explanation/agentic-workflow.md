@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-11
 related:
   - path: serial-gitlab-agent-loop.md
     why: Describes the issue workflow that uses these roles.
@@ -41,8 +41,8 @@ The coding lane is the default for a whole diff that changes executable code,
 tests, CI, packaging, configuration, schemas, command contracts, or executable
 automation. It uses the full TDD route: architecture, Red, Green, timing
 review, validation, and the applicable implementation, test, CI, CLI, and
-filesystem reviews. Documentation work can happen in parallel with Red, but it
-does not make a behavior change exempt from its behavior tests.
+filesystem reviews. Green owns any coding-lane documentation after Red, so the
+same sole mutator keeps behavior, tests, and documentation synchronized.
 
 The documentation and agent-policy lane is for a whole diff limited to
 documentation and the instructions that govern agent work. It does not invent
@@ -103,29 +103,19 @@ keeps the same boundary when it processes an issue.
 flowchart TD
     branch[Feature branch] --> classify{Classify whole diff}
     classify --> coding_architect[Architect: coding lane]
-    coding_architect --> tests[Test Writer]
-    coding_architect --> diataxis_writer[Diátaxis Writer]
-    tests --> implementer[Implementer]
-    diataxis_writer --> implementer
-    implementer --> nonfunctional[Non-functional Reviewer]
-    nonfunctional --> implementation[Implementation Judge]
-    nonfunctional --> diataxis_judge[Diátaxis Judge]
-    implementation --> final_gates[Final review gates]
-    diataxis_judge --> final_gates
-    final_gates --> coding_finalizer[Finalizer]
+    coding_architect --> tests[Test Writer: Red]
+    tests --> implementer[Implementer: Green]
+    implementer --> judges[Concurrent read-only judges]
+    judges --> implementer
+    implementer --> coding_architect
+    coding_architect --> coding_finalizer[Finalizer]
     coding_finalizer --> mr[Publish or update merge request]
     classify --> policy_architect[Architect: conditional policy design or N/A]
     policy_architect --> documentation_writer[Documentation Writer]
-    documentation_writer --> documentation_judge[Diátaxis Judge]
-    documentation_writer --> policy_judge[Agent Policy Judge]
-    documentation_judge --> documentation_finalizer[Documentation Finalizer]
-    policy_judge --> documentation_finalizer
+    documentation_writer --> documentation_finalizer[Consolidated Documentation Finalizer]
+    documentation_finalizer --> documentation_writer
     documentation_finalizer --> mr
-    mr --> pipeline[Pipeline Performance Judge]
-    mr -->|Phase 4–6 Minor findings| triage[Findings Triage]
-    mr -->|Content review Minor findings| triage
-    pipeline --> human[Human approval and merge]
-    triage --> human
+    mr --> human[Human approval and merge]
 ```
 
 For non-trivial coding work, the manifest names every phase rather than rolling
@@ -136,21 +126,22 @@ and Codex model/effort named by their row. In Codex those tiers resolve to
 balanced work, and `gpt-5.6-luna` / `low` for focused checks. Other supported
 frontends resolve only their enabled equivalent; Frontier is never a fallback.
 
-Red and Green are deliberately main-agent phases: the same agent carries the
-failed behavior evidence into the minimum implementation that satisfies it.
-They retain the current enabled main-session model and cannot switch
-model/effort mid-session. Their Balanced metadata is therefore a recommendation
-for selecting that session at its start, not a runtime model switch.
-The Diátaxis Writer is delegated in parallel with Red because it has a separate
-output and must not change tests or code. In the documentation and agent-policy
-lane, the main-owned Documentation Writer instead edits the approved content
-boundaries without manufacturing behavior tests. Its Diátaxis and Agent Policy
-judges independently review documentation and operational-policy claims before
-the Documentation Finalizer runs content-structure and synchronization gates.
-Architecture, reviews, and judges have similarly explicit delegated or main
-ownership in the manifest. If a phase rejects the work, its receipt identifies
-the owning earlier phase to revisit instead of allowing a later role to silently
-repair or waive it.
+For coding work, the Architect owns one workflow session rather than launching
+an unrelated top-level process for each phase. It hands its design directly to
+Red; Red's returned failing-test evidence is handed directly to Green. Green is
+the sole mutable owner: it reads the actual diff, fans out concurrent read-only
+judges when their subjects apply, repairs actionable feedback, and consolidates
+the results for the Architect. The Architect decides whether the complete
+workflow is ready for finalization. This keeps the context that matters with
+the agents that need it while judges use the diff and focused evidence instead
+of a full workflow transcript.
+
+For coding work, Green makes required README and documentation edits before
+the read-only review fan-out; no second agent mutates the shared worktree. In
+the documentation and agent-policy lane, Architect delegates one Documentation
+Writer as the sole mutator, followed by one consolidated Documentation
+Finalizer. The writer may repair that complete finding set once. A repeated
+rejection or scope expansion returns to Architect for human direction.
 
 The CLI and filesystem judges are conditional only because their subjects can
 be absent. Skipping either requires an explicit receipt in the applicability
@@ -161,29 +152,15 @@ validates every required completion and every permitted not-applicable receipt
 before it allows publication. This preserves a complete record without running
 a judge against a change that cannot affect its contract or layout.
 
-## Pipeline reconciliation has one owner
+## Publication returns promptly to the human boundary
 
-Publication crosses an opaque boundary: `Publish MR → Pipeline Performance
-Judge → human review`. One invocation of the Pipeline Performance Judge
-exclusively owns live GitLab pipeline reconciliation and any evidence-based
-feedback from it. Other workflow roles neither inspect nor interpret a live
-pipeline; they continue to own only their local design, implementation,
-documentation, or validation receipts.
-
-This separation keeps GitLab-specific observation, duration analysis, and
-follow-up authority out of the shared change workflow. The Pipeline Performance
-Judge's skill and role reference define its detailed behavior, including its
-duration report and when it creates or routes feedback. Execution budgets use
-the longest executed terminal job with a numeric duration; skipped, canceled,
-or manual jobs remain separately visible, and runner queues and staggered
-scheduling cannot reject a change. The general workflow needs only its
-boundary and its human approval rules: agents never approve or merge, and they
-never change project-owned values or workflow policy merely to clear a gate
-without explicit human approval for that exact change.
-
-Findings Triage is independent of that boundary. It records actionable Minor
-findings produced by the pre-publication judges as deduplicated GitLab issues;
-it does not inspect the live pipeline or control its reconciliation.
+Publication ends the workflow session and returns the verified merge request
+to human review. The trusted serial runner may observe the exact pipeline as a
+bounded recovery concern, but it does not start another general-purpose agent
+phase for new work. Pipeline failure or conflict re-enters the coarse workflow
+with the preserved worktree and evidence. Agents never approve or merge, and
+they never change project-owned values or workflow policy merely to clear a
+gate without explicit human approval for that exact change.
 
 ## Merge requests are the shared record
 
@@ -204,12 +181,11 @@ approval and merge boundary.
 
 | Role | Responsibility | Does not |
 | --- | --- | --- |
-| Architect | Designs modules, data structures, and dependency boundaries | Write code or tests |
+| Architect | Owns the coding workflow session, design, context handoff, and final decision | Write production changes or tests |
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
-| Diátaxis Writer | Creates or updates Diátaxis documentation in the coding lane | Touch code, tests, or README.md |
 | Documentation Writer | Main-owned editor for documentation and agent-policy changes | Change executable scope or manufacture behavior tests |
-| Implementer | Makes the minimum change to reach Green | Refactor or add untested features |
+| Implementer | Green's sole mutable owner; implements code and documentation, reads the diff, and consolidates judge feedback | Waive failed review evidence |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
@@ -218,8 +194,6 @@ approval and merge boundary.
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
 | CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
-| Pipeline Performance Judge | Exclusively owns post-publication live CI reconciliation, timing diagnosis, and its feedback issues | Edit code or CI, retry/cancel jobs, approve, or merge |
-| Findings Triage | After publication, creates deduplicated GitLab Bug issues for actionable Minor findings from the selected workflow's reviews | Edit code, run validation, commit, push, approve, or merge |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |

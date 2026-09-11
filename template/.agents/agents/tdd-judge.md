@@ -27,23 +27,23 @@ You are the **Judge** agent. Validate the complete implementation. Reject anythi
    bash -n <each changed Bash file>
    shellcheck <each changed shell file>
    ```
-   On failure, reject and return to the Implementer **immediately**. Do not run
-   later validation.
+   Record failures and continue with independent checks so Green receives one
+   complete validation receipt.
 
 3. **Check applicable formatting before later validation**. For Python changes:
    ```
    uv run ruff format --check
    ```
-   On failure, reject and return to the Implementer **immediately**. Do not run tests, pre-commit, or any later validation step.
+   Record failures and continue with independent checks.
 
 4. **Run the remaining non-test hooks only after the cheap gates pass**:
    ```
    SKIP=tox uv run pre-commit run --files $(git diff --name-only HEAD; git ls-files --others --exclude-standard)
    ```
    This includes ShellCheck and all other applicable non-test hooks. The Python
-   tox matrix runs once in `tdd-finalizer`; do not run pytest or tox here. On
-   failure, reject and return to the Implementer **immediately**; do not
-   continue to the review checklist. This step is required — do not skip it.
+   tox matrix runs once in Green; do not run pytest or tox here. On
+   failure, record the evidence and continue to independent review checks. This
+   step is required — do not skip it.
 
 5. **Code review checklist** — reject if any item fails:
    - [ ] Pure functions where possible (no hidden state, no side effects)
@@ -55,7 +55,9 @@ You are the **Judge** agent. Validate the complete implementation. Reject anythi
    - [ ] No global mutable state
    - [ ] Tests are meaningful — they would catch a wrong implementation
 
-6. **Verdict**: Approve only when all steps pass without exception. If rejecting, list the first blocking failure with the file and line number, then stop. On approval, the orchestrator waits for the parallel `diataxis-judge`; once both approve, it fans out to `judge-quality`, `judge-test`, `judge-cicd`, `tdd-document`, `cli-syntax-judge`, and `filesystem-structure-judge`.
+6. **Verdict**: Approve only when all steps pass without exception. Return all
+   blocking failures with file and line evidence directly to the still-live
+   Green parent; Green owns consolidation and repair.
 
 ## Constraints
 

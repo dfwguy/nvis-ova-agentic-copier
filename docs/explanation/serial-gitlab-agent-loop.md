@@ -1,7 +1,7 @@
 ---
 title: Why the agent loop is serial and GitLab-native
 type: explanation
-summary: Understand why bounded recovery segments use GitLab projection and local durable state.
+summary: Understand why bounded workflow sessions use GitLab projection and local durable state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
@@ -12,7 +12,7 @@ related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the exact command and lifecycle.
   - path: agentic-workflow.md
-    why: Explains the roles used by worker segments.
+    why: Explains the workflow session's role hierarchy.
   - path: serial-agent-loop-recovery-design.md
     why: Provides the detailed state-machine architecture.
 ---
@@ -20,16 +20,14 @@ related:
 # Why the agent loop is serial and GitLab-native
 
 The agent loop is a recoverable finite-state machine, not a long-running agent
-session. Every systemd activation is bounded, but it normally advances one
-issue through several individually persisted segments back to back. A later
-activation reconciles the last durable boundary and resumes the same issue
-before it considers new work.
+session. Every systemd activation is bounded, but its worker owns the complete
+applicable workflow session for one issue. A later activation reconciles the
+durable worktree and coarse workflow state before it considers new work.
 
 For a fresh issue, this means attempting the complete applicable workflow in
-one activation. For recovered work, it means starting at the saved checkpoint
-without skipping any remaining phase. Forward approvals and backward rejection
-routes are both ordinary durable transitions, so either can continue
-immediately while the activation still has budget and can make progress.
+one activation. For recovered work, the runner restores the durable worktree
+and re-enters the workflow session at its coarse `WORKFLOW` boundary; it does
+not manufacture sidecar checkpoints for Architect, Red, Green, or judges.
 
 ```mermaid
 stateDiagram-v2
@@ -56,33 +54,31 @@ safely reconcile or record. Labels deliberately do not carry the transaction
 history; the local ledger does.
 
 The ledger fills the gap GitLab labels cannot safely represent. It remembers
-the selected issue, phase, attempt, retry deadline, durable worktree, branch
-and MR evidence, workflow receipts, transition intent, and redacted next
-action. Persisting intent before an external mutation makes a partial operation
-replayable after a process, host, or API interruption. A durable worktree keeps
-ordinary uncommitted evidence in place; a stash is emergency evidence that the
-runner inventories but never applies or drops.
+the selected issue, coarse workflow state, attempt, retry deadline, durable
+worktree, branch and MR evidence, workflow receipts, transition intent, and
+redacted next action. Persisting intent before an external mutation makes a
+partial operation replayable after a process, host, or API interruption. A
+durable worktree keeps ordinary uncommitted evidence in place; a stash is
+emergency evidence that the runner inventories but never applies or drops.
 
 Serial execution is a local safety boundary. One host owns unattended work for
 a project and a single-project lock prevents overlapping activations. Within
-an activation, persisting each transition preserves the same crash-recovery
-boundary without imposing a scheduling delay between available phases. The
-activation continues only on its current issue; it never consumes a second
-issue merely because capacity remains.
+an activation, the workflow session directly hands Architect context to Red,
+Red evidence to Green, and Green's consolidated judge feedback back to the
+Architect. The activation continues only on its current issue; it never
+consumes a second issue merely because capacity remains.
 
 The activation yields for terminal or human-facing states, a future retry, a
-pending external result, lack of progress, or its segment or wall-time limit.
+pending external result, lack of progress, or its workflow or wall-time limit.
 The 20-minute timer delay begins only after the complete activation finishes,
 so it serves idle polling and external waits rather than pacing internal
 workflow phases. A 90-minute service timeout leaves room for the default
 one-hour activation limit and orderly shutdown. This does not claim distributed
 coordination: operators must not run a second timer for the same project.
 
-The activation deadline also bounds individual work. Before invoking a worker,
-the runner reduces that worker's configured timeout to the activation time
-remaining. If the worker uses that effective timeout, its timeout is recorded
-and processed through the existing retry and recovery path rather than losing
-the checkpoint.
+The activation deadline bounds the workflow-owning worker. If it exhausts its
+effective timeout, the runner records the timeout and recovers the durable
+worktree through the normal retry path rather than losing its changes.
 
 GitLab remains preferable to a webhook receiver or a filesystem queue because
 it already supplies the human work record and MR handoff. The local ledger is
@@ -102,8 +98,10 @@ does not let issue text, labels, comments, or worker output widen authority.
 Issue discussion can still help a worker understand the current work. For that
 reason, the runner fetches notes only immediately before an execution, excludes
 system and runner-outcome notes, and passes ordinary human and bot discussion
-as untrusted context. It does not carry that context across segments or persist
-it in the ledger or lifecycle log. A 32 KiB JSON bound keeps the context
+as untrusted context. It does not persist that context in the ledger or
+lifecycle log. The workflow session itself carries the context needed by its
+Architect, Red, Green, and judge handoffs; it does not need a new top-level
+worker for each handoff. A 32 KiB JSON bound keeps the context
 bounded; when pruning is necessary, the newest useful notes win while their
 chronological order is preserved. Note retrieval and validation use the same
 bounded GitLab retry path as other temporary GitLab failures, so a worker never
