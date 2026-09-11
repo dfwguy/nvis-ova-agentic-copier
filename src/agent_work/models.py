@@ -65,6 +65,28 @@ class GitLabIssue(BoundaryModel):
         return "" if value is None else value
 
 
+class GitLabNoteAuthor(BoundaryModel):
+    """Validated GitLab issue-note author metadata."""
+
+    username: str = Field(min_length=1, max_length=255)
+
+
+class GitLabIssueNote(BoundaryModel):
+    """Validated GitLab issue note used as untrusted worker context."""
+
+    id: int = Field(gt=0)
+    body: str = ""
+    author: GitLabNoteAuthor | None = None
+    created_at: datetime
+    system: bool = False
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def normalize_body(cls, value: object) -> object:
+        """Accept GitLab's nullable note body."""
+        return "" if value is None else value
+
+
 class GitLabProject(BoundaryModel):
     """Configured-project identity returned by GitLab."""
 

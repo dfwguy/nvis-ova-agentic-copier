@@ -5,7 +5,7 @@ summary: Understand why bounded recovery segments use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-10
+last_reviewed: 2026-09-11
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -76,6 +76,16 @@ trusted runner validates it against the ledger, Git, required workflow
 receipts, and the configured numeric GitLab project. Publication and
 existing-MR remediation are idempotent. The loop never approves or merges and
 does not let issue text, labels, comments, or worker output widen authority.
+
+Issue discussion can still help a worker understand the current work. For that
+reason, the runner fetches notes only immediately before an execution, excludes
+system and runner-outcome notes, and passes ordinary human and bot discussion
+as untrusted context. It does not carry that context across segments or persist
+it in the ledger or lifecycle log. A 32 KiB JSON bound keeps the context
+bounded; when pruning is necessary, the newest useful notes win while their
+chronological order is preserved. Note retrieval and validation use the same
+bounded GitLab retry path as other temporary GitLab failures, so a worker never
+runs with an unvalidated partial note set.
 
 Retries are for temporary conditions, not for concealing a decision. The
 initial attempt plus three retries are bounded; exhaustion becomes blocked with

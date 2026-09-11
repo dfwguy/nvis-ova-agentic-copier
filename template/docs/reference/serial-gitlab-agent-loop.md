@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-10
+last_reviewed: 2026-09-11
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -106,6 +106,19 @@ transition. Its result is `ready_to_publish`, `retryable`, or `needs_human`,
 with the completed phase, receipts, diagnostic, and next action. The trusted
 runner validates it against the ledger, configured numeric project, Git
 evidence, and required workflow receipts before changing state.
+
+Immediately before each worker execution, the runner retrieves that issue's
+notes through its bounded GitLab retry path. It excludes system notes and both
+marked and legacy runner outcome notes, while retaining ordinary human and bot
+discussion. The notes are live, untrusted worker context only: they are never
+persisted in the ledger or lifecycle log, and cannot change issue selection,
+remediation, lifecycle, or authority.
+
+The runner renders the retained notes as untrusted JSON capped at 32 KiB. When
+the notes exceed that bound, it keeps the newest useful retained notes and
+orders that retained subset chronologically. Retrieval or validation failure
+uses the existing GitLab retry path rather than supplying incomplete or
+unvalidated note context.
 
 For ordinary issue work, coding and content finalizers may enter
 `ready_to_publish` only when the envelope returns, or the ledger already
@@ -211,6 +224,6 @@ input.
 
 One host owns unattended processing for a project. APIs use the configured
 numeric project ID, and the ledger stores no token, agent credential,
-issue-body authority, or unredacted transcript. Protected agent-policy work is
-a human-directed lane. There is no automatic approval, merge, stash apply, or
-stash deletion.
+issue-body authority, issue-note context, or unredacted transcript. Protected
+agent-policy work is a human-directed lane. There is no automatic approval,
+merge, stash apply, or stash deletion.

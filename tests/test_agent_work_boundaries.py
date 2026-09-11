@@ -48,6 +48,21 @@ def _issue_payload(iid: int = 12, labels: list[str] | None = None) -> dict[str, 
     }
 
 
+def _note_payload(
+    note_id: int,
+    *,
+    body: str = "Useful context",
+    created_at: str = "2026-01-01T00:00:00Z",
+) -> dict[str, object]:
+    return {
+        "id": note_id,
+        "body": body,
+        "author": {"username": "reviewer", "id": 42, "name": "Reviewer"},
+        "created_at": created_at,
+        "system": False,
+    }
+
+
 def _mr_payload(description: str = "") -> dict[str, object]:
     return {
         "iid": 88,
@@ -176,6 +191,15 @@ def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     gateway.comment_outcome(
         12, error_code="blocked", summary="Safe", next_action="Review"
     )
+    outcome_call = next(
+        command
+        for command in api.commands
+        if command[command.index("-X") + 2].endswith("/notes")
+    )
+    assert any(
+        part.startswith("body=<!-- agent-work-outcome:v1 -->\nAgent outcome")
+        for part in outcome_call
+    )
     assert all(
         "projects/310967" in command[command.index("-X") + 2]
         for command in api.commands
@@ -255,6 +279,63 @@ def test_gitlab_projected_inventory_reads_every_issue_page(tmp_path: Path) -> No
 
     assert len(issues) == 101
     assert issues[-1].iid == 101
+
+
+def test_gitlab_issue_notes_are_paginated_and_deterministically_ordered(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        page = int(
+            next(part for part in command if part.startswith("page=")).removeprefix(
+                "page="
+            )
+        )
+        payload = (
+            [
+                _note_payload(
+                    note_id,
+                    created_at=f"2026-01-01T00:{note_id % 60:02d}:00Z",
+                )
+                for note_id in range(100, 0, -1)
+            ]
+            if page == 1
+            else [_note_payload(101, created_at="2026-01-01T00:59:00Z")]
+        )
+        return CommandResult(0, json.dumps(payload), "")
+
+    notes = GitLabGateway(_config(tmp_path), fake).fetch_issue_notes(12)
+
+    assert len(notes) == 101
+    assert [(note.created_at, note.id) for note in notes] == sorted(
+        (note.created_at, note.id) for note in notes
+    )
+    assert all("projects/310967/issues/12/notes" in command for command in calls)
+    assert all("order_by=created_at" in command for command in calls)
+    assert all("sort=asc" in command for command in calls)
+    assert all("per_page=100" in command for command in calls)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": 1},
+        [_note_payload(1), _note_payload(1, body="conflicting")],
+        [_note_payload(1, created_at="not-a-date")],
+    ],
+)
+def test_gitlab_issue_notes_fail_closed_for_invalid_data(
+    tmp_path: Path, payload: object
+) -> None:
+    gateway = GitLabGateway(
+        _config(tmp_path),
+        lambda *_args, **_kwargs: CommandResult(0, json.dumps(payload), ""),
+    )
+
+    with pytest.raises(GitLabError, match="invalid issue note data"):
+        gateway.fetch_issue_notes(12)
 
 
 @pytest.mark.parametrize(

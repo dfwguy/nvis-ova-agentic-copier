@@ -25,6 +25,8 @@ from agent_work.ledger import JsonLedger
 from agent_work.models import (
     AgentWorkConfig,
     GitLabIssue,
+    GitLabIssueNote,
+    GitLabNoteAuthor,
     GitLabProject,
     LedgerRecord,
     MergeRequestDraft,
@@ -110,6 +112,9 @@ class FakeGitLab:
         self.closing_error: GitLabError | None = None
         self.closing_results: list[bool] = []
         self.label_failures = 0
+        self.notes: tuple[GitLabIssueNote, ...] = ()
+        self.note_fetches = 0
+        self.note_error: GitLabError | None = None
 
     def verify_project(self) -> GitLabProject:
         return _project()
@@ -133,6 +138,13 @@ class FakeGitLab:
     def fetch_issue(self, iid: int) -> GitLabIssue:
         del iid
         return self.issue
+
+    def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]:
+        del iid
+        self.note_fetches += 1
+        if self.note_error is not None:
+            raise self.note_error
+        return self.notes
 
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
         del iid
@@ -301,9 +313,11 @@ class FakeInvoker:
     def __init__(self, output: str = "", returncode: int | None = 0) -> None:
         self.output = output
         self.returncode = returncode
+        self.prompts: list[str] = []
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
-        del checkout, prompt, timeout
+        del checkout, timeout
+        self.prompts.append(prompt)
         return WorkerInvocation(self.returncode, self.output, "safe diagnostic")
 
 
@@ -386,6 +400,63 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
 
     assert outcome is not None and outcome.phase is WorkflowPhase.CODING_NONFUNCTIONAL
     assert len(outcome.receipts) == 1
+
+
+def test_execution_fetches_live_issue_notes_for_the_worker_prompt(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab()
+    gitlab.notes = (
+        GitLabIssueNote(
+            id=1,
+            body="Use the reviewer-approved boundary",
+            author=GitLabNoteAuthor(username="reviewer"),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            system=False,
+        ),
+    )
+    invoker = FakeInvoker(returncode=1)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert gitlab.note_fetches == 1
+    assert "Use the reviewer-approved boundary" in invoker.prompts[0]
+
+
+def test_issue_note_failure_retries_without_invoking_worker(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab()
+    gitlab.note_error = GitLabError("safe failure")
+    invoker = FakeInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.GITLAB_RETRYABLE
+    assert invoker.prompts == []
 
 
 def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None:
