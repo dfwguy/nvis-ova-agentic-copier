@@ -5,8 +5,10 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-12
 related:
+  - path: ../how-to/configure-agent-capacity.md
+    why: Explains how to configure enough live-agent capacity for a lane.
   - path: serial-gitlab-agent-loop.md
     why: Describes the issue workflow that uses these roles.
   - path: ../reference/license-compliance.md
@@ -38,6 +40,12 @@ the directories under `.agents/skills/`, not frontend-specific agents or
 configuration. A display name such as “Test Writer” helps a reader understand
 the phase, but it is never a routing identifier. The exact `$skill-id` named
 by the manifest is the only identifier an agent may load or delegate.
+
+Capacity is a workflow precondition, not a repository setting. The active
+frontend reports available live-agent capacity through trusted runtime or
+session metadata, and the manifest compares that total with the lane's widest
+parallel phase. For the setup procedure and the required `needs_human`
+reporting, see [Configure agent capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` is intentionally a concise routing manifest rather than a second
 copy of every role procedure. It says which file or skill to read, when it

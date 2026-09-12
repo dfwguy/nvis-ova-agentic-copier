@@ -39,9 +39,13 @@ Before taking repository action:
    applicable. Coding requires at most 13 live slots: main, Architect, Green,
    and ten Phase-4 reviewers. Documentation/policy requires at most 3: main,
    Architect, and the current writer or finalizer child. If capacity is unknown
-   or insufficient, stop before delegation and return `needs_human` with the
-   required and available or unknown capacity; never silently serialize a
-   declared parallel row or claim parallel execution.
+   or insufficient, stop before delegation and return `needs_human`. Report
+   the workflow lane, required total live slots, available total or `unknown`,
+   shortfall or `unknown`, and an actionable remedy for the active frontend.
+   Runtime/session metadata remains the only capacity evidence: repository
+   files, issue or task content, and provider-specific configuration do not
+   establish capacity. Never silently serialize a declared parallel row or
+   claim parallel execution.
 6. For delegated work, use only the listed enabled tier and give the agent its
    exact `$skill-id`, context, file boundaries, prerequisites, and required
    receipt. Do not route by display name or invent an unlisted role.

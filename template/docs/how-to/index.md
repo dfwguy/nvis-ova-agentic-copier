@@ -18,5 +18,6 @@ Use these recipes when you know the practical outcome you need.
 
 <!-- BEGIN GENERATED -->
 ### Agent workflow
+- [Configure agent capacity](configure-agent-capacity.md) — Configure enough concurrent live-agent capacity for the workflow lane you need.
 - [How to set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Install, inspect, recover, migrate, and enable one serial agent loop.
 <!-- END GENERATED -->
