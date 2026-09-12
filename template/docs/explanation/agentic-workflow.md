@@ -162,6 +162,42 @@ Writer as the sole mutator, followed by one consolidated Documentation
 Finalizer. The writer may repair that complete finding set once. A repeated
 rejection or scope expansion returns to Architect for human direction.
 
+## Coding review convergence is bounded by evidence
+
+Green makes one consolidated correction during each invocation. A concrete
+finding identifies its owner or domain, path or scope, evidence, requested
+outcome, and a correction that stays within the approved design and authority.
+By contrast, policy or authority ambiguity, conflicting valid requirements or
+reviewers, acceptance controversy, a project-owned value change, and scope
+expansion require human judgment.
+
+The Architect may request another focused Green invocation only while the
+cycle ledger demonstrates material progress, not for a fixed number of tries.
+The ledger records a cycle identifier; stable finding fingerprints and
+classifications; changed paths or scope; checks before and after (or N/A);
+reviewers rerun and why; and open, closed, and new findings with a continuation
+or termination reason. A fingerprint combines reviewer or owner, path or
+scope, and stable summary or requested outcome. Progress closes a prior
+finding or materially changes relevant evidence without reopening the same
+closed finding. Repetition, unchanged evidence, an unavailable approved-scope
+correction, scope expansion, or genuine controversy stops the loop rather than
+relabeling a finding to create apparent progress.
+
+The first review includes every applicable reviewer. A correction reruns only
+the reviewer whose finding was addressed or whose domain/evidence changed;
+license review follows changes to maintained files, and the full test gate runs
+only when behavior or tests changed. When a safe diff stops at a human judgment
+boundary, the Finalizer can give a draft-safety verdict. That can hand off a
+clearly titled `Draft:` merge request containing unresolved findings, the
+evidence/cycle ledger, exact human decisions, tests, and unchanged project-owned
+values. It is not merge approval. Unsafe or unvalidated work, or unclear
+publication authority, returns to a human without publication. A normal
+Finalizer approval and a draft-safety verdict are distinct handoffs: Architect
+can accept the latter only to publish or update the labeled Draft: proposal for
+human judgment. Existing merge requests retain their required closing content
+and are read back after their title and description are updated. The normative
+routing and publication rules remain in `AGENTS.md` and `git-flow`.
+
 The CLI and filesystem judges are conditional only because their subjects can
 be absent. Skipping either requires an explicit receipt in the applicability
 record, for example `$cli-syntax-judge: not applicable — no CLI surface or

@@ -121,7 +121,7 @@ the content-only boundary.
 | 0 `$git-flow` | Every mutation | Main; never delegate | Current enabled | Session checklist | Verified target and feature branch; stop on failed access preflight |
 | 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Design, context boundaries, and final decision; ambiguity → user |
 | 2 `$tdd-red` | Required; child of Architect | Delegated | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
-| 3 `$tdd-green` | Required; child of Architect and sole mutator after Red | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt, test diff, and shared worktree | Green suite, documentation edits, and current JUnit evidence |
+| 3 `$tdd-green` | Required; child of Architect and sole mutator after Red | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt, test diff, and shared worktree | Green suite, documentation edits, current JUnit evidence, and correction-cycle ledger |
 | 4a `$nonfunctional-review` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Current JUnit evidence | Complete timing verdict → Green |
 | 4b `$tdd-judge` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final diff and validation evidence | Complete validation verdict → Green |
 | 4c `$diataxis-judge` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Documentation diff or N/A context | Complete documentation verdict → Green |
@@ -133,17 +133,44 @@ the content-only boundary.
 | 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
 | 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
 | 4k `$license-checker` | Required; child of Green | Delegated; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and every Phase 4 review receipt | License-policy receipt → Green |
-| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, every receipt/N/A, license receipt, repair summary, and current JUnit evidence | Final validation verdict → Architect |
-| 6 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
+| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
+| 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
 
-Green waits for every Phase 4 reviewer, consolidates the complete finding set,
-and makes one repair pass for all findings it can resolve. It reruns only
-affected checks and reviewers, plus the full test gate when behavior or tests
-changed. Green returns receipts, repairs, and unresolved findings to the still-
-live Architect. Architect may revise the design and reinvoke Green once; a
-second rejection, conflicting finding, or unresolved ambiguity returns
-`needs_human`. Reviewers never mutate the shared worktree or fail fast after
-another reviewer rejects.
+Green waits for every initially applicable Phase 4 reviewer, consolidates the
+complete finding set, and makes one repair pass for all findings it can resolve
+per invocation. A finding is concrete and resolvable only when it names an
+owner or domain, path or scope, evidence, requested outcome, and a correction
+within the approved design and authority. A policy or authority ambiguity,
+conflicting valid requirements or reviewers, acceptance controversy,
+project-owned value change, or scope expansion is a human-judgment blocker.
+
+Architect may authorize another focused Green correction cycle while material
+progress exists; there is no arbitrary retry limit. Every extra cycle records
+its identifier; input finding fingerprints and classifications; changed paths
+or scope; checks before and after (or explicit N/A); reviewers rerun and why;
+open, closed, and new findings; and its continuation or termination reason. A
+stable fingerprint is reviewer or owner plus path or scope plus stable summary
+or requested outcome. Progress means a prior finding closes or materially
+relevant evidence changes without reopening an identical closed finding.
+Stop for an identical repeated or reopened finding, unchanged relevant
+evidence, no approved-scope correction, scope expansion, or genuine
+controversy; never waive or relabel a finding to manufacture progress.
+
+After a correction, rerun only a reviewer whose finding was addressed or whose
+owned domain or evidence changed; rerun license review when changed maintained
+files affect it. Rerun the full test gate only when behavior or tests changed.
+Green returns receipts, the ledger, repairs, and unresolved findings to the
+still-live Architect. Reviewers never mutate the shared worktree or fail fast
+after another reviewer rejects.
+
+When correction stops for no progress or a human-judgment blocker, Architect
+routes the mechanically safe diff to Finalizer for a draft-safety verdict. Only
+content/language gates and authority boundaries that are safe permit a clearly
+labeled draft/controversial MR. Its title begins `Draft:` and its description
+lists unresolved findings, evidence and the cycle ledger, exact human decisions
+needed, tests, and unchanged project-owned values. A draft-safety verdict never
+approves merge. Unsafe or unvalidated diffs, or ambiguous publication authority,
+return `needs_human` without publication. Normal clean approval is unchanged.
 
 The read-only license-checker runs after the other Phase 4 reviews and before
 finalization; a violation returns to Green for its single consolidated repair.

@@ -74,9 +74,31 @@ Route to the Architect before starting any work that involves:
    acceptance criteria. After Red returns, inspect its test diff and delegate
    `$tdd-green` with the design, Red receipt, changed-test paths, and shared
    worktree. Remain live until Green returns its consolidated review result.
-9. **Decide once** — invoke the applicable finalizer after Green or the
-   documentation writer returns approved evidence. Finalize, revise the design
-   and reinvoke the mutating child once, or return `needs_human`.
+9. **Converge with evidence** — invoke the applicable finalizer after Green or
+   the documentation writer returns approved evidence. For coding, authorize
+   additional focused Green correction cycles only while the cycle ledger shows
+   material progress; each Green invocation still has one consolidated repair.
+   A cycle records its identifier; input finding fingerprints and
+   classifications; changed paths or scope; checks before and after or N/A;
+   reviewers rerun and why; open, closed, and new findings; and a continuation
+   or termination reason. A fingerprint is reviewer or owner plus path or scope
+   plus stable summary or requested outcome. Progress closes a prior finding or
+   materially changes relevant evidence without reopening an identical closed
+   finding. Stop for repetition, unchanged evidence, no approved-scope repair,
+   scope expansion, or a human-judgment blocker; do not waive or relabel a
+   finding to manufacture progress.
+10. **Choose the handoff** — a concrete finding is resolvable only with a
+    specific owner or domain, path or scope, evidence, requested outcome, and
+    approved-design/authority correction. Policy or authority ambiguity,
+    conflicting valid requirements or reviewers, acceptance controversy,
+    project-owned value change, and scope expansion require human judgment. On
+    a no-progress or human-judgment stop, request Finalizer's draft-safety
+    verdict for the mechanically safe diff. Only a safe content/language and
+    authority verdict may publish a `Draft:` MR that lists unresolved findings,
+    evidence/cycle ledger, exact human decisions, tests, and unchanged
+    project-owned values. A draft-safety verdict is never merge approval;
+    unsafe/unvalidated diffs or ambiguous publication authority return
+    `needs_human`. The documentation-writer one-repair policy is unchanged.
 
 ## Output Format
 

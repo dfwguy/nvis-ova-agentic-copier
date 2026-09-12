@@ -262,11 +262,28 @@ the preflight. One user approval per remote-touching command.
    `remove_source_branch=true` deletes the feature branch when the MR merges;
    `squash=true` collapses the branch's commits into one on merge.
 
-3b. **MR exists — just push**:
+   A Finalizer draft-safety verdict is the only exception to the normal title
+   shape: publish a mechanically safe but unresolved proposal with a title that
+   begins `Draft:`. Its description must enumerate unresolved findings, their
+   evidence and correction-cycle ledger, the exact human decisions needed,
+   tests run, and project-owned values left unchanged. This is a handoff for
+   human judgment, never approval to merge. Do not publish when the verdict
+   reports unsafe/unvalidated content or ambiguous publication authority.
+
+3b. **MR exists — push, then preserve or update its draft handoff**:
    ```bash
    git push
    ```
-   GitLab updates the existing MR with the new commits. Do not create a duplicate MR.
+   GitLab updates the existing MR with the new commits. For normal approval,
+   preserve its existing title and description. For an accepted Finalizer
+   draft-safety verdict, first use the verified numeric-project MR identity,
+   preserve required existing content and closing references, and update that
+   same MR so its title begins `Draft:` and its description enumerates
+   unresolved findings, evidence/cycle ledger, exact human decisions, tests,
+   and unchanged project-owned values. Read the same MR back and verify its
+   identity, title, description, source branch, and target branch. If it cannot
+   be safely relabeled, described, or verified, return `needs_human`; never
+   create a duplicate MR. A Draft: handoff is never approval to merge.
 
 If `git push` or merge-request creation fails, stop and report the non-secret
 error and required next action. The failure blocks the work; do not call local
