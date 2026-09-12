@@ -229,7 +229,9 @@ def dispatch(
     repository = wired.repository
     wired.logger.info("command=%s applied=%s", request.command, apply)
     wired.logger.debug(
-        "issue_iid=%s timeout_seconds=%s", request.issue_iid, request.timeout_seconds
+        "issue_iid=%s max_activation_seconds=%s",
+        request.issue_iid,
+        request.max_activation_seconds,
     )
     project = gitlab.verify_project()
     identity = {"host": config.host, "project_id": project.id}
@@ -438,7 +440,7 @@ def dispatch(
                 gitlab=gitlab,
                 repository=repository,
                 invoke=wired.invoke,
-                timeout_seconds=request.timeout_seconds,
+                timeout_seconds=request.max_activation_seconds,
                 now=wired.clock(),
                 issue_iid=issue_iid,
                 remaining_seconds=remaining_activation_seconds,

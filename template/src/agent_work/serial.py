@@ -427,7 +427,7 @@ def _execute(
         remaining = remaining_seconds()
         if remaining <= 0:
             return None
-        worker_timeout = min(timeout_seconds, max(1, math.ceil(remaining)))
+        worker_timeout = max(1, math.ceil(remaining))
     prompt = build_worker_prompt(
         record.model_dump(mode="json"),
         project_id=record.project_id,

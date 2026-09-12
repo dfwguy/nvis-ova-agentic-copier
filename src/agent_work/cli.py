@@ -17,7 +17,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .domain import CommandRequest
+from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .ledger import LockBusy
 from .models import CommandReport
 from .runtime import dispatch as default_dispatch
@@ -68,12 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
-        "--timeout-seconds",
-        type=_positive_integer,
-        default=1800,
-        help="maximum seconds for each workflow session (default: %(default)s)",
-    )
-    run.add_argument(
         "--max-segments",
         type=_positive_integer,
         default=16,
@@ -82,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--max-activation-seconds",
         type=_positive_integer,
-        default=3600,
+        default=DEFAULT_MAX_ACTIVATION_SECONDS,
         help="maximum seconds for one applied activation (default: %(default)s)",
     )
     status = loop_actions.add_parser("status", help="show durable loop state")
@@ -144,9 +138,10 @@ def main(
         command=command,
         issue_iid=getattr(parsed, "issue_iid", None),
         plan_file=getattr(parsed, "plan_file", None),
-        timeout_seconds=getattr(parsed, "timeout_seconds", 1800),
         max_segments=getattr(parsed, "max_segments", 16),
-        max_activation_seconds=getattr(parsed, "max_activation_seconds", 3600),
+        max_activation_seconds=getattr(
+            parsed, "max_activation_seconds", DEFAULT_MAX_ACTIVATION_SECONDS
+        ),
         debug=parsed.debug,
     )
     try:

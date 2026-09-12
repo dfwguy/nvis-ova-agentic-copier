@@ -2259,8 +2259,8 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
         in generated_service
     )
     assert "Unit=my_test_project-agent-work.service" in generated_timer
-    assert "TimeoutStartSec=90min" in root_service
-    assert "TimeoutStartSec=90min" in generated_service
+    assert "TimeoutStartSec=190min" in root_service
+    assert "TimeoutStartSec=190min" in generated_service
     assert "OnUnitInactiveSec=20min" in generated_timer
     assert "RandomizedDelaySec=60s" in generated_timer
     assert "FixedRandomDelay=true" in generated_timer
