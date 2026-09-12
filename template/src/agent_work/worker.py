@@ -213,7 +213,12 @@ def build_worker_prompt(
         "Follow AGENTS.md for the recorded workflow. Do not commit, push, approve, or merge. "
         "When ordinary work completes coding-finalize or content-finalize and the durable record has no "
         "merge_request_draft, a successful result must include merge_request_draft with non-empty title "
-        "and description fields. The same publication-metadata requirement applies when ordinary work completes workflow. "
+        "and description fields. "
+        "Every new-merge-request work kind must return merge_request_draft with non-empty title "
+        "and description fields before publication; existing-MR remediation is the only exception. "
+        "For a safe controversial policy handoff, the title must begin 'Draft:' and the description "
+        "must list unresolved findings and evidence, exact human decisions, tests, the cycle ledger, "
+        "and unchanged project-owned values. "
         "Return exactly one protocol_version=1 JSON object inside "
         "<agent-work-result>...</agent-work-result>."
     )

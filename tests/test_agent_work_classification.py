@@ -62,7 +62,7 @@ finding: review
         classify_work(_issue(description), project_id=310967)
 
 
-def test_protected_policy_lane_takes_precedence_over_remediation() -> None:
+def test_exact_remediation_marker_takes_precedence_over_policy_path_mentions() -> None:
     description = """Update AGENTS.md.
 <!-- agent-mr-remediation
 project_id: 310967
@@ -74,7 +74,7 @@ finding: review
 
     classification = classify_work(_issue(description), project_id=310967)
 
-    assert classification.kind is WorkKind.PROTECTED_POLICY_MANUAL
+    assert classification.kind is WorkKind.EXISTING_MR_REMEDIATION
 
 
 def test_merge_conflict_marker_selects_conflict_repair() -> None:

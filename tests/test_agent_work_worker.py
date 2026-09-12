@@ -127,6 +127,27 @@ def test_worker_prompt_requires_publication_metadata_from_ordinary_finalizer() -
     assert "exactly one protocol_version=1 JSON object" in prompt
 
 
+def test_worker_prompt_requires_draft_policy_handoff_metadata() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "protected_policy_manual",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        issue_title="Untrusted title",
+        issue_description="Untrusted body",
+    )
+
+    assert "Draft:" in prompt
+    assert "unresolved findings" in prompt
+    assert "exact human decisions" in prompt
+    assert "cycle ledger" in prompt
+    assert "unchanged project-owned values" in prompt
+
+
 def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> None:
     prompt = build_worker_prompt(
         {

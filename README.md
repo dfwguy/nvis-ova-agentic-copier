@@ -85,7 +85,10 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
   separate coding and documentation/agent-policy lanes.
 - A recoverable serial GitLab issue loop that selects the oldest eligible open,
   non-confidential issue without a lifecycle projection or durable-ledger record;
-  it creates merge requests but never approves or merges them.
+  its trusted runner publishes only validated workflow results, creates merge
+  requests, and never approves or merges them. Policy changes can publish after
+  complete receipts and metadata; unresolved safe controversies require a
+  `Draft:` handoff, while unsafe or incomplete evidence remains `needs_human`.
 
 ## Agent workflow
 
