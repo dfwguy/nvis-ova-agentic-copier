@@ -155,6 +155,8 @@ class RepositoryPort(Protocol):
 class InvokerPort(Protocol):
     """One bounded worker process."""
 
+    def preflight(self) -> None: ...
+
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation: ...
 
 

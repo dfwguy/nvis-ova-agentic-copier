@@ -48,7 +48,7 @@ from agent_work.models import (
 from agent_work.repository import RepositoryError
 from agent_work.runtime import RuntimeDependencies, dispatch
 from agent_work.serial import SegmentError, run_segment
-from agent_work.worker import WorkerInvocation
+from agent_work.worker import WorkerInvocation, WorkerProtocolError
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
@@ -327,6 +327,9 @@ class FakeInvoker:
         self.returncode = returncode
         self.prompts: list[str] = []
 
+    def preflight(self) -> None:
+        pass
+
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
@@ -374,6 +377,9 @@ class BatchingInvoker:
         self.reject_once = reject_once
         self.lane = lane
 
+    def preflight(self) -> None:
+        pass
+
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout
         self.timeouts.append(timeout)
@@ -419,6 +425,9 @@ class SingleSessionInvoker:
         self.lane = lane
         self.needs_human = needs_human
         self.phases: list[str] = []
+
+    def preflight(self) -> None:
+        pass
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout, timeout
@@ -1799,6 +1808,50 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
     assert report.items[-1].state is RunnerState.AWAITING_HUMAN
     assert invoker.phases == ["workflow"]
     assert gitlab.created_merge_requests == 1
+
+
+def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab(_issue())
+    repository = FakeRepository(config)
+
+    class UnsupportedInvoker:
+        def __init__(self) -> None:
+            self.preflight_calls = 0
+            self.invoke_calls = 0
+
+        def preflight(self) -> None:
+            self.preflight_calls += 1
+            raise WorkerProtocolError("codex exec does not support --add-dir")
+
+        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+            del checkout, prompt, timeout
+            self.invoke_calls += 1
+            raise AssertionError("invoke must not run after failed preflight")
+
+    def lock() -> object:
+        raise AssertionError("lock must not run after failed preflight")
+
+    invoker = UnsupportedInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        invoke=invoker,  # type: ignore[arg-type]
+        lock=lock,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(WorkerProtocolError, match="--add-dir"):
+        dispatch(
+            CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+        )
+
+    assert invoker.preflight_calls == 1
+    assert invoker.invoke_calls == 0
+    assert gitlab.labels == []
+    assert ledger.list_records() == ()
+    assert not repository.prepared
 
 
 def test_apply_batches_the_complete_content_workflow_until_human_handoff(

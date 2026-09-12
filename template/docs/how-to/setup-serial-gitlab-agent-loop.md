@@ -58,6 +58,16 @@ with Pi. The unattended path requires exactly Developer access (`30`) for the
 `glab` identity. This is a fail-closed readiness check, not a claim that a role
 alone proves repository policy.
 
+For Codex, also verify that `codex exec --help` advertises `--add-dir` before
+enabling `--apply`. The worker grants only the prepared issue checkout's
+`.agents` and `template/.agents` directories through that option, allowing the
+approved workflow policy while keeping the writable scope bounded. Upgrade
+Codex or select another supported agent if the option is absent.
+
+```bash
+codex exec --help | grep -Eq '(^|[[:space:]])--add-dir([[:space:]]|$)'
+```
+
 ### Verify Developer-readable safeguards
 
 Before enabling `--apply`, paste this guarded block. It exits nonzero and

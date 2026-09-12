@@ -222,6 +222,7 @@ def build_worker_prompt(
 def _agent_command(
     agent: str, executable: str, checkout: Path, prompt: str
 ) -> tuple[tuple[str, ...], str | None]:
+    _validate_agent(agent)
     if agent == "codex":
         return (
             (
@@ -233,6 +234,10 @@ def _agent_command(
                 "workspace-write",
                 "-c",
                 "sandbox_workspace_write.network_access=true",
+                "--add-dir",
+                str(checkout / ".agents"),
+                "--add-dir",
+                str(checkout / "template" / ".agents"),
                 "--ephemeral",
                 "--color",
                 "never",
@@ -269,7 +274,20 @@ def _agent_command(
             ),
             None,
         )
-    raise WorkerProtocolError("AGENT_WORK_AGENT must be one of: codex, claude, pi")
+    raise AssertionError("validated agent profile is unsupported")
+
+
+def _validate_agent(agent: str) -> None:
+    """Reject agent names without a supported worker profile."""
+    if agent not in {"codex", "claude", "pi"}:
+        raise WorkerProtocolError("AGENT_WORK_AGENT must be one of: codex, claude, pi")
+
+
+def _agent_profile(environment: Mapping[str, str]) -> tuple[str, str]:
+    """Resolve and validate the selected agent profile from the environment."""
+    agent = environment.get("AGENT_WORK_AGENT", "codex")
+    _validate_agent(agent)
+    return agent, environment.get("AGENT_WORK_AGENT_PATH", agent)
 
 
 def _redact(output: str, environment: Mapping[str, str]) -> str:
@@ -309,10 +327,26 @@ class AgentInvoker:
         self._run_command = run_command
         self._environment = environment
 
+    def preflight(self) -> None:
+        """Verify the selected agent supports the required worker boundary."""
+        agent, executable = _agent_profile(self._environment)
+        if agent != "codex":
+            return
+        result = self._run_command(
+            (executable, "exec", "--help"),
+            stdin=None,
+            timeout_seconds=None,
+            environment=_worker_environment(self._environment),
+        )
+        if (
+            result.returncode != 0
+            or re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout) is None
+        ):
+            raise WorkerProtocolError("codex exec does not support --add-dir")
+
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
-        agent = self._environment.get("AGENT_WORK_AGENT", "codex")
-        executable = self._environment.get("AGENT_WORK_AGENT_PATH", agent)
+        agent, executable = _agent_profile(self._environment)
         command, stdin = _agent_command(agent, executable, checkout, prompt)
         try:
             result = self._run_command(

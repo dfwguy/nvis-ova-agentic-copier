@@ -414,6 +414,7 @@ def dispatch(
             outcome="eligible" if eligible else "idle",
             project=identity,
         )
+    wired.invoke.preflight()
     records: list[LedgerRecord] = []
     stop_reason = "idle"
     started = wired.monotonic()
