@@ -34,9 +34,7 @@ class AgentWorkConfig(BoundaryModel):
     checkout: Path
     state_root: Path
     default_branch: str = Field(default="main", min_length=1)
-    base_branch: str | None = Field(
-        default=None, pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$"
-    )
+    base_branch: str = Field(pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$")
     journal_tag: str = Field(default="agent-work", min_length=1)
 
     @field_validator("host")

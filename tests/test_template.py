@@ -1172,11 +1172,7 @@ def test_setup_preflight_url_encodes_default_branch_before_api_paths(
 
 def _bash_block_containing(document: str, required_fragments: tuple[str, ...]) -> str:
     """Return the unique Bash fence containing stable executable signatures."""
-    blocks = re.findall(
-        r"^[ \t]*```bash[ \t]*\n(?P<script>.*?)\n^[ \t]*```[ \t]*$",
-        document,
-        flags=re.DOTALL | re.MULTILINE,
-    )
+    blocks = _bash_blocks(document)
     matches = [
         block
         for block in blocks
@@ -1184,6 +1180,76 @@ def _bash_block_containing(document: str, required_fragments: tuple[str, ...]) -
     ]
     assert len(matches) == 1, required_fragments
     return matches[0]
+
+
+def _bash_blocks(document: str) -> tuple[str, ...]:
+    """Return the executable Bash fences from one Markdown document."""
+    return tuple(
+        re.findall(
+            r"^[ \t]*```bash[ \t]*\n(?P<script>.*?)\n^[ \t]*```[ \t]*$",
+            document,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+    )
+
+
+def _loads_configured_base_branch(script: str) -> bool:
+    """Return whether one runnable block loads the configured service base."""
+    exports_canonical_base = bool(
+        re.search(
+            r"^export AGENT_WORK_BASE_BRANCH=(?:['\"])?agent/work-base(?:['\"])?$",
+            script,
+            flags=re.MULTILINE,
+        )
+    )
+    sources_service_environment = "set -a" in script and bool(
+        re.search(r"^source .*agent-work\.env(?:['\"])?$", script, flags=re.MULTILINE)
+    )
+    return exports_canonical_base or sources_service_environment
+
+
+def test_manual_loop_run_examples_load_configured_base_branch(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Every manual loop activation runs with an explicit service base."""
+    documents = (
+        project_root / "README.md",
+        template_dir / "README.md.jinja",
+        generated_project / "README.md",
+        project_root / "docs/how-to/setup-serial-gitlab-agent-loop.md",
+        template_dir / "docs/how-to/setup-serial-gitlab-agent-loop.md",
+    )
+
+    for document in documents:
+        manual_blocks = tuple(
+            block
+            for block in _bash_blocks(document.read_text())
+            if "uv run agent-work loop run" in block
+        )
+        assert manual_blocks, document
+        assert all(_loads_configured_base_branch(block) for block in manual_blocks)
+
+
+def test_loop_reference_defines_required_base_before_claiming_work(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """The reference states the base invariant and its pre-claim boundary."""
+    relative_path = Path("docs/reference/serial-gitlab-agent-loop.md")
+    root_reference = (project_root / relative_path).read_text()
+
+    assert root_reference == (template_dir / relative_path).read_text()
+    assert root_reference == (generated_project / relative_path).read_text()
+    matching_paragraphs = tuple(
+        paragraph
+        for paragraph in root_reference.split("\n\n")
+        if "AGENT_WORK_BASE_BRANCH" in paragraph
+    )
+    assert matching_paragraphs
+    requirement = " ".join(matching_paragraphs).lower()
+    assert "required" in requirement
+    assert "agent/work-base" in requirement
+    assert "before" in requirement
+    assert "claim" in requirement
 
 
 _READINESS_FENCE_SIGNATURE = (

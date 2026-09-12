@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from pytest_subprocess import FakeProcess
 
 from agent_work.cli import main
@@ -41,6 +42,7 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         project_id=310967,
         checkout=tmp_path / "checkout",
         state_root=tmp_path / "state",
+        base_branch="agent/work-base",
     )
 
 
@@ -386,6 +388,63 @@ def test_origin_identity_rejects_an_unusable_remote() -> None:
         _origin_identity("local-path")
 
 
+@pytest.mark.parametrize(
+    "base_branch_fields",
+    (
+        pytest.param({}, id="omitted"),
+        pytest.param({"base_branch": None}, id="null"),
+    ),
+)
+def test_agent_work_config_requires_base_branch(
+    tmp_path: Path, base_branch_fields: dict[str, object]
+) -> None:
+    payload = {
+        "host": "gitlab.example.com",
+        "project_id": 310967,
+        "checkout": tmp_path / "checkout",
+        "state_root": tmp_path / "state",
+        **base_branch_fields,
+    }
+
+    with pytest.raises(ValidationError, match="base_branch"):
+        AgentWorkConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "base_branch_fields",
+    (
+        pytest.param({}, id="missing"),
+        pytest.param({"AGENT_WORK_BASE_BRANCH": ""}, id="empty"),
+    ),
+)
+def test_discover_config_requires_base_branch_before_running_commands(
+    tmp_path: Path, base_branch_fields: dict[str, str]
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def unexpected_command(
+        command: tuple[str, ...], **_kwargs: object
+    ) -> CommandResult:
+        calls.append(command)
+        raise AssertionError("configuration discovery called a command")
+
+    environment = {
+        "XDG_STATE_HOME": str(tmp_path / "xdg"),
+        "GITLAB_HOST": "gitlab.example.com",
+        "GITLAB_PROJECT_ID": "310967",
+        **base_branch_fields,
+    }
+
+    with pytest.raises(RepositoryError, match=r"^AGENT_WORK_BASE_BRANCH is required$"):
+        discover_config(
+            current_directory=tmp_path,
+            environment=environment,
+            run_command=unexpected_command,
+        )
+
+    assert calls == []
+
+
 def test_discover_config_is_read_only_and_confirms_numeric_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -416,10 +475,13 @@ def test_discover_config_is_read_only_and_confirms_numeric_project(
             "XDG_STATE_HOME": str(tmp_path / "xdg"),
             "GITLAB_HOST": "gitlab.example.com",
             "GITLAB_PROJECT_ID": "310967",
+            "AGENT_WORK_BASE_BRANCH": "agent/work-base",
         },
         run_command=fake,
     )
     assert config.project_id == 310967
+    assert config.default_branch == "main"
+    assert config.base_branch == "agent/work-base"
     assert config.state_root.parent.name == "projects"
     assert not any("pull" in command for command in calls)
 
@@ -450,7 +512,11 @@ def test_repository_prepares_publishes_and_inventories(
         if args in responses:
             return responses[args]
         if args == ("branch", "--show-current"):
-            branch = "main" if Path(command[2]) == config.checkout else "agent/issue-12"
+            branch = (
+                config.base_branch
+                if Path(command[2]) == config.checkout
+                else "agent/issue-12"
+            )
             return CommandResult(0, f"{branch}\n", "")
         if args == ("status", "--porcelain"):
             return CommandResult(0, "M file\n", "")

@@ -93,6 +93,9 @@ def discover_config(
     run_command: CommandRunner,
 ) -> AgentWorkConfig:
     """Discover and verify config without mutating the checkout."""
+    base_branch = environment.get("AGENT_WORK_BASE_BRANCH", "")
+    if not base_branch:
+        raise RepositoryError("AGENT_WORK_BASE_BRANCH is required")
     start = current_directory.resolve()
     checkout = Path(
         _confirmed(
@@ -140,7 +143,7 @@ def discover_config(
             checkout=checkout,
             state_root=state_root,
             default_branch=str(project.get("default_branch") or "main"),
-            base_branch=environment.get("AGENT_WORK_BASE_BRANCH") or None,
+            base_branch=base_branch,
             journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
         )
     except ValidationError as error:
@@ -167,7 +170,7 @@ class GitRepository:
 
     def refresh_base(self) -> None:
         """Require a clean base checkout and fast-forward it."""
-        expected = self.config.base_branch or self.config.default_branch
+        expected = self.config.base_branch
         if self._git("branch", "--show-current") != expected:
             raise RepositoryError(f"service checkout must be on {expected!r}")
         if self._git("status", "--porcelain"):

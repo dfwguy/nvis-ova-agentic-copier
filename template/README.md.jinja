@@ -27,6 +27,7 @@ non-confidential issue without lifecycle or ledger state and never approves or
 merges its human-gated merge request.
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --json
 ```
 
@@ -55,6 +56,7 @@ then confirms both Git and GitLab access before work begins. A Developer account
 can poll open, unprojected issues, so no webhook or inbound service is required:
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --json
 ```
 
