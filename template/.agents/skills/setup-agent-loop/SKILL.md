@@ -116,13 +116,56 @@ before checking repository safeguards.
    Record the selected agent name and absolute executable paths for both `uv`
    and the agent in its environment file; the runner invokes that recorded
    absolute agent path directly, rather than relying on the service manager PATH.
-   If the GitLab token is directory-scoped through `direnv`, also record the
-   absolute `direnv` path and run the runner through `direnv exec <checkout>`.
-   The user manager does not inherit interactive `direnv` variables; never put
-   the token in the environment file or use `glab auth status` to test this
-   credential route, because it reports only stored `glab` logins.
+   Record the bare `GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID` in
+   the mode-600 environment file with those paths, but never a token. If the
+   GitLab token is directory-scoped through `direnv`, select it only when the
+   dedicated checkout has a regular checkout-local `.envrc`, record an absolute
+   executable `direnv` path, and run the runner through `direnv exec
+   <checkout>`. The wrapper rejects a configured `direnv` route without that
+   local file and restores the recorded host and project ID after `direnv`
+   supplies credentials. Before enabling the timer, execute the wrapper's
+   no-`--apply` preview through `env -i` with exactly the public service
+   variables and minimal service baseline so an interactive credential or
+   identity cannot mask the configured route. The user manager does not inherit
+   interactive `direnv` variables; never put the token in the environment file
+   or use `glab auth status` to test this credential route, because it reports
+   only stored `glab` logins.
+
+   ```bash
+   unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
+   uv_path="$(command -v uv)"
+   agent_name="${AGENT_WORK_AGENT:-codex}"
+   agent_path="$(command -v "$agent_name")"
+   gitlab_host="${GITLAB_HOST:-}"
+   gitlab_project_id="${GITLAB_PROJECT_ID:-}"
+   case "$gitlab_host" in ''|*://*|*/*) exit 1;; esac
+   case "$gitlab_project_id" in ''|0|00*|*[!0-9]*) exit 1;; esac
+   direnv_path=""
+   if [[ -f "$PWD/.envrc" ]]; then
+     direnv_path="$(command -v direnv || true)"
+     [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
+   fi
+   [[ "$uv_path" == /* && -x "$uv_path" ]] || exit 1
+   case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
+   [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
+   install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
+   install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
+   install -d -m 700 "$HOME/.config/$unit_name"
+   printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+   chmod 600 "$HOME/.config/$unit_name/agent-work.env"
+
+   env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+     AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
+     AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
+     AGENT_WORK_BASE_BRANCH=agent/work-base GITLAB_HOST="$gitlab_host" \
+     GITLAB_PROJECT_ID="$gitlab_project_id" \
+     bash "$PWD/scripts/agent-work-systemd-run.sh"
+   ```
+
    The wrapper emits once to stdout/stderr and systemd records that output, so
    operators use `journalctl --user -u <project-slug>-agent-work.service`.
+   Only after that isolated preview succeeds may the operator run
+   `systemctl --user enable --now <project-slug>-agent-work.timer`.
    The timer schedules 20 minutes after the previous service completion and
    uses a stable randomized delay to spread starts. Require linger
    with `sudo loginctl enable-linger "$USER"`, then verify `Linger=yes` using
