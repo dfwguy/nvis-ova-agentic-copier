@@ -106,6 +106,69 @@ def test_malformed_or_multiple_remediation_markers_fail_closed(
 
 
 @pytest.mark.parametrize(
+    ("field", "first_value", "second_value"),
+    [
+        pytest.param("project_id", "310967", "999", id="project-id-conflicting-values"),
+        pytest.param(
+            "project_id", "310967", "310967", id="project-id-identical-values"
+        ),
+        pytest.param("merge_request_iid", "88", "89", id="mr-iid-conflicting-values"),
+        pytest.param("merge_request_iid", "88", "88", id="mr-iid-identical-values"),
+        pytest.param(
+            "source_branch",
+            "review/existing",
+            "review/other",
+            id="branch-conflicting-values",
+        ),
+        pytest.param(
+            "source_branch",
+            "review/existing",
+            "review/existing",
+            id="branch-identical-values",
+        ),
+        pytest.param(
+            "source_sha",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            id="sha-conflicting-values",
+        ),
+        pytest.param(
+            "source_sha",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            id="sha-identical-values",
+        ),
+        pytest.param(
+            "finding", "review", "other review", id="finding-conflicting-values"
+        ),
+        pytest.param("finding", "review", "review", id="finding-identical-values"),
+    ],
+)
+def test_remediation_marker_with_repeated_recognized_field_fails_closed(
+    field: str, first_value: str, second_value: str
+) -> None:
+    values = {
+        "project_id": "310967",
+        "merge_request_iid": "88",
+        "source_branch": "review/existing",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "finding": "review",
+    }
+    description = (
+        "<!-- agent-mr-remediation\n"
+        + "\n".join(
+            f"{key}: {value}"
+            for key, value in values.items()
+            for value in ((first_value, second_value) if key == field else (value,))
+        )
+        + "\n-->"
+    )
+
+    with pytest.raises(ClassificationError):
+        parse_remediation_marker(description)
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "AGENTS.md",

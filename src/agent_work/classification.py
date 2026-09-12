@@ -42,7 +42,13 @@ def parse_remediation_marker(description: str) -> RemediationMarker | None:
         key, separator, value = line.partition(":")
         if not separator or not key.strip() or not value.strip():
             raise ClassificationError("remediation marker contains an invalid field")
-        values[key.strip()] = value.strip()
+        normalized_key = key.strip()
+        if (
+            normalized_key in RemediationMarker.model_fields
+            and normalized_key in values
+        ):
+            raise ClassificationError("remediation marker contains a repeated field")
+        values[normalized_key] = value.strip()
     try:
         return RemediationMarker.model_validate(values)
     except ValidationError as error:
