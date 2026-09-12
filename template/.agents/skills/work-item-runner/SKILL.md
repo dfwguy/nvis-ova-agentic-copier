@@ -41,7 +41,20 @@ Do not infer a skill from a display name or from a rolled-up label such as
 Delegate one live `$architect`. For coding, Architect delegates `$tdd-red`,
 then `$tdd-green`; Green alone mutates after Red, fans out all applicable
 read-only judges concurrently, repairs their consolidated findings once, and
-returns to Architect for finalization. For content, Architect delegates one
+returns to Architect for finalization. Architect may authorize further focused
+Green cycles while a recorded cycle ledger shows material progress; each Green
+invocation still makes one consolidated repair. The ledger records cycle ID,
+input finding fingerprints/classifications, changed scope, checks before/after
+or N/A, rerun reviewers and reasons, finding disposition, and a continuation or
+termination reason. A fingerprint is reviewer/owner plus path/scope plus stable
+summary/requested outcome. Stop on a repeated/reopened identical finding,
+unchanged relevant evidence, no approved-scope repair, scope expansion, or a
+human-judgment blocker; never waive/relabel findings to manufacture progress.
+For a no-progress or controversy stop, Architect obtains Finalizer's
+draft-safety verdict. Only a mechanically safe, validated, authority-clear
+diff may publish a `Draft:` MR listing unresolved findings, evidence/cycle
+ledger, exact human decisions, tests, and unchanged project-owned values; this
+is never merge approval. For content, Architect delegates one
 sole-mutator `$documentation-writer`, then `$documentation-finalizer`. Keep
 every required or not-applicable receipt in the single result envelope. The
 worker exception changes who publishes; it does not weaken either workflow.
