@@ -422,20 +422,21 @@ def _execute(
             now=now,
             error_code=ErrorCode.GITLAB_RETRYABLE,
         )
-    prompt = build_worker_prompt(
-        record.model_dump(mode="json"),
-        project_id=record.project_id,
-        issue_iid=record.issue_iid,
-        issue_title=issue.title,
-        issue_description=issue.description,
-        issue_notes=issue_notes,
-    )
     worker_timeout = timeout_seconds
     if remaining_seconds is not None:
         remaining = remaining_seconds()
         if remaining <= 0:
             return None
         worker_timeout = min(timeout_seconds, max(1, math.ceil(remaining)))
+    prompt = build_worker_prompt(
+        record.model_dump(mode="json"),
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        effective_worker_budget_seconds=worker_timeout,
+        issue_title=issue.title,
+        issue_description=issue.description,
+        issue_notes=issue_notes,
+    )
     invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
     if invocation.returncode != 0:
         return _record_retry(

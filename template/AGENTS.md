@@ -215,7 +215,16 @@ A worker invoked by `agent-work loop run --apply` follows the same loading
 table and workflow manifest inside one live workflow-owning session. Its
 Architect delegates the applicable children, preserves their direct context
 handoffs, and returns one versioned result envelope for the coarse `workflow`
-phase. The worker edits and validates its prepared per-issue worktree but must
+phase. After the trusted wrapper delegates its live Architect, and before Red,
+the documentation writer, or any worktree mutation, Architect makes one
+semantic intake sizing decision. Suitable work has one independently
+reviewable and mergeable outcome that can reasonably complete every applicable
+workflow phase inside the effective worker budget. Oversized or separately
+deliverable work returns `needs_human` with `error_code=split_required` and
+ordered, independently mergeable slice proposals; it does not select a lane,
+mutate the worktree, create child issues, execute slices, or retry
+automatically. A human must approve and file the slices or narrow the parent
+before an explicit retry. The worker edits and validates its prepared per-issue worktree but must
 not commit, push, create a merge request, call GitLab, approve, or merge; the
 trusted runner owns publication, exact pipeline observation, and durable
 recovery. Existing ledgers at legacy phases may finish that recorded route;

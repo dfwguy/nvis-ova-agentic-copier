@@ -5,7 +5,7 @@ summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-12
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -312,6 +312,30 @@ not change labels to resume blocked work.
 Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
+
+### Resolve a `split_required` blocker
+
+When status reports `error_code=split_required`, review the numbered slice
+outcomes and their dependency order in the recorded summary. Decide whether to
+use the parent as a tracking issue and file the approved slices as separate
+issues, or narrow the parent to one independently mergeable outcome. The loop
+does not create or update those issues itself.
+
+Let each approved child issue enter the normal eligibility queue and produce
+its own merge request in dependency order. Leave a tracking parent blocked or
+close it according to the project's issue practice; do not retry it merely to
+re-run the same sizing decision. If the parent itself was narrowed to a
+suitable outcome, explicitly retry that IID only after the edit is complete:
+
+```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
+uv run agent-work loop retry --issue-iid IID --json
+uv run agent-work loop retry --issue-iid IID --apply --json
+```
+
+Do not remove lifecycle labels by hand or increase worker budgets to bypass
+the sizing decision. The explicit retry preserves the durable recovery path;
+the next worker session reassesses the revised scope before mutation.
 
 ## Migrate existing loop evidence
 

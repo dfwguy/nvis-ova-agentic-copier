@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,7 @@ from agent_work.domain import (
 )
 from agent_work.models import LedgerRecord, MergeRequestDraft, WorkerResultEnvelope
 from agent_work.state_machine import apply_worker_result, plan_retry
+from agent_work.worker import parse_worker_result
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
 
@@ -177,6 +179,64 @@ def test_needs_human_result_becomes_a_documented_block() -> None:
 
     assert outcome.record.state is RunnerState.BLOCKED
     assert outcome.record.next_action == "Run the policy workflow manually."
+
+
+def test_split_required_result_blocks_without_changing_retry_state() -> None:
+    retry_at = NOW + timedelta(minutes=7)
+    record = _record(retry_count=2).model_copy(
+        update={
+            "phase": WorkflowPhase.WORKFLOW,
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "retry_at": retry_at,
+        }
+    )
+    payload = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": 0,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "needs_human",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "change_summary": "Issue requires decomposition before work begins.",
+        "error_code": "split_required",
+        "redacted_summary": (
+            "1. Local manifest and preview. "
+            "2. Upstream discovery and deduplication. "
+            "3. Explicit apply and recovery."
+        ),
+        "next_action": "Obtain human direction on the proposed ordered slices.",
+    }
+
+    result = parse_worker_result(
+        f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
+        expected_project_id=310967,
+        expected_issue_iid=12,
+        expected_revision=0,
+    )
+    outcome = apply_worker_result(record, result, now=NOW)
+
+    assert result.protocol_version == 1
+    assert result.error_code is not None
+    assert result.error_code.value == "split_required"
+    assert outcome.record.state is RunnerState.BLOCKED
+    assert outcome.record.phase is WorkflowPhase.WORKFLOW
+    assert outcome.record.retry_count == 2
+    assert outcome.record.retry_at == retry_at
+    assert outcome.record.error_code is result.error_code
+    assert outcome.record.summary == result.redacted_summary
+    assert outcome.record.next_action == result.next_action
+
+    legacy_envelope = WorkerResultEnvelope.model_validate(
+        _result("ready_to_publish").model_dump(mode="json")
+    )
+    legacy_record = LedgerRecord.model_validate(record.model_dump(mode="json"))
+    assert legacy_envelope.protocol_version == 1
+    assert legacy_record.schema_version == 1
 
 
 def test_successful_postpublication_repair_reenters_downstream_validation() -> None:

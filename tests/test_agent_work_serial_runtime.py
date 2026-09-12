@@ -376,6 +376,7 @@ class BatchingInvoker:
         lane: str = "coding",
     ) -> None:
         self.phases: list[str] = []
+        self.prompts: list[str] = []
         self.timeouts: list[int] = []
         self.reject_once = reject_once
         self.lane = lane
@@ -385,6 +386,7 @@ class BatchingInvoker:
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout
+        self.prompts.append(prompt)
         self.timeouts.append(timeout)
         raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
         record = ast.literal_eval(raw_record)
@@ -2490,6 +2492,9 @@ def test_apply_caps_the_worker_timeout_to_the_remaining_activation_budget(
 
     assert report.stop_reason == "time_limit"
     assert invoker.timeouts == [90]
+    assert "effective bounded worker budget for this session is 90 seconds" in (
+        invoker.prompts[0].casefold()
+    )
 
 
 def test_apply_returns_unresolved_workflow_feedback_without_relaunching(
