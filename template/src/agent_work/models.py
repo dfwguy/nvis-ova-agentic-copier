@@ -164,12 +164,22 @@ class DecisionReviewSignal(BoundaryModel):
         return value
 
 
+def _sanitize_notice_text(text: str) -> str:
+    """Make control characters safe, visible text before HTML escaping."""
+    return "".join(
+        " "
+        if character in "\n\r"
+        else f"\\x{ord(character):02x}"
+        if ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F
+        else character
+        for character in text
+    )
+
+
 def _notice_items(items: tuple[str, ...]) -> str:
     """Render untrusted review text as literal list content, not headings."""
     return "\n".join(
-        "- <code>"
-        + html.escape(item.replace(chr(10), " ").replace(chr(13), " "))
-        + "</code>"
+        "- <code>" + html.escape(_sanitize_notice_text(item)) + "</code>"
         for item in items
     )
 

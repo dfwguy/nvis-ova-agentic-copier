@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -170,6 +170,7 @@ def test_decision_review_notice_is_canonical_first_and_resists_section_injection
     assert "Injected" in rendered
 
 
+@example(level=1, text="\x1e#")
 @given(level=st.integers(min_value=1, max_value=6), text=st.text(max_size=80))
 def test_decision_review_renderer_neutralizes_all_heading_levels_and_markers(
     level: int, text: str
@@ -208,6 +209,37 @@ def test_decision_review_renderer_neutralizes_all_heading_levels_and_markers(
         "## Summary",
     ]
     assert "- <code>&gt;" in rendered
+
+
+@pytest.mark.parametrize("codepoint", [*range(0x20), *range(0x7F, 0xA0)])
+def test_decision_review_renderer_neutralizes_every_control_character(
+    codepoint: int,
+) -> None:
+    """Control characters cannot create structure and remain visibly represented."""
+    control = chr(codepoint)
+    expected_control = " " if control in "\n\r" else f"\\x{codepoint:02x}"
+    value = f"visible{control}# not a heading Ω <&>"
+    review = _decision_review().model_copy(update={"decisions": (value,)})
+
+    rendered = render_decision_review_notice(review, value)
+
+    assert rendered.count("<!-- agent-work-decision-review:v1 -->") == 1
+    assert [line for line in rendered.splitlines() if line.startswith("#")] == [
+        "# ⚠️ Decision review required",
+        "## Decisions and assumptions",
+        "## Alternatives considered",
+        "## Risks",
+        "## Exact reviewer checks",
+        "## Unresolved findings",
+        "## Evidence",
+        "## Tests",
+        "## Correction cycle ledger",
+        "## Unchanged project-owned values",
+        "## Summary",
+    ]
+    assert f"visible{expected_control}# not a heading Ω &lt;&amp;&gt;" in rendered
+    if control not in "\n\r":
+        assert control not in rendered
 
 
 @given(issue_iid=st.integers(min_value=1, max_value=2_147_483_647))
