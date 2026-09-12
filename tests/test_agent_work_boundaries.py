@@ -560,6 +560,94 @@ def test_agent_profiles_are_argv_only_and_invocation_redacts_secrets(
     assert result.stdout == result.stderr == "[REDACTED]"
 
 
+def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
+    tmp_path: Path,
+) -> None:
+    command, stdin = _agent_command("codex", "/codex", tmp_path, "prompt")
+
+    assert command == (
+        "/codex",
+        "exec",
+        "-C",
+        str(tmp_path),
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "--add-dir",
+        str(tmp_path / ".agents"),
+        "--add-dir",
+        str(tmp_path / "template" / ".agents"),
+        "--ephemeral",
+        "--color",
+        "never",
+        "-",
+    )
+    assert stdin == "prompt"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, "usage: codex exec"),
+        (0, "usage: codex exec\n  --sandbox workspace-write"),
+    ],
+)
+def test_codex_preflight_rejects_an_unsupported_exec(
+    tmp_path: Path, returncode: int, stdout: str
+) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="failure")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "SECRET_TOKEN": "token-value",
+        },
+    )
+
+    with pytest.raises(WorkerProtocolError):
+        invoker.preflight()
+
+    assert calls == [
+        (
+            ("/codex", "exec", "--help"),
+            {
+                "stdin": None,
+                "timeout_seconds": None,
+                "environment": {
+                    "AGENT_WORK_AGENT": "codex",
+                    "AGENT_WORK_AGENT_PATH": "/codex",
+                },
+            },
+        )
+    ]
+
+
+def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        return SimpleNamespace(
+            returncode=0, stdout="usage: codex exec --add-dir DIR", stderr=""
+        )
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+
+    invoker.preflight()
+
+    assert calls[0][0] == ("/codex", "exec", "--help")
+
+
 def test_local_operational_log_keeps_info_and_debug_at_requested_verbosity(
     tmp_path: Path,
 ) -> None:
