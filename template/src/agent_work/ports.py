@@ -77,6 +77,10 @@ class GitLabPort(Protocol):
         self, branch: str
     ) -> MergeRequestEvidence | None: ...
 
+    def open_merge_requests_by_branch(
+        self, branch: str
+    ) -> tuple[MergeRequestEvidence, ...]: ...
+
     def create_merge_request(
         self,
         *,

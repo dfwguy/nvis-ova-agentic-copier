@@ -251,6 +251,37 @@ def _due(record: LedgerRecord, now: datetime) -> bool:
     )
 
 
+def _can_reconcile_published_ordinary_work(record: LedgerRecord) -> bool:
+    """Return whether a stale ordinary record may already have an opened MR."""
+    if record.work_kind is not WorkKind.ORDINARY or record.revision == 0:
+        return False
+    if record.state in {
+        RunnerState.PREPARING,
+        RunnerState.EXECUTING,
+        RunnerState.PUBLISHING,
+    }:
+        return True
+    if record.state is RunnerState.RETRY_WAIT:
+        return record.prior_state in {
+            RunnerState.PREPARING,
+            RunnerState.EXECUTING,
+            RunnerState.PUBLISHING,
+        }
+    return record.state is RunnerState.BLOCKED and record.error_code in {
+        ErrorCode.RETRY_EXHAUSTED,
+        ErrorCode.STATE_RECONCILIATION_FAILED,
+    }
+
+
+def _is_fresh_ordinary_preparation(record: LedgerRecord) -> bool:
+    """Return whether an un-revised ordinary record is about to prepare work."""
+    return (
+        record.work_kind is WorkKind.ORDINARY
+        and record.revision == 0
+        and record.state is RunnerState.PREPARING
+    )
+
+
 def select_record(
     ledger: LedgerPort,
     gitlab: GitLabPort,
@@ -268,9 +299,13 @@ def select_record(
         raise SegmentError("multiple resumable records require reconciliation")
     if issue_iid is not None:
         pinned = next(
-            (record for record in active if record.issue_iid == issue_iid), None
+            (record for record in records if record.issue_iid == issue_iid), None
         )
         if pinned is None:
+            raise SegmentError("pinned issue is not the active durable record")
+        if _can_reconcile_published_ordinary_work(pinned):
+            return pinned, gitlab.fetch_issue(pinned.issue_iid)
+        if pinned not in active:
             raise SegmentError("pinned issue is not the active durable record")
         if not _due(pinned, now):
             return None, None
@@ -284,9 +319,19 @@ def select_record(
             return record, issue
     if active:
         record = active[0]
+        if _can_reconcile_published_ordinary_work(record):
+            return record, issues[record.issue_iid]
         if not _due(record, now):
             return None, None
         return record, issues[record.issue_iid]
+    for reconciliable in (
+        record for record in records if _can_reconcile_published_ordinary_work(record)
+    ):
+        try:
+            if gitlab.open_merge_requests_by_branch(reconciliable.source_branch):
+                return reconciliable, issues[reconciliable.issue_iid]
+        except GitLabError:
+            return reconciliable, issues[reconciliable.issue_iid]
     lifecycle = set(LIFECYCLE_LABELS)
     for record in records:
         issue = issues[record.issue_iid]
@@ -415,14 +460,15 @@ def _block_publication_identity(
     record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort, summary: str
 ) -> LedgerRecord:
     """Persist and project one actionable publication-identity block."""
+    updates = {
+        "error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+        "summary": summary,
+        "next_action": "Review the exact MR, branch, target, SHA, and closing evidence.",
+    }
     blocked = ledger.persist(
-        transition_record(
-            record,
-            RunnerState.BLOCKED,
-            error_code=ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
-            summary=summary,
-            next_action="Review the exact MR, branch, target, SHA, and closing evidence.",
-        )
+        record.model_copy(update=updates)
+        if record.state is RunnerState.BLOCKED
+        else transition_record(record, RunnerState.BLOCKED, **updates)
     )
     gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
     gitlab.comment_outcome(
@@ -432,6 +478,184 @@ def _block_publication_identity(
         next_action=blocked.next_action,
     )
     return blocked
+
+
+def _retry_or_block_recovery_transport_error(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+    summary: str,
+    error_code: ErrorCode,
+) -> LedgerRecord:
+    """Retry active recovery transport failures while retaining existing blocks."""
+    if record.state is RunnerState.BLOCKED:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=summary
+        )
+    if record.state is RunnerState.RETRY_WAIT:
+        record = transition_record(
+            record,
+            record.prior_state or RunnerState.EXECUTING,
+            phase=record.prior_phase or record.phase,
+            retry_at=None,
+        )
+    return _record_retry(
+        record,
+        ledger=ledger,
+        gitlab=gitlab,
+        now=now,
+        error_code=error_code,
+    )
+
+
+def _block_fresh_preparation_with_published_mr(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+) -> LedgerRecord | None:
+    """Fail closed when a newly synthesized record already has an open MR."""
+    try:
+        candidates = gitlab.open_merge_requests_by_branch(record.source_branch)
+    except GitLabError:
+        return _retry_or_block_recovery_transport_error(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            summary="Published merge request inventory could not be verified.",
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    if not candidates:
+        return None
+    return _block_publication_identity(
+        record,
+        ledger=ledger,
+        gitlab=gitlab,
+        summary="A newly synthesized record cannot adopt an existing merge request.",
+    )
+
+
+def _reconcile_published_ordinary_work(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord | None:
+    """Recover an already-published ordinary record without replaying publication."""
+    try:
+        candidates = gitlab.open_merge_requests_by_branch(record.source_branch)
+    except GitLabError:
+        return _retry_or_block_recovery_transport_error(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            summary="Published merge request inventory could not be verified.",
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Opened merge request inventory for the recorded branch is ambiguous.",
+        )
+    mr = candidates[0]
+    if (
+        record.merge_request_iid is not None and record.merge_request_iid != mr.iid
+    ) or (
+        record.merge_request_url is not None and record.merge_request_url != mr.web_url
+    ):
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Discovered merge request does not match durable evidence.",
+        )
+    candidate_iid = mr.iid
+    candidate_url = mr.web_url
+    candidate_sha = mr.sha
+    try:
+        if not _mr_evidence_is_exact(
+            record, mr, gitlab=gitlab, repository=repository, source_sha=mr.sha
+        ):
+            raise RepositoryError("discovered merge request evidence is not exact")
+        worktree = repository.worktree_for_existing_branch(
+            record.issue_iid, record.source_branch, mr.sha
+        )
+        repository.verify_worktree(worktree, record.source_branch, mr.sha)
+        if record.merge_request_draft is not None:
+            mr = gitlab.reconcile_merge_request(
+                mr, issue_iid=record.issue_iid, draft=record.merge_request_draft
+            )
+        if (
+            mr.iid != candidate_iid
+            or mr.web_url != candidate_url
+            or mr.sha != candidate_sha
+        ):
+            raise RepositoryError("reconciled merge request identity changed")
+        if not _mr_evidence_is_exact(
+            record,
+            mr,
+            gitlab=gitlab,
+            repository=repository,
+            source_sha=candidate_sha,
+        ):
+            raise RepositoryError("reconciled merge request evidence is not exact")
+        repository.verify_worktree(worktree, record.source_branch, candidate_sha)
+    except GitLabError:
+        return _retry_or_block_recovery_transport_error(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            summary="Published merge request reconciliation could not be verified.",
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except RepositoryTransientError:
+        return _retry_or_block_recovery_transport_error(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            summary="Published merge request worktree could not be verified.",
+            error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    observing = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+            worktree=worktree,
+            merge_request_iid=mr.iid,
+            merge_request_url=mr.web_url,
+            source_sha=mr.sha,
+            intent=None,
+            retry_count=0,
+            retry_at=None,
+            prior_state=None,
+            prior_phase=None,
+            error_code=None,
+            summary="Published merge request recovered and verified.",
+            next_action="Observe the exact source-SHA pipeline.",
+        )
+    )
+    gitlab.transition_labels(record.issue_iid, label_for_state(observing.state))
+    return _observe(
+        observing, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+    )
 
 
 def _prepare(
@@ -1012,6 +1236,20 @@ def run_segment(
         )
         gitlab.transition_labels(issue.iid, None)
         return complete
+    if not _due(record, now):
+        return None
+    if _can_reconcile_published_ordinary_work(record):
+        reconciled = _reconcile_published_ordinary_work(
+            record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+        )
+        if reconciled is not None:
+            return reconciled
+    if _is_fresh_ordinary_preparation(record):
+        blocked = _block_fresh_preparation_with_published_mr(
+            record, ledger=ledger, gitlab=gitlab, now=now
+        )
+        if blocked is not None:
+            return blocked
     if record.revision == 0 and record.state is RunnerState.BLOCKED:
         blocked = ledger.persist(record)
         gitlab.transition_labels(issue.iid, label_for_state(blocked.state))

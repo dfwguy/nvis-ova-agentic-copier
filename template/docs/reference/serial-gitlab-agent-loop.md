@@ -215,6 +215,19 @@ draft because it publishes only to the verified existing MR. A legacy ordinary
 `intent=null` is recovered side-effect-free to its lane finalizer; the runner
 never synthesizes a draft from issue text.
 
+Before retry, worker, worktree-baseline, push, or MR-creation handling, an
+ordinary stale record may reconcile work that was already published. The runner
+lists every opened MR for the recorded source branch in the configured numeric
+project; an empty inventory follows the ordinary recovery path. Any nonempty
+inventory must contain exactly one MR with the recorded branch, configured
+target branch and project on both sides, its exact source SHA, and GitLab's
+closing relation to the issue. The durable worktree must also resolve to that
+branch and SHA. An ambiguous or mismatched result becomes
+`publication_identity_mismatch`; the runner never chooses a candidate or
+replays worker, push, or MR creation. It preserves retained Draft metadata
+when reconciling the verified MR, resets retry evidence, and immediately
+observes that exact SHA.
+
 ### Decision-review Draft metadata
 
 Reasonable bounded uncertainty does not itself block the workflow. A worker may

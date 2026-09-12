@@ -260,6 +260,11 @@ def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     assert gateway.transition_labels(12, "agent::running").labels == ("agent::running",)
     assert gateway.fetch_merge_request(88).iid == 88
     assert gateway.find_merge_request_by_branch("agent/issue-12") is not None
+    assert gateway.open_merge_requests_by_branch("agent/issue-12") == (_mr_evidence(),)
+    inventory_call = api.commands[-1]
+    assert "state=opened" in inventory_call
+    assert "source_branch=agent/issue-12" in inventory_call
+    assert "per_page=100" in inventory_call
     draft = MergeRequestDraft(title="Change", description="Details")
     assert (
         gateway.create_merge_request(
@@ -693,6 +698,52 @@ def test_gitlab_projected_inventory_reads_every_issue_page(tmp_path: Path) -> No
 
     assert len(issues) == 101
     assert issues[-1].iid == 101
+
+
+def test_gitlab_open_mr_inventory_reads_every_page_before_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous page-two MR cannot be hidden behind a full first page."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        page = int(
+            next(part for part in command if part.startswith("page=")).removeprefix(
+                "page="
+            )
+        )
+        payload = [_mr_payload() for _ in range(100)] if page == 1 else [_mr_payload()]
+        return CommandResult(0, json.dumps(payload), "")
+
+    inventory = GitLabGateway(_config(tmp_path), fake).open_merge_requests_by_branch(
+        "agent/issue-12"
+    )
+
+    assert len(inventory) == 101
+    assert [
+        next(part for part in command if part.startswith("page=")) for command in calls
+    ] == ["page=1", "page=2"]
+    assert all("per_page=100" in command for command in calls)
+
+
+def test_gitlab_open_mr_inventory_rejects_excessive_pages(tmp_path: Path) -> None:
+    """A non-terminating MR inventory fails closed at its bounded page limit."""
+    calls = 0
+
+    def fake(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        return CommandResult(0, json.dumps([_mr_payload() for _ in range(100)]), "")
+
+    gateway = GitLabGateway(
+        _config(tmp_path),
+        fake,
+    )
+
+    with pytest.raises(GitLabError, match="too many merge request pages"):
+        gateway.open_merge_requests_by_branch("agent/issue-12")
+    assert calls == 100
 
 
 def test_gitlab_issue_notes_are_paginated_and_deterministically_ordered(

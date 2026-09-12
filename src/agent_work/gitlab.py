@@ -70,6 +70,7 @@ NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
 NOTE_AUTHOR_FIELDS = ("username",)
 _MAX_NOTE_PAGES = 100
 _MAX_ISSUE_PAGES = 100
+_MAX_MERGE_REQUEST_PAGES = 100
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -336,6 +337,37 @@ class GitLabGateway:
             ),
             None,
         )
+
+    def open_merge_requests_by_branch(
+        self, branch: str
+    ) -> tuple[MergeRequestEvidence, ...]:
+        """Return every validated opened merge request for one source branch."""
+        try:
+            items: list[dict[str, object]] = []
+            for page in range(1, _MAX_MERGE_REQUEST_PAGES + 1):
+                page_items = self._items(
+                    self._call(
+                        f"projects/{self._config.project_id}/merge_requests",
+                        fields=(
+                            "state=opened",
+                            f"source_branch={branch}",
+                            "per_page=100",
+                            f"page={page}",
+                        ),
+                    ),
+                    "merge request list",
+                )
+                items.extend(page_items)
+                if len(page_items) < 100:
+                    break
+            else:
+                raise GitLabError("GitLab returned too many merge request pages")
+            return tuple(
+                MergeRequestEvidence.model_validate(_selected(item, MR_FIELDS))
+                for item in items
+            )
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid merge request data") from error
 
     def create_merge_request(
         self,
