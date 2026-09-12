@@ -45,6 +45,15 @@ activation bounds.
 For scheduled operation, safeguards, status checks, and troubleshooting, see
 [How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
 
+## Preview an upstream finding
+
+Validate a finding manifest locally, without GitLab access or writes. JSON emits
+only structural fields, fingerprints, and copied-path/evidence-link counts:
+
+```bash
+uv run agent-work upstream-finding preview --manifest-file finding.yaml --json
+```
+
 ## Check the scheduled agent loop
 
 Check the timer and its most recent service activity:
