@@ -79,6 +79,13 @@ Workflow, project settings, and the runtime never-approve/merge guardrail keep
 the agent from approving or merging. This is not a hard same-user security
 boundary: inaccessible, absent, or mismatched evidence blocks `--apply`. Git
 and `glab` credentials may differ.
+
+The trusted runner may publish agent-policy changes only after it verifies the
+complete applicable workflow receipts, a complete verdict, and non-empty merge
+request metadata. A safe controversial result must use a `Draft:` title and
+identify unresolved findings and evidence, exact human decisions, tests, its
+cycle ledger, and unchanged project-owned values. Incomplete or unsafe evidence
+remains `needs_human`; workers still never publish directly.
 See
 [`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md),
 [`docs/reference/serial-gitlab-agent-loop.md`](docs/reference/serial-gitlab-agent-loop.md),

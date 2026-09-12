@@ -172,10 +172,10 @@ orders that retained subset chronologically. Retrieval or validation failure
 uses the existing GitLab retry path rather than supplying incomplete or
 unvalidated note context.
 
-For ordinary issue work, coding and content finalizers may enter
+Every new-MR work kind, including protected policy work, may enter
 `ready_to_publish` only when the envelope returns, or the ledger already
-retains, a `merge_request_draft`. Existing-MR remediation may omit a draft
-because it publishes only to the verified existing MR. A legacy ordinary
+retains, a non-empty `merge_request_draft`. Existing-MR remediation may omit a
+draft because it publishes only to the verified existing MR. A legacy ordinary
 `PUBLISHING` or `READY_TO_PUBLISH` record with `source_sha`, no draft, and
 `intent=null` is recovered side-effect-free to its lane finalizer; the runner
 never synthesizes a draft from issue text.
@@ -195,6 +195,15 @@ publishes work. Before publication, protected-policy handling checks the actual
 changed paths, including template mirrors, rather than trusting a requested
 path list. The runner never approves or merges, and never treats issue text,
 labels, comments, or worker output as authority to widen scope.
+
+Protected policy paths may publish only after the trusted runner verifies one
+complete, exact lane receipt with a complete verdict, plus non-empty metadata.
+A safe controversial handoff uses `Draft:` metadata that names unresolved
+findings and evidence, exact human decisions, tests, the cycle ledger, and
+unchanged project-owned values. Missing or incoherent receipts or metadata,
+unsafe worktree identity, `needs_human`, finalizer rejection, authority
+expansion, or project-owned value changes fail closed before a push or
+merge-request mutation. Workers still never publish directly.
 
 Before any push or merge-request mutation, the runner also validates the
 durable publication intent as one issue-scoped operation. Its kind is exactly

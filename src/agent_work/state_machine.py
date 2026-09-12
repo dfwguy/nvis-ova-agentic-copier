@@ -152,6 +152,42 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
     }
 )
 
+
+def has_complete_workflow_receipt(
+    record: LedgerRecord, *, requires_policy_review: bool = False
+) -> bool:
+    """Return whether durable workflow evidence exactly authorizes publication."""
+    required = WORKFLOW_RECEIPTS.get(record.workflow_lane, ())
+    workflow_receipts = tuple(
+        receipt
+        for receipt in record.receipts
+        if receipt.phase is WorkflowPhase.WORKFLOW
+    )
+    if not workflow_receipts or workflow_receipts[-1].verdict != "complete":
+        return False
+    receipt_skills = tuple(
+        receipt.partition(":")[0]
+        for receipt in workflow_receipts[-1].detail.splitlines()
+    )
+    complete = (
+        len(receipt_skills) == len(required)
+        and set(receipt_skills) == set(required)
+        and len(set(receipt_skills)) == len(receipt_skills)
+    )
+    if (
+        not complete
+        or not requires_policy_review
+        or record.workflow_lane is not WorkflowLane.CODING
+    ):
+        return complete
+    policy_receipt = next(
+        receipt
+        for receipt in workflow_receipts[-1].detail.splitlines()
+        if receipt.partition(":")[0] == "$agent-policy-judge"
+    )
+    return "not applicable" not in policy_receipt.casefold()
+
+
 REJECTION_ROUTES: Final = MappingProxyType(
     {
         WorkflowPhase.CODING_RED_DOCS: frozenset(
@@ -304,7 +340,8 @@ def apply_worker_result(
     next_phase = next_workflow_phase(record.phase, result.workflow_lane)
     merge_request_draft = result.merge_request_draft or record.merge_request_draft
     if (
-        record.work_kind is WorkKind.ORDINARY
+        record.work_kind
+        not in {WorkKind.EXISTING_MR_REMEDIATION, WorkKind.MERGE_CONFLICT_REPAIR}
         and next_phase is WorkflowPhase.READY_TO_PUBLISH
         and merge_request_draft is None
     ):

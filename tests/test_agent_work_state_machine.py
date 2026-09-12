@@ -368,3 +368,31 @@ def test_ordinary_finalizer_cannot_publish_without_merge_request_metadata(
 
     with pytest.raises(ValueError, match="publication metadata"):
         apply_worker_result(record, result, now=NOW)
+
+
+def test_protected_policy_workflow_cannot_publish_without_merge_request_metadata() -> (
+    None
+):
+    workflow = WorkflowPhase("workflow")
+    record = _record().model_copy(
+        update={
+            "phase": workflow,
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+        }
+    )
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": workflow,
+            "completed_phase": workflow,
+            "workflow_lane": WorkflowLane.CONTENT,
+            "receipts": (
+                "$architect: approved",
+                "$documentation-writer: complete",
+                "$documentation-finalizer: approved",
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="publication metadata"):
+        apply_worker_result(record, result, now=NOW)

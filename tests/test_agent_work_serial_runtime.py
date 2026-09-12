@@ -44,10 +44,12 @@ from agent_work.models import (
     MergeRequestEvidence,
     PipelineEvidence,
     TransitionIntentRecord,
+    WorkflowReceiptRecord,
 )
 from agent_work.repository import RepositoryError
 from agent_work.runtime import RuntimeDependencies, dispatch
 from agent_work.serial import SegmentError, run_segment
+from agent_work.state_machine import WORKFLOW_RECEIPTS
 from agent_work.worker import WorkerInvocation, WorkerProtocolError
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
@@ -1568,8 +1570,89 @@ def test_publication_mismatch_is_an_actionable_block(
     assert gitlab.comments
 
 
-def test_actual_protected_policy_changes_block_before_publication(
+def test_policy_canary_completes_workflow_and_runner_creates_merge_request(
     tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    repository = FakeRepository(config)
+    repository.paths = ("AGENTS.md",)
+    gitlab = FakeGitLab(_issue(description="Update AGENTS.md safely."))
+    invoker = SingleSessionInvoker(lane="content")
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    completed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    published = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert completed is not None and completed.state is RunnerState.PUBLISHING
+    assert published is not None and published.state is RunnerState.OBSERVING
+    assert invoker.phases == ["workflow"]
+    assert repository.pushes == 1
+    assert gitlab.created_merge_requests == 1
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        None,
+        WorkflowReceiptRecord(
+            phase=WorkflowPhase.WORKFLOW,
+            verdict="complete",
+            detail="$architect: approved",
+        ),
+        WorkflowReceiptRecord(
+            phase=WorkflowPhase.WORKFLOW,
+            verdict="complete",
+            detail=(
+                "$architect: approved\n"
+                "$documentation-writer: complete\n"
+                "$wrong-skill: approved"
+            ),
+        ),
+        WorkflowReceiptRecord(
+            phase=WorkflowPhase.WORKFLOW,
+            verdict="complete",
+            detail=(
+                "$architect: approved\n"
+                "$documentation-writer: complete\n"
+                "$documentation-writer: complete"
+            ),
+        ),
+        WorkflowReceiptRecord(
+            phase=WorkflowPhase.WORKFLOW,
+            verdict="rejected",
+            detail=(
+                "$architect: approved\n"
+                "$documentation-writer: complete\n"
+                "$documentation-finalizer: approved"
+            ),
+        ),
+    ],
+)
+def test_protected_policy_publication_with_invalid_receipts_fails_closed(
+    tmp_path: Path, receipt: WorkflowReceiptRecord | None
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
@@ -1580,9 +1663,12 @@ def test_actual_protected_policy_changes_block_before_publication(
             phase=WorkflowPhase.READY_TO_PUBLISH,
         ).model_copy(
             update={
+                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+                "workflow_lane": WorkflowLane.CONTENT,
                 "merge_request_draft": MergeRequestDraft(
-                    title="Change", description="Details"
-                )
+                    title="Policy update", description="Validated policy update."
+                ),
+                "receipts": () if receipt is None else (receipt,),
             }
         )
     )
@@ -1600,8 +1686,245 @@ def test_actual_protected_policy_changes_block_before_publication(
     )
 
     assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.PROTECTED_POLICY_MANUAL
+    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
     assert repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+
+@pytest.mark.parametrize(
+    ("workflow_lane", "receipt", "draft"),
+    [
+        (
+            WorkflowLane.CODING,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-judge' else 'approved'}"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+                ),
+            ),
+            MergeRequestDraft(title="Policy update", description="Validated."),
+        ),
+        (
+            WorkflowLane.CONTENT,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: approved"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+                ),
+            ),
+            MergeRequestDraft(
+                title="Draft: policy update",
+                description=(
+                    "unresolved findings; exact human decisions; tests; cycle ledger; "
+                    "unchanged project-owned values"
+                ),
+            ),
+        ),
+    ],
+)
+def test_protected_policy_publication_rejects_incoherent_receipt_or_draft(
+    tmp_path: Path,
+    workflow_lane: WorkflowLane,
+    receipt: WorkflowReceiptRecord,
+    draft: MergeRequestDraft,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+                "workflow_lane": workflow_lane,
+                "merge_request_draft": draft,
+                "receipts": (receipt,),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("AGENTS.md",)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+
+@pytest.mark.parametrize(
+    ("workflow_lane", "receipt", "draft"),
+    [
+        (
+            WorkflowLane.CODING,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: approved"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+                ),
+            ),
+            MergeRequestDraft(title="Policy update", description="Validated."),
+        ),
+        (
+            WorkflowLane.CONTENT,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: approved"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+                ),
+            ),
+            MergeRequestDraft(
+                title="Draft: policy update",
+                description=(
+                    "unresolved findings and evidence; exact human decisions; tests; "
+                    "cycle ledger; unchanged project-owned values"
+                ),
+            ),
+        ),
+    ],
+)
+def test_protected_policy_publication_with_complete_evidence_publishes(
+    tmp_path: Path,
+    workflow_lane: WorkflowLane,
+    receipt: WorkflowReceiptRecord,
+    draft: MergeRequestDraft,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+                "workflow_lane": workflow_lane,
+                "merge_request_draft": draft,
+                "receipts": (receipt,),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("AGENTS.md",)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert repository.pushes == 1
+    assert gitlab.created_merge_requests == 1
+
+
+@pytest.mark.parametrize(
+    ("receipts", "expected_state", "expected_pushes"),
+    [
+        (
+            (
+                WorkflowReceiptRecord(
+                    phase=WorkflowPhase.WORKFLOW,
+                    verdict="rejected",
+                    detail="$architect: rejected",
+                ),
+                WorkflowReceiptRecord(
+                    phase=WorkflowPhase.WORKFLOW,
+                    verdict="complete",
+                    detail="\n".join(
+                        f"{skill}: approved"
+                        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+                    ),
+                ),
+            ),
+            RunnerState.OBSERVING,
+            1,
+        ),
+        (
+            (
+                WorkflowReceiptRecord(
+                    phase=WorkflowPhase.WORKFLOW,
+                    verdict="complete",
+                    detail="\n".join(
+                        f"{skill}: approved"
+                        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+                    ),
+                ),
+                WorkflowReceiptRecord(
+                    phase=WorkflowPhase.WORKFLOW,
+                    verdict="rejected",
+                    detail="$architect: rejected",
+                ),
+            ),
+            RunnerState.BLOCKED,
+            0,
+        ),
+    ],
+)
+def test_protected_policy_publication_uses_latest_workflow_receipt(
+    tmp_path: Path,
+    receipts: tuple[WorkflowReceiptRecord, WorkflowReceiptRecord],
+    expected_state: RunnerState,
+    expected_pushes: int,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+                "workflow_lane": WorkflowLane.CONTENT,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Policy update", description="Validated."
+                ),
+                "receipts": receipts,
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("AGENTS.md",)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is expected_state
+    assert repository.pushes == expected_pushes
+    assert gitlab.created_merge_requests == expected_pushes
 
 
 def test_closed_issue_is_reconciled_and_lifecycle_label_removed(tmp_path: Path) -> None:

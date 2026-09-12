@@ -31,12 +31,18 @@ from .gitlab import GitLabError
 from .models import (
     GitLabIssue,
     LedgerRecord,
+    MergeRequestDraft,
     MergeRequestEvidence,
     TransitionIntentRecord,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
 from .repository import RepositoryError, RepositoryTransientError
-from .state_machine import apply_worker_result, plan_retry, transition_record
+from .state_machine import (
+    apply_worker_result,
+    has_complete_workflow_receipt,
+    plan_retry,
+    transition_record,
+)
 from .worker import build_worker_prompt, parse_worker_result
 
 
@@ -46,6 +52,24 @@ class SegmentError(RuntimeError):
 
 def _has_workflow_receipt(record: LedgerRecord) -> bool:
     return any(receipt.phase is WorkflowPhase.WORKFLOW for receipt in record.receipts)
+
+
+def _draft_handoff_is_valid(draft: MergeRequestDraft) -> bool:
+    """Validate the mandatory content of a controversial Draft handoff."""
+    if not draft.title.startswith("Draft:"):
+        return True
+    description = draft.description.casefold()
+    return all(
+        phrase in description
+        for phrase in (
+            "unresolved findings",
+            "evidence",
+            "exact human decisions",
+            "tests",
+            "cycle ledger",
+            "unchanged project-owned values",
+        )
+    )
 
 
 def _new_record(
@@ -294,25 +318,6 @@ def _prepare(
             )
         )
         gitlab.transition_labels(issue.iid, label_for_state(record.state))
-    if record.work_kind is WorkKind.PROTECTED_POLICY_MANUAL:
-        blocked = ledger.persist(
-            transition_record(
-                record,
-                RunnerState.BLOCKED,
-                intent=None,
-                error_code=ErrorCode.PROTECTED_POLICY_MANUAL,
-                summary="Protected agent-policy work requires a human-directed lane.",
-                next_action="Run the documented policy workflow manually.",
-            )
-        )
-        gitlab.transition_labels(issue.iid, label_for_state(blocked.state))
-        gitlab.comment_outcome(
-            issue.iid,
-            error_code=str(ErrorCode.PROTECTED_POLICY_MANUAL),
-            summary=blocked.summary,
-            next_action=blocked.next_action,
-        )
-        return blocked
     try:
         if record.work_kind in {
             WorkKind.EXISTING_MR_REMEDIATION,
@@ -585,14 +590,20 @@ def _publish(
             for path in repository.changed_paths(record.worktree)
             if is_protected_policy_path(path)
         )
-        if protected:
+        if protected and (
+            not has_complete_workflow_receipt(record, requires_policy_review=True)
+            or (draft is not None and not _draft_handoff_is_valid(draft))
+        ):
             blocked = ledger.persist(
                 transition_record(
                     record,
                     RunnerState.BLOCKED,
-                    error_code=ErrorCode.PROTECTED_POLICY_MANUAL,
-                    summary="Actual changes include protected agent-policy paths.",
-                    next_action="Publish these changes through a human-directed policy lane.",
+                    error_code=ErrorCode.WORKER_RECEIPT_INVALID,
+                    summary="Protected agent-policy publication evidence is incomplete.",
+                    next_action=(
+                        "Resume the workflow and return complete applicable receipts "
+                        "and coherent merge request metadata."
+                    ),
                 )
             )
             gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))

@@ -226,12 +226,22 @@ validated repair that the trusted runner may publish. `retryable` names a
 transient category and retry deadline. `needs_human` names the blocked reason
 and a concrete action without treating a deliberate stop as failure.
 
-For ordinary issue work, the coding or content finalizer may return
+For every new-MR work kind, including protected policy work, the coding or
+content finalizer may return
 `ready_to_publish` only with a returned or ledger-retained
 `merge_request_draft`. This prevents the trusted runner from reconstructing a
 publication request from untrusted issue text. Existing-MR remediation is the
 intentional exception: its verified MR supplies the publication target, so no
 new draft is required.
+
+The trusted runner permits protected policy paths only after complete applicable
+workflow receipts, a complete verdict, and typed non-empty metadata. A safe
+controversial result uses a `Draft:` title and includes unresolved findings and
+evidence, exact human decisions, tests, cycle ledger, and unchanged
+project-owned values. Missing evidence, unsafe worktree identity, authority
+expansion, project-owned value changes, `needs_human`, or a finalizer rejection
+remain fail-closed before publication. The worker never commits, pushes, or
+creates a merge request.
 
 Architecture, Red/Green, documentation, review, finalization,
 post-publication observation, and repair remain required according to
@@ -249,7 +259,7 @@ Failures are classified before labels or exit codes are chosen:
 | --- | --- | --- |
 | Idle | No resumable record or eligible issue | Successful `idle` |
 | Retryable | Timeout, temporary API failure, transient runner contention | `retry-wait`; up to three automatic attempts |
-| Human-blocked | Ambiguous request, unmet dependency, protected policy lane, unsafe recovery evidence | `agent::blocked` with exact next action |
+| Human-blocked | Ambiguous request, unmet dependency, unsafe policy evidence, unsafe recovery evidence | `agent::blocked` with exact next action |
 | Awaiting review | Exact MR and required receipts verified | `agent::awaiting-human` |
 | Unrecoverable | Ledger cannot be safely read or written, irreconcilable identity conflict | `agent::failed` where safely recordable |
 

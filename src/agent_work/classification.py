@@ -66,11 +66,6 @@ def classify_work(
     requested_paths: tuple[str, ...] = (),
 ) -> WorkClassification:
     """Classify one issue without allowing task text to widen authority."""
-    policy_names = ("AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".cursor/")
-    if any(is_protected_policy_path(path) for path in requested_paths) or any(
-        name in issue.description for name in policy_names
-    ):
-        return WorkClassification(WorkKind.PROTECTED_POLICY_MANUAL)
     marker = parse_remediation_marker(issue.description)
     if marker is not None:
         if marker.project_id != project_id:
@@ -86,4 +81,9 @@ def classify_work(
             marker.source_branch,
             marker.source_sha,
         )
+    policy_names = ("AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".cursor/")
+    if any(is_protected_policy_path(path) for path in requested_paths) or any(
+        name in issue.description for name in policy_names
+    ):
+        return WorkClassification(WorkKind.PROTECTED_POLICY_MANUAL)
     return WorkClassification(WorkKind.ORDINARY)
