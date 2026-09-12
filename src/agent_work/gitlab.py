@@ -562,7 +562,6 @@ class GitLabGateway:
                     fields=(
                         f"title={title}",
                         f"description={description}",
-                        f"labels={_LOW_PRIORITY_LABEL}",
                     ),
                 ),
                 "split child issue",
@@ -570,11 +569,7 @@ class GitLabGateway:
             issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid split child issue") from error
-        if (
-            issue.title != title
-            or marker not in issue.description
-            or _LOW_PRIORITY_LABEL not in issue.labels
-        ):
+        if issue.title != title or marker not in issue.description:
             raise GitLabError("GitLab split child evidence is not exact")
         return issue
 

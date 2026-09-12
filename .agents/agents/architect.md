@@ -171,16 +171,5 @@ exit codes, and parser choice>
   is the design, delegated receipts, and final decision.
 - When a design defers scope, identify each follow-up as a GitLab Feature issue
   with its Problem, Proposed outcome, Acceptance criteria, Priority, Severity,
-  and Scope and dependencies. Put this stable marker in Additional context:
-
-  ```text
-  <!-- agent-architect-deferred-follow-up
-  project_id: <numeric-project-id>
-  fingerprint: <stable-scope>|<stable-summary>
-  -->
-  ```
-
-  The main agent must create it atomically with `agent-priority::low`, use the
-  numeric project ID, verify returned title, marker, and exact low-label
-  evidence, report any unfiled item and its blocker, and never claim it was
-  persisted.
+  and Scope and dependencies. The main agent must use the numeric project ID,
+  report any unfiled item and its blocker, and never claim it was persisted.

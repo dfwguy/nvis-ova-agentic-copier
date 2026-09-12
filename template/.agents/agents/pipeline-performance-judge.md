@@ -195,10 +195,8 @@ Before writing, search open GitLab issues for the stable marker and compare exac
 Reuse an exact open match. Otherwise, after the repository's required
 submission-identity and approval-policy audits, create one GitLab Bug template
 ordinary issue through the numeric `projects/$GITLAB_PROJECT_ID/issues`
-endpoint with `labels=agent-priority::low`, and accept it only when returned
-evidence contains the exact low label, requested title, and marker. Include
-actual behavior, expected behavior, acceptance criteria, relevant run evidence,
-and the marker. Because this is not an
+endpoint. Include actual behavior, expected behavior, acceptance criteria,
+relevant run evidence, and the marker. Because this is not an
 `agent-mr-remediation` issue, a later serial worker uses its normal issue branch
 and the feedback remains valid after the observed MR or SHA changes.
 

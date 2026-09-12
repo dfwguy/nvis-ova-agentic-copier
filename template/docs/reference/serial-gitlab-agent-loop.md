@@ -93,9 +93,7 @@ time evidence fails safely. Labels do not retroactively change existing issues.
 
 Create the two scoped labels during project setup. Humans can assign high to
 expedite fresh work, remove either label for normal ordering, or assign low to
-defer it. Repository-owned factory issues, including split children and
-deferred findings or feedback, receive low atomically on creation and verify
-that GitLab returned it; recovered marker-bound children are not relabeled.
+defer it.
 
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
@@ -108,7 +106,7 @@ that GitLab returned it; recovered marker-bound children are not relabeled.
 | --- | --- | --- |
 | `agent-priority::high` | 0 | Human expedite |
 | no recognized exact value | 1 | Normal; remove a scoped label |
-| `agent-priority::low` | 2 | Human or factory defer |
+| `agent-priority::low` | 2 | Human defer |
 
 The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication

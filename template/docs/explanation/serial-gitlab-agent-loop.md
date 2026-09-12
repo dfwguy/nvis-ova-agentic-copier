@@ -84,8 +84,7 @@ handled active/resumable work and eligibility filtering, exact
 labels) is second, and exact `agent-priority::low` is third. Absolute creation
 time and IID make each rank deterministic without trusting GitLab API ordering;
 invalid timestamp evidence fails closed. Humans use high, low, or label removal
-to target, defer, or normalize new work. Factory-created deferred work receives
-low atomically, while recovered split children retain their existing evidence.
+to target, defer, or normalize new work.
 
 The ledger fills the gap GitLab labels cannot safely represent. It remembers
 the selected issue, coarse workflow state, attempt, retry deadline, durable

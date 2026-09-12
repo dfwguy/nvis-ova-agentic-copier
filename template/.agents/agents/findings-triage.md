@@ -79,12 +79,8 @@ Create only the deduplicated issue through:
 direnv exec . glab api --hostname "$GITLAB_HOST" -X POST \
   "projects/$GITLAB_PROJECT_ID/issues" \
   -f title="<concise finding title>" \
-  -f description="<Bug-template body>" \
-  -f labels="agent-priority::low"
+  -f description="<Bug-template body>"
 ```
-
-Accept creation only when the returned issue contains exact
-`agent-priority::low` as well as the requested title and marker.
 
 If authentication, search, or creation fails, record the non-secret error as
 `unfiled`; never claim persistence.

@@ -227,9 +227,7 @@ before checking repository safeguards.
 
 Enabling the guarded loop authorizes it to resume active or automatically
 resumable work before selecting fresh open, non-confidential issues without a
-lifecycle projection, ledger record, or open split prerequisite. Fresh work
-ranks exact high, normal (no recognized exact priority label), then exact low;
-absolute creation time and IID break each rank. It projects active work as
+lifecycle projection, ledger record, or open split prerequisite. It projects active work as
 `agent::running`, and then uses
 `agent::awaiting-human` only after exact same-project MR evidence, matching
 local/remote branch tips, default target, and `Closes #IID`. Expected human

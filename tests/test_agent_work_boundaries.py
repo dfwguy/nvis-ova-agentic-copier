@@ -581,7 +581,7 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
         + "a" * 64
         + " parent=12 key=child dependencies=none -->"
     )
-    child = _issue_payload(20, ["agent-priority::low"])
+    child = _issue_payload(20)
     child.update({"title": "Child", "description": marker})
     parent = _issue_payload(12)
     parent.update({"state": "closed"})
@@ -608,35 +608,14 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
     gateway.ensure_decomposition_note(12, "note")
     assert gateway.close_issue(12).state == "closed"
     assert any(
-        "title=Child" in command
-        and f"description={marker}" in command
-        and "labels=agent-priority::low" in command
+        "title=Child" in command and f"description={marker}" in command
         for command in commands
+    )
+    assert not any(
+        field.startswith("labels=") for command in commands for field in command
     )
     assert any("body=note" in command for command in commands)
     assert any("state_event=close" in command for command in commands)
-
-
-def test_gitlab_split_child_creation_rejects_missing_atomic_low_priority_evidence(
-    tmp_path: Path,
-) -> None:
-    """A child is accepted only when GitLab confirms the creation label."""
-    marker = (
-        "<!-- agent-work-split:v1 fingerprint="
-        + "a" * 64
-        + " parent=12 key=child dependencies=none -->"
-    )
-    child = _issue_payload(20)
-    child.update({"title": "Child", "description": marker})
-
-    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        del command
-        return CommandResult(0, json.dumps(child), "")
-
-    with pytest.raises(GitLabError, match="split child evidence is not exact"):
-        GitLabGateway(_config(tmp_path), fake).create_split_child(
-            title="Child", description=marker, marker=marker
-        )
 
 
 @pytest.mark.parametrize(

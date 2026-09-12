@@ -37,8 +37,7 @@ loop orders exact high, normal (no recognized exact priority value), then exact
 low; within each group it uses absolute creation time and IID. Apply high to
 expedite an issue, low to defer it, or remove either label to return it to
 normal ordering. Active/resumable work and all eligibility checks still take
-precedence. Do not retroactively label existing issues: newly created
-repository factory work is labeled low atomically and verified by the creator.
+precedence. Do not retroactively label existing issues.
 
 ## Check prerequisites and Developer-readable safeguards
 
