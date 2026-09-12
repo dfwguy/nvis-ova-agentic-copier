@@ -130,8 +130,10 @@ handoff:
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
    the local ledger.
 3. Resume recoverable `agent::running` work before selecting new work.
-4. Select the oldest open, non-confidential issue with no lifecycle projection
-   and no ledger record. Unrelated labels do not affect eligibility.
+4. Filter fresh work to open, non-confidential issues with no lifecycle
+   projection, ledger record, or open split prerequisite. Rank exact high,
+   then normal (no recognized exact priority label), then exact low; within a
+   rank compare absolute creation time and IID.
 5. Classify it before claiming it as ordinary issue work, existing-MR
    remediation, merge-conflict repair, or protected policy work that requires
    the manual lane.

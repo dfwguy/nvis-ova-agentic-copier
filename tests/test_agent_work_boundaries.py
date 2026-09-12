@@ -53,7 +53,12 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
     )
 
 
-def _issue_payload(iid: int = 12, labels: list[str] | None = None) -> dict[str, object]:
+def _issue_payload(
+    iid: int = 12,
+    labels: list[str] | None = None,
+    *,
+    created_at: str = "2026-01-01T00:00:00Z",
+) -> dict[str, object]:
     return {
         "iid": iid,
         "title": "Work",
@@ -61,7 +66,7 @@ def _issue_payload(iid: int = 12, labels: list[str] | None = None) -> dict[str, 
         "labels": labels or [],
         "state": "opened",
         "confidential": False,
-        "created_at": "2026-01-01T00:00:00Z",
+        "created_at": created_at,
         "author": {"username": "ignored"},
     }
 
@@ -491,6 +496,83 @@ def test_gitlab_eligibility_honors_valid_split_dependency_markers(
     assert [issue.iid for issue in gateway.list_eligible()] == [20, 21]
 
 
+def test_gitlab_eligibility_prioritizes_exact_labels_and_absolute_creation_time(
+    tmp_path: Path,
+) -> None:
+    """Fresh work is ranked independently of GitLab's inventory ordering."""
+    issues = [
+        _issue_payload(90, ["agent-priority::low"], created_at="2025-01-01T00:00:00Z"),
+        _issue_payload(10, [], created_at="2025-12-30T00:00:00Z"),
+        _issue_payload(
+            30,
+            [],
+            created_at="2026-01-01T01:00:00+01:00",
+        ),
+        _issue_payload(
+            29,
+            ["agent-priority::urgent"],
+            created_at="2025-12-31T19:00:00-05:00",
+        ),
+        _issue_payload(60, ["agent-priority::high"], created_at="2027-01-01T00:00:00Z"),
+    ]
+    commands: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, json.dumps(issues), "")
+
+    eligible = GitLabGateway(_config(tmp_path), fake).list_eligible()
+
+    assert [issue.iid for issue in eligible] == [60, 10, 29, 30, 90]
+    assert not any("/notes" in command[command.index("-X") + 2] for command in commands)
+
+
+def test_gitlab_eligibility_keeps_high_priority_ineligible_candidates_excluded(
+    tmp_path: Path,
+) -> None:
+    """Priority never bypasses confidentiality, lifecycle, or split prerequisites."""
+    fingerprint = hashlib.sha256(b"310967:12:child").hexdigest()
+    dependent = _issue_payload(23, ["agent-priority::high"])
+    dependent["description"] = (
+        f"<!-- agent-work-split:v1 fingerprint={fingerprint} parent=12 key=child "
+        "dependencies=24 -->"
+    )
+    prerequisite = _issue_payload(24, ["agent::awaiting-human"])
+    prerequisite["state"] = "opened"
+    issues = [
+        _issue_payload(21, ["agent-priority::high"]),
+        _issue_payload(22, ["agent-priority::high", "agent::running"]),
+        dependent,
+        prerequisite,
+    ]
+    issues[0]["confidential"] = True
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        state = next(
+            part.removeprefix("state=") for part in command if part.startswith("state=")
+        )
+        payload = (
+            issues
+            if state == "all"
+            else [issue for issue in issues if issue["state"] == "opened"]
+        )
+        return CommandResult(0, json.dumps(payload), "")
+
+    assert GitLabGateway(_config(tmp_path), fake).list_eligible() == ()
+
+
+def test_gitlab_eligibility_rejects_invalid_priority_timestamp(tmp_path: Path) -> None:
+    """Malformed timestamp evidence cannot silently select fresh work."""
+    invalid = _issue_payload(12, created_at="not-a-timestamp")
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        del command
+        return CommandResult(0, json.dumps([invalid]), "")
+
+    with pytest.raises(GitLabError, match="invalid issue creation time"):
+        GitLabGateway(_config(tmp_path), fake).list_eligible()
+
+
 def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) -> None:
     """The real gateway creates, notes, and closes only exact split evidence."""
     commands: list[tuple[str, ...]] = []
@@ -499,7 +581,7 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
         + "a" * 64
         + " parent=12 key=child dependencies=none -->"
     )
-    child = _issue_payload(20)
+    child = _issue_payload(20, ["agent-priority::low"])
     child.update({"title": "Child", "description": marker})
     parent = _issue_payload(12)
     parent.update({"state": "closed"})
@@ -526,11 +608,35 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
     gateway.ensure_decomposition_note(12, "note")
     assert gateway.close_issue(12).state == "closed"
     assert any(
-        "title=Child" in command and f"description={marker}" in command
+        "title=Child" in command
+        and f"description={marker}" in command
+        and "labels=agent-priority::low" in command
         for command in commands
     )
     assert any("body=note" in command for command in commands)
     assert any("state_event=close" in command for command in commands)
+
+
+def test_gitlab_split_child_creation_rejects_missing_atomic_low_priority_evidence(
+    tmp_path: Path,
+) -> None:
+    """A child is accepted only when GitLab confirms the creation label."""
+    marker = (
+        "<!-- agent-work-split:v1 fingerprint="
+        + "a" * 64
+        + " parent=12 key=child dependencies=none -->"
+    )
+    child = _issue_payload(20)
+    child.update({"title": "Child", "description": marker})
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        del command
+        return CommandResult(0, json.dumps(child), "")
+
+    with pytest.raises(GitLabError, match="split child evidence is not exact"):
+        GitLabGateway(_config(tmp_path), fake).create_split_child(
+            title="Child", description=marker, marker=marker
+        )
 
 
 @pytest.mark.parametrize(

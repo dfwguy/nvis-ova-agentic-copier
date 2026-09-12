@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import cast
 
 from pydantic import ValidationError
@@ -71,6 +72,8 @@ NOTE_AUTHOR_FIELDS = ("username",)
 _MAX_NOTE_PAGES = 100
 _MAX_ISSUE_PAGES = 100
 _MAX_MERGE_REQUEST_PAGES = 100
+_HIGH_PRIORITY_LABEL = "agent-priority::high"
+_LOW_PRIORITY_LABEL = "agent-priority::low"
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -98,6 +101,26 @@ def _require_exact_metadata(
     if mr.title != title or mr.description != description or mr.is_draft != is_draft:
         raise GitLabError("GitLab did not apply merge request metadata")
     return mr
+
+
+def _priority_rank(issue: GitLabIssue) -> int:
+    """Return the queue rank for one eligible issue."""
+    if _HIGH_PRIORITY_LABEL in issue.labels:
+        return 0
+    if _LOW_PRIORITY_LABEL in issue.labels:
+        return 2
+    return 1
+
+
+def _creation_time(issue: GitLabIssue) -> datetime:
+    """Parse one absolute issue creation time or fail closed."""
+    try:
+        created_at = datetime.fromisoformat(issue.created_at)
+    except ValueError as error:
+        raise GitLabError("GitLab returned invalid issue creation time") from error
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise GitLabError("GitLab returned invalid issue creation time")
+    return created_at
 
 
 class GitLabGateway:
@@ -184,7 +207,7 @@ class GitLabGateway:
             raise GitLabError("GitLab returned invalid issue data") from error
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]:
-        """Return open, non-confidential, unprojected issues oldest first."""
+        """Return eligible issues by priority, absolute creation time, and IID."""
         issues = self._issues(state="opened")
         dependency_inventory = (
             self._issues(state="all")
@@ -192,13 +215,23 @@ class GitLabGateway:
             else issues
         )
         by_iid = {issue.iid: issue for issue in dependency_inventory}
-        return tuple(
+        eligible = tuple(
             issue
             for issue in issues
             if issue.state == "opened"
             and not issue.confidential
             and not set(issue.labels).intersection(LIFECYCLE_LABELS)
             and self._split_dependencies_closed(issue, by_iid)
+        )
+        return tuple(
+            sorted(
+                eligible,
+                key=lambda issue: (
+                    _priority_rank(issue),
+                    _creation_time(issue),
+                    issue.iid,
+                ),
+            )
         )
 
     def _split_dependencies_closed(
@@ -526,14 +559,22 @@ class GitLabGateway:
                 self._call(
                     f"projects/{self._config.project_id}/issues",
                     method="POST",
-                    fields=(f"title={title}", f"description={description}"),
+                    fields=(
+                        f"title={title}",
+                        f"description={description}",
+                        f"labels={_LOW_PRIORITY_LABEL}",
+                    ),
                 ),
                 "split child issue",
             )
             issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid split child issue") from error
-        if issue.title != title or marker not in issue.description:
+        if (
+            issue.title != title
+            or marker not in issue.description
+            or _LOW_PRIORITY_LABEL not in issue.labels
+        ):
             raise GitLabError("GitLab split child evidence is not exact")
         return issue
 

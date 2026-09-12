@@ -85,9 +85,11 @@ source branch and default target, matches the local and remote branch tips, and
 GitLab confirms `Closes #IID`; otherwise return a structured blocker without
 manufacturing changes.
 
-The GitLab lifecycle begins when the loop selects the oldest open,
-non-confidential issue without a lifecycle projection or ledger record. Active
-and automatically resumable states project as `agent::running`; verified handoff
+The GitLab lifecycle resumes active and automatically resumable work before it
+selects fresh open, non-confidential issues without a lifecycle projection,
+ledger record, or open split prerequisite. Fresh work ranks exact high, normal
+(no recognized exact priority label), then exact low; absolute creation time and
+IID break each rank. Active states project as `agent::running`; verified handoff
 projects as `agent::awaiting-human`; documented human action projects as
 `agent::blocked`. `agent::failed` is exceptional, not a synonym for a no-op or
 interruption. The XDG-local single-host lock is not a distributed lock or

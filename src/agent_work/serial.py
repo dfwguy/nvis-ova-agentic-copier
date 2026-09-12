@@ -289,7 +289,7 @@ def select_record(
     now: datetime,
     issue_iid: int | None = None,
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
-    """Reconcile durable work before selecting the oldest eligible issue."""
+    """Reconcile work before ranking eligible fresh issues by priority and age."""
     project = gitlab.verify_project()
     records = ledger.list_records()
     if any(record.project_id != project.id for record in records):
