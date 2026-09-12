@@ -16,7 +16,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from .domain import AGENT_OUTCOME_NOTE_MARKER, LIFECYCLE_LABELS
+from .domain import AGENT_OUTCOME_NOTE_MARKER, LIFECYCLE_LABELS, parse_split_marker
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
@@ -65,6 +65,7 @@ PIPELINE_FIELDS = ("id", "status", "sha", "web_url")
 NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
 NOTE_AUTHOR_FIELDS = ("username",)
 _MAX_NOTE_PAGES = 100
+_MAX_ISSUE_PAGES = 100
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -135,8 +136,7 @@ class GitLabGateway:
             fields.append(f"labels={labels}")
         try:
             items: list[dict[str, object]] = []
-            page = 1
-            while True:
+            for page in range(1, _MAX_ISSUE_PAGES + 1):
                 page_items = self._items(
                     self._call(
                         f"projects/{self._config.project_id}/issues",
@@ -147,7 +147,8 @@ class GitLabGateway:
                 items.extend(page_items)
                 if len(page_items) < 100:
                     break
-                page += 1
+            else:
+                raise GitLabError("GitLab returned too many issue pages")
             return tuple(
                 GitLabIssue.model_validate(_selected(item, ISSUE_FIELDS))
                 for item in items
@@ -157,13 +158,42 @@ class GitLabGateway:
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]:
         """Return open, non-confidential, unprojected issues oldest first."""
+        issues = self._issues(state="opened")
+        dependency_inventory = (
+            self._issues(state="all")
+            if any("<!-- agent-work-split:v1" in issue.description for issue in issues)
+            else issues
+        )
+        by_iid = {issue.iid: issue for issue in dependency_inventory}
         return tuple(
             issue
-            for issue in self._issues(state="opened")
+            for issue in issues
             if issue.state == "opened"
             and not issue.confidential
             and not set(issue.labels).intersection(LIFECYCLE_LABELS)
+            and self._split_dependencies_closed(issue, by_iid)
         )
+
+    def _split_dependencies_closed(
+        self, issue: GitLabIssue, by_iid: dict[int, GitLabIssue]
+    ) -> bool:
+        """Validate split provenance and defer children with open prerequisites."""
+        try:
+            parsed = parse_split_marker(issue.description, self._config.project_id)
+        except ValueError as error:
+            raise GitLabError("GitLab split marker is invalid") from error
+        if parsed is None:
+            return True
+        parent, _key, dependency_iids = parsed
+        if parent == issue.iid:
+            raise GitLabError("GitLab split marker is invalid")
+        if issue.iid in dependency_iids:
+            raise GitLabError("GitLab split marker is invalid")
+        try:
+            dependency_issues = tuple(by_iid[value] for value in dependency_iids)
+        except KeyError as error:
+            raise GitLabError("GitLab split dependency is missing") from error
+        return all(dependency.state == "closed" for dependency in dependency_issues)
 
     def list_projected(self) -> tuple[GitLabIssue, ...]:
         """Return issues carrying any lifecycle projection."""
@@ -370,3 +400,59 @@ class GitLabGateway:
             method="POST",
             fields=(f"body={body}",),
         )
+
+    def split_child_inventory(self) -> tuple[GitLabIssue, ...]:
+        """Return one bounded inventory used for a decomposition segment."""
+        return tuple(
+            issue
+            for issue in self._issues(state="all")
+            if "<!-- agent-work-split:v1" in issue.description
+        )
+
+    def create_split_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue:
+        """Create and verify one marker-bound child issue."""
+        try:
+            payload = self._mapping(
+                self._call(
+                    f"projects/{self._config.project_id}/issues",
+                    method="POST",
+                    fields=(f"title={title}", f"description={description}"),
+                ),
+                "split child issue",
+            )
+            issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid split child issue") from error
+        if issue.title != title or marker not in issue.description:
+            raise GitLabError("GitLab split child evidence is not exact")
+        return issue
+
+    def ensure_decomposition_note(self, iid: int, body: str) -> None:
+        """Create at most one exact parent decomposition note."""
+        if any(note.body == body for note in self.fetch_issue_notes(iid)):
+            return
+        self._call(
+            f"projects/{self._config.project_id}/issues/{iid}/notes",
+            method="POST",
+            fields=(f"body={body}",),
+        )
+
+    def close_issue(self, iid: int) -> GitLabIssue:
+        """Close one parent issue and return exact resulting evidence."""
+        try:
+            payload = self._mapping(
+                self._call(
+                    f"projects/{self._config.project_id}/issues/{iid}",
+                    method="PUT",
+                    fields=("state_event=close",),
+                ),
+                "closed issue",
+            )
+            issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid closed issue") from error
+        if issue.iid != iid or issue.state != "closed":
+            raise GitLabError("GitLab did not close split parent")
+        return issue

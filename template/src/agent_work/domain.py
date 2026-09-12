@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +30,7 @@ class RunnerState(StrEnum):
     PUBLISHING = "publishing"
     OBSERVING = "observing"
     REPAIR = "repair"
+    DECOMPOSING = "decomposing"
     BLOCKED = "blocked"
     AWAITING_HUMAN = "awaiting-human"
     FAILED = "failed"
@@ -112,6 +115,7 @@ ACTIVE_STATES = frozenset(
         RunnerState.PUBLISHING,
         RunnerState.OBSERVING,
         RunnerState.REPAIR,
+        RunnerState.DECOMPOSING,
     }
 )
 
@@ -123,6 +127,46 @@ LIFECYCLE_LABELS: Final = (
 )
 
 AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"
+_SPLIT_MARKER: Final = re.compile(
+    r"<!-- agent-work-split:v1 fingerprint=([0-9a-f]{64}) parent=([1-9][0-9]*) key=([a-z0-9]+(?:-[a-z0-9]+)*) dependencies=(none|[1-9][0-9]*(?:,[1-9][0-9]*)*) -->"
+)
+
+
+def split_fingerprint(project_id: int, parent_iid: int, key: str) -> str:
+    """Return the deterministic identity fingerprint for one split child."""
+    return hashlib.sha256(
+        f"{project_id}:{parent_iid}:{key}".encode("ascii")
+    ).hexdigest()
+
+
+def render_split_marker(
+    project_id: int, parent_iid: int, key: str, dependency_iids: tuple[int, ...]
+) -> str:
+    """Render the canonical durable split marker."""
+    dependencies = ",".join(str(iid) for iid in dependency_iids) or "none"
+    return f"<!-- agent-work-split:v1 fingerprint={split_fingerprint(project_id, parent_iid, key)} parent={parent_iid} key={key} dependencies={dependencies} -->"
+
+
+def parse_split_marker(
+    description: str, project_id: int
+) -> tuple[int, str, tuple[int, ...]] | None:
+    """Parse and validate one split marker, failing closed for malformed sentinels."""
+    match = _SPLIT_MARKER.search(description)
+    if match is None:
+        if "<!-- agent-work-split:v1" in description:
+            raise ValueError("malformed split marker")
+        return None
+    fingerprint, parent, key, dependencies = match.groups()
+    dependency_iids = (
+        ()
+        if dependencies == "none"
+        else tuple(int(value) for value in dependencies.split(","))
+    )
+    if fingerprint != split_fingerprint(project_id, int(parent), key) or len(
+        set(dependency_iids)
+    ) != len(dependency_iids):
+        raise ValueError("invalid split marker")
+    return int(parent), key, dependency_iids
 
 
 @dataclass(frozen=True)

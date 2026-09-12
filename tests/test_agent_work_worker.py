@@ -215,7 +215,7 @@ def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:
     assert "current lane and workflow unchanged" in normalized
 
 
-def test_workflow_prompt_requires_stable_nonretrying_split_handoff() -> None:
+def test_workflow_prompt_requires_structured_runner_owned_split_handoff() -> None:
     prompt = build_worker_prompt(
         {
             "state": "executing",
@@ -230,12 +230,15 @@ def test_workflow_prompt_requires_stable_nonretrying_split_handoff() -> None:
         issue_description="This may require ordered merge requests.",
     ).casefold()
 
-    assert "result_kind=needs_human" in prompt
+    assert "result_kind=split_required" in prompt
     assert "completed_phase=workflow" in prompt
-    assert "error_code=split_required" in prompt
-    assert "stable, concise, redacted summary" in prompt
-    assert "ordered independently mergeable slice proposals" in prompt
-    assert "human direction" in prompt
+    assert "structured split_plan" in prompt
+    assert "ordinal" in prompt
+    assert "key" in prompt
+    assert "depends_on" in prompt
+    assert "trusted runner" in prompt
+    assert "not worker" in prompt
+    assert "no human approval step" in prompt
     assert "stop before red or any worktree mutation" in prompt
     assert "do not create or update child issues" in prompt
     assert "do not automatically retry" in prompt

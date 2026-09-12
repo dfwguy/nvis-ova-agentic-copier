@@ -39,6 +39,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         ),
         RunnerState.EXECUTING: frozenset(
             {
+                RunnerState.DECOMPOSING,
                 RunnerState.EXECUTING,
                 RunnerState.RETRY_WAIT,
                 RunnerState.PUBLISHING,
@@ -50,6 +51,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         ),
         RunnerState.RETRY_WAIT: frozenset(
             {
+                RunnerState.DECOMPOSING,
                 RunnerState.EXECUTING,
                 RunnerState.PUBLISHING,
                 RunnerState.OBSERVING,
@@ -88,6 +90,14 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.RETRY_WAIT,
                 RunnerState.BLOCKED,
                 RunnerState.FAILED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.DECOMPOSING: frozenset(
+            {
+                RunnerState.DECOMPOSING,
+                RunnerState.RETRY_WAIT,
+                RunnerState.BLOCKED,
                 RunnerState.COMPLETE,
             }
         ),
@@ -284,6 +294,21 @@ def apply_worker_result(
                 record,
                 RunnerState.BLOCKED,
                 error_code=result.error_code,
+                summary=result.redacted_summary or result.change_summary,
+                next_action=result.next_action,
+            )
+        )
+    if result.result_kind == "split_required":
+        return PlannedOutcome(
+            transition_record(
+                record,
+                RunnerState.DECOMPOSING,
+                decomposition_plan=result.split_plan,
+                decomposition_progress=(),
+                merge_request_draft=None,
+                merge_request_iid=None,
+                merge_request_url=None,
+                error_code=None,
                 summary=result.redacted_summary or result.change_summary,
                 next_action=result.next_action,
             )

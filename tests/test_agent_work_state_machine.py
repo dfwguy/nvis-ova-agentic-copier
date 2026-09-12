@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from pydantic import ValidationError
 
 from agent_work.domain import (
     ErrorCode,
@@ -25,9 +26,14 @@ from agent_work.domain import (
     WorkflowPhase,
     WorkKind,
 )
-from agent_work.models import LedgerRecord, MergeRequestDraft, WorkerResultEnvelope
+from agent_work.models import (
+    LedgerRecord,
+    MergeRequestDraft,
+    SplitChildEvidence,
+    WorkerResultEnvelope,
+)
 from agent_work.state_machine import apply_worker_result, plan_retry
-from agent_work.worker import parse_worker_result
+from agent_work.worker import WorkerProtocolError, parse_worker_result
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
 
@@ -44,6 +50,54 @@ def _record(*, retry_count: int = 0) -> LedgerRecord:
         worktree=Path("/state/worktrees/12"),
         retry_count=retry_count,
     )
+
+
+def test_ledger_rejects_decomposition_progress_without_a_plan() -> None:
+    payload = _record().model_dump(mode="python")
+    payload["decomposition_progress"] = (
+        SplitChildEvidence(ordinal=1, key="one", fingerprint="a" * 64, issue_iid=13),
+    )
+    with pytest.raises(ValidationError):
+        LedgerRecord.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"ordinal": 2, "key": "one", "fingerprint": "a" * 64, "issue_iid": 13},
+        {"ordinal": 1, "key": "wrong", "fingerprint": "a" * 64, "issue_iid": 13},
+        {"ordinal": 1, "key": "one", "fingerprint": "b" * 64, "issue_iid": 12},
+    ],
+)
+def test_ledger_rejects_incoherent_split_evidence(evidence: dict[str, object]) -> None:
+    payload = _record().model_dump(mode="python")
+    payload.update(
+        {
+            "state": RunnerState.DECOMPOSING,
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "decomposition_plan": {
+                "slices": [
+                    {
+                        "ordinal": 1,
+                        "key": "one",
+                        "title": "One",
+                        "description": "One.",
+                        "depends_on": [],
+                    },
+                    {
+                        "ordinal": 2,
+                        "key": "two",
+                        "title": "Two",
+                        "description": "Two.",
+                        "depends_on": [1],
+                    },
+                ]
+            },
+            "decomposition_progress": (evidence,),
+        }
+    )
+    with pytest.raises(ValidationError):
+        LedgerRecord.model_validate(payload)
 
 
 def _result(
@@ -181,7 +235,9 @@ def test_needs_human_result_becomes_a_documented_block() -> None:
     assert outcome.record.next_action == "Run the policy workflow manually."
 
 
-def test_split_required_result_blocks_without_changing_retry_state() -> None:
+def test_split_required_workflow_result_persists_a_validated_decomposition_plan() -> (
+    None
+):
     retry_at = NOW + timedelta(minutes=7)
     record = _record(retry_count=2).model_copy(
         update={
@@ -198,12 +254,28 @@ def test_split_required_result_blocks_without_changing_retry_state() -> None:
         "expected_state": "executing",
         "expected_phase": "workflow",
         "workflow_lane": "unknown",
-        "result_kind": "needs_human",
+        "result_kind": "split_required",
         "phase_status": "complete",
         "completed_phase": "workflow",
-        "receipts": [],
+        "split_plan": {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "protocol-model",
+                    "title": "Add validated split protocol models",
+                    "description": "Add the boundary models and compatibility checks.",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "runner-decomposition",
+                    "title": "Persist and execute decomposition",
+                    "description": "Create recoverable child issues from the durable plan.",
+                    "depends_on": [1],
+                },
+            ]
+        },
         "change_summary": "Issue requires decomposition before work begins.",
-        "error_code": "split_required",
         "redacted_summary": (
             "1. Local manifest and preview. "
             "2. Upstream discovery and deduplication. "
@@ -221,13 +293,12 @@ def test_split_required_result_blocks_without_changing_retry_state() -> None:
     outcome = apply_worker_result(record, result, now=NOW)
 
     assert result.protocol_version == 1
-    assert result.error_code is not None
-    assert result.error_code.value == "split_required"
-    assert outcome.record.state is RunnerState.BLOCKED
+    assert outcome.record.state is RunnerState.DECOMPOSING
     assert outcome.record.phase is WorkflowPhase.WORKFLOW
+    assert outcome.record.decomposition_plan == result.split_plan
     assert outcome.record.retry_count == 2
     assert outcome.record.retry_at == retry_at
-    assert outcome.record.error_code is result.error_code
+    assert outcome.record.error_code is None
     assert outcome.record.summary == result.redacted_summary
     assert outcome.record.next_action == result.next_action
 
@@ -237,6 +308,205 @@ def test_split_required_result_blocks_without_changing_retry_state() -> None:
     legacy_record = LedgerRecord.model_validate(record.model_dump(mode="json"))
     assert legacy_envelope.protocol_version == 1
     assert legacy_record.schema_version == 1
+
+
+@pytest.mark.parametrize(
+    "split_plan",
+    [
+        {
+            "slices": [
+                {"ordinal": 1, "key": "one", "title": "One", "description": "First"}
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": ordinal,
+                    "key": f"slice-{ordinal}",
+                    "title": f"Slice {ordinal}",
+                    "description": "Bounded plan test.",
+                    "depends_on": [],
+                }
+                for ordinal in range(1, 27)
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "first",
+                    "title": "First",
+                    "description": "First slice.",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "second",
+                    "title": "Second",
+                    "description": "Second slice.",
+                    "depends_on": [1, 1],
+                },
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "one",
+                    "title": "One",
+                    "description": "First",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 3,
+                    "key": "three",
+                    "title": "Three",
+                    "description": "Third",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "not a slug",
+                    "title": "One",
+                    "description": "First",
+                    "depends_on": [1],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "two",
+                    "title": "Two",
+                    "description": "Second",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "duplicate",
+                    "title": "One",
+                    "description": "First",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "duplicate",
+                    "title": "Two",
+                    "description": "Second",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "one",
+                    "title": "One",
+                    "description": "First",
+                    "depends_on": [2],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "two",
+                    "title": "Two",
+                    "description": "Second",
+                    "depends_on": [],
+                },
+            ]
+        },
+    ],
+)
+def test_split_required_protocol_rejects_malformed_or_non_topological_plans(
+    split_plan: dict[str, object],
+) -> None:
+    payload = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": 0,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "split_required",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "split_plan": split_plan,
+        "change_summary": "The issue needs independently mergeable slices.",
+        "next_action": "Create the planned child issues.",
+    }
+
+    with pytest.raises(WorkerProtocolError):
+        parse_worker_result(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"result_kind": "ready_to_publish"},
+        {"expected_phase": "coding-green", "completed_phase": "coding-green"},
+        {"workflow_lane": "coding"},
+        {"phase_status": "rejected"},
+        {"receipts": ["$architect: not allowed"]},
+        {
+            "merge_request_draft": {
+                "title": "Forbidden",
+                "description": "Split routes never publish a parent MR.",
+            }
+        },
+        {"error_code": "split_required"},
+    ],
+)
+def test_split_protocol_rejects_contextual_ambiguity(
+    overrides: dict[str, object],
+) -> None:
+    payload: dict[str, object] = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": 0,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "split_required",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "split_plan": {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "first",
+                    "title": "First",
+                    "description": "First slice.",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "second",
+                    "title": "Second",
+                    "description": "Second slice.",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        "change_summary": "The parent is decomposed into two child issues.",
+        "next_action": "The trusted runner creates the planned children.",
+    }
+    payload.update(overrides)
+
+    with pytest.raises(WorkerProtocolError):
+        parse_worker_result(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        )
 
 
 def test_successful_postpublication_repair_reenters_downstream_validation() -> None:
