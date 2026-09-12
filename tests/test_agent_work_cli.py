@@ -56,16 +56,17 @@ def test_bare_loop_run_is_a_read_only_preview() -> None:
 
 
 def test_apply_flag_reaches_the_single_dispatch_boundary() -> None:
-    seen: list[bool] = []
+    seen: list[tuple[CommandRequest, bool]] = []
 
-    def dispatch(_request: object, *, apply: bool) -> CommandReport:
-        seen.append(apply)
+    def dispatch(request: object, *, apply: bool) -> CommandReport:
+        seen.append((cast(CommandRequest, request), apply))
         return CommandReport(
             command="loop.run", applied=apply, outcome="segment_complete"
         )
 
     assert main(["loop", "run", "--apply"], dispatch=dispatch) == 0
-    assert seen == [True]
+    assert seen[0][1] is True
+    assert seen[0][0].max_activation_seconds == 10_800
 
 
 def test_loop_run_exposes_bounded_activation_controls() -> None:
@@ -100,9 +101,8 @@ def test_loop_run_exposes_bounded_activation_controls() -> None:
     )
 
     assert result == 0
-    assert defaults.timeout_seconds == 1800
     assert defaults.max_segments == 16
-    assert defaults.max_activation_seconds == 3600
+    assert defaults.max_activation_seconds == 10_800
     assert seen[0].max_segments == 3
     assert seen[0].max_activation_seconds == 120
     assert json.loads(output[0]) == {
@@ -128,19 +128,18 @@ def test_loop_run_help_documents_preview_apply_and_default_bounds(
     assert raised.value.code == 0
     assert "Preview the next safe action without mutation" in help_text
     assert "omit for a read-only preview" in help_text
-    assert "maximum seconds for each workflow session (default: 1800)" in help_text
     assert (
         "maximum persisted workflow attempts in one applied activation (default: 16)"
         in help_text
     )
-    assert "maximum seconds for one applied activation (default: 3600)" in help_text
+    assert "maximum seconds for one applied activation (default: 10800)" in help_text
+    assert "--timeout-seconds" not in help_text
     assert captured.err == ""
 
 
 @pytest.mark.parametrize(
     ("flag", "sentinel"),
     [
-        ("--timeout-seconds", 1801),
         ("--max-segments", 17),
         ("--max-activation-seconds", 3601),
     ],
@@ -184,6 +183,20 @@ def test_loop_run_rejects_invalid_activation_bounds(flag: str, value: str) -> No
         build_parser().parse_args(["loop", "run", flag, value])
 
     assert raised.value.code == 2
+
+
+def test_loop_run_rejects_the_removed_per_session_timeout_option() -> None:
+    with pytest.raises(SystemExit) as raised:
+        build_parser().parse_args(["loop", "run", "--timeout-seconds", "1800"])
+
+    assert raised.value.code == 2
+
+
+def test_command_request_defaults_to_one_three_hour_activation_budget() -> None:
+    request = CommandRequest(command="loop.run")
+
+    assert request.max_activation_seconds == 10_800
+    assert not hasattr(request, "timeout_seconds")
 
 
 def test_human_output_reports_the_final_activation_checkpoint() -> None:

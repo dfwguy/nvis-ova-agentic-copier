@@ -16,6 +16,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
+
 
 class RunnerState(StrEnum):
     """Durable lifecycle states for one work item."""
@@ -140,9 +142,8 @@ class CommandRequest:
     command: str
     issue_iid: int | None = None
     plan_file: Path | None = None
-    timeout_seconds: int = 1800
     max_segments: int = 16
-    max_activation_seconds: int = 3600
+    max_activation_seconds: int = DEFAULT_MAX_ACTIVATION_SECONDS
     debug: bool = False
 
 

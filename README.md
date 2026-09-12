@@ -35,11 +35,12 @@ uv run agent-work loop run --apply --json
 ```
 
 By default, one activation advances one issue through up to 16 persisted
-workflow attempts within 3,600 seconds; each workflow session remains capped
-at 1,800 seconds. A new issue attempts its full applicable workflow in one worker
-session, while saved work resumes from its durable worktree and recorded outer
-phase. Use `--max-segments` or
-`--max-activation-seconds` to tighten the activation bounds.
+workflow attempts within one 10,800-second (three-hour) overall work budget.
+Each workflow invocation receives the positive, ceil-rounded time remaining
+from that same budget. A new issue attempts its full applicable workflow in one
+worker session, while saved work resumes from its durable worktree and recorded
+outer phase. Use `--max-segments` or `--max-activation-seconds` to tighten the
+activation bounds.
 
 For scheduled operation, safeguards, status checks, and troubleshooting, see
 [How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).

@@ -20,4 +20,4 @@ ExecStart=/usr/bin/env bash ${AGENT_WORK_CHECKOUT}/scripts/agent-work-systemd-ru
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=agentic-copier-agent-work
-TimeoutStartSec=90min
+TimeoutStartSec=190min

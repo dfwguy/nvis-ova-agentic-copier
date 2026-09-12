@@ -155,14 +155,15 @@ re-enters its coarse `WORKFLOW` state. Existing legacy phase-ledger values
 finish their recorded route; the first rollout deliberately adds no sidecar checkpoints for
 Architect, Red, Green, documentation, or judges.
 
-The default activation runs at most 16 workflow attempts or 3,600 seconds, and
-each workflow-owning worker has a 1,800-second timeout. Its effective timeout
-is capped to the activation time remaining. An exhausted effective timeout is
+The default activation runs at most 16 workflow attempts within one 10,800-second
+(three-hour) overall work budget. Each workflow-owning invocation receives the
+positive, ceil-rounded time remaining from that budget. An exhausted budget is
 handled by the normal durable-worktree retry and recovery path. The timer waits
 20 minutes after the complete activation, so that interval controls idle
 polling and external waits rather than spacing internal handoffs. The systemd
-service allows 90 minutes for the bounded activation and orderly shutdown. The
-timer does not own workflow state or perform checkout cleanup.
+service allows 190 minutes: the work budget plus a bounded ten-minute orderly
+shutdown margin. The timer does not own workflow state or perform checkout
+cleanup.
 
 ## Durable ledger and worktrees
 

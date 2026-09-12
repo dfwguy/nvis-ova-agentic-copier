@@ -31,7 +31,7 @@ related:
 ```text
 agent-work loop run [--apply] [--max-segments COUNT]
                     [--max-activation-seconds SECONDS]
-                    [--timeout-seconds SECONDS] [--json] [--debug]
+                    [--json] [--debug]
 agent-work loop status [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
 agent-work migration preview [--json] [--debug]
@@ -40,12 +40,12 @@ agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 
 An applied `loop run` performs one bounded, recoverable activation for one
 issue. The worker owns the complete applicable workflow session. The defaults
-are 16 workflow attempts, 3,600 seconds for the complete activation, and 1,800
-seconds for each workflow session. `--max-segments`,
-`--max-activation-seconds`, and `--timeout-seconds` override those respective
-bounds. The runner caps the workflow session timeout to the activation time
-that remains. Exhausting that effective timeout follows the normal retry and
-durable-worktree recovery contract.
+are 16 workflow attempts and one 10,800-second (three-hour) overall work
+budget for the complete activation. `--max-segments` and
+`--max-activation-seconds` override those respective bounds. Each workflow
+invocation receives the positive, ceil-rounded time remaining from that single
+budget. Exhausting the budget follows the normal retry and durable-worktree
+recovery contract.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
@@ -125,7 +125,8 @@ external evidence such as a pending pipeline; reaches `retry-wait`, `blocked`,
 `failed`, `awaiting-human`, or completion; or exhausts its workflow or wall-time
 limit. The timer uses `OnUnitInactiveSec=20min`, measured after the complete
 activation finishes, for idle polling and external waits. The service timeout
-is 90 minutes. The loop is serial per host and project, not multi-host
+is 190 minutes: the three-hour work budget plus a bounded ten-minute orderly
+shutdown margin. The loop is serial per host and project, not multi-host
 coordination.
 
 ## Ledger and worktrees

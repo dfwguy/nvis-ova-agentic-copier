@@ -2459,7 +2459,7 @@ def test_apply_respects_activation_time_budget_between_segments(
     assert report.items[0].state is RunnerState.EXECUTING
 
 
-def test_apply_caps_the_worker_timeout_to_the_remaining_activation_budget(
+def test_apply_gives_each_workflow_invocation_the_remaining_activation_budget(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -2472,7 +2472,7 @@ def test_apply_caps_the_worker_timeout_to_the_remaining_activation_budget(
         )
     )
     invoker = BatchingInvoker()
-    readings = iter((0.0, 0.0, 30.2, 121.0))
+    readings = iter((0.0, 0.0, 0.2, 12.2, 12.2, 10_801.0))
     dependencies = replace(
         _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
         invoke=invoker,
@@ -2482,18 +2482,20 @@ def test_apply_caps_the_worker_timeout_to_the_remaining_activation_budget(
     report = dispatch(
         CommandRequest(
             command="loop.run",
-            timeout_seconds=1800,
             max_segments=16,
-            max_activation_seconds=120,
+            max_activation_seconds=10_800,
         ),
         apply=True,
         dependencies=dependencies,
     )
 
     assert report.stop_reason == "time_limit"
-    assert invoker.timeouts == [90]
-    assert "effective bounded worker budget for this session is 90 seconds" in (
+    assert invoker.timeouts == [10_800, 10_788]
+    assert "effective bounded worker budget for this session is 10800 seconds" in (
         invoker.prompts[0].casefold()
+    )
+    assert "effective bounded worker budget for this session is 10788 seconds" in (
+        invoker.prompts[1].casefold()
     )
 
 

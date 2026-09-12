@@ -97,13 +97,15 @@ The activation yields for terminal or human-facing states, a future retry, a
 pending external result, lack of progress, or its workflow or wall-time limit.
 The 20-minute timer delay begins only after the complete activation finishes,
 so it serves idle polling and external waits rather than pacing internal
-workflow phases. A 90-minute service timeout leaves room for the default
-one-hour activation limit and orderly shutdown. This does not claim distributed
-coordination: operators must not run a second timer for the same project.
+workflow phases. A 190-minute service timeout leaves room for the three-hour
+overall work budget and a bounded ten-minute orderly shutdown margin. This does
+not claim distributed coordination: operators must not run a second timer for
+the same project.
 
-The activation deadline bounds the workflow-owning worker. If it exhausts its
-effective timeout, the runner records the timeout and recovers the durable
-worktree through the normal retry path rather than losing its changes.
+The activation deadline is the workflow-owning worker's one overall work
+budget. Each invocation receives the positive, ceil-rounded time remaining. If
+that budget is exhausted, the runner records the timeout and recovers the
+durable worktree through the normal retry path rather than losing its changes.
 
 GitLab remains preferable to a webhook receiver or a filesystem queue because
 it already supplies the human work record and MR handoff. The local ledger is
