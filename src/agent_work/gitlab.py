@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import cast
 
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ from .models import (
     MergeRequestDraft,
     MergeRequestEvidence,
     PipelineEvidence,
+    render_decision_review_notice,
 )
 from .ports import CommandRunner
 
@@ -60,6 +62,8 @@ MR_FIELDS = (
     "sha",
     "has_conflicts",
     "description",
+    "title",
+    "draft",
 )
 PIPELINE_FIELDS = ("id", "status", "sha", "web_url")
 NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
@@ -71,6 +75,28 @@ _MAX_ISSUE_PAGES = 100
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
     """Select repository-owned fields from a larger GitLab response."""
     return {field: payload[field] for field in fields if field in payload}
+
+
+def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
+    """Build one canonical description with exactly one closing reference."""
+    body = (
+        render_decision_review_notice(draft.decision_review, draft.description)
+        if draft.decision_review is not None
+        else draft.description.rstrip()
+    )
+    closing = f"Closes #{issue_iid}"
+    pattern = re.compile(rf"^\s*closes\s*#\s*{issue_iid}\s*$", re.IGNORECASE)
+    retained = "\n".join(line for line in body.splitlines() if not pattern.match(line))
+    return f"{retained.rstrip()}\n\n{closing}"
+
+
+def _require_exact_metadata(
+    mr: MergeRequestEvidence, *, title: str, description: str, is_draft: bool
+) -> MergeRequestEvidence:
+    """Reject a GitLab response that did not apply requested MR metadata."""
+    if mr.title != title or mr.description != description or mr.is_draft != is_draft:
+        raise GitLabError("GitLab did not apply merge request metadata")
+    return mr
 
 
 class GitLabGateway:
@@ -320,7 +346,7 @@ class GitLabGateway:
         draft: MergeRequestDraft,
     ) -> MergeRequestEvidence:
         """Create one same-project human-review merge request."""
-        description = f"{draft.description.rstrip()}\n\nCloses #{issue_iid}"
+        description = _desired_description(draft, issue_iid)
         try:
             payload = self._mapping(
                 self._call(
@@ -337,7 +363,57 @@ class GitLabGateway:
                 ),
                 "merge request",
             )
-            return MergeRequestEvidence.model_validate(_selected(payload, MR_FIELDS))
+            return _require_exact_metadata(
+                MergeRequestEvidence.model_validate(_selected(payload, MR_FIELDS)),
+                title=draft.title,
+                description=description,
+                is_draft=draft.title.startswith("Draft:"),
+            )
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid merge request data") from error
+
+    def reconcile_merge_request(
+        self, mr: MergeRequestEvidence, *, issue_iid: int, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence:
+        """Converge one existing MR on durable metadata without clearing Draft."""
+        desired_description = _desired_description(draft, issue_iid)
+        desired_draft = mr.is_draft or draft.title.startswith("Draft:")
+        desired_title = (
+            mr.title
+            if mr.is_draft and not draft.title.startswith("Draft:")
+            else draft.title
+        )
+        fields = tuple(
+            part
+            for part, changed in (
+                (f"title={desired_title}", mr.title != desired_title),
+                (
+                    f"description={desired_description}",
+                    mr.description != desired_description,
+                ),
+            )
+            if changed
+        )
+        if not fields:
+            return mr
+        try:
+            payload = self._mapping(
+                self._call(
+                    f"projects/{self._config.project_id}/merge_requests/{mr.iid}",
+                    method="PUT",
+                    fields=fields,
+                ),
+                "merge request",
+            )
+            returned = MergeRequestEvidence.model_validate(
+                _selected(payload, MR_FIELDS)
+            )
+            return _require_exact_metadata(
+                returned,
+                title=desired_title,
+                description=desired_description,
+                is_draft=desired_draft,
+            )
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid merge request data") from error
 

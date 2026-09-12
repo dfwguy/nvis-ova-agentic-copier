@@ -240,6 +240,13 @@ def build_worker_prompt(
         "For a safe controversial policy handoff, the title must begin 'Draft:' and the description "
         "must list unresolved findings and evidence, exact human decisions, tests, the cycle ledger, "
         "and unchanged project-owned values. "
+        "Reasonable uncertainty or bounded decisions continue through validation and return "
+        "ready_to_publish with Draft: merge_request_draft metadata containing a complete "
+        "decision_review: decisions and assumptions, alternatives_considered, risks, exact "
+        "reviewer checks, unresolved findings, evidence, tests, correction_cycle_ledger, and "
+        "unchanged_project_owned_values. Use needs_human only for unsafe actions, missing "
+        "authority or credentials, irreconcilable requirements, or exact unapproved "
+        "project-owned values. "
         "Return exactly one protocol_version=1 JSON object inside "
         "<agent-work-result>...</agent-work-result>."
     )

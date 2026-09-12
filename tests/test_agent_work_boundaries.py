@@ -24,7 +24,13 @@ from pytest_subprocess import FakeProcess
 from agent_work.cli import main
 from agent_work.domain import LIFECYCLE_LABELS
 from agent_work.gitlab import GitLabError, GitLabGateway
-from agent_work.models import AgentWorkConfig, CommandReport, MergeRequestDraft
+from agent_work.models import (
+    AgentWorkConfig,
+    CommandReport,
+    DecisionReviewSignal,
+    MergeRequestDraft,
+    MergeRequestEvidence,
+)
 from agent_work.repository import (
     CommandResult,
     GitRepository,
@@ -87,14 +93,44 @@ def _mr_payload(description: str = "") -> dict[str, object]:
         "sha": "a" * 40,
         "has_conflicts": False,
         "description": description,
+        "title": "",
+        "draft": False,
         "references": {"short": "!88"},
     }
+
+
+def _mr_evidence(description: str = "") -> MergeRequestEvidence:
+    return MergeRequestEvidence.model_validate(
+        {
+            key: value
+            for key, value in _mr_payload(description).items()
+            if key != "references"
+        }
+    )
+
+
+def _decision_review() -> DecisionReviewSignal:
+    return DecisionReviewSignal(
+        decisions=("Keep the retry policy unchanged.",),
+        assumptions=("The existing MR can be reconciled.",),
+        alternatives_considered=("Block for human direction.",),
+        risks=("A retry could lose review context.",),
+        reviewer_checks=("Confirm the retry policy.",),
+        unresolved_findings=("Human review is required.",),
+        evidence=("Red tests specify the behavior.",),
+        tests=("uv run pytest tests/test_agent_work_boundaries.py",),
+        correction_cycle_ledger=("cycle-2",),
+        unchanged_project_owned_values=("retry budget",),
+    )
 
 
 class ApiStub:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.issue = _issue_payload(labels=["customer::priority"])
+        self.mr_title = ""
+        self.mr_description = ""
+        self.mr_draft = False
 
     def __call__(self, command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         self.commands.append(command)
@@ -120,9 +156,46 @@ class ApiStub:
                 self.issue["labels"] = additions
             payload = self.issue
         elif endpoint.endswith("/merge_requests"):
-            payload = _mr_payload() if method == "POST" else [_mr_payload()]
+            if method == "POST":
+                payload = _mr_payload()
+                payload["title"] = next(
+                    part.removeprefix("title=")
+                    for part in command
+                    if part.startswith("title=")
+                )
+                payload["description"] = next(
+                    part.removeprefix("description=")
+                    for part in command
+                    if part.startswith("description=")
+                )
+                payload["draft"] = payload["title"].startswith("Draft:")
+                self.mr_title = payload["title"]
+                self.mr_description = payload["description"]
+                self.mr_draft = payload["draft"]
+            else:
+                payload = [_mr_payload()]
         elif endpoint.endswith("/merge_requests/88"):
             payload = _mr_payload("Closes #12")
+            if method == "PUT":
+                self.mr_title = next(
+                    (
+                        part.removeprefix("title=")
+                        for part in command
+                        if part.startswith("title=")
+                    ),
+                    self.mr_title,
+                )
+                self.mr_description = next(
+                    (
+                        part.removeprefix("description=")
+                        for part in command
+                        if part.startswith("description=")
+                    ),
+                    self.mr_description,
+                )
+                payload["title"] = self.mr_title
+                payload["description"] = self.mr_description
+                payload["draft"] = self.mr_draft
         elif endpoint.endswith("/closes_issues"):
             payload = [{"iid": 12, "project_id": 310967}]
         elif endpoint.endswith("/pipelines"):
@@ -216,6 +289,163 @@ def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
         "projects/310967" in command[command.index("-X") + 2]
         for command in api.commands
     )
+
+
+def test_gitlab_gateway_creates_and_reconciles_a_decision_review_draft(
+    tmp_path: Path,
+) -> None:
+    api = ApiStub()
+    gateway = GitLabGateway(_config(tmp_path), api)
+    draft = MergeRequestDraft(
+        title="Draft: retry policy decision",
+        description="## Summary\nReview required.",
+        is_draft=True,
+        decision_review=_decision_review(),
+    )
+
+    created = gateway.create_merge_request(
+        branch="agent/issue-12", target="main", issue_iid=12, draft=draft
+    )
+    stale = created.model_copy(
+        update={"description": "Previously rendered.\ncloses # 12"}
+    )
+    reconciled = gateway.reconcile_merge_request(stale, issue_iid=12, draft=draft)
+
+    post = next(command for command in api.commands if "POST" in command)
+    assert not any(part.startswith("draft=") for part in post)
+    assert any(part.startswith("title=Draft: retry policy decision") for part in post)
+    assert reconciled.is_draft is True
+    update = next(
+        command
+        for command in api.commands
+        if "PUT" in command and command[command.index("-X") + 2].endswith("/88")
+    )
+    assert any(
+        part.startswith("description=# ⚠️ Decision review required\n") for part in update
+    )
+    assert not any(part.startswith("draft=") for part in update)
+
+
+def test_gitlab_gateway_reconciliation_is_idempotent_at_the_api_boundary(
+    tmp_path: Path,
+) -> None:
+    """Two real gateway updates converge on one exact rendered description."""
+    commands: list[tuple[str, ...]] = []
+    responses = iter([_mr_payload(), _mr_payload()])
+    draft = MergeRequestDraft(
+        title="Draft: decision",
+        description="Inline text: do not Closes #12 here.",
+        is_draft=True,
+        decision_review=_decision_review(),
+    )
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        response = next(responses)
+        response["title"] = draft.title
+        response["description"] = next(
+            part.removeprefix("description=")
+            for part in command
+            if part.startswith("description=")
+        )
+        response["draft"] = True
+        return CommandResult(0, json.dumps(response), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+    existing = _mr_evidence("Old.\nCLOSES # 12\nInline text: do not Closes #12 here.")
+    first = gateway.reconcile_merge_request(existing, issue_iid=12, draft=draft)
+    second = gateway.reconcile_merge_request(
+        first.model_copy(update={"description": first.description + "\ncloses # 12"}),
+        issue_iid=12,
+        draft=draft,
+    )
+
+    assert first.description == second.description
+    assert first.description.count("<!-- agent-work-decision-review:v1 -->") == 1
+    assert sum(line == "Closes #12" for line in first.description.splitlines()) == 1
+    assert first.description.endswith("\n\nCloses #12")
+    assert "Inline text: do not Closes #12 here." in first.description
+    assert len(commands) == 2
+    assert not any(
+        part.startswith("draft=") for command in commands for part in command
+    )
+
+
+def test_gitlab_gateway_preserves_an_existing_draft_title_and_evidence(
+    tmp_path: Path,
+) -> None:
+    """Ordinary metadata must not downgrade an existing GitLab Draft."""
+    commands: list[tuple[str, ...]] = []
+    existing = _mr_evidence("Old details").model_copy(
+        update={"title": "Draft: earlier decision", "is_draft": True}
+    )
+    draft = MergeRequestDraft(title="Ordinary update", description="Details")
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        response = _mr_payload(
+            next(
+                part.removeprefix("description=")
+                for part in command
+                if part.startswith("description=")
+            )
+        )
+        response.update({"title": existing.title, "draft": True})
+        return CommandResult(0, json.dumps(response), "")
+
+    reconciled = GitLabGateway(_config(tmp_path), api).reconcile_merge_request(
+        existing, issue_iid=12, draft=draft
+    )
+
+    assert reconciled.title == existing.title
+    assert reconciled.is_draft is True
+    assert not any(part.startswith("title=") for part in commands[0])
+    assert not any(part.startswith("draft=") for part in commands[0])
+
+
+@pytest.mark.parametrize(
+    ("operation", "mismatched_field"),
+    [
+        ("create", "title"),
+        ("create", "description"),
+        ("create", "draft"),
+        ("reconcile", "title"),
+        ("reconcile", "description"),
+        ("reconcile", "draft"),
+    ],
+)
+def test_gitlab_gateway_rejects_response_that_does_not_apply_exact_metadata(
+    tmp_path: Path, operation: str, mismatched_field: str
+) -> None:
+    """GitLab success is insufficient unless its returned metadata is exact."""
+    draft = MergeRequestDraft(
+        title="Draft: decision", description="Details", is_draft=True
+    )
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        response = _mr_payload("Details\n\nCloses #12")
+        response.update({"title": draft.title, "draft": draft.is_draft})
+        response[mismatched_field] = {
+            "title": "wrong title",
+            "description": "wrong description",
+            "draft": False,
+        }[mismatched_field]
+        assert any(part.startswith("description=") for part in command)
+        return CommandResult(0, json.dumps(response), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+    if operation == "create":
+        with pytest.raises(GitLabError, match="did not apply"):
+            gateway.create_merge_request(
+                branch="agent/issue-12", target="main", issue_iid=12, draft=draft
+            )
+    else:
+        with pytest.raises(GitLabError, match="did not apply"):
+            gateway.reconcile_merge_request(
+                _mr_evidence("old"),
+                issue_iid=12,
+                draft=draft,
+            )
 
 
 def test_gitlab_eligibility_honors_valid_split_dependency_markers(

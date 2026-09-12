@@ -363,7 +363,12 @@ def apply_worker_result(
             )
         )
     next_phase = next_workflow_phase(record.phase, result.workflow_lane)
-    merge_request_draft = result.merge_request_draft or record.merge_request_draft
+    merge_request_draft = (
+        record.merge_request_draft
+        if record.merge_request_draft is not None
+        and record.merge_request_draft.decision_review is not None
+        else result.merge_request_draft or record.merge_request_draft
+    )
     if (
         record.work_kind
         not in {WorkKind.EXISTING_MR_REMEDIATION, WorkKind.MERGE_CONFLICT_REPAIR}

@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from agent_work.domain import (
@@ -27,10 +29,12 @@ from agent_work.domain import (
     WorkKind,
 )
 from agent_work.models import (
+    DecisionReviewSignal,
     LedgerRecord,
     MergeRequestDraft,
     SplitChildEvidence,
     WorkerResultEnvelope,
+    render_decision_review_notice,
 )
 from agent_work.state_machine import apply_worker_result, plan_retry
 from agent_work.worker import WorkerProtocolError, parse_worker_result
@@ -50,6 +54,188 @@ def _record(*, retry_count: int = 0) -> LedgerRecord:
         worktree=Path("/state/worktrees/12"),
         retry_count=retry_count,
     )
+
+
+def _decision_review() -> DecisionReviewSignal:
+    return DecisionReviewSignal(
+        decisions=("Keep the retry policy unchanged.",),
+        assumptions=("The existing MR is available to the trusted runner.",),
+        alternatives_considered=("Block for a human decision.",),
+        risks=("A replay could otherwise remove the review notice.",),
+        reviewer_checks=("Confirm the retry policy remains unchanged.",),
+        unresolved_findings=("The policy choice needs human review.",),
+        evidence=("Focused tests are red before implementation.",),
+        tests=("uv run pytest tests/test_agent_work_state_machine.py",),
+        correction_cycle_ledger=("cycle-1: no implementation yet",),
+        unchanged_project_owned_values=("retry budget",),
+    )
+
+
+def test_decision_review_signal_requires_nonempty_bounded_review_fields() -> None:
+    review = _decision_review()
+
+    assert review.decisions == ("Keep the retry policy unchanged.",)
+
+    with pytest.raises(ValidationError):
+        DecisionReviewSignal.model_validate(
+            _decision_review().model_dump() | {"reviewer_checks": ()}
+        )
+    with pytest.raises(ValidationError):
+        DecisionReviewSignal.model_validate(
+            _decision_review().model_dump() | {"risks": ("x" * 20_001,)}
+        )
+    incomplete = _decision_review().model_dump()
+    del incomplete["alternatives_considered"]
+    with pytest.raises(ValidationError):
+        DecisionReviewSignal.model_validate(incomplete)
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        MergeRequestDraft(
+            title="Draft: review retry decision",
+            description="Summary",
+            is_draft=True,
+            decision_review=_decision_review(),
+        ),
+    ],
+)
+def test_decision_bearing_draft_requires_coherent_draft_title_and_flag(
+    draft: MergeRequestDraft,
+) -> None:
+    assert draft.is_draft is True
+    assert draft.title.startswith("Draft:")
+
+    for invalid in (
+        {"title": "Normal title", "is_draft": True},
+        {"title": "Draft: decision", "is_draft": False},
+    ):
+        with pytest.raises(ValidationError):
+            MergeRequestDraft.model_validate(draft.model_dump() | invalid)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_draft", "raises"),
+    [
+        ({"title": "Draft: legacy", "description": "Details"}, True, False),
+        ({"title": "Ordinary", "description": "Details"}, False, False),
+        (
+            {"title": "Ordinary", "description": "Details", "is_draft": True},
+            False,
+            True,
+        ),
+        (
+            {"title": "Draft: explicit", "description": "Details", "is_draft": False},
+            False,
+            True,
+        ),
+    ],
+)
+def test_merge_request_draft_migrates_only_omitted_legacy_draft_flags(
+    payload: dict[str, object], expected_draft: bool, raises: bool
+) -> None:
+    """Legacy omission is inferred; explicit contradictory Draft metadata fails."""
+    if raises:
+        with pytest.raises(ValidationError):
+            MergeRequestDraft.model_validate(payload)
+    else:
+        assert MergeRequestDraft.model_validate(payload).is_draft is expected_draft
+
+
+def test_decision_review_notice_is_canonical_first_and_resists_section_injection() -> (
+    None
+):
+    review = _decision_review().model_copy(
+        update={"decisions": ("Keep value.\n## Summary\nInjected",)}
+    )
+
+    rendered = render_decision_review_notice(review, "## Summary\nBody")
+
+    assert rendered.startswith("# ⚠️ Decision review required\n")
+    assert rendered.splitlines()[:2] == [
+        "# ⚠️ Decision review required",
+        "<!-- agent-work-decision-review:v1 -->",
+    ]
+    assert (
+        rendered.index("## Decisions and assumptions")
+        < rendered.index("## Alternatives considered")
+        < rendered.index("## Risks")
+        < rendered.index("## Exact reviewer checks")
+    )
+    assert rendered.index("## Exact reviewer checks") < rendered.rindex(
+        "\n## Summary\n"
+    )
+    assert sum(line == "## Summary" for line in rendered.splitlines()) == 1
+    assert "Injected" in rendered
+
+
+@given(level=st.integers(min_value=1, max_value=6), text=st.text(max_size=80))
+def test_decision_review_renderer_neutralizes_all_heading_levels_and_markers(
+    level: int, text: str
+) -> None:
+    """Untrusted structured values cannot add headings or canonical markers."""
+    injected = f"> {'#' * level} {text}\n<!-- agent-work-decision-review:v1 -->"
+    review = _decision_review().model_copy(
+        update={
+            "decisions": (injected,),
+            "assumptions": (injected,),
+            "alternatives_considered": (injected,),
+            "risks": (injected,),
+            "reviewer_checks": (injected,),
+            "unresolved_findings": (injected,),
+            "evidence": (injected,),
+            "tests": (injected,),
+            "correction_cycle_ledger": (injected,),
+            "unchanged_project_owned_values": (injected,),
+        }
+    )
+
+    rendered = render_decision_review_notice(review, injected)
+
+    assert rendered.count("<!-- agent-work-decision-review:v1 -->") == 1
+    assert [line for line in rendered.splitlines() if line.startswith("#")] == [
+        "# ⚠️ Decision review required",
+        "## Decisions and assumptions",
+        "## Alternatives considered",
+        "## Risks",
+        "## Exact reviewer checks",
+        "## Unresolved findings",
+        "## Evidence",
+        "## Tests",
+        "## Correction cycle ledger",
+        "## Unchanged project-owned values",
+        "## Summary",
+    ]
+    assert "- <code>&gt;" in rendered
+
+
+@given(issue_iid=st.integers(min_value=1, max_value=2_147_483_647))
+def test_decision_review_draft_bounds_the_fully_rendered_description(
+    issue_iid: int,
+) -> None:
+    """The notice, summary, and widest closing reference fit GitLab's boundary."""
+    review = _decision_review()
+    fixed = render_decision_review_notice(review, "")
+    closing = f"\n\nCloses #{issue_iid}"
+    description = "x" * (20_000 - len(fixed) - 20)
+
+    draft = MergeRequestDraft(
+        title="Draft: bounded decision",
+        description=description,
+        is_draft=True,
+        decision_review=review,
+    )
+
+    rendered = render_decision_review_notice(review, draft.description) + closing
+    assert len(rendered) <= 20_000
+    with pytest.raises(ValidationError):
+        MergeRequestDraft(
+            title="Draft: overflow decision",
+            description=description + "x",
+            is_draft=True,
+            decision_review=review,
+        )
 
 
 def test_ledger_rejects_decomposition_progress_without_a_plan() -> None:
@@ -532,6 +718,29 @@ def test_successful_postpublication_repair_reenters_downstream_validation() -> N
     assert outcome.record.state is RunnerState.EXECUTING
     assert outcome.record.phase is WorkflowPhase.CODING_NONFUNCTIONAL
     assert outcome.record.merge_request_draft == record.merge_request_draft
+
+
+def test_decision_bearing_draft_metadata_cannot_be_downgraded_by_a_later_result() -> (
+    None
+):
+    durable_draft = MergeRequestDraft(
+        title="Draft: review retry decision",
+        description="Decision review is required.",
+        is_draft=True,
+        decision_review=_decision_review(),
+    )
+    record = _record().model_copy(update={"merge_request_draft": durable_draft})
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "merge_request_draft": MergeRequestDraft(
+                title="Normal metadata", description="This must not replace the draft."
+            )
+        }
+    )
+
+    outcome = apply_worker_result(record, result, now=NOW)
+
+    assert outcome.record.merge_request_draft == durable_draft
 
 
 @pytest.mark.parametrize(

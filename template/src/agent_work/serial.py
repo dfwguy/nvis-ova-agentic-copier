@@ -195,6 +195,8 @@ def _draft_handoff_is_valid(draft: MergeRequestDraft) -> bool:
     """Validate the mandatory content of a controversial Draft handoff."""
     if not draft.title.startswith("Draft:"):
         return True
+    if draft.decision_review is not None:
+        return True
     description = draft.description.casefold()
     return all(
         phrase in description
@@ -784,13 +786,20 @@ def _publish(
                     "remediation publication lacks its exact merge request"
                 )
             mr = gitlab.fetch_merge_request(record.merge_request_iid)
-            mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
+            if draft is not None:
+                mr = gitlab.reconcile_merge_request(
+                    mr, issue_iid=record.issue_iid, draft=draft
+                )
+            else:
+                mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
         else:
             if draft is None:
                 raise SegmentError("new merge request lacks publication metadata")
             if replaying and record.merge_request_iid is not None:
                 mr = gitlab.fetch_merge_request(record.merge_request_iid)
-                mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
+                mr = gitlab.reconcile_merge_request(
+                    mr, issue_iid=record.issue_iid, draft=draft
+                )
             else:
                 mr = gitlab.find_merge_request_by_branch(record.source_branch)
                 if mr is None:
@@ -801,7 +810,9 @@ def _publish(
                         draft=draft,
                     )
                 else:
-                    mr = gitlab.ensure_closing_issue_reference(mr, record.issue_iid)
+                    mr = gitlab.reconcile_merge_request(
+                        mr, issue_iid=record.issue_iid, draft=draft
+                    )
         identity_exact = _mr_publication_identity_is_exact(
             record, mr, repository=repository, source_sha=sha
         )
