@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-12
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -158,6 +158,41 @@ expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
 `needs_human`, with the coarse completed state, receipts, diagnostic, and next
 action. The trusted runner validates it against the ledger, configured numeric
 project, Git evidence, and required workflow receipts before changing state.
+
+### Intake sizing contract
+
+At the start of a fresh coarse `workflow` session, the trusted wrapper first
+delegates the live Architect. Before Red, the documentation writer, lane
+selection, or any worktree mutation, Architect makes one semantic sizing
+decision. A suitable issue has one independently reviewable and independently
+mergeable delivery outcome that can reasonably complete every applicable
+workflow phase inside the effective bounded worker budget. The decision uses
+behavioral capability boundaries, dependency and ordering boundaries, and
+workflow breadth; numeric content thresholds such as line count do not decide
+suitability.
+
+Suitable work continues through the existing coding or content workflow. An
+oversized issue, or one containing multiple separately deliverable
+capabilities, returns one protocol-version-1 envelope with these values:
+
+| Field | Value |
+| --- | --- |
+| `result_kind` | `needs_human` |
+| `phase_status` | `complete` |
+| `completed_phase` | `workflow` |
+| `workflow_lane` | `unknown` |
+| `error_code` | `split_required` |
+
+The redacted summary is stable and concise and contains numbered, ordered,
+independently mergeable slice outcomes with dependency order. The next action
+asks a human to approve and file those slices or narrow the parent. This route
+requires no receipts or merge-request draft. The worker makes no worktree or
+GitLab mutation, creates no child issues, and executes no proposed slice. The
+trusted runner still records the blocker on the parent through its normal
+label and outcome-note projection. The split parent is not automatically
+retried. `LedgerRecord.schema_version` and
+`WorkerResultEnvelope.protocol_version` remain `1`; older records and envelopes
+remain valid.
 
 Immediately before each worker execution, the runner retrieves that issue's
 notes through its bounded GitLab retry path. It excludes system notes and both

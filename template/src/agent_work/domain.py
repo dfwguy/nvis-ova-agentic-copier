@@ -82,6 +82,7 @@ class ErrorCode(StrEnum):
     REMEDIATION_MARKER_INVALID = "remediation_marker_invalid"
     REMEDIATION_MR_MISMATCH = "remediation_mr_mismatch"
     PROTECTED_POLICY_MANUAL = "protected_policy_manual"
+    SPLIT_REQUIRED = "split_required"
     WORKTREE_MISSING = "worktree_missing"
     WORKTREE_OWNERSHIP_AMBIGUOUS = "worktree_ownership_ambiguous"
     BRANCH_OWNERSHIP_AMBIGUOUS = "branch_ownership_ambiguous"

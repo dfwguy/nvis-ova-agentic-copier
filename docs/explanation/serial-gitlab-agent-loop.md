@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-12
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -37,6 +37,22 @@ For a fresh issue, this means attempting the complete applicable workflow in
 one activation. For recovered work, the runner restores the durable worktree
 and re-enters the workflow session at its coarse `WORKFLOW` boundary; it does
 not manufacture sidecar checkpoints for Architect, Red, Green, or judges.
+
+Before choosing the coding or content lane, the live Architect decides whether
+the issue describes one independently reviewable and mergeable outcome that
+can reasonably finish the complete applicable workflow inside the bounded
+worker budget. This is a semantic architecture decision based on capability,
+dependency order, and workflow breadth, not a line-count or point threshold.
+Making it before Red, documentation writing, or any worktree mutation avoids
+spending the worker budget on a change that cannot reach a reviewable handoff.
+
+An oversized issue is a deliberate human blocker, not a transient failure. The
+worker returns `split_required` with ordered, independently mergeable slice
+proposals and stops without creating child issues or retrying. A human chooses
+and files those slices, or narrows the parent; only a suitably narrowed parent
+is explicitly retried. This keeps issue ownership and decomposition decisions
+outside the less-trusted worker while allowing each approved slice to produce
+its own merge request.
 
 ```mermaid
 stateDiagram-v2

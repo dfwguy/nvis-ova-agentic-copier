@@ -114,6 +114,7 @@ def test_worker_prompt_requires_publication_metadata_from_ordinary_finalizer() -
         },
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title="Untrusted title",
         issue_description="Untrusted body",
     )
@@ -137,6 +138,7 @@ def test_worker_prompt_requires_draft_policy_handoff_metadata() -> None:
         },
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title="Untrusted title",
         issue_description="Untrusted body",
     )
@@ -158,6 +160,7 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
         },
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title="Improve the implementation",
         issue_description="Keep the workflow fast.",
     )
@@ -175,6 +178,67 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     assert "Test Judge receives the Red receipt" in prompt
     assert "still-live Architect" in prompt
     assert "Do not commit, push, approve, or merge" in prompt
+
+
+def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        issue_title="Deliver one bounded behavior",
+        issue_description="Keep the current workflow for suitable work.",
+        effective_worker_budget_seconds=90,
+    )
+    normalized = prompt.casefold()
+
+    architect = normalized.index("delegate architect")
+    sizing = normalized.index("intake sizing decision")
+    red = normalized.index("delegates red")
+    mutation = normalized.index("sole mutable owner")
+    assert architect < sizing < red < mutation
+    assert "behavioral boundaries" in normalized
+    assert "dependency/order boundaries" in normalized
+    assert "all applicable architecture, red, green, reviews, and finalization" in (
+        normalized
+    )
+    assert "effective bounded worker budget" in normalized
+    assert (
+        "effective bounded worker budget for this session is 90 seconds" in normalized
+    )
+    assert "do not use a line-count threshold" in normalized
+    assert "suitable" in normalized
+    assert "current lane and workflow unchanged" in normalized
+
+
+def test_workflow_prompt_requires_stable_nonretrying_split_handoff() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=30,
+        effective_worker_budget_seconds=1800,
+        issue_title="Deliver several dependent capabilities",
+        issue_description="This may require ordered merge requests.",
+    ).casefold()
+
+    assert "result_kind=needs_human" in prompt
+    assert "completed_phase=workflow" in prompt
+    assert "error_code=split_required" in prompt
+    assert "stable, concise, redacted summary" in prompt
+    assert "ordered independently mergeable slice proposals" in prompt
+    assert "human direction" in prompt
+    assert "stop before red or any worktree mutation" in prompt
+    assert "do not create or update child issues" in prompt
+    assert "do not automatically retry" in prompt
 
 
 def _note(
@@ -199,6 +263,7 @@ def test_worker_prompt_includes_only_useful_issue_notes_as_untrusted_json() -> N
         {"state": "executing", "phase": "coding-green"},
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title="Title",
         issue_description="Body",
         issue_notes=(
@@ -230,6 +295,7 @@ def test_worker_prompt_orders_notes_by_instant_across_timezone_offsets() -> None
         {},
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_notes=(
             _note(1, "Earlier instant", created_at="2026-01-01T00:30:00+01:00"),
             _note(2, "Later instant", created_at="2026-01-01T00:00:00+00:00"),
@@ -253,6 +319,7 @@ def test_worker_prompt_bounds_unicode_context_and_keeps_newest_notes() -> None:
         {},
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title='"\\' * 20_000,
         issue_description='\\"' * 20_000,
         issue_notes=notes,
@@ -278,6 +345,7 @@ def test_worker_prompt_accounts_for_final_truncation_flag_at_byte_limit() -> Non
         {},
         project_id=310967,
         issue_iid=12,
+        effective_worker_budget_seconds=1800,
         issue_title="a" * 4_094,
         issue_description="b" * 12_286,
         issue_notes=notes,
