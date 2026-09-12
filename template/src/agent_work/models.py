@@ -11,11 +11,19 @@
 
 from __future__ import annotations
 
+import html
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from .domain import (
     ErrorCode,
@@ -125,6 +133,69 @@ class MergeRequestEvidence(BoundaryModel):
     sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     has_conflicts: bool = False
     description: str = ""
+    title: str = ""
+    is_draft: bool = Field(
+        default=False, validation_alias=AliasChoices("draft", "is_draft")
+    )
+
+
+class DecisionReviewSignal(BoundaryModel):
+    """Complete, bounded evidence for a human decision-review draft."""
+
+    decisions: tuple[str, ...] = Field(min_length=1, max_length=100)
+    assumptions: tuple[str, ...] = Field(min_length=1, max_length=100)
+    alternatives_considered: tuple[str, ...] = Field(min_length=1, max_length=100)
+    risks: tuple[str, ...] = Field(min_length=1, max_length=100)
+    reviewer_checks: tuple[str, ...] = Field(min_length=1, max_length=100)
+    unresolved_findings: tuple[str, ...] = Field(min_length=1, max_length=100)
+    evidence: tuple[str, ...] = Field(min_length=1, max_length=100)
+    tests: tuple[str, ...] = Field(min_length=1, max_length=100)
+    correction_cycle_ledger: tuple[str, ...] = Field(min_length=1, max_length=100)
+    unchanged_project_owned_values: tuple[str, ...] = Field(
+        min_length=1, max_length=100
+    )
+
+    @field_validator("*")
+    @classmethod
+    def validate_entries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject overlong values while preserving text for canonical escaping."""
+        if any(not item.strip() or len(item) > 20_000 for item in value):
+            raise ValueError("decision-review entries must be nonempty and bounded")
+        return value
+
+
+def _notice_items(items: tuple[str, ...]) -> str:
+    """Render untrusted review text as literal list content, not headings."""
+    return "\n".join(
+        "- <code>"
+        + html.escape(item.replace(chr(10), " ").replace(chr(13), " "))
+        + "</code>"
+        for item in items
+    )
+
+
+def render_decision_review_notice(review: DecisionReviewSignal, summary: str) -> str:
+    """Render the stable v1 decision-review notice without heading injection."""
+    sections = (
+        ("## Decisions and assumptions", review.decisions + review.assumptions),
+        ("## Alternatives considered", review.alternatives_considered),
+        ("## Risks", review.risks),
+        ("## Exact reviewer checks", review.reviewer_checks),
+        ("## Unresolved findings", review.unresolved_findings),
+        ("## Evidence", review.evidence),
+        ("## Tests", review.tests),
+        ("## Correction cycle ledger", review.correction_cycle_ledger),
+        ("## Unchanged project-owned values", review.unchanged_project_owned_values),
+    )
+    body = "\n\n".join(
+        f"{heading}\n{_notice_items(items)}" for heading, items in sections
+    )
+    safe_summary = _notice_items((summary,)).removeprefix("- ")
+    return (
+        "# ⚠️ Decision review required\n<!-- agent-work-decision-review:v1 -->\n\n"
+        + body
+        + f"\n\n## Summary\n{safe_summary}"
+    )
 
 
 class PipelineEvidence(BoundaryModel):
@@ -151,6 +222,39 @@ class MergeRequestDraft(BoundaryModel):
 
     title: str = Field(min_length=1, max_length=255)
     description: str = Field(min_length=1, max_length=20_000)
+    is_draft: bool = False
+    decision_review: DecisionReviewSignal | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_draft_flag(cls, value: object) -> object:
+        """Infer omitted protocol-v1 Draft state from its legacy title."""
+        if isinstance(value, dict) and "is_draft" not in value:
+            payload = cast(dict[str, object], value)
+            return payload | {
+                "is_draft": str(payload.get("title")).startswith("Draft:")
+            }
+        return value
+
+    @model_validator(mode="after")
+    def validate_decision_review(self) -> MergeRequestDraft:
+        """Require decision review to remain an explicitly labelled Draft."""
+        if self.is_draft != self.title.startswith("Draft:"):
+            raise ValueError("draft flag must match the Draft: title")
+        if self.decision_review is not None and (
+            not self.is_draft or not self.title.startswith("Draft:")
+        ):
+            raise ValueError("decision review requires a Draft: title and draft flag")
+        rendered = (
+            render_decision_review_notice(self.decision_review, self.description)
+            if self.decision_review is not None
+            else self.description
+        )
+        if len(rendered) + 20 > 20_000:
+            raise ValueError(
+                "merge request description exceeds the publication boundary"
+            )
+        return self
 
 
 class TransitionIntentRecord(BoundaryModel):

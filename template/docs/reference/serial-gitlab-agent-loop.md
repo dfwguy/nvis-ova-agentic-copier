@@ -215,6 +215,18 @@ draft because it publishes only to the verified existing MR. A legacy ordinary
 `intent=null` is recovered side-effect-free to its lane finalizer; the runner
 never synthesizes a draft from issue text.
 
+### Decision-review Draft metadata
+
+Reasonable bounded uncertainty does not itself block the workflow. A worker may
+return `ready_to_publish` with a `Draft:` merge-request title, `is_draft=true`,
+and complete `decision_review` metadata. The runner renders its canonical v1
+notice, records it durably, and reconciles retried, branch-found, and remediated
+MRs without downgrading an existing Draft. The notice records decisions and
+assumptions, alternatives, risks, exact reviewer checks, unresolved findings,
+evidence, tests, correction-cycle ledger, and unchanged project-owned values.
+`needs_human` remains for unsafe actions, missing authority or credentials,
+irreconcilable requirements, or exact unapproved project-owned values.
+
 The Architect and Green route a rejected internal review to its owning role
 inside the session. The runner resumes only at `WORKFLOW` after interruption;
 it does not guess or persist a role-level checkpoint. Receipts must still match

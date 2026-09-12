@@ -150,6 +150,39 @@ def test_worker_prompt_requires_draft_policy_handoff_metadata() -> None:
     assert "unchanged project-owned values" in prompt
 
 
+def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (
+    None
+):
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+        issue_title="Untrusted title",
+        issue_description="Untrusted body",
+    )
+
+    normalized = prompt.casefold()
+    assert "reasonable uncertainty" in normalized
+    assert "ready_to_publish" in prompt
+    assert "decision_review" in prompt
+    assert "decisions and assumptions" in normalized
+    assert "alternatives_considered" in prompt
+    assert "risks" in normalized
+    assert "exact reviewer checks" in normalized
+    assert "needs_human" in prompt
+    assert "unsafe actions" in normalized
+    assert "missing authority or credentials" in normalized
+    assert "irreconcilable requirements" in normalized
+    assert "exact unapproved project-owned values" in normalized
+    assert "Do not commit, push, approve, or merge" in prompt
+
+
 def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> None:
     prompt = build_worker_prompt(
         {

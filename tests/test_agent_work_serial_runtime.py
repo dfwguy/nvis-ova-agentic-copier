@@ -37,6 +37,7 @@ from agent_work.gitlab import GitLabError
 from agent_work.ledger import JsonLedger
 from agent_work.models import (
     AgentWorkConfig,
+    DecisionReviewSignal,
     GitLabIssue,
     GitLabIssueNote,
     GitLabNoteAuthor,
@@ -98,6 +99,9 @@ def _mr(
     target_branch: str = "main",
     sha: str = "a" * 40,
     has_conflicts: bool = False,
+    title: str = "Change",
+    is_draft: bool = False,
+    description: str = "Closes #12",
 ) -> MergeRequestEvidence:
     return MergeRequestEvidence(
         iid=88,
@@ -109,7 +113,29 @@ def _mr(
         target_branch=target_branch,
         sha=sha,
         has_conflicts=has_conflicts,
-        description="Closes #12",
+        title=title,
+        is_draft=is_draft,
+        description=description,
+    )
+
+
+def _decision_draft() -> MergeRequestDraft:
+    return MergeRequestDraft(
+        title="Draft: retry policy decision",
+        description="## Summary\nReview required.",
+        is_draft=True,
+        decision_review=DecisionReviewSignal(
+            decisions=("Keep the retry policy unchanged.",),
+            assumptions=("The existing MR can be reconciled.",),
+            alternatives_considered=("Block for human direction.",),
+            risks=("A retry could lose review context.",),
+            reviewer_checks=("Confirm the retry policy.",),
+            unresolved_findings=("Human review is required.",),
+            evidence=("Red tests specify the behavior.",),
+            tests=("uv run pytest tests/test_agent_work_serial_runtime.py",),
+            correction_cycle_ledger=("cycle-1",),
+            unchanged_project_owned_values=("retry budget",),
+        ),
     )
 
 
@@ -122,6 +148,8 @@ class FakeGitLab:
         self.existing_mr: MergeRequestEvidence | None = None
         self.create_error: RuntimeError | None = None
         self.created_merge_requests = 0
+        self.reconciled_drafts: list[MergeRequestDraft] = []
+        self.reconciliation_descriptions: list[str] = []
         self.closing_reference_updates = 0
         self.fetched_merge_requests: list[int] = []
         self.fetch_merge_request_error: GitLabError | None = None
@@ -214,6 +242,27 @@ class FakeGitLab:
         del issue_iid
         self.closing_reference_updates += 1
         return mr
+
+    def reconcile_merge_request(
+        self, mr: MergeRequestEvidence, *, issue_iid: int, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence:
+        del issue_iid
+        self.reconciled_drafts.append(draft)
+        canonical_description = (
+            "# ⚠️ Decision review required\n"
+            "<!-- agent-work-decision-review:v1 -->\n\n"
+            f"{draft.description.rstrip()}\n\nCloses #12"
+        )
+        self.reconciliation_descriptions.append(canonical_description)
+        reconciled = mr.model_copy(
+            update={
+                "title": draft.title,
+                "description": canonical_description,
+                "is_draft": draft.is_draft or mr.is_draft,
+            }
+        )
+        self.existing_mr = reconciled
+        return reconciled
 
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
         del mr_iid, issue_iid
@@ -1530,6 +1579,159 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
     assert gitlab.created_merge_requests == 0
 
 
+def test_publication_reconciles_existing_mr_to_preserve_decision_review_draft(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    draft = _decision_draft()
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(update={"merge_request_draft": draft})
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert gitlab.created_merge_requests == 0
+    assert gitlab.reconciled_drafts == [draft]
+
+
+def test_replayed_publication_reconciles_the_recorded_mr_with_decision_review(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    draft = _decision_draft()
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_draft": draft,
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:0",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                    },
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert gitlab.fetched_merge_requests == [88]
+    assert gitlab.reconciled_drafts == [draft]
+
+
+def test_remediation_reconciles_only_its_recorded_mr_with_decision_review(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    draft = _decision_draft()
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "merge_request_iid": 88,
+                "merge_request_draft": draft,
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert gitlab.fetched_merge_requests == [88]
+    assert gitlab.reconciled_drafts == [draft]
+
+
+def test_existing_draft_is_not_downgraded_by_ordinary_publication_metadata(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ordinary = MergeRequestDraft(title="Normal change", description="Details")
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(update={"merge_request_draft": ordinary})
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(title="Draft: earlier review", is_draft=True)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert gitlab.existing_mr is not None and gitlab.existing_mr.is_draft is True
+
+
+def test_repeated_reconciliation_has_one_canonical_notice_and_closing_reference() -> (
+    None
+):
+    gitlab = FakeGitLab()
+    draft = _decision_draft()
+    existing = _mr(description="old description\n\nCloses #12")
+
+    first = gitlab.reconcile_merge_request(existing, issue_iid=12, draft=draft)
+    second = gitlab.reconcile_merge_request(first, issue_iid=12, draft=draft)
+
+    assert second.description == first.description
+    assert second.description.count("Closes #12") == 1
+    assert second.description.count("# ⚠️ Decision review required") == 1
+
+
 @pytest.mark.parametrize(
     "intent",
     [
@@ -2097,6 +2299,7 @@ def test_protected_policy_publication_with_invalid_receipts_fails_closed(
             ),
             MergeRequestDraft(
                 title="Draft: policy update",
+                is_draft=True,
                 description=(
                     "unresolved findings; exact human decisions; tests; cycle ledger; "
                     "unchanged project-owned values"
@@ -2173,11 +2376,24 @@ def test_protected_policy_publication_rejects_incoherent_receipt_or_draft(
             ),
             MergeRequestDraft(
                 title="Draft: policy update",
+                is_draft=True,
                 description=(
                     "unresolved findings and evidence; exact human decisions; tests; "
                     "cycle ledger; unchanged project-owned values"
                 ),
             ),
+        ),
+        (
+            WorkflowLane.CONTENT,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: approved"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+                ),
+            ),
+            _decision_draft(),
         ),
     ],
 )

@@ -13,6 +13,12 @@ This repository ships one portable workflow for Codex, Pi, and Claude Code.
 `AGENTS.md` is the canonical routing manifest; frontend-specific configuration
 must not replace or reinterpret it.
 
+This is a software factory: humans provide product and policy inputs and retain
+final MR approval and merge, while routine architecture, decomposition, Red/Green,
+validation, repair, and publication proceed without an inner-loop human decision.
+Safe bounded uncertainty is recorded as a structured Draft handoff; capacity and
+technical transients are execution blockers or retryable unless authority is needed.
+
 ## Agent session checklist
 
 Before taking repository action:

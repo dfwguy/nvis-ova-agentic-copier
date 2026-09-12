@@ -90,6 +90,10 @@ class GitLabPort(Protocol):
         self, mr: MergeRequestEvidence, issue_iid: int
     ) -> MergeRequestEvidence: ...
 
+    def reconcile_merge_request(
+        self, mr: MergeRequestEvidence, *, issue_iid: int, draft: MergeRequestDraft
+    ) -> MergeRequestEvidence: ...
+
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool: ...
 
     def latest_pipeline_for_sha(
