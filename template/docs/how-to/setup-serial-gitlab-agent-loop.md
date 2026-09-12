@@ -157,6 +157,7 @@ token, then inspect the recoverable state before enabling a timer:
 
 ```bash
 git pull --ff-only
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 uv run agent-work loop run --json
 ```
@@ -173,6 +174,7 @@ git worktree add -b agent/work-base "$agent_checkout" origin/main
 git -C "$agent_checkout" branch --set-upstream-to=origin/main agent/work-base
 cd "$agent_checkout"
 command -v uv systemctl loginctl
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 
@@ -236,6 +238,7 @@ Preview the next action before authorizing mutation. A preview must not change
 GitLab, labels, branches, worktrees, ledger records, or systemd state.
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --json
 uv run agent-work loop status --json
 ```
@@ -250,6 +253,7 @@ finish their recorded route; internal Architect, Red, Green, and judge handoffs 
 separately persisted:
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --apply --json
 systemctl --user status "$unit_name.service"
 ```
@@ -275,6 +279,7 @@ for the named blocked item after explicit human direction; it resets that
 item's retry budget and returns it to resumable preparation.
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
@@ -300,6 +305,7 @@ safe ledger actions without modifying them.
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
 systemctl --user disable --now "$unit_name.timer"
 systemctl --user status "$unit_name.service"
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work migration preview --json >agent-work-migration-plan.json
 ```
 
@@ -310,6 +316,7 @@ ledger record; it never overwrites that evidence. After human review, apply
 the idempotent migration and inspect the result:
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work migration apply --plan-file agent-work-migration-plan.json --apply --json
 uv run agent-work loop status --json
 ```
@@ -324,6 +331,7 @@ workflow, then run bounded activations until status reports
 receipts. Human review, approval, and merge remain outside the loop.
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --apply --json
 uv run agent-work loop status --json
 systemctl --user enable --now <project-slug>-agent-work.timer
@@ -345,6 +353,7 @@ Inspect both evidence sources; neither replaces the other.
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
 journalctl --user -u "$unit_name.service" --since today
 systemctl --user status "$unit_name.timer" "$unit_name.service"
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 
@@ -369,6 +378,7 @@ systemctl --user disable --now "$unit_name.timer"
 systemctl --user stop "$unit_name.service"
 systemctl --user show "$unit_name.timer" "$unit_name.service" \
   --property=UnitFileState --property=ActiveState
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 

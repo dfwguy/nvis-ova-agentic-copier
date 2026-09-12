@@ -61,6 +61,11 @@ preview file and `--apply`; it does not resolve ambiguous evidence. `--json` emi
 the documented redacted JSON result. `--debug` adds local diagnostics without
 credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
 
+`AGENT_WORK_BASE_BRANCH` is required and must name a valid configured
+`agent/...` service branch; the setup uses the canonical `agent/work-base`
+branch. The runner validates it before it claims an issue, changes a label, or
+creates a ledger record; an omitted value fails the command instead.
+
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction

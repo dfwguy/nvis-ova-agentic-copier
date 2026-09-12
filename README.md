@@ -20,6 +20,7 @@ Check whether the agent can select work without changing the repository
 or GitLab:
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --json
 ```
 
@@ -29,6 +30,7 @@ After a human has authorized unattended publication and the safeguards are in
 place, process one issue in a bounded pass:
 
 ```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --apply --json
 ```
 

@@ -59,6 +59,7 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         project_id=310967,
         checkout=tmp_path / "checkout",
         state_root=tmp_path / "state",
+        base_branch="agent/work-base",
     )
 
 
