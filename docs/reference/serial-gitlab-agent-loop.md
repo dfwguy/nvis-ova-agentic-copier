@@ -36,6 +36,7 @@ agent-work loop status [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
+agent-work upstream-finding preview --manifest-file PATH [--apply] [--json] [--debug]
 ```
 
 An applied `loop run` performs one bounded, recoverable activation for one
@@ -60,6 +61,55 @@ idempotent records and label changes. `migration apply` requires a reviewed
 preview file and `--apply`; it does not resolve ambiguous evidence. `--json` emits
 the documented redacted JSON result. `--debug` adds local diagnostics without
 credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
+
+`upstream-finding preview` is a strictly local, read-only manifest validator.
+It neither contacts GitLab nor writes files. Its successful output contains only
+structural fields, stable fingerprints, and counts; it never prints project identity, finding text,
+validation evidence, or evidence URLs. Invalid manifests and unreadable files
+exit `1` with sanitized diagnostics.
+`--apply` is accepted only for uniform command syntax and remains a harmless
+no-op for this strictly local preview.
+
+### Upstream-finding manifest v1
+
+The required YAML top-level mapping has exactly these fields; unknown fields,
+YAML tags, anchors, aliases, duplicate keys, non-UTF-8 input, and documents
+larger than 64 KiB are rejected. Scalars are strict: quoted or coercible
+numbers and booleans do not satisfy typed fields.
+
+| Field | Required v1 value |
+| --- | --- |
+| `schema_version` | Literal integer `1`. |
+| `generated_project` | Exact mapping: public bare DNS `host`, positive integer `project_id`, and safe relative `path_with_namespace`. |
+| `copier` | Exact mapping: credential-free network Git `source` and lowercase 40-hex commit `revision`. |
+| `finding` | Exact mapping described below. |
+
+`finding.copied_paths` contains 1–100 safe relative paths; its duplicates and
+order are normalized for the semantic fingerprint. `reproduction` contains
+1–20 ordered, nonempty bounded text steps. `expected_behavior`,
+`observed_behavior`, and `validation_evidence` are nonempty bounded text.
+`priority` is `low`, `medium`, `high`, or `urgent`; `severity` is `low`,
+`medium`, `high`, or `critical`; and `scope` is `generated-project`,
+`template`, or `both`. `evidence_links` contains 0–20 exact mappings with
+`visibility: public` and a credential-free public HTTPS `url`; local, private,
+ambiguous, insecure, userinfo-bearing, query-bearing, and fragment-bearing
+URLs are rejected.
+
+The three lowercase SHA-256 fingerprints use canonical stable JSON. The
+project fingerprint derives from normalized project identity; the revision
+fingerprint adds normalized Copier source and exact revision; the semantic
+finding fingerprint adds sorted, deduplicated paths, ordered reproduction,
+expected and observed behavior, and scope. Priority, severity, validation
+evidence, and evidence links are mutable metadata and do not affect the
+semantic fingerprint. NFC normalization and harmless surrounding whitespace
+produce the same fingerprints.
+
+JSON success output contains only `schema_version`, `command`, `outcome`, the
+three fingerprints, `copied_path_count`, and `evidence_link_count`. Human
+success output contains the outcome, three fingerprints, and the two counts.
+No manifest content is retained or printed. Valid
+previews exit `0`; sanitized read or validation failures exit `1`; argparse
+usage failures exit `2`.
 
 `AGENT_WORK_BASE_BRANCH` is required and must name a valid configured
 `agent/...` service branch; the setup uses the canonical `agent/work-base`

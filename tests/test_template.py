@@ -1721,6 +1721,7 @@ esac""",
         "src/agent_work/state_machine.py",
         "src/agent_work/worker.py",
         "src/agent_work/cli.py",
+        "src/agent_work/upstream_finding.py",
     ),
 )
 def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
@@ -1733,6 +1734,26 @@ def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
 
     assert root_file.read_bytes() == template_file.read_bytes()
     assert root_file.read_bytes() == generated_file.read_bytes()
+
+
+def test_upstream_finding_docs_publish_the_local_preview_interface_and_navigation(
+    project_root: Path, template_dir: Path
+) -> None:
+    """Reference syntax and a linked how-to remain mirrored template interfaces."""
+    reference_path = Path("docs/reference/serial-gitlab-agent-loop.md")
+    how_to_path = Path("docs/how-to/setup-serial-gitlab-agent-loop.md")
+    root_reference = (project_root / reference_path).read_text()
+    root_how_to = (project_root / how_to_path).read_text()
+    assert root_reference == (template_dir / reference_path).read_text()
+    assert root_how_to == (template_dir / how_to_path).read_text()
+    command = "agent-work upstream-finding preview --manifest-file PATH [--apply] [--json] [--debug]"
+    assert command in root_reference
+    assert "../how-to/setup-serial-gitlab-agent-loop.md" in root_reference
+    assert "upstream-finding preview --manifest-file" in root_how_to
+    assert (
+        "serial-gitlab-agent-loop.md"
+        in (project_root / "docs/reference/index.md").read_text()
+    )
 
 
 @pytest.mark.parametrize(

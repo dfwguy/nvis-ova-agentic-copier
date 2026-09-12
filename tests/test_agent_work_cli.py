@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +22,7 @@ from agent_work.cli import build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
 from agent_work.ledger import LockBusy
 from agent_work.models import CommandItemReport, CommandReport
+from agent_work.upstream_finding import UpstreamFindingPreview
 
 
 @pytest.mark.parametrize(
@@ -281,3 +283,206 @@ def test_lock_contention_returns_temporary_exit_75() -> None:
         == 75
     )
     assert errors == ["another segment owns the project lock"]
+
+
+def test_upstream_finding_preview_is_local_json_and_bypasses_runtime_dispatch() -> None:
+    output: list[str] = []
+    seen_paths: list[Path] = []
+
+    def dispatch_must_not_run(*_args: object, **_kwargs: object) -> CommandReport:
+        raise AssertionError("runtime dispatch must not run for a local preview")
+
+    def preview_manifest(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        seen_paths.append(path)
+        assert callable(read_bytes)
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=1,
+        )
+
+    assert (
+        main(
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--json",
+            ],
+            dispatch=dispatch_must_not_run,
+            preview_manifest=preview_manifest,
+            read_bytes=lambda _path: b"unused",
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert seen_paths == [Path("finding.yaml")]
+    rendered = json.loads(output[0])
+    assert set(rendered) == {
+        "schema_version",
+        "command",
+        "outcome",
+        "project_fingerprint",
+        "revision_fingerprint",
+        "semantic_finding_fingerprint",
+        "copied_path_count",
+        "evidence_link_count",
+    }
+    assert rendered["semantic_finding_fingerprint"] == "c" * 64
+    assert "src/widget.py" not in output[0] and "high" not in output[0]
+
+
+def test_upstream_finding_preview_help_and_harmless_apply_contract(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as help_exit:
+        build_parser().parse_args(["upstream-finding", "preview", "--help"])
+    help_text = capsys.readouterr().out
+    assert help_exit.value.code == 0
+    assert (
+        "local" in help_text.lower()
+        and "GitLab" in help_text
+        and "write" in help_text.lower()
+    )
+    parsed = build_parser().parse_args(
+        ["upstream-finding", "preview", "--manifest-file", "finding.yaml", "--apply"]
+    )
+    assert parsed.apply is True
+
+
+def test_upstream_finding_preview_apply_remains_local_and_bypasses_dispatch() -> None:
+    """The consistency flag cannot turn the local preview into an operation."""
+    output: list[str] = []
+    read_paths: list[Path] = []
+
+    def dispatch_must_not_run(*_args: object, **_kwargs: object) -> CommandReport:
+        raise AssertionError("runtime dispatch must not run for a local preview")
+
+    def read_bytes(path: Path) -> bytes:
+        read_paths.append(path)
+        return b"manifest bytes"
+
+    def preview_manifest(
+        path: Path, *, read_bytes: Callable[[Path], bytes]
+    ) -> UpstreamFindingPreview:
+        assert read_bytes(path) == b"manifest bytes"
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=1,
+        )
+
+    assert (
+        main(
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--apply",
+            ],
+            dispatch=dispatch_must_not_run,
+            preview_manifest=preview_manifest,
+            read_bytes=read_bytes,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert read_paths == [Path("finding.yaml")]
+    assert output == [
+        "outcome=valid project_fingerprint="
+        + "a" * 64
+        + " revision_fingerprint="
+        + "b" * 64
+        + " semantic_finding_fingerprint="
+        + "c" * 64
+        + " paths=1 evidence_links=1"
+    ]
+
+
+def test_upstream_finding_preview_renders_safe_human_summary_and_sanitizes_errors() -> (
+    None
+):
+    output: list[str] = []
+    errors: list[str] = []
+
+    def preview_success(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=2,
+            evidence_link_count=1,
+        )
+
+    assert (
+        main(
+            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            preview_manifest=preview_success,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert "valid" in output[0]
+    assert "a" * 64 in output[0]
+    assert "paths=2" in output[0] and "evidence_links=1" in output[0]
+    assert all(
+        value not in output[0] for value in ("src/widget.py", "high", "medium", "both")
+    )
+
+    def preview_failure(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        from agent_work.upstream_finding import ManifestError
+
+        raise ManifestError("finding.validation_evidence is invalid")
+
+    assert (
+        main(
+            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            preview_manifest=preview_failure,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert errors == ["finding.validation_evidence is invalid"]
+
+
+def test_upstream_finding_preview_requires_a_manifest_file_and_returns_one_for_read_failure() -> (
+    None
+):
+    with pytest.raises(SystemExit) as missing_file:
+        build_parser().parse_args(["upstream-finding", "preview"])
+    assert missing_file.value.code == 2
+
+    errors: list[str] = []
+
+    def unreadable(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        from agent_work.upstream_finding import ManifestError
+
+        raise ManifestError("manifest file could not be read")
+
+    assert (
+        main(
+            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            preview_manifest=unreadable,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert errors == ["manifest file could not be read"]

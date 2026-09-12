@@ -157,6 +157,20 @@ recurring Maintainer attestation. The observable branch and global approval
 checks above must pass; the runtime independently never approves or merges.
 The parentheses isolate strict shell options and preserve the block's status.
 
+## Preview an upstream finding locally
+
+Validate a supplied upstream-finding manifest without accessing GitLab or
+changing the checkout. The optional JSON output is safe to attach to a review:
+it contains structural fields, fingerprints, and copied-path/evidence-link
+counts only.
+
+```bash
+uv run agent-work upstream-finding preview --manifest-file finding.yaml --json
+```
+
+See the complete syntax and exit behavior in the
+[reference](../reference/serial-gitlab-agent-loop.md).
+
 ## Install and inspect
 
 From the dedicated checkout, ensure Git, `glab`, the selected coding agent,

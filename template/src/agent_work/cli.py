@@ -16,11 +16,22 @@ import logging
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol
 
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .ledger import LockBusy
 from .models import CommandReport
 from .runtime import dispatch as default_dispatch
+from .upstream_finding import ManifestError, UpstreamFindingPreview
+from .upstream_finding import preview_manifest as default_preview_manifest
+
+
+class _PreviewManifest(Protocol):
+    """Typed local preview boundary."""
+
+    def __call__(
+        self, path: Path, *, read_bytes: Callable[[Path], bytes]
+    ) -> UpstreamFindingPreview: ...
 
 
 def _positive_integer(value: str) -> int:
@@ -97,6 +108,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common(apply_parser)
     apply_parser.add_argument("--plan-file", type=Path, required=True)
+    finding = resources.add_parser(
+        "upstream-finding", help="validate a strictly local upstream finding"
+    )
+    finding_actions = finding.add_subparsers(dest="action", required=True)
+    finding_preview = finding_actions.add_parser(
+        "preview",
+        help="validate locally without GitLab access or writes",
+        description="Strictly local manifest preview; it does not contact GitLab or write files.",
+    )
+    finding_preview.add_argument("--manifest-file", type=Path, required=True)
+    _common(
+        finding_preview,
+        apply_help="accepted for command consistency; preview remains read-only",
+    )
     return parser
 
 
@@ -124,15 +149,43 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
     return " ".join(details)
 
 
+def _render_finding_preview(preview: UpstreamFindingPreview, *, as_json: bool) -> str:
+    """Render the intentionally content-free local preview."""
+    if as_json:
+        return preview.as_json()
+    return " ".join(
+        (
+            f"outcome={preview.outcome}",
+            f"project_fingerprint={preview.project_fingerprint}",
+            f"revision_fingerprint={preview.revision_fingerprint}",
+            f"semantic_finding_fingerprint={preview.semantic_finding_fingerprint}",
+            f"paths={preview.copied_path_count}",
+            f"evidence_links={preview.evidence_link_count}",
+        )
+    )
+
+
 def main(
     arguments: Sequence[str] | None = None,
     *,
     dispatch: Callable[..., CommandReport] = default_dispatch,
+    preview_manifest: _PreviewManifest = default_preview_manifest,
+    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "upstream-finding" and parsed.action == "preview":
+        try:
+            preview = preview_manifest(parsed.manifest_file, read_bytes=read_bytes)
+        except ManifestError as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        write_stdout(_render_finding_preview(preview, as_json=parsed.json))
+        return 0
     command = f"{parsed.resource}.{parsed.action}"
     request = CommandRequest(
         command=command,
