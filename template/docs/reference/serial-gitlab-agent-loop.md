@@ -81,10 +81,19 @@ preview under a scrubbed `env -i` environment before enabling the timer.
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction
-record. Project-level loop enablement authorizes unattended selection. After
-resuming existing `agent::running` work, the runner selects the oldest open,
-non-confidential issue that has no lifecycle projection and no ledger record.
-Unrelated labels do not affect eligibility.
+record. Project-level loop enablement authorizes unattended selection. Existing
+active or resumable work always wins. For a fresh issue, the runner first
+filters to open, non-confidential issues with no lifecycle projection, ledger
+record, or open split prerequisite. It then ranks exact `agent-priority::high`
+first, every issue without a recognized exact priority label next (including
+unknown priority-like labels), and exact `agent-priority::low` last. Within a
+rank it compares absolute timezone-aware `created_at`, then numeric IID; it
+does not trust API ordering or query issue notes/comments. Malformed creation
+time evidence fails safely. Labels do not retroactively change existing issues.
+
+Create the two scoped labels during project setup. Humans can assign high to
+expedite fresh work, remove either label for normal ordering, or assign low to
+defer it.
 
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
@@ -92,6 +101,12 @@ Unrelated labels do not affect eligibility.
 | `agent::awaiting-human` | awaiting-human | Exact MR evidence and required receipts await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
+
+| Queue label | Fresh-work rank | Control |
+| --- | --- | --- |
+| `agent-priority::high` | 0 | Human expedite |
+| no recognized exact value | 1 | Normal; remove a scoped label |
+| `agent-priority::low` | 2 | Human defer |
 
 The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication

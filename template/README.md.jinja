@@ -22,9 +22,11 @@ uv run python scripts/check_licenses.py --root .
 ## Start the GitLab issue loop
 
 After the repository safeguards are ready, install the runner and enable its
-single user-level systemd timer. The loop processes the oldest eligible open,
-non-confidential issue without lifecycle or ledger state and never approves or
-merges its human-gated merge request.
+single user-level systemd timer. The loop processes an eligible open,
+non-confidential issue without lifecycle or ledger state only after active work;
+fresh work ranks exact high priority, no recognized exact priority label, then
+exact low priority, with absolute creation time and IID within each rank. It
+never approves or merges its human-gated merge request.
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base

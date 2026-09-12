@@ -31,6 +31,14 @@ is authorized by enabling the project-level timer. It selects eligible open,
 non-confidential issues without a lifecycle projection or ledger record, never
 approves or merges, and never applies or drops a recovery stash.
 
+Before enabling the loop, create the scoped GitLab labels
+`agent-priority::high` and `agent-priority::low`. For fresh eligible work, the
+loop orders exact high, normal (no recognized exact priority value), then exact
+low; within each group it uses absolute creation time and IID. Apply high to
+expedite an issue, low to defer it, or remove either label to return it to
+normal ordering. Active/resumable work and all eligibility checks still take
+precedence. Do not retroactively label existing issues.
+
 ## Check prerequisites and Developer-readable safeguards
 
 Run the loop from the repository it operates on. It confirms Git access,

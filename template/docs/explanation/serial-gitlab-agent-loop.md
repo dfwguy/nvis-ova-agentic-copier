@@ -78,6 +78,14 @@ GitLab is the shared, operator-visible projection: active or resumable work is
 safely reconcile or record. Labels deliberately do not carry the transaction
 history; the local ledger does.
 
+Fresh selection is deliberately separate from recovery. Once the runner has
+handled active/resumable work and eligibility filtering, exact
+`agent-priority::high` is first, normal work (including unknown priority-like
+labels) is second, and exact `agent-priority::low` is third. Absolute creation
+time and IID make each rank deterministic without trusting GitLab API ordering;
+invalid timestamp evidence fails closed. Humans use high, low, or label removal
+to target, defer, or normalize new work.
+
 The ledger fills the gap GitLab labels cannot safely represent. It remembers
 the selected issue, coarse workflow state, attempt, retry deadline, durable
 worktree, branch and MR evidence, workflow receipts, transition intent, and

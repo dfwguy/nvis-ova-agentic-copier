@@ -84,9 +84,12 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - A read-only `scripts/check_licenses.py` policy checker, run by pre-commit and CI.
 - A portable, human-gated agent workflow rooted in `.agents/skills`, with
   separate coding and documentation/agent-policy lanes.
-- A recoverable serial GitLab issue loop that selects the oldest eligible open,
-  non-confidential issue without a lifecycle projection or durable-ledger record;
-  its trusted runner publishes only validated workflow results, creates merge
+- A recoverable serial GitLab issue loop that resumes active work first, then
+  selects eligible fresh issues as high priority, no recognized exact priority
+  label, then low priority;
+  within each group it uses absolute creation time and IID. Eligibility still
+  requires an open, non-confidential issue without a lifecycle projection or
+  durable-ledger record; its trusted runner publishes only validated workflow results, creates merge
   requests, and never approves or merges them. Policy changes can publish after
   complete receipts and metadata; unresolved safe controversies require a
   `Draft:` handoff, while unsafe or incomplete evidence remains `needs_human`.
