@@ -1,3 +1,12 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 # OVA Agentic Flow copier
 
 A [Copier](https://copier.readthedocs.io/) template for new Python projects.
@@ -69,6 +78,7 @@ see [Create your first project](docs/tutorials/create-your-first-project.md).
 - UV-managed Python, Ruff, ty, pytest, tox, pre-commit, and GitLab CI.
 - A `src/<package>/` project layout with starter tests and documentation.
 - Bash syntax and ShellCheck validation when a project contains Bash.
+- A read-only `scripts/check_licenses.py` policy checker, run by pre-commit and CI.
 - A portable, human-gated agent workflow rooted in `.agents/skills`, with
   separate coding and documentation/agent-policy lanes.
 - A recoverable serial GitLab issue loop that selects the oldest eligible open,
@@ -108,7 +118,7 @@ For unattended work, one workflow-owning agent session preserves context from
 Architect through Red, Green, concurrent review, consolidated repair, and
 finalization. The trusted runner alone publishes and observes the exact source-
 SHA pipeline; no post-publication agent invocation delays human handoff. Coding-
-lane GitLab validation lists its eight gates as native jobs with individual green or red status indicators.
+lane GitLab validation lists its nine gates as native jobs with individual green or red status indicators.
 The root jobs use the repository's immutable prebuilt validation image without
 runtime dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs,
 and coverage reports.

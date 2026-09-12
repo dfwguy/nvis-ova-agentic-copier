@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 set -Eeuo pipefail
 
 readonly log_directory="ci-logs"
@@ -69,6 +78,10 @@ run_type_check() {
     uv run --no-sync ty check
 }
 
+run_license_check() {
+    uv run --no-sync python scripts/check_licenses.py --root .
+}
+
 run_shellcheck() {
     local file
     local first_line
@@ -119,6 +132,7 @@ run_selected_gate() {
         yamllint) run_yamllint ;;
         kingfisher) run_kingfisher ;;
         type-check) run_type_check ;;
+        license-check) run_license_check ;;
         shellcheck) run_shellcheck ;;
         *)
             printf 'Unknown CI gate: %s\n' "$name" >&2
@@ -156,6 +170,7 @@ readonly -a check_names=(
     "yamllint"
     "kingfisher"
     "type-check"
+    "license-check"
     "shellcheck"
 )
 declare -a check_pids=()

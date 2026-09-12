@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+copyright = "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+identifier = "SPDX-License-Identifier: LicenseRef-NvidiaProprietary"
+notice = [
+  "NVIDIA CORPORATION, its affiliates and licensors retain all intellectual",
+  "property and proprietary rights in and to this material, related",
+  "documentation and any modifications thereto. Any use, reproduction,",
+  "disclosure or distribution of this material and related documentation",
+  "without an express license agreement from NVIDIA CORPORATION or",
+  "its affiliates is strictly prohibited.",
+]
+hash_suffixes = [".py", ".sh", ".toml", ".yaml", ".yml", ".service", ".timer"]
+markdown_suffixes = [".md", ".mdc"]
+hash_names = [".gitignore", "Dockerfile", "{{ _copier_conf.answers_file }}"]
+annotation_suffixes = [".json", ".lock"]
+annotations_file = ".license-annotations.toml"
+exclude_paths = [
+  ".git",
+  ".cache",
+  ".hypothesis",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".venv",
+  "ci-logs",
+]
+exclude_globs = [
+  ".coverage*",
+  "*-code-quality-report.json",
+  "ci-gates.*",
+  "coverage*.xml",
+  "format-changes.diff",
+  "test-results*.xml",
+  "yamllint-report.json",
+  "**/__pycache__/**",
+  "**/*.pyc",
+]

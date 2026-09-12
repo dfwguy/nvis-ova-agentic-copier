@@ -1,3 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 """Tests for the copier template."""
 
 import json
@@ -50,6 +59,7 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
 
 _VALIDATION_JOBS = {
     "kingfisher",
+    "license-check",
     "pytest-py311",
     "pytest-py314",
     "ruff-check",
@@ -87,7 +97,7 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
     }
 
     assert visible_gates == _VALIDATION_JOBS
-    assert "validation (8 gates)" not in configuration
+    assert "validation (9 gates)" not in configuration
     for job_name in _VALIDATION_JOBS:
         job = configuration[job_name]
         assert "needs" not in job
@@ -161,9 +171,9 @@ def test_portable_ci_keeps_one_shared_setup_job(
     """Generated CI stays portable without repeating setup across jobs."""
     for root in (template_dir, generated_project):
         configuration = _ci_configuration(root)
-        assert "validation (8 gates)" in configuration
+        assert "validation (9 gates)" in configuration
         assert not (_VALIDATION_JOBS & configuration.keys())
-        assert configuration["validation (8 gates)"]["script"] == [
+        assert configuration["validation (9 gates)"]["script"] == [
             "bash tests/helpers/run-ci-checks.sh"
         ]
         assert (root / "tests" / "helpers" / "run-ci-checks.sh").exists()
@@ -370,7 +380,8 @@ def test_package_init_rendered(generated_project: Path) -> None:
     ).read_text()
     assert "{{" not in content
     assert "}}" not in content
-    assert content.strip() == '"""My Test Project."""'
+    assert content.endswith('"""My Test Project."""\n')
+    assert "SPDX-License-Identifier: LicenseRef-NvidiaProprietary" in content
 
 
 def test_generated_starter_test_exists(generated_project: Path) -> None:
@@ -808,9 +819,9 @@ def test_contributing_md_absent_in_generated_project(generated_project: Path) ->
 
 def test_claude_md_is_a_minimal_agents_md_entry_point(generated_project: Path) -> None:
     """Claude receives shared instructions without a second configuration tree."""
-    assert (
-        generated_project / "CLAUDE.md"
-    ).read_text() == "# CLAUDE.md\n\n@AGENTS.md\n"
+    content = (generated_project / "CLAUDE.md").read_text()
+    assert content.endswith("# CLAUDE.md\n\n@AGENTS.md\n")
+    assert "SPDX-License-Identifier: LicenseRef-NvidiaProprietary" in content
 
 
 def test_cursor_testing_rule_references_canonical_file(generated_project: Path) -> None:

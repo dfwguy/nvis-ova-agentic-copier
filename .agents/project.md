@@ -1,3 +1,12 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 ## What This Repo Is
 
 A [copier](https://copier.readthedocs.io/) template for generating new Python projects. Running `copier copy` against this repo scaffolds a complete Python project with UV, ruff, pytest, pre-commit, and GitLab CI/CD pre-configured.
@@ -45,6 +54,18 @@ This repository is a Copier template, whose generated-project payload is under
   only when they introduce a Bash application.
 - **Rationale:** the root runner validates the Copier payload's serial GitLab
   issue workflow while the repository continues to produce project files.
+
+- **Language:** Python
+- **Rule:** Python command implementations live below `src/<package>/`, and
+  installed commands use `[project.scripts]`.
+- **Actual paths:** the repository-wide read-only checker is
+  `scripts/check_licenses.py`, mirrored at `template/scripts/check_licenses.py`.
+  `tests/test_licenses.py` is its source behavior contract; root and template
+  pre-commit and CI invoke the checker directly.
+- **Rationale:** it validates repository files before package installation. It
+  is a read-only repository development/CI helper, not a user-facing
+  operational application; ephemeral diagnostics preserve zero writes. This
+  is a narrow local classification, not a global FileHandler policy change.
 
 - **Language:** Bash
 - **Rule:** user-facing Bash commands use one `bin/<tool>` entry point, with

@@ -1,3 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 """Contract tests for the project-only validation image."""
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ import yaml
 _IMAGE_INPUTS = ("Dockerfile", "pyproject.toml", "uv.lock")
 _VALIDATION_JOBS = {
     "kingfisher",
+    "license-check",
     "pytest-py311",
     "pytest-py314",
     "ruff-check",
@@ -230,7 +240,7 @@ def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
     }
 
     assert visible_validation_jobs == _VALIDATION_JOBS
-    assert "validation (8 gates)" not in configuration
+    assert "validation (9 gates)" not in configuration
     assert configuration["workflow"]["rules"] == [
         {"if": '$CI_PIPELINE_SOURCE == "merge_request_event"'},
         {
@@ -315,5 +325,5 @@ def test_portable_template_keeps_its_independent_validation_bootstrap(
     assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
     assert "uv python install 3.14.3 --managed-python" in template_ci
     assert "UV_PROJECT_ENVIRONMENT=/opt/ci" not in template_ci
-    assert "validation (8 gates)" in configuration
+    assert "validation (9 gates)" in configuration
     assert not (_VALIDATION_JOBS & configuration.keys())

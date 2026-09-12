@@ -1,3 +1,12 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 # AGENTS.md
 
 This repository ships one portable workflow for Codex, Pi, and Claude Code.
@@ -119,7 +128,8 @@ the content-only boundary.
 | 4h `$cli-syntax-judge` | CLI surface or contract changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | CLI diff and tests or N/A reason | Complete CLI verdict → Green |
 | 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
 | 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
-| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, every receipt/N/A, repair summary, and current JUnit evidence | Final validation verdict → Architect |
+| 4k `$license-checker` | Required; child of Green | Delegated; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and every Phase 4 review receipt | License-policy receipt → Green |
+| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, every receipt/N/A, license receipt, repair summary, and current JUnit evidence | Final validation verdict → Architect |
 | 6 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
 
 Green waits for every Phase 4 reviewer, consolidates the complete finding set,
@@ -130,6 +140,9 @@ live Architect. Architect may revise the design and reinvoke Green once; a
 second rejection, conflicting finding, or unresolved ambiguity returns
 `needs_human`. Reviewers never mutate the shared worktree or fail fast after
 another reviewer rejects.
+
+The read-only license-checker runs after the other Phase 4 reviews and before
+finalization; a violation returns to Green for its single consolidated repair.
 
 ## Documentation and agent-policy workflow manifest
 

@@ -12,6 +12,15 @@ related:
   - path: refresh-ci-image.md
     why: Publishes the dependency image used to accelerate these checks.
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 
 # Validate template changes
 
@@ -31,16 +40,17 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-the root pipeline lists eight native jobs: `ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and
-`shellcheck`. They extend the one root `.base_uv` definition, whose image is
+the root pipeline lists nine native jobs: `ruff-check`, `ruff-format`,
+`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
+`license-check`, and `shellcheck`. They extend the one root `.base_uv`
+definition, whose image is
 pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
 `uv sync` bootstrap. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
 GitLab job. The two root pytest jobs retain separate Python 3.11 and 3.14.3
 JUnit and coverage reports.
 
-The generated template deliberately keeps its portable `validation (8 gates)`
+The generated template deliberately keeps its portable `validation (9 gates)`
 aggregate job. It performs the dependency bootstrap once, then reports its
 aggregate gate suite and separate pytest reports; it does not consume the root
 image or require registry credentials. In both configurations, workflow rules

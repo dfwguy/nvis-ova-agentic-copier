@@ -3,6 +3,15 @@ name: tdd-red
 description: Test Writer — writes failing tests and confirms Red before any implementation. Use after the Architect has produced a design and before any production code is written.
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 
 # TDD Red Phase — Test Writer
 
