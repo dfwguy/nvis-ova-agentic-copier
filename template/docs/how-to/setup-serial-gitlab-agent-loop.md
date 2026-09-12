@@ -179,30 +179,49 @@ uv run agent-work loop status --json
 ```
 
 The service manager does not inherit an interactive `PATH` or checkout `direnv`
-variables. Record absolute executable paths and, when used, the absolute
-`direnv` path; the wrapper invokes `direnv exec` without writing a token to the
-environment file. Set the rendered unit name, install the units, and create a
-mode-600 environment file:
+variables. The environment file records the configured bare GitLab host and
+positive numeric project ID, but never a token. Use `direnv` only when this
+dedicated checkout has its own regular `.envrc`; the wrapper refuses any other
+configured `direnv` route. It runs `direnv` only to obtain directory-scoped
+credentials and then restores the configured host and project ID. Record
+absolute executable paths, install the units, and create a mode-600 environment
+file:
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
 uv_path="$(command -v uv)"
 agent_name="${AGENT_WORK_AGENT:-codex}"
 agent_path="$(command -v "$agent_name")"
-direnv_path="$(command -v direnv || true)"
+gitlab_host="${GITLAB_HOST:-}"
+gitlab_project_id="${GITLAB_PROJECT_ID:-}"
+case "$gitlab_host" in ''|*://*|*/*) exit 1;; esac
+case "$gitlab_project_id" in ''|0|00*|*[!0-9]*) exit 1;; esac
+direnv_path=""
+if [[ -f "$PWD/.envrc" ]]; then
+  direnv_path="$(command -v direnv || true)"
+  [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
+fi
 [[ "$uv_path" == /* && -x "$uv_path" ]] || exit 1
 case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
-[[ -z "$direnv_path" || ( "$direnv_path" == /* && -x "$direnv_path" ) ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
+
+env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+  AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
+  AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
+  AGENT_WORK_BASE_BRANCH=agent/work-base GITLAB_HOST="$gitlab_host" \
+  GITLAB_PROJECT_ID="$gitlab_project_id" \
+  bash "$PWD/scripts/agent-work-systemd-run.sh"
 ```
 
-Enable linger for the operator so the user manager survives logout, then reload
-and enable the timer:
+This isolated preview validates the exact service wrapper and credential route
+without inheriting an interactive GitLab identity. It must succeed before
+enabling the timer. Enable linger for the operator so the user manager survives
+logout, then reload and enable the timer:
 
 ```bash
 sudo loginctl enable-linger "$USER"

@@ -66,6 +66,18 @@ credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`
 branch. The runner validates it before it claims an issue, changes a label, or
 creates a ledger record; an omitted value fails the command instead.
 
+## Systemd wrapper environment
+
+The systemd wrapper requires a bare `GITLAB_HOST` and positive numeric
+`GITLAB_PROJECT_ID`; malformed or missing values exit `2` before execution. The
+mode-600 service environment file stores those public identity values and the
+recorded executable paths, never GitLab credentials. A configured
+`AGENT_WORK_DIRENV` requires a regular `${AGENT_WORK_CHECKOUT}/.envrc` and an
+executable absolute path. It may provide directory-scoped credentials, but the
+wrapper invokes `/usr/bin/env` with the captured service host and project ID so
+that `direnv` cannot replace the configured target. Setup runs the wrapper's
+preview under a scrubbed `env -i` environment before enabling the timer.
+
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction

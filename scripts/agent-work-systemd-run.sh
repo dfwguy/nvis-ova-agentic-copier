@@ -14,6 +14,20 @@ if [[ -z "${AGENT_WORK_CHECKOUT:-}" ]]; then
   echo "stopped: AGENT_WORK_CHECKOUT is not set" >&2
   exit 2
 fi
+configured_gitlab_host="${GITLAB_HOST:-}"
+case "$configured_gitlab_host" in
+  ''|*://*|*/*)
+    echo "stopped: GITLAB_HOST must be a bare hostname" >&2
+    exit 2
+    ;;
+esac
+configured_gitlab_project_id="${GITLAB_PROJECT_ID:-}"
+case "$configured_gitlab_project_id" in
+  ''|0|00*|*[!0-9]*)
+    echo "stopped: GITLAB_PROJECT_ID must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 if [[ -z "${AGENT_WORK_UV:-}" ]]; then
   echo "stopped: AGENT_WORK_UV is not set" >&2
   exit 2
@@ -43,10 +57,19 @@ if [[ -n "${AGENT_WORK_DIRENV:-}" && ! -x "$AGENT_WORK_DIRENV" ]]; then
   echo "stopped: AGENT_WORK_DIRENV is not executable: $AGENT_WORK_DIRENV" >&2
   exit 2
 fi
+if [[ -n "${AGENT_WORK_DIRENV:-}" && ( ! -f "$AGENT_WORK_CHECKOUT/.envrc" || -L "$AGENT_WORK_CHECKOUT/.envrc" ) ]]; then
+  echo "stopped: AGENT_WORK_DIRENV requires a regular AGENT_WORK_CHECKOUT/.envrc" >&2
+  exit 2
+fi
 
 cd "$AGENT_WORK_CHECKOUT"
 if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  runner=("$AGENT_WORK_DIRENV" exec "$AGENT_WORK_CHECKOUT" "$AGENT_WORK_UV")
+  runner=(
+    "$AGENT_WORK_DIRENV" exec "$AGENT_WORK_CHECKOUT" /usr/bin/env
+    "GITLAB_HOST=$configured_gitlab_host"
+    "GITLAB_PROJECT_ID=$configured_gitlab_project_id"
+    "$AGENT_WORK_UV"
+  )
 else
   runner=("$AGENT_WORK_UV")
 fi

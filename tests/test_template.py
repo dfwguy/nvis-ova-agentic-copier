@@ -797,6 +797,8 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
         "AGENT_WORK_UV": str(commands / "uv"),
         "AGENT_WORK_AGENT": "codex",
         "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "123",
         "MARKER": str(marker),
         "PATH": f"{commands}:{os.environ['PATH']}",
     }
@@ -810,6 +812,215 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
 
     assert result.returncode == 0
     assert marker.read_text() == "run agent-work loop run --json\n"
+
+
+def test_agent_loop_wrapper_stops_before_direnv_without_checkout_local_envrc(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A configured direnv route is valid only for a checkout-local envrc."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    direnv_marker = tmp_path / "direnv-marker"
+    uv_marker = tmp_path / "uv-marker"
+    _write_command(commands / "direnv", 'touch "$DIRENV_MARKER"')
+    _write_command(commands / "uv", 'touch "$UV_MARKER"')
+    _write_command(commands / "agent", "exit 0")
+
+    environment = os.environ | {
+        "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "AGENT_WORK_DIRENV": str(commands / "direnv"),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "123",
+        "DIRENV_MARKER": str(direnv_marker),
+        "UV_MARKER": str(uv_marker),
+    }
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts" / "agent-work-systemd-run.sh")],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "AGENT_WORK_CHECKOUT/.envrc" in result.stderr
+    assert not direnv_marker.exists()
+    assert not uv_marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("gitlab_host", "gitlab_project_id", "expected_error"),
+    (
+        ("", "123", "GITLAB_HOST must be a bare hostname"),
+        ("https://gitlab.example.test", "123", "GITLAB_HOST must be a bare hostname"),
+        ("gitlab.example.test/group", "123", "GITLAB_HOST must be a bare hostname"),
+        ("gitlab.example.test", "", "GITLAB_PROJECT_ID must be a positive integer"),
+        ("gitlab.example.test", "0", "GITLAB_PROJECT_ID must be a positive integer"),
+        ("gitlab.example.test", "00", "GITLAB_PROJECT_ID must be a positive integer"),
+        ("gitlab.example.test", "abc", "GITLAB_PROJECT_ID must be a positive integer"),
+    ),
+)
+def test_agent_loop_wrapper_rejects_invalid_service_target_identity(
+    project_root: Path,
+    tmp_path: Path,
+    gitlab_host: str,
+    gitlab_project_id: str,
+    expected_error: str,
+) -> None:
+    """The wrapper rejects malformed public GitLab target configuration."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    marker = tmp_path / "uv-marker"
+    _write_command(commands / "uv", 'touch "$UV_MARKER"')
+    _write_command(commands / "agent", "exit 0")
+
+    environment = os.environ | {
+        "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "GITLAB_HOST": gitlab_host,
+        "GITLAB_PROJECT_ID": gitlab_project_id,
+        "UV_MARKER": str(marker),
+    }
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts" / "agent-work-systemd-run.sh")],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_stops_before_direnv_with_symlinked_envrc(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A checkout-local authorization boundary cannot be a symlink."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    external_envrc = tmp_path / "external.envrc"
+    external_envrc.write_text("# unauthorized external envrc\n")
+    (checkout / ".envrc").symlink_to(external_envrc)
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    direnv_marker = tmp_path / "direnv-marker"
+    _write_command(commands / "direnv", 'touch "$DIRENV_MARKER"')
+    _write_command(commands / "uv", "exit 0")
+    _write_command(commands / "agent", "exit 0")
+
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts" / "agent-work-systemd-run.sh")],
+        check=False,
+        capture_output=True,
+        env=os.environ
+        | {
+            "AGENT_WORK_CHECKOUT": str(checkout),
+            "AGENT_WORK_UV": str(commands / "uv"),
+            "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+            "AGENT_WORK_DIRENV": str(commands / "direnv"),
+            "DIRENV_MARKER": str(direnv_marker),
+            "GITLAB_HOST": "gitlab.example.test",
+            "GITLAB_PROJECT_ID": "123",
+        },
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "AGENT_WORK_CHECKOUT/.envrc" in result.stderr
+    assert not direnv_marker.exists()
+
+
+@pytest.mark.parametrize("arguments", ((), ("--apply",)))
+def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
+    project_root: Path, tmp_path: Path, arguments: tuple[str, ...]
+) -> None:
+    """Direnv credentials cannot replace the service's GitLab target identity."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".envrc").write_text("# fake direnv authorization boundary\n")
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    marker = tmp_path / "runner-identity.json"
+    _write_command(
+        commands / "direnv",
+        "export GITLAB_HOST=ancestor.example.test\n"
+        "export GITLAB_PROJECT_ID=999\n"
+        "shift 2\n"
+        'exec "$@"',
+    )
+    _write_command(
+        commands / "uv",
+        'printf \'{"host":"%s","project_id":"%s","arguments":"%s"}\\n\' '
+        '"$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$*" > "$MARKER"',
+    )
+    _write_command(commands / "agent", "exit 0")
+
+    environment = os.environ | {
+        "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "AGENT_WORK_DIRENV": str(commands / "direnv"),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "123",
+        "MARKER": str(marker),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(project_root / "scripts" / "agent-work-systemd-run.sh"),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(marker.read_text()) == {
+        "host": "gitlab.example.test",
+        "project_id": "123",
+        "arguments": (
+            "run agent-work loop run --apply --json"
+            if arguments
+            else "run agent-work loop run --json"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".agents/skills/setup-agent-loop/SKILL.md",
+        "docs/how-to/setup-serial-gitlab-agent-loop.md",
+    ),
+)
+def test_service_setup_persists_public_identity_and_previews_wrapper_before_timer(
+    generated_project: Path, project_root: Path, relative_path: str
+) -> None:
+    """Published setup validates the isolated service route before enabling it."""
+    document = (project_root / relative_path).read_text()
+    assert document == (project_root / "template" / relative_path).read_text()
+    assert document == (generated_project / relative_path).read_text()
+    setup = _bash_block_containing(document, ("unit_name=", "agent-work.env"))
+
+    assert "GITLAB_HOST=%q" in setup
+    assert "GITLAB_PROJECT_ID=%q" in setup
+    assert "GITLAB_TOKEN" not in setup
+    assert "env -i" in setup
+    assert "agent-work-systemd-run.sh" in setup
+    assert document.index("agent-work-systemd-run.sh") < document.index(
+        "systemctl --user enable --now"
+    )
 
 
 def test_contributing_md_absent_in_generated_project(generated_project: Path) -> None:
