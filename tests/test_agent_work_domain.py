@@ -43,7 +43,10 @@ def test_terminal_and_handoff_states_have_distinct_projections() -> None:
     ("source", "target"),
     [
         (RunnerState.PREPARING, RunnerState.EXECUTING),
+        (RunnerState.PREPARING, RunnerState.OBSERVING),
+        (RunnerState.RETRY_WAIT, RunnerState.PREPARING),
         (RunnerState.EXECUTING, RunnerState.PUBLISHING),
+        (RunnerState.EXECUTING, RunnerState.OBSERVING),
         (RunnerState.PUBLISHING, RunnerState.EXECUTING),
         (RunnerState.PUBLISHING, RunnerState.OBSERVING),
         (RunnerState.OBSERVING, RunnerState.REPAIR),
@@ -61,8 +64,6 @@ def test_required_transition_edges_are_explicit(
 @pytest.mark.parametrize(
     ("source", "target"),
     [
-        (RunnerState.PREPARING, RunnerState.OBSERVING),
-        (RunnerState.EXECUTING, RunnerState.OBSERVING),
         (RunnerState.BLOCKED, RunnerState.EXECUTING),
         (RunnerState.FAILED, RunnerState.PREPARING),
         (RunnerState.COMPLETE, RunnerState.EXECUTING),

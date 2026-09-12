@@ -148,6 +148,18 @@ handoff:
     no progress or an external wait, `retry-wait`, a terminal or human-facing
     state, or its workflow or wall-time bound.
 
+An interrupted ordinary workflow can have completed publication before its
+ledger records the MR. Before normal retry, worker, worktree-baseline, push, or
+MR-creation paths, the runner inventories every opened MR for that recorded
+source branch. It accepts only one candidate whose configured numeric source
+and target projects, source and target branches, source SHA, closing relation,
+and durable worktree all match. This makes the discovered MR authoritative
+without choosing a newest candidate. A mismatch or ambiguity is a
+`publication_identity_mismatch` block; an empty inventory leaves the ordinary
+recovery path unchanged. Once verified, retained Draft metadata is reconciled
+without downgrading it, retry fields are cleared atomically, and exact-SHA
+pipeline observation begins in that activation.
+
 Selection of a fresh issue starts at the beginning of its applicable workflow
 and attempts to reach human handoff or another yield condition in that
 activation. Reconciliation of an existing record restores the worktree and
