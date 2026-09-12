@@ -1,3 +1,12 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 # Python Testing Patterns
 
 Detailed, on-demand reference for writing Python tests in this repo. The concise rules live in [`python.md`](python.md) → Testing; this file holds the worked examples. Read it when writing or reviewing non-trivial tests (subprocess, HTTP, imports, fixtures, logging). It is **not** auto-loaded — pull it in when you need a pattern.

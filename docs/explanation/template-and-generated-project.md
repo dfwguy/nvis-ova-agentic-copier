@@ -12,6 +12,15 @@ related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 
 # Why the template and generated project are separate
 
@@ -42,12 +51,13 @@ one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
 
 The root repository also has an internal CI boundary. Its `.base_uv` definition
-pins one project-only image by immutable digest, and eight native jobs extend
+pins one project-only image by immutable digest, and nine native jobs extend
 it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
-`kingfisher`, `type-check`, and `shellcheck`. The image holds the jobs'
+`kingfisher`, `type-check`, `license-check`, and `shellcheck`. The image holds
+the jobs'
 interpreter, system tools, and locked dependencies, so they do not install them
 again. That optimization belongs only to this repository. Generated projects
-instead retain their single portable `validation (8 gates)` job, which performs
+instead retain their single portable `validation (9 gates)` job, which performs
 dependency bootstrap once and reports the aggregate checks without the private
 registry image or its credentials. When root dependencies change, maintainers
 publish a new image digest and deliberately update the one `.base_uv` pin

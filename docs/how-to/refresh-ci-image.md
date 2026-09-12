@@ -12,6 +12,15 @@ related:
   - path: ../reference/template-contract.md
     why: Defines the boundary between this repository and generated projects.
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 
 # Refresh the CI dependency image
 
@@ -55,14 +64,14 @@ credential or registry-login command into a generated template.
 
 Use the recorded digest to update the single image pin in the root `.base_uv`
 definition in a separate merge request. Set it to the complete `CI_IMAGE`
-value, including `@sha256:...`; never substitute a floating tag. The eight
+value, including `@sha256:...`; never substitute a floating tag. The nine
 native jobs that extend `.base_uv`—`ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and
-`shellcheck`—then use the image's prepared interpreter, system tools, and
+`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
+`license-check`, and `shellcheck`—then use the image's prepared interpreter, system tools, and
 locked project dependencies. They must not run `apt-get`, `uv python install`,
 `uv sync`, or another dependency-installation fallback.
 
-Run the consumer pipeline and inspect the eight named root jobs directly; do
+Run the consumer pipeline and inspect the nine named root jobs directly; do
 not look for a root synthetic aggregate validation job or JUnit gate suite. The
 two pytest jobs retain separate JUnit and coverage reports. Apply the project
 budget to the longest executed terminal job with a numeric duration: prefer at

@@ -1,3 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 repos:
   - repo: local
     hooks:
@@ -17,6 +26,12 @@ repos:
         entry: "uv run python -c 'import sys, tomllib; from pathlib import Path; [tomllib.loads(Path(path).read_text()) for path in sys.argv[1:]]'"
         language: system
         types: [toml]
+      - id: license-check
+        name: NVIDIA license policy
+        entry: uv run python scripts/check_licenses.py --root .
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: bash-syntax
         name: Bash syntax
         entry: bash -n

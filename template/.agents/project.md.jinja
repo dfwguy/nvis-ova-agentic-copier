@@ -1,3 +1,12 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 ## What This Project Is
 
 **{{ project_name }}** — {{ description }}
@@ -40,6 +49,18 @@ production code and are not additional user entry points.
   referenced by the installed service unit.
 
 Record any additional deviation in this form:
+
+- **Language:** Python
+- **Rule:** Python command implementations live below `src/<package>/`, and
+  installed commands use `[project.scripts]`.
+- **Actual paths:** rendered `scripts/check_licenses.py` is sourced from
+  `template/scripts/check_licenses.py`; the source repository's
+  `tests/test_licenses.py` is its behavior contract, and generated pre-commit
+  and CI invoke the script.
+- **Rationale:** it validates repository files before package installation. It
+  is a read-only repository development/CI helper, not a user-facing
+  operational application; ephemeral diagnostics preserve zero writes. This
+  is a narrow local classification, not a global FileHandler policy change.
 
 - **Language:** affected language.
 - **Rule:** standard rule being departed from.

@@ -22,6 +22,15 @@ related:
   - path: ../explanation/template-and-generated-project.md
     why: Explains the template boundary behind this contract.
 ---
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
+<!--  -->
+<!-- NVIDIA CORPORATION, its affiliates and licensors retain all intellectual -->
+<!-- property and proprietary rights in and to this material, related -->
+<!-- documentation and any modifications thereto. Any use, reproduction, -->
+<!-- disclosure or distribution of this material and related documentation -->
+<!-- without an express license agreement from NVIDIA CORPORATION or -->
+<!-- its affiliates is strictly prohibited. -->
 
 # Template contract
 
@@ -103,7 +112,7 @@ initialized project until the command preflight has passed.
 | Quality | Ruff linting and formatting, plus ty type checking. |
 | Tests | pytest, coverage, Hypothesis, randomized test ordering, and purpose-built boundary mocking tools. |
 | Hooks | YAML validation, trailing-whitespace and TOML parsing checks, Bash syntax and ShellCheck, Kingfisher secret scanning, Ruff, ty, and tox through pre-commit. |
-| CI | Root CI lists eight native jobs: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, and `shellcheck`. They extend the single root `.base_uv` definition, which pins the project-only image as `<registry>/<project>/validation@sha256:<digest>`. The image supplies the interpreter, system tools, and locked dependencies, so root jobs perform no `apt-get`, `uv python install`, or `uv sync` bootstrap. There is no synthetic aggregate root validation job or aggregate JUnit gate suite; each check is investigated through its named job. The root pytest jobs retain separate JUnit and coverage reports. The generated template instead retains its portable `validation (8 gates)` aggregate job, which bootstraps dependencies once and retains its aggregate gate suite and separate pytest reports. Local tox remains the supported-matrix runner outside CI. Generated projects do not inherit the root image's registry configuration, digest pin, or credentials. Both configurations use mutually exclusive workflow rules: merge-request pipelines run, while duplicate branch pipelines are suppressed when the merge request is open. |
+| CI | Root CI lists nine native jobs: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, and `shellcheck`. They extend the single root `.base_uv` definition, which pins the project-only image as `<registry>/<project>/validation@sha256:<digest>`. The image supplies the interpreter, system tools, and locked dependencies, so root jobs perform no `apt-get`, `uv python install`, or `uv sync` bootstrap. There is no synthetic aggregate root validation job or aggregate JUnit gate suite; each check is investigated through its named job. The root pytest jobs retain separate JUnit and coverage reports. The generated template instead retains its portable `validation (9 gates)` aggregate job, which bootstraps dependencies once and retains its aggregate gate suite and separate pytest reports. Local tox remains the supported-matrix runner outside CI. Generated projects do not inherit the root image's registry configuration, digest pin, or credentials. Both configurations use mutually exclusive workflow rules: merge-request pipelines run, while duplicate branch pipelines are suppressed when the merge request is open. |
 | Agent workflow | `AGENTS.md`, `.agents/`, and `DIATAXIS.md` define architecture, TDD, documentation, review, and publication routing. `.agents/` is the only workflow tree. `CLAUDE.md` imports `AGENTS.md`, a guarded task maintains the `.claude/skills` link to `.agents/skills`, and minimal Claude settings deny approval and merge commands. |
 
 ## Generated filesystem layout
