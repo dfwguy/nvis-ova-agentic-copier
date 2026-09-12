@@ -154,6 +154,21 @@ is blocked where reportable, and failed only where it cannot be safely recorded.
 
 ## Worker protocol and publication
 
+### Systemd wrapper refresh contract
+
+The systemd wrapper requires recorded absolute paths for Git, `glab`, `jq`,
+`flock`, UV, and the selected agent. It acquires a per-worktree advisory lock,
+verifies the configured GitLab project and checkout identity, and disables
+repository hooks for every refresh command. Preview uses `git ls-remote` to
+require that `HEAD` is the remote default-branch tip without fetching or
+writing a tracking ref. Applied execution fetches only that default branch and
+fast-forwards it; any failure blocks UV. Checkout-local Git configuration is
+strictly allowlisted, target filter attributes are rejected, and submodule
+recursion is disabled. System/global transport and credential configuration is
+the operator-managed service boundary. After first deployment, stop the timer,
+manually fast-forward once, preview/canary, then restart it; later applied
+activations self-refresh.
+
 A workflow-owning worker returns a versioned, redacted envelope for its
 expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
 `needs_human`, with the coarse completed state, receipts, diagnostic, and next

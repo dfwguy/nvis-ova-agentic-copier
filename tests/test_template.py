@@ -784,34 +784,297 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
     project_root: Path, tmp_path: Path
 ) -> None:
     """Bare wrapper execution is a harmless preview."""
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    commands = tmp_path / "commands"
-    commands.mkdir()
-    marker = tmp_path / "marker"
-    _write_command(commands / "uv", 'printf \'%s\\n\' "$*" > "$MARKER"')
-    _write_command(commands / "agent", "exit 0")
+    checkout, environment, marker, glab_marker = _wrapper_checkout_environment(tmp_path)
+    before_head = _test_git_output(checkout, "rev-parse", "HEAD")
 
-    environment = os.environ | {
-        "AGENT_WORK_CHECKOUT": str(checkout),
-        "AGENT_WORK_UV": str(commands / "uv"),
-        "AGENT_WORK_AGENT": "codex",
-        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
-        "GITLAB_HOST": "gitlab.example.test",
-        "GITLAB_PROJECT_ID": "123",
-        "MARKER": str(marker),
-        "PATH": f"{commands}:{os.environ['PATH']}",
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode == 0, result.stderr
+    assert _test_git_output(checkout, "rev-parse", "HEAD") == before_head
+    assert marker.read_text() == "one\nrun agent-work loop run --json\n"
+    assert json.loads(glab_marker.read_text()) == {
+        "host": "gitlab.example.test",
+        "project_id": "123",
     }
-    result = subprocess.run(
-        ["bash", str(project_root / "scripts" / "agent-work-systemd-run.sh")],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
+
+
+def test_agent_loop_wrapper_fast_forwards_before_applied_worker(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """An applied service run uses the newly fetched default-branch content."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    _advance_wrapper_default_branch(checkout, "two")
+    hook_marker = tmp_path / "post-merge-ran"
+    hook = checkout / ".git" / "hooks" / "post-merge"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    _write_command(hook, 'touch "$HOOK_MARKER"')
+    environment["HOOK_MARKER"] = str(hook_marker)
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert (checkout / "version").read_text() == "two\n"
+    assert marker.read_text() == "two\nrun agent-work loop run --apply --json\n"
+    assert not hook_marker.exists()
+
+
+@pytest.mark.parametrize("state", ("dirty", "diverged"))
+def test_agent_loop_wrapper_blocks_unrefreshable_checkout_before_worker(
+    project_root: Path, tmp_path: Path, state: str
+) -> None:
+    """Dirty or diverged dedicated checkouts fail closed without invoking UV."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    if state == "dirty":
+        (checkout / "untracked").write_text("dirty\n")
+    else:
+        (checkout / "version").write_text("local\n")
+        _commit_repository_state(checkout, "local divergence")
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_rejects_configured_base_branch_mismatch(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """The service may only refresh the explicitly configured agent branch."""
+    _, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    environment["AGENT_WORK_BASE_BRANCH"] = "agent/another-base"
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    (
+        "reported_project_id",
+        "reported_default_branch",
+        "reported_origin",
+        "upstream_override",
+    ),
+    (
+        ("124", "main", None, None),
+        ("123", "missing", None, None),
+        ("123", "main", "https://wrong.example.test/project.git", None),
+        ("123", "main", None, "origin/not-main"),
+    ),
+)
+def test_agent_loop_wrapper_rejects_untrusted_gitlab_or_checkout_identity(
+    project_root: Path,
+    tmp_path: Path,
+    reported_project_id: str,
+    reported_default_branch: str,
+    reported_origin: str | None,
+    upstream_override: str | None,
+) -> None:
+    """Project, default, origin, and upstream evidence must all agree."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(
+        tmp_path,
+        reported_project_id=reported_project_id,
+        reported_default_branch=reported_default_branch,
+        reported_origin=reported_origin,
+        upstream_override=upstream_override,
     )
 
-    assert result.returncode == 0
-    assert marker.read_text() == "run agent-work loop run --json\n"
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert checkout.exists()
+
+
+def test_agent_loop_wrapper_preview_blocks_behind_checkout_without_mutation(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Preview verifies remote freshness but never fetches, merges, or runs stale work."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    _advance_wrapper_default_branch(checkout, "two")
+    before_head = _test_git_output(checkout, "rev-parse", "HEAD")
+    before_remote_ref = _test_git_output(checkout, "rev-parse", "origin/main")
+    before_status = _test_git_output(
+        checkout, "status", "--porcelain", "--untracked-files=all"
+    )
+
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode != 0
+    assert _test_git_output(checkout, "rev-parse", "HEAD") == before_head
+    assert _test_git_output(checkout, "rev-parse", "origin/main") == before_remote_ref
+    assert (
+        _test_git_output(checkout, "status", "--porcelain", "--untracked-files=all")
+        == before_status
+    )
+    assert (checkout / "version").read_text() == "one\n"
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_preview_does_not_require_local_tracking_ref(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A current preview relies on ls-remote, not a local origin default ref."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    _run_test_git(checkout, "update-ref", "-d", "refs/remotes/origin/main")
+
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert not (checkout / ".git" / "refs" / "remotes" / "origin" / "main").exists()
+
+
+@pytest.mark.parametrize("operation", ("fetch", "merge"))
+def test_agent_loop_wrapper_stops_on_refresh_command_failure(
+    project_root: Path, tmp_path: Path, operation: str
+) -> None:
+    """A failed fetch or fast-forward blocks the worker rather than recovering unsafely."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    if operation == "merge":
+        _advance_wrapper_default_branch(checkout, "two")
+    commands = tmp_path / "commands"
+    _write_command(
+        commands / "git-failure",
+        f'for argument in "$@"; do\n'
+        f'  if [ "$argument" = "{operation}" ]; then exit 72; fi\n'
+        "done\n"
+        'exec "$(command -v git)" "$@"',
+    )
+    environment["AGENT_WORK_GIT"] = str(commands / "git-failure")
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_fails_closed_when_refresh_lock_is_held(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Only one wrapper can refresh and invoke the worker for a checkout at once."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    git_dir = Path(
+        _test_git_output(checkout, "rev-parse", "--path-format=absolute", "--git-dir")
+    )
+    lock_path = git_dir / "agent-work-systemd.lock"
+    lock_holder = subprocess.Popen(
+        ["flock", "-n", str(lock_path), "/bin/sh", "-c", "read ignored"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert lock_holder.poll() is None
+        result = _run_wrapper(project_root, environment, "--apply")
+    finally:
+        assert lock_holder.stdin is not None
+        lock_holder.stdin.close()
+        lock_holder.wait(timeout=5)
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_rejects_target_filter_attributes_before_refresh(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A target filter attribute blocks refresh even without a local filter driver."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    writer = checkout.parent / "writer"
+    subprocess.run(
+        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (writer / ".gitattributes").write_text("filtered filter=untrusted\n")
+    (writer / "filtered").write_text("remote content\n")
+    _commit_repository_state(writer, "add filtered content")
+    _run_test_git(writer, "push", "origin", "main")
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "config_key",
+    (
+        "filter.untrusted.smudge",
+        "core.askpass",
+        "credential.helper",
+        "extensions.worktreeConfig",
+        "http.sslverify",
+        "http.proxy",
+        "remote.origin.proxy",
+    ),
+)
+def test_agent_loop_wrapper_rejects_unsafe_local_config_before_refresh(
+    project_root: Path, tmp_path: Path, config_key: str
+) -> None:
+    """Every non-allowlisted local Git setting blocks before any refresh."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    commands = tmp_path / "commands"
+    _write_command(commands / "grep", "exit 99")
+    environment["PATH"] = f"{commands}:{environment['PATH']}"
+    filter_marker = tmp_path / "filter-ran"
+    _run_test_git(
+        checkout,
+        "config",
+        config_key,
+        f"touch {filter_marker}",
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not filter_marker.exists()
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_rejects_local_info_attributes_before_refresh(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Resolved local attributes cannot bind an untrusted filter driver."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    attributes_path = Path(
+        _test_git_output(
+            checkout,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/attributes",
+        )
+    )
+    attributes_path.parent.mkdir(parents=True, exist_ok=True)
+    attributes_path.write_text("* filter=untrusted\n")
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_rejects_duplicate_origin_urls(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Ambiguous local origin URLs block before remote or worker execution."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    _run_test_git(
+        checkout,
+        "config",
+        "--add",
+        "remote.origin.url",
+        "https://wrong.example.test/project.git",
+    )
+
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode != 0
+    assert not marker.exists()
 
 
 def test_agent_loop_wrapper_stops_before_direnv_without_checkout_local_envrc(
@@ -944,11 +1207,12 @@ def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
     project_root: Path, tmp_path: Path, arguments: tuple[str, ...]
 ) -> None:
     """Direnv credentials cannot replace the service's GitLab target identity."""
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
     (checkout / ".envrc").write_text("# fake direnv authorization boundary\n")
+    _commit_repository_state(checkout, "add checkout envrc")
+    _run_test_git(checkout, "push", "origin", "HEAD:main")
+    _run_test_git(checkout, "fetch", "origin", "main:refs/remotes/origin/main")
     commands = tmp_path / "commands"
-    commands.mkdir()
     marker = tmp_path / "runner-identity.json"
     _write_command(
         commands / "direnv",
@@ -964,13 +1228,9 @@ def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
     )
     _write_command(commands / "agent", "exit 0")
 
-    environment = os.environ | {
-        "AGENT_WORK_CHECKOUT": str(checkout),
+    environment |= {
         "AGENT_WORK_UV": str(commands / "uv"),
-        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
         "AGENT_WORK_DIRENV": str(commands / "direnv"),
-        "GITLAB_HOST": "gitlab.example.test",
-        "GITLAB_PROJECT_ID": "123",
         "MARKER": str(marker),
     }
     result = subprocess.run(
@@ -1202,6 +1462,138 @@ def _run_test_git(path: Path, *arguments: str) -> None:
         check=True,
         capture_output=True,
         cwd=path,
+        env=environment,
+        text=True,
+    )
+
+
+def _test_git_output(path: Path, *arguments: str) -> str:
+    """Return deterministic output from an isolated test repository."""
+    environment = os.environ | {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return subprocess.run(
+        ["git", *arguments],
+        check=True,
+        capture_output=True,
+        cwd=path,
+        env=environment,
+        text=True,
+    ).stdout.strip()
+
+
+def _wrapper_checkout_environment(
+    tmp_path: Path,
+    *,
+    reported_project_id: str = "123",
+    reported_default_branch: str = "main",
+    reported_origin: str | None = None,
+    upstream_override: str | None = None,
+) -> tuple[Path, dict[str, str], Path, Path]:
+    """Create a dedicated clean checkout and command seams for wrapper tests."""
+    remote = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "--initial-branch", "main", remote],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    _initialize_test_repository(checkout)
+    (checkout / "version").write_text("one\n")
+    _commit_repository_state(checkout, "initial")
+    _run_test_git(checkout, "remote", "add", "origin", str(remote))
+    _run_test_git(checkout, "push", "-u", "origin", "main")
+    _run_test_git(checkout, "switch", "-c", "agent/work-base")
+    _run_test_git(
+        checkout,
+        "branch",
+        "--set-upstream-to",
+        "origin/main",
+    )
+    if upstream_override is not None:
+        _run_test_git(
+            checkout,
+            "config",
+            "branch.agent/work-base.merge",
+            f"refs/heads/{upstream_override}",
+        )
+
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    marker = tmp_path / "uv-marker"
+    glab_marker = tmp_path / "glab-marker"
+    project_url = reported_origin or str(remote)
+    project_json = json.dumps(
+        {
+            "id": int(reported_project_id),
+            "default_branch": reported_default_branch,
+            "http_url_to_repo": project_url,
+            "ssh_url_to_repo": f"git@example.test:{reported_project_id}/project.git",
+        }
+    )
+    _write_command(
+        commands / "glab",
+        'printf \'{"host":"%s","project_id":"%s"}\\n\' '
+        '"$GITLAB_HOST" "$GITLAB_PROJECT_ID" > "$GLAB_MARKER"\n'
+        f"printf '%s\\n' '{project_json}'",
+    )
+    _write_command(
+        commands / "uv",
+        'printf \'%s\\n\' "$(cat version)" > "$UV_MARKER"\n'
+        'printf \'%s\\n\' "$*" >> "$UV_MARKER"',
+    )
+    _write_command(commands / "agent", "exit 0")
+    command_paths = {
+        "AGENT_WORK_GIT": shutil.which("git"),
+        "AGENT_WORK_JQ": shutil.which("jq"),
+        "AGENT_WORK_FLOCK": shutil.which("flock"),
+    }
+    assert all(command_paths.values())
+    environment = os.environ | {
+        "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "AGENT_WORK_AGENT": "codex",
+        "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "AGENT_WORK_GLAB": str(commands / "glab"),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "123",
+        "UV_MARKER": str(marker),
+        "GLAB_MARKER": str(glab_marker),
+        **{key: str(value) for key, value in command_paths.items()},
+    }
+    return checkout, environment, marker, glab_marker
+
+
+def _advance_wrapper_default_branch(checkout: Path, content: str) -> None:
+    """Advance the tracked default branch without altering the service checkout."""
+    writer = checkout.parent / "writer"
+    subprocess.run(
+        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (writer / "version").write_text(f"{content}\n")
+    _commit_repository_state(writer, f"advance to {content}")
+    _run_test_git(writer, "push", "origin", "main")
+
+
+def _run_wrapper(
+    project_root: Path, environment: dict[str, str], *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the wrapper under its injected command and checkout seams."""
+    return subprocess.run(
+        [
+            "bash",
+            str(project_root / "scripts" / "agent-work-systemd-run.sh"),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
         env=environment,
         text=True,
     )

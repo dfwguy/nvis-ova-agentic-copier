@@ -190,6 +190,10 @@ file:
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
 uv_path="$(command -v uv)"
+git_path="$(command -v git)"
+glab_path="$(command -v glab)"
+jq_path="$(command -v jq)"
+flock_path="$(command -v flock)"
 agent_name="${AGENT_WORK_AGENT:-codex}"
 agent_path="$(command -v "$agent_name")"
 gitlab_host="${GITLAB_HOST:-}"
@@ -201,17 +205,17 @@ if [[ -f "$PWD/.envrc" ]]; then
   direnv_path="$(command -v direnv || true)"
   [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
 fi
-[[ "$uv_path" == /* && -x "$uv_path" ]] || exit 1
+[[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
 case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 
 env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
-  AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
+  AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
   AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
   AGENT_WORK_BASE_BRANCH=agent/work-base GITLAB_HOST="$gitlab_host" \
   GITLAB_PROJECT_ID="$gitlab_project_id" \
@@ -222,6 +226,14 @@ This isolated preview validates the exact service wrapper and credential route
 without inheriting an interactive GitLab identity. It must succeed before
 enabling the timer. Enable linger for the operator so the user manager survives
 logout, then reload and enable the timer:
+
+After this wrapper change first merges, stop the timer, manually fast-forward
+the dedicated checkout once, run this preview (and any canary), then restart
+the timer. Later applied activations refresh the verified default branch before
+they invoke Python. Local executable or rewrite-capable Git configuration and
+target filter attributes are rejected; repository hooks are disabled for the
+refresh. System/global transport and credential configuration is the
+operator-managed service boundary.
 
 ```bash
 sudo loginctl enable-linger "$USER"
