@@ -178,20 +178,19 @@ capabilities, returns one protocol-version-1 envelope with these values:
 
 | Field | Value |
 | --- | --- |
-| `result_kind` | `needs_human` |
+| `result_kind` | `split_required` |
 | `phase_status` | `complete` |
 | `completed_phase` | `workflow` |
 | `workflow_lane` | `unknown` |
-| `error_code` | `split_required` |
+| `split_plan` | 2..25 ordered slices with stable ASCII keys and lower-ordinal dependencies |
 
-The redacted summary is stable and concise and contains numbered, ordered,
-independently mergeable slice outcomes with dependency order. The next action
-asks a human to approve and file those slices or narrow the parent. This route
-requires no receipts or merge-request draft. The worker makes no worktree or
-GitLab mutation, creates no child issues, and executes no proposed slice. The
-trusted runner still records the blocker on the parent through its normal
-label and outcome-note projection. The split parent is not automatically
-retried. `LedgerRecord.schema_version` and
+This route requires no receipts, merge-request draft, or error code. The worker
+makes no worktree or GitLab mutation, creates no child issues, and executes no
+proposed slice. The trusted runner persists `decomposing`, derives a durable
+marker for each child, recovers crash-created children by that marker, creates
+missing children in dependency order, posts one decomposition note, and closes
+the parent. Children whose prerequisites remain open are not eligible until
+those dependencies close. `LedgerRecord.schema_version` and
 `WorkerResultEnvelope.protocol_version` remain `1`; older records and envelopes
 remain valid.
 

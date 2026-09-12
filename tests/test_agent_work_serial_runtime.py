@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 from contextlib import nullcontext
@@ -30,6 +31,7 @@ from agent_work.domain import (
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
+    split_fingerprint,
 )
 from agent_work.gitlab import GitLabError
 from agent_work.ledger import JsonLedger
@@ -43,6 +45,7 @@ from agent_work.models import (
     MergeRequestDraft,
     MergeRequestEvidence,
     PipelineEvidence,
+    SplitChildEvidence,
     TransitionIntentRecord,
     WorkflowReceiptRecord,
 )
@@ -129,6 +132,13 @@ class FakeGitLab:
         self.notes: tuple[GitLabIssueNote, ...] = ()
         self.note_fetches = 0
         self.note_error: GitLabError | None = None
+        self.split_children: dict[str, GitLabIssue] = {}
+        self.split_child_matches: dict[str, tuple[GitLabIssue, ...]] = {}
+        self.created_children: list[tuple[str, str]] = []
+        self.decomposition_notes: list[str] = []
+        self.closed_issues: list[int] = []
+        self.child_creation_failures = 0
+        self.created_child_override: GitLabIssue | None = None
 
     def verify_project(self) -> GitLabProject:
         return _project()
@@ -216,6 +226,38 @@ class FakeGitLab:
         if self.pipeline_error is not None:
             raise self.pipeline_error
         return self.pipeline
+
+    def split_child_inventory(self) -> tuple[GitLabIssue, ...]:
+        return (
+            *self.split_children.values(),
+            *(item for items in self.split_child_matches.values() for item in items),
+        )
+
+    def create_split_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue:
+        if self.child_creation_failures:
+            self.child_creation_failures -= 1
+            raise GitLabError("temporary child creation failure")
+        self.created_children.append((title, marker))
+        child = _issue(
+            iid=max((item.iid for item in self.split_children.values()), default=100)
+            + 1,
+            description=description,
+        ).model_copy(update={"title": title})
+        if self.created_child_override is not None:
+            child = self.created_child_override
+        self.split_children[marker] = child
+        return child
+
+    def ensure_decomposition_note(self, iid: int, body: str) -> None:
+        del iid
+        if body not in self.decomposition_notes:
+            self.decomposition_notes.append(body)
+
+    def close_issue(self, iid: int) -> GitLabIssue:
+        self.closed_issues.append(iid)
+        return self.issue.model_copy(update={"state": "closed"})
 
 
 class ChangingSnapshotJsonLedger(JsonLedger):
@@ -577,6 +619,341 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
 
     assert outcome is not None and outcome.phase is WorkflowPhase.CODING_NONFUNCTIONAL
     assert len(outcome.receipts) == 1
+
+
+def test_split_required_workflow_creates_children_in_order_then_closes_parent(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    record = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    )
+    record = ledger.persist(record)
+    payload = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "split_required",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "split_plan": {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "first",
+                    "title": "First slice",
+                    "description": "Independent first work.",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "second",
+                    "title": "Second slice",
+                    "description": "Dependent second work.",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        "change_summary": "Split the parent into two mergeable slices.",
+        "next_action": "Create the durable child issues.",
+    }
+    gitlab = FakeGitLab()
+
+    decomposing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    complete = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert decomposing is not None and decomposing.state is RunnerState.DECOMPOSING
+    assert [title for title, _marker in gitlab.created_children] == [
+        "First slice",
+        "Second slice",
+    ]
+    first_fingerprint = hashlib.sha256(b"310967:12:first").hexdigest()
+    second_fingerprint = hashlib.sha256(b"310967:12:second").hexdigest()
+    assert first_fingerprint in gitlab.created_children[0][1]
+    assert second_fingerprint in gitlab.created_children[1][1]
+    child_descriptions = tuple(
+        child.description for child in gitlab.split_children.values()
+    )
+    assert all("Parent: #12" in description for description in child_descriptions)
+    assert "Depends-on: #" not in child_descriptions[0]
+    assert "Depends-on: #" in child_descriptions[1]
+    assert complete is not None and complete.state is RunnerState.COMPLETE
+    assert gitlab.closed_issues == [12]
+    assert len(gitlab.decomposition_notes) == 1
+
+
+def test_split_decomposition_recovers_a_created_child_and_retries_only_the_remaining_child(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = FakeGitLab()
+    gitlab.child_creation_failures = 1
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "state": RunnerState.DECOMPOSING,
+                "workflow_lane": WorkflowLane.UNKNOWN,
+                "decomposition_plan": {
+                    "slices": [
+                        {
+                            "ordinal": 1,
+                            "key": "first",
+                            "title": "First slice",
+                            "description": "Independent first work.",
+                            "depends_on": [],
+                        },
+                        {
+                            "ordinal": 2,
+                            "key": "second",
+                            "title": "Second slice",
+                            "description": "Dependent second work.",
+                            "depends_on": [1],
+                        },
+                    ]
+                },
+            }
+        )
+    )
+    first_fingerprint = hashlib.sha256(b"310967:12:first").hexdigest()
+    first_marker = (
+        "<!-- agent-work-split:v1 "
+        f"fingerprint={first_fingerprint} parent=12 key=first dependencies=none -->"
+    )
+    gitlab.split_children[first_marker] = _issue(iid=101).model_copy(
+        update={
+            "title": "First slice",
+            "description": f"{first_marker}\n\nParent: #12\n\nIndependent first work.",
+        }
+    )
+
+    retry = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW + timedelta(minutes=20),
+    )
+
+    assert retry is not None and retry.state is RunnerState.RETRY_WAIT
+    assert resumed is not None and resumed.state is RunnerState.COMPLETE
+    assert [title for title, _marker in gitlab.created_children] == ["Second slice"]
+
+
+def test_malformed_split_envelope_blocks_before_any_decomposition_mutation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    malformed = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "split_required",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "split_plan": {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "only",
+                    "title": "Only",
+                    "description": "Invalid singleton.",
+                    "depends_on": [],
+                }
+            ]
+        },
+        "change_summary": "Malformed decomposition.",
+        "next_action": "Do not mutate GitLab.",
+    }
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(malformed)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert gitlab.created_children == []
+    assert gitlab.decomposition_notes == []
+    assert gitlab.closed_issues == []
+
+
+@pytest.mark.parametrize("match_kind", ["duplicate", "conflicting"])
+def test_split_recovery_blocks_ambiguous_marker_evidence_without_mutation(
+    tmp_path: Path, match_kind: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    fingerprint = hashlib.sha256(b"310967:12:first").hexdigest()
+    marker = (
+        "<!-- agent-work-split:v1 "
+        f"fingerprint={fingerprint} parent=12 key=first dependencies=none -->"
+    )
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "state": RunnerState.DECOMPOSING,
+                "workflow_lane": WorkflowLane.UNKNOWN,
+                "decomposition_plan": {
+                    "slices": [
+                        {
+                            "ordinal": 1,
+                            "key": "first",
+                            "title": "First",
+                            "description": "First slice.",
+                            "depends_on": [],
+                        },
+                        {
+                            "ordinal": 2,
+                            "key": "second",
+                            "title": "Second",
+                            "description": "Second slice.",
+                            "depends_on": [1],
+                        },
+                    ]
+                },
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    exact = _issue(iid=101, description=f"{marker}\n\nParent: #12")
+    gitlab.split_child_matches[marker] = (
+        (exact, exact.model_copy(update={"iid": 102}))
+        if match_kind == "duplicate"
+        else (exact.model_copy(update={"description": f"{marker}\n\nwrong evidence"}),)
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert gitlab.created_children == []
+    assert gitlab.decomposition_notes == []
+    assert gitlab.closed_issues == []
+
+
+@pytest.mark.parametrize("override", ["title", "body", "parent"])
+def test_split_creation_rejects_inexact_returned_child_before_parent_mutation(
+    tmp_path: Path, override: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    plan = {
+        "slices": [
+            {
+                "ordinal": 1,
+                "key": "one",
+                "title": "One",
+                "description": "One.",
+                "depends_on": [],
+            },
+            {
+                "ordinal": 2,
+                "key": "two",
+                "title": "Two",
+                "description": "Two.",
+                "depends_on": [1],
+            },
+        ]
+    }
+    from agent_work.domain import render_split_marker
+
+    payload = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    ).model_dump(mode="python")
+    payload.update(
+        {
+            "state": RunnerState.DECOMPOSING,
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "decomposition_plan": plan,
+            "decomposition_progress": (
+                SplitChildEvidence(
+                    ordinal=1,
+                    key="one",
+                    fingerprint=split_fingerprint(310967, 12, "one"),
+                    issue_iid=101,
+                ),
+            ),
+        }
+    )
+    ledger.persist(LedgerRecord.model_validate(payload))
+    marker = render_split_marker(310967, 12, "two", (101,))
+    expected = f"{marker}\n\nParent: #12\nDepends-on: #101\n\nTwo."
+    gitlab = FakeGitLab()
+    gitlab.created_child_override = _issue(
+        iid=12 if override == "parent" else 102,
+        description="altered" if override == "body" else expected,
+    ).model_copy(update={"title": "altered" if override == "title" else "Two"})
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert len(gitlab.created_children) == 1
+    assert len(outcome.decomposition_progress) == 1
+    assert gitlab.decomposition_notes == [] and gitlab.closed_issues == []
 
 
 def test_execution_fetches_live_issue_notes_for_the_worker_prompt(

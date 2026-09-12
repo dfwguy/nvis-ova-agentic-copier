@@ -44,12 +44,13 @@ never use line count or another brittle numeric content threshold.
 
 If the issue is oversized or contains separately deliverable capabilities,
 stop before selecting a lane or delegating mutable work. Return exactly one
-protocol-version-1 `needs_human` envelope for completed phase `workflow`, with
-lane `unknown`, stable error code `split_required`, and a concise redacted
-summary containing numbered, ordered, independently mergeable slice outcomes
-and their dependency order. Ask a human to approve and file the slices or
-narrow the parent. This blocked route needs no receipts or merge-request draft.
-Do not create or update issues, execute a proposed slice, or retry the parent
+protocol-version-1 `split_required` envelope for completed phase `workflow`, with
+lane `unknown` and a structured `split_plan` of 2..25 numbered, ordered,
+independently mergeable slice proposals with ASCII keys and lower-ordinal
+dependencies. This route needs no receipts, merge-request draft, or error code.
+The trusted runner, not the worker, persistently creates or recovers child
+issues and closes the parent without human approval. Do not create or update
+issues, execute a proposed slice, or retry the parent
 automatically. A suitable issue continues through the current workflow
 unchanged.
 

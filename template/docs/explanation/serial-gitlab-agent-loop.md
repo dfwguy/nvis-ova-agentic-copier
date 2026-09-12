@@ -46,13 +46,13 @@ dependency order, and workflow breadth, not a line-count or point threshold.
 Making it before Red, documentation writing, or any worktree mutation avoids
 spending the worker budget on a change that cannot reach a reviewable handoff.
 
-An oversized issue is a deliberate human blocker, not a transient failure. The
-worker returns `split_required` with ordered, independently mergeable slice
-proposals and stops without creating child issues or retrying. A human chooses
-and files those slices, or narrows the parent; only a suitably narrowed parent
-is explicitly retried. This keeps issue ownership and decomposition decisions
-outside the less-trusted worker while allowing each approved slice to produce
-its own merge request.
+An oversized issue enters a durable decomposition state, not a transient
+failure. The worker returns `split_required` with a validated structured plan,
+then stops without creating child issues or retrying. The trusted runner owns
+the external work: it creates or recovers marker-bound child issues in
+dependency order, records its progress after each child, and closes the parent.
+This makes recovery safe across a crash while allowing every child to retain its
+own merge-request lifecycle.
 
 ```mermaid
 stateDiagram-v2

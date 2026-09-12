@@ -314,13 +314,13 @@ Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
 
-### Resolve a `split_required` blocker
+### Observe an automated `split_required` decomposition
 
-When status reports `error_code=split_required`, review the numbered slice
-outcomes and their dependency order in the recorded summary. Decide whether to
-use the parent as a tracking issue and file the approved slices as separate
-issues, or narrow the parent to one independently mergeable outcome. The loop
-does not create or update those issues itself.
+When an Architect returns `result_kind=split_required`, the trusted runner
+durably creates or recovers the proposed child issues and closes the parent.
+Review the parent decomposition note and the marker-bound child issues. A child
+with an open `Depends-on` issue remains ineligible until every prerequisite is
+closed; no manual filing or retry is needed.
 
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or

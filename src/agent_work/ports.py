@@ -96,6 +96,16 @@ class GitLabPort(Protocol):
         self, mr_iid: int, sha: str
     ) -> PipelineEvidence | None: ...
 
+    def split_child_inventory(self) -> tuple[GitLabIssue, ...]: ...
+
+    def create_split_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue: ...
+
+    def ensure_decomposition_note(self, iid: int, body: str) -> None: ...
+
+    def close_issue(self, iid: int) -> GitLabIssue: ...
+
 
 class LedgerPort(Protocol):
     """Durable record storage."""

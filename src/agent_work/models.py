@@ -15,9 +15,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .domain import ErrorCode, RunnerState, WorkflowLane, WorkflowPhase, WorkKind
+from .domain import (
+    ErrorCode,
+    RunnerState,
+    WorkflowLane,
+    WorkflowPhase,
+    WorkKind,
+    split_fingerprint,
+)
 
 
 class BoundaryModel(BaseModel):
@@ -162,6 +169,56 @@ class WorkflowReceiptRecord(BoundaryModel):
     detail: str = Field(min_length=1, max_length=20_000)
 
 
+class SplitSliceProposal(BoundaryModel):
+    """One ordered, independently mergeable decomposition slice."""
+
+    ordinal: int = Field(ge=1)
+    key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=80)
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(min_length=1, max_length=20_000)
+    depends_on: tuple[int, ...] = ()
+
+    @field_validator("depends_on")
+    @classmethod
+    def validate_dependencies(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """Require unique positive dependency ordinals."""
+        if len(set(value)) != len(value) or any(item < 1 for item in value):
+            raise ValueError("dependencies must be unique positive ordinals")
+        return value
+
+
+class SplitPlan(BoundaryModel):
+    """Validated topologically ordered worker decomposition plan."""
+
+    slices: tuple[SplitSliceProposal, ...] = Field(min_length=2, max_length=25)
+
+    @model_validator(mode="after")
+    def validate_topology(self) -> SplitPlan:
+        """Require contiguous ordinals, unique keys, and lower dependencies."""
+        if tuple(slice_.ordinal for slice_ in self.slices) != tuple(
+            range(1, len(self.slices) + 1)
+        ):
+            raise ValueError("slice ordinals must be contiguous starting at one")
+        if len({slice_.key for slice_ in self.slices}) != len(self.slices):
+            raise ValueError("slice keys must be unique")
+        if any(
+            dependency >= slice_.ordinal
+            for slice_ in self.slices
+            for dependency in slice_.depends_on
+        ):
+            raise ValueError("dependencies must refer to lower ordinals")
+        return self
+
+
+class SplitChildEvidence(BoundaryModel):
+    """One durable child binding for an ordered split slice."""
+
+    ordinal: int = Field(ge=1)
+    key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    issue_iid: int = Field(gt=0)
+
+
 class LedgerRecord(BoundaryModel):
     """Durable state for one issue."""
 
@@ -186,8 +243,46 @@ class LedgerRecord(BoundaryModel):
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
     error_code: ErrorCode | None = None
+    decomposition_plan: SplitPlan | None = None
+    decomposition_progress: tuple[SplitChildEvidence, ...] = ()
     summary: str = ""
     next_action: str = ""
+
+    @model_validator(mode="after")
+    def validate_decomposition(self) -> LedgerRecord:
+        """Keep durable decomposition state and recovered child progress coherent."""
+        requires_plan = self.state is RunnerState.DECOMPOSING or (
+            self.state is RunnerState.RETRY_WAIT
+            and self.prior_state is RunnerState.DECOMPOSING
+        )
+        if (
+            requires_plan or self.decomposition_progress
+        ) and self.decomposition_plan is None:
+            raise ValueError("decomposition state or progress requires a plan")
+        if self.decomposition_plan is not None:
+            if len(self.decomposition_progress) > len(self.decomposition_plan.slices):
+                raise ValueError("decomposition progress exceeds its plan")
+            progress_iids = tuple(
+                item.issue_iid for item in self.decomposition_progress
+            )
+            if len(set(progress_iids)) != len(progress_iids) or any(
+                iid == self.issue_iid for iid in progress_iids
+            ):
+                raise ValueError("decomposition progress has invalid child issue IDs")
+            expected = self.decomposition_plan.slices[
+                : len(self.decomposition_progress)
+            ]
+            if any(
+                evidence.ordinal != slice_.ordinal
+                or evidence.key != slice_.key
+                or evidence.fingerprint
+                != split_fingerprint(self.project_id, self.issue_iid, slice_.key)
+                for evidence, slice_ in zip(
+                    self.decomposition_progress, expected, strict=True
+                )
+            ):
+                raise ValueError("decomposition progress is not an exact plan prefix")
+        return self
 
 
 class WorkerResultEnvelope(BoundaryModel):
@@ -200,16 +295,38 @@ class WorkerResultEnvelope(BoundaryModel):
     expected_state: RunnerState
     expected_phase: WorkflowPhase
     workflow_lane: WorkflowLane
-    result_kind: Literal["ready_to_publish", "retryable", "needs_human"]
+    result_kind: Literal[
+        "ready_to_publish", "retryable", "needs_human", "split_required"
+    ]
     phase_status: Literal["complete", "rejected"]
     completed_phase: WorkflowPhase
     rejection_route: WorkflowPhase | None = None
     receipts: tuple[str, ...] = ()
+    split_plan: SplitPlan | None = None
     change_summary: str = Field(min_length=1, max_length=20_000)
     merge_request_draft: MergeRequestDraft | None = None
     error_code: ErrorCode | None = None
     redacted_summary: str = ""
     next_action: str = Field(min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def validate_split_context(self) -> WorkerResultEnvelope:
+        """Keep split-required envelopes unambiguous and worker-only."""
+        if self.result_kind == "split_required":
+            if (
+                self.expected_phase is not WorkflowPhase.WORKFLOW
+                or self.completed_phase is not WorkflowPhase.WORKFLOW
+                or self.workflow_lane is not WorkflowLane.UNKNOWN
+                or self.phase_status != "complete"
+                or self.receipts
+                or self.merge_request_draft is not None
+                or self.error_code is not None
+                or self.split_plan is None
+            ):
+                raise ValueError("split_required envelope has invalid context")
+        elif self.split_plan is not None:
+            raise ValueError("split_plan is only valid for split_required")
+        return self
 
 
 class MigrationObservation(BoundaryModel):

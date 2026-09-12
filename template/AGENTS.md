@@ -220,11 +220,11 @@ the documentation writer, or any worktree mutation, Architect makes one
 semantic intake sizing decision. Suitable work has one independently
 reviewable and mergeable outcome that can reasonably complete every applicable
 workflow phase inside the effective worker budget. Oversized or separately
-deliverable work returns `needs_human` with `error_code=split_required` and
-ordered, independently mergeable slice proposals; it does not select a lane,
-mutate the worktree, create child issues, execute slices, or retry
-automatically. A human must approve and file the slices or narrow the parent
-before an explicit retry. The worker edits and validates its prepared per-issue worktree but must
+deliverable work returns `result_kind=split_required` with a validated, ordered
+`split_plan`; it does not select a lane, mutate the worktree, create child
+issues, execute slices, or retry automatically. The trusted runner persists
+the plan, creates or recovers the child issues with dependency markers, and
+closes the parent. The worker edits and validates its prepared per-issue worktree but must
 not commit, push, create a merge request, call GitLab, approve, or merge; the
 trusted runner owns publication, exact pipeline observation, and durable
 recovery. Existing ledgers at legacy phases may finish that recorded route;

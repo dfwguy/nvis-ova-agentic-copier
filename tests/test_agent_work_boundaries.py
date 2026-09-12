@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -215,6 +216,178 @@ def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
         "projects/310967" in command[command.index("-X") + 2]
         for command in api.commands
     )
+
+
+def test_gitlab_eligibility_honors_valid_split_dependency_markers(
+    tmp_path: Path,
+) -> None:
+    child_fingerprint = hashlib.sha256(b"310967:12:child").hexdigest()
+    independent_fingerprint = hashlib.sha256(b"310967:12:independent").hexdigest()
+    child = _issue_payload(20)
+    child["description"] = (
+        f"<!-- agent-work-split:v1 fingerprint={child_fingerprint} parent=12 key=child "
+        "dependencies=19 -->\n\nParent: #12\nDepends-on: #19"
+    )
+    prerequisite = _issue_payload(19)
+    prerequisite.update({"state": "opened", "labels": ["agent::awaiting-human"]})
+    independent = _issue_payload(21)
+    independent["description"] = (
+        f"<!-- agent-work-split:v1 fingerprint={independent_fingerprint} parent=12 key=independent "
+        "dependencies=none -->\n\nParent: #12"
+    )
+    issues = [child, prerequisite, independent]
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert command[command.index("-X") + 2].endswith("/issues")
+        state = next(
+            part.removeprefix("state=") for part in command if part.startswith("state=")
+        )
+        payload = (
+            issues
+            if state == "all"
+            else [issue for issue in issues if issue["state"] == state]
+        )
+        return CommandResult(0, json.dumps(payload), "")
+
+    gateway = GitLabGateway(_config(tmp_path), fake)
+
+    assert [issue.iid for issue in gateway.list_eligible()] == [21]
+    prerequisite["state"] = "closed"
+    assert [issue.iid for issue in gateway.list_eligible()] == [20, 21]
+
+
+def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) -> None:
+    """The real gateway creates, notes, and closes only exact split evidence."""
+    commands: list[tuple[str, ...]] = []
+    marker = (
+        "<!-- agent-work-split:v1 fingerprint="
+        + "a" * 64
+        + " parent=12 key=child dependencies=none -->"
+    )
+    child = _issue_payload(20)
+    child.update({"title": "Child", "description": marker})
+    parent = _issue_payload(12)
+    parent.update({"state": "closed"})
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint.endswith("/issues") and method == "POST":
+            return CommandResult(0, json.dumps(child), "")
+        if endpoint.endswith("/issues/12/notes") and method == "GET":
+            return CommandResult(0, "[]", "")
+        if endpoint.endswith("/issues/12/notes"):
+            return CommandResult(0, json.dumps({"id": 1}), "")
+        if endpoint.endswith("/issues/12") and method == "PUT":
+            return CommandResult(0, json.dumps(parent), "")
+        raise AssertionError(endpoint)
+
+    gateway = GitLabGateway(_config(tmp_path), fake)
+    assert (
+        gateway.create_split_child(title="Child", description=marker, marker=marker).iid
+        == 20
+    )
+    gateway.ensure_decomposition_note(12, "note")
+    assert gateway.close_issue(12).state == "closed"
+    assert any(
+        "title=Child" in command and f"description={marker}" in command
+        for command in commands
+    )
+    assert any("body=note" in command for command in commands)
+    assert any("state_event=close" in command for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("child_update", "parent_update", "message"),
+    [
+        ({"description": "missing"}, {}, "split child evidence"),
+        ({}, {"state": "opened"}, "did not close"),
+    ],
+)
+def test_gitlab_split_mutations_reject_inexact_evidence(
+    tmp_path: Path,
+    child_update: dict[str, object],
+    parent_update: dict[str, object],
+    message: str,
+) -> None:
+    marker = (
+        "<!-- agent-work-split:v1 fingerprint="
+        + "a" * 64
+        + " parent=12 key=child dependencies=none -->"
+    )
+    child = _issue_payload(20)
+    child.update({"title": "Child", "description": marker, **child_update})
+    parent = _issue_payload(12)
+    parent.update({"state": "closed", **parent_update})
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            0,
+            json.dumps(
+                child
+                if command[command.index("-X") + 2].endswith("/issues")
+                else parent
+            ),
+            "",
+        )
+
+    gateway = GitLabGateway(_config(tmp_path), fake)
+    with pytest.raises(GitLabError, match=message):
+        if child_update:
+            gateway.create_split_child(title="Child", description=marker, marker=marker)
+        else:
+            gateway.close_issue(12)
+
+
+def test_gitlab_split_note_is_idempotent_for_exact_existing_body(
+    tmp_path: Path,
+) -> None:
+    """An exact durable decomposition note is never posted a second time."""
+    commands: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        if endpoint.endswith("/issues/12/notes"):
+            return CommandResult(
+                0,
+                json.dumps([_note_payload(1, body="existing decomposition")]),
+                "",
+            )
+        raise AssertionError(endpoint)
+
+    GitLabGateway(_config(tmp_path), fake).ensure_decomposition_note(
+        12, "existing decomposition"
+    )
+
+    assert not any(command[command.index("-X") + 1] == "POST" for command in commands)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "<!-- agent-work-split:v1 fingerprint=bad parent=12 key=child dependencies=none -->",
+        "<!-- agent-work-split:v1 fingerprint="
+        + hashlib.sha256(b"310967:12:child").hexdigest()
+        + " parent=12 key=child dependencies=20 -->",
+        "<!-- agent-work-split:v1 fingerprint="
+        + hashlib.sha256(b"310967:12:child").hexdigest()
+        + " parent=12 key=child dependencies=999 -->",
+    ],
+)
+def test_gitlab_eligibility_fails_closed_for_malformed_or_invalid_split_dependencies(
+    tmp_path: Path, description: str
+) -> None:
+    issue = _issue_payload(20)
+    issue["description"] = description
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert command[command.index("-X") + 2].endswith("/issues")
+        return CommandResult(0, json.dumps([issue]), "")
+
+    with pytest.raises(GitLabError):
+        GitLabGateway(_config(tmp_path), fake).list_eligible()
 
 
 @pytest.mark.parametrize(

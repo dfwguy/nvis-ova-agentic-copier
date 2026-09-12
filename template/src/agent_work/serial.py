@@ -26,6 +26,8 @@ from .domain import (
     WorkflowPhase,
     WorkKind,
     label_for_state,
+    render_split_marker,
+    split_fingerprint,
 )
 from .gitlab import GitLabError
 from .models import (
@@ -33,6 +35,7 @@ from .models import (
     LedgerRecord,
     MergeRequestDraft,
     MergeRequestEvidence,
+    SplitChildEvidence,
     TransitionIntentRecord,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
@@ -52,6 +55,140 @@ class SegmentError(RuntimeError):
 
 def _has_workflow_receipt(record: LedgerRecord) -> bool:
     return any(receipt.phase is WorkflowPhase.WORKFLOW for receipt in record.receipts)
+
+
+def _split_description(
+    marker: str, parent_iid: int, description: str, dependencies: tuple[int, ...]
+) -> str:
+    """Render one child body with human-readable provenance."""
+    links = "\n".join(f"Depends-on: #{item}" for item in dependencies)
+    dependency_section = f"{links}\n" if links else ""
+    return f"{marker}\n\nParent: #{parent_iid}\n{dependency_section}\n{description}".rstrip()
+
+
+def _split_child_is_exact(
+    child: GitLabIssue,
+    *,
+    parent_iid: int,
+    title: str,
+    description: str,
+    assigned_iids: set[int],
+) -> bool:
+    """Return whether one recovered or created child exactly matches its plan evidence."""
+    return (
+        child.iid != parent_iid
+        and child.iid not in assigned_iids
+        and child.title == title
+        and child.description == description
+    )
+
+
+def _decompose(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+    close_parent: bool = True,
+) -> LedgerRecord:
+    """Persistently create or recover every split child, then close its parent."""
+    plan = record.decomposition_plan
+    if plan is None:
+        raise SegmentError("decomposition state lacks a plan")
+    children = list(record.decomposition_progress)
+    try:
+        inventory = gitlab.split_child_inventory()
+        for slice_ in plan.slices[len(children) :]:
+            dependency_iids = tuple(
+                children[ordinal - 1].issue_iid for ordinal in slice_.depends_on
+            )
+            marker = render_split_marker(
+                record.project_id, record.issue_iid, slice_.key, dependency_iids
+            )
+            matches = tuple(issue for issue in inventory if marker in issue.description)
+            if len(matches) > 1:
+                raise SegmentError("split child marker evidence is ambiguous")
+            description = _split_description(
+                marker, record.issue_iid, slice_.description, dependency_iids
+            )
+            if matches:
+                child = matches[0]
+                if not _split_child_is_exact(
+                    child,
+                    parent_iid=record.issue_iid,
+                    title=slice_.title,
+                    description=description,
+                    assigned_iids={item.issue_iid for item in children},
+                ):
+                    raise SegmentError(
+                        "split child marker evidence conflicts with the plan"
+                    )
+            else:
+                child = gitlab.create_split_child(
+                    title=slice_.title, description=description, marker=marker
+                )
+                if not _split_child_is_exact(
+                    child,
+                    parent_iid=record.issue_iid,
+                    title=slice_.title,
+                    description=description,
+                    assigned_iids={item.issue_iid for item in children},
+                ):
+                    raise SegmentError("created split child evidence is not exact")
+            children.append(
+                SplitChildEvidence(
+                    ordinal=slice_.ordinal,
+                    key=slice_.key,
+                    fingerprint=split_fingerprint(
+                        record.project_id, record.issue_iid, slice_.key
+                    ),
+                    issue_iid=child.iid,
+                )
+            )
+            record = ledger.persist(
+                record.model_copy(update={"decomposition_progress": tuple(children)})
+            )
+        if not close_parent:
+            return record
+        note = "\n".join(
+            ["<!-- agent-work-decomposition:v1 -->", "Decomposed into:"]
+            + [f"- #{child.issue_iid}" for child in children]
+        )
+        gitlab.ensure_decomposition_note(record.issue_iid, note)
+        gitlab.close_issue(record.issue_iid)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except SegmentError as error:
+        blocked = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.BLOCKED,
+                summary=str(error),
+                next_action="Resolve conflicting split evidence before retrying.",
+            )
+        )
+        gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
+        gitlab.comment_outcome(
+            record.issue_iid,
+            error_code=str(ErrorCode.STATE_RECONCILIATION_FAILED),
+            summary=blocked.summary,
+            next_action=blocked.next_action,
+        )
+        return blocked
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.COMPLETE,
+            summary="Parent decomposed into durable child issues.",
+            next_action="No action required.",
+        )
+    )
 
 
 def _draft_handoff_is_valid(draft: MergeRequestDraft) -> bool:
@@ -526,6 +663,10 @@ def _execute(
                 summary="Post-publication merge request evidence is not exact.",
             )
     outcome = ledger.persist(outcome)
+    if outcome.state is RunnerState.DECOMPOSING:
+        return _decompose(
+            outcome, ledger=ledger, gitlab=gitlab, now=now, close_parent=False
+        )
     gitlab.transition_labels(issue.iid, label_for_state(outcome.state))
     if outcome.state is RunnerState.BLOCKED:
         gitlab.comment_outcome(
@@ -938,7 +1079,7 @@ def run_segment(
             now=now,
         )
     if record.state is RunnerState.RETRY_WAIT:
-        return ledger.persist(
+        resumed = ledger.persist(
             transition_record(
                 record,
                 record.prior_state or RunnerState.EXECUTING,
@@ -946,6 +1087,9 @@ def run_segment(
                 retry_at=None,
             )
         )
+        if resumed.state is RunnerState.DECOMPOSING:
+            return _decompose(resumed, ledger=ledger, gitlab=gitlab, now=now)
+        return resumed
     if record.state in {RunnerState.EXECUTING, RunnerState.REPAIR}:
         return _execute(
             record,
@@ -958,6 +1102,8 @@ def run_segment(
             now=now,
             remaining_seconds=remaining_seconds,
         )
+    if record.state is RunnerState.DECOMPOSING:
+        return _decompose(record, ledger=ledger, gitlab=gitlab, now=now)
     if record.state is RunnerState.PUBLISHING:
         return _publish(
             record,
