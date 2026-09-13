@@ -2494,6 +2494,44 @@ def test_manual_loop_run_examples_load_configured_base_branch(
         assert all(_loads_configured_base_branch(block) for block in manual_blocks)
 
 
+@pytest.mark.parametrize(
+    ("document", "validation_commands"),
+    (
+        ("root", ("uvx copier copy", "uv run pytest")),
+        ("template", ("uv run pytest",)),
+        ("rendered", ("uv run pytest",)),
+    ),
+)
+def test_readmes_keep_only_starting_examples_and_one_safe_loop_preview(
+    document: str,
+    validation_commands: tuple[str, ...],
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Each README has its start command and one read-only loop preview."""
+    readmes = {
+        "root": project_root / "README.md",
+        "template": template_dir / "README.md.jinja",
+        "rendered": generated_project / "README.md",
+    }
+    bash_blocks = _bash_blocks(readmes[document].read_text())
+    loop_blocks = tuple(
+        block for block in bash_blocks if "uv run agent-work loop run" in block
+    )
+
+    assert len(loop_blocks) == 1
+    preview = loop_blocks[0]
+    assert "export AGENT_WORK_BASE_BRANCH=agent/work-base" in preview
+    assert "export AGENT_WORK_FACTORY_USERNAME=" in preview
+    assert "uv run agent-work loop run --json" in preview
+    assert "--apply" not in preview
+
+    starting_blocks = tuple(block for block in bash_blocks if block != preview)
+    assert len(starting_blocks) == 1
+    assert all(command in starting_blocks[0] for command in validation_commands)
+
+
 def test_loop_reference_defines_required_base_before_claiming_work(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:

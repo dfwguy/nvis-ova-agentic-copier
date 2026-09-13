@@ -11,22 +11,15 @@
 
 {{ description }}
 
-## Check license compliance
-
-Run the read-only policy checker locally:
+## First validation
 
 ```bash
-uv run python scripts/check_licenses.py --root .
+uv run pytest
 ```
 
-## Start the GitLab issue loop
+## Agent-loop preview
 
-After the repository safeguards are ready, install the runner and enable its
-single user-level systemd timer. The loop processes an eligible open,
-non-confidential issue without lifecycle or ledger state only after active work;
-fresh work ranks exact high priority, no recognized exact priority label, then
-exact low priority, with absolute creation time and IID within each rank. It
-never approves or merges its human-gated merge request.
+Preview the next safe action without changing the repository or GitLab:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -34,90 +27,13 @@ export AGENT_WORK_FACTORY_USERNAME=your-service-account
 uv run agent-work loop run --json
 ```
 
-`AGENT_WORK_FACTORY_USERNAME` is required and must exactly match the authenticated
-GitLab service username.
+`AGENT_WORK_FACTORY_USERNAME` must match the authenticated GitLab service
+username. For setup and operation, use the [agent-loop setup
+guide](docs/how-to/setup-serial-gitlab-agent-loop.md) and [agent-loop
+reference](docs/reference/serial-gitlab-agent-loop.md).
 
-Run it from the repository it should operate on. This bare command is a
-read-only preview. The runner derives the GitLab host and project from `origin`
-and confirms that project through GitLab before reporting eligible work. Use
-[`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md)
-to install the timer. It records redacted lifecycle evidence in the systemd
-journal and the XDG-local `agent-work.log`.
-Enable linger
-and verify it before relying on the timer after logout:
+## Project documentation
 
-```bash
-sudo loginctl enable-linger "$USER"
-loginctl show-user "$USER" --property=Linger
-```
-
-The second command must report `Linger=yes`. A held checkout lock fails that
-pass with temporary-failure exit `75`.
-
-Human general comments and inline
-replies on an awaiting-review merge request wake only that exact work item for
-same-MR remediation. The runner preserves the draft state, title, description,
-and closing relationship; no-action feedback is acknowledged without a commit.
-
-When a worker exits nonzero, status JSON includes bounded `worker_exit` evidence
-with its validated nonzero return code and a safe stderr-derived diagnostic. This excludes
-prompts, issue content, credentials, stdout, and terminal controls; retry
-exhaustion retains it for diagnosis.
-
-## Preview an upstream finding
-
-Validate a finding manifest against an explicit upstream GitLab target. The
-read-only preview makes bounded GitLab GET requests, never posts an issue, and
-never writes the checkout. JSON emits only structural fields, fingerprints,
-counts, and an upstream issue IID when it finds an exact existing marker:
-
-```bash
-uv run agent-work upstream-finding preview --manifest-file finding.yaml \
-  --upstream-host gitlab.example.com --upstream-project-id 123 \
-  --upstream-credential-file /secure/upstream-token --json
-```
-
-## Serial GitLab agent loop
-
-This project uses GitLab-only polling for one eligible issue at a time. The
-runner derives its checkout and GitLab project from the current repository,
-then confirms both Git and GitLab access before work begins. A Developer account
-can poll open, unprojected issues, so no webhook or inbound service is required:
-
-```bash
-export AGENT_WORK_BASE_BRANCH=agent/work-base
-export AGENT_WORK_FACTORY_USERNAME=your-service-account
-uv run agent-work loop run --json
-```
-
-An applied run advances one issue through up to 16 persisted segments within one
-10,800-second (three-hour) overall work budget. Each workflow invocation receives
-the positive, ceil-rounded time remaining from that same budget. Fresh work
-attempts its full applicable workflow; saved work resumes from its durable
-checkpoint. After publication and observation complete, the activation stops at
-`awaiting-human`; otherwise it yields durably for recovery. No segment
-approves or merges. Enable the user-level
-systemd timer only after a human explicitly authorizes publication. For a constrained
-identity with effective API access exactly `30` (Developer), the
-Developer-readable readiness preflight uses the authoritative effective
-default-branch response to require no Developer push, no Developer merge, and
-`can_push: false`; it also requires an unambiguously global approval rule with
-at least one required approval. When that evidence matches, it skips only the
-Maintainer-only `/approvals` audit and recurring Maintainer attestation.
-Developer access cannot prove self-approval prevention or per-MR
-approval-rule overrides; those checks are intentionally Maintainer-only.
-Workflow, project settings, and the runtime never-approve/merge guardrail keep
-the agent from approving or merging. This is not a hard same-user security
-boundary: inaccessible, absent, or mismatched evidence blocks `--apply`. Git
-and `glab` credentials may differ.
-
-The trusted runner may publish agent-policy changes only after it verifies the
-complete applicable workflow receipts, a complete verdict, and non-empty merge
-request metadata. A safe controversial result must use a `Draft:` title and
-identify unresolved findings and evidence, exact human decisions, tests, its
-cycle ledger, and unchanged project-owned values. Incomplete or unsafe evidence
-remains `needs_human`; workers still never publish directly.
-See
-[`docs/how-to/setup-serial-gitlab-agent-loop.md`](docs/how-to/setup-serial-gitlab-agent-loop.md),
-[`docs/reference/serial-gitlab-agent-loop.md`](docs/reference/serial-gitlab-agent-loop.md),
-and [`.agents/skills/setup-agent-loop/SKILL.md`](.agents/skills/setup-agent-loop/SKILL.md).
+- [Agent instructions](AGENTS.md)
+- [Documentation index](docs/index.md)
+- [License compliance reference](docs/reference/license-compliance.md)
