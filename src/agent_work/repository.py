@@ -232,6 +232,9 @@ def discover_config(
     base_branch = environment.get("AGENT_WORK_BASE_BRANCH", "")
     if not base_branch:
         raise RepositoryError("AGENT_WORK_BASE_BRANCH is required")
+    factory_username = environment.get("AGENT_WORK_FACTORY_USERNAME", "")
+    if not factory_username:
+        raise RepositoryError("AGENT_WORK_FACTORY_USERNAME is required")
     git_path = Path(environment.get("AGENT_WORK_GIT", ""))
     glab_path = Path(environment.get("AGENT_WORK_GLAB", ""))
     if not git_path.is_absolute() or not glab_path.is_absolute():
@@ -305,6 +308,7 @@ def discover_config(
             journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
             git_path=git_path,
             glab_path=glab_path,
+            factory_username=factory_username,
         )
     except ValidationError as error:
         raise RepositoryError("agent-work configuration is invalid") from error
@@ -394,7 +398,7 @@ class GitRepository:
         return result.returncode == 0
 
     def _merge_current_default(self, default_sha: str, worktree: Path) -> None:
-        """Start a merge, retaining Git's conflict state for workflow repair."""
+        """Start a merge while retaining conflict state for workflow repair."""
         result = self._run_command(
             (
                 str(self.config.git_path),
@@ -517,6 +521,27 @@ class GitRepository:
             raise RepositoryError("durable worktree branch changed")
         if self.head(worktree) != expected_head:
             raise RepositoryError("durable worktree baseline changed")
+
+    def sync_feedback_worktree(
+        self, worktree: Path, branch: str, old_sha: str, new_sha: str
+    ) -> None:
+        """Fast-forward an existing clean feedback worktree to its exact MR SHA."""
+        if self.has_changes(worktree):
+            raise RepositoryError("durable worktree must be clean")
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("durable worktree branch changed")
+        head = self.head(worktree)
+        if head not in {old_sha, new_sha}:
+            raise RepositoryError("feedback worktree baseline changed")
+        if head == new_sha:
+            return
+        self._git("fetch", "origin", branch, cwd=worktree, transient=True)
+        if self._git("rev-parse", f"origin/{branch}", cwd=worktree) != new_sha:
+            raise RepositoryError(
+                "feedback remote branch does not match merge request SHA"
+            )
+        self._git("merge", "--ff-only", f"origin/{branch}", cwd=worktree)
+        self.verify_worktree(worktree, branch, new_sha)
 
     def reconcile_default_branch(
         self, worktree: Path, branch: str, expected_head: str

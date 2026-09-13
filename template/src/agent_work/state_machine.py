@@ -59,6 +59,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.PUBLISHING,
                 RunnerState.OBSERVING,
                 RunnerState.REPAIR,
+                RunnerState.AWAITING_HUMAN,
                 RunnerState.BLOCKED,
                 RunnerState.FAILED,
                 RunnerState.COMPLETE,
@@ -94,6 +95,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.BLOCKED,
                 RunnerState.FAILED,
                 RunnerState.COMPLETE,
+                RunnerState.AWAITING_HUMAN,
             }
         ),
         RunnerState.DECOMPOSING: frozenset(
@@ -113,7 +115,12 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
             }
         ),
         RunnerState.AWAITING_HUMAN: frozenset(
-            {RunnerState.REPAIR, RunnerState.COMPLETE, RunnerState.BLOCKED}
+            {
+                RunnerState.REPAIR,
+                RunnerState.RETRY_WAIT,
+                RunnerState.COMPLETE,
+                RunnerState.BLOCKED,
+            }
         ),
         RunnerState.FAILED: frozenset({RunnerState.COMPLETE}),
         RunnerState.COMPLETE: frozenset(),
@@ -384,9 +391,13 @@ def apply_worker_result(
         and record.merge_request_draft.decision_review is not None
         else result.merge_request_draft or record.merge_request_draft
     )
+    if record.pending_feedback is not None:
+        # Existing-MR feedback may change code, never review metadata.
+        merge_request_draft = None
     if (
         record.work_kind
         not in {WorkKind.EXISTING_MR_REMEDIATION, WorkKind.MERGE_CONFLICT_REPAIR}
+        and record.pending_feedback is None
         and next_phase is WorkflowPhase.READY_TO_PUBLISH
         and merge_request_draft is None
     ):

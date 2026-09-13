@@ -29,12 +29,15 @@ from .domain import (
     render_split_marker,
     split_fingerprint,
 )
-from .gitlab import GitLabError
+from .gitlab import GitLabError, GitLabIdentityError
 from .models import (
     GitLabIssue,
     LedgerRecord,
     MergeRequestDraft,
     MergeRequestEvidence,
+    MergeRequestFeedback,
+    MergeRequestFeedbackCursor,
+    PendingMergeRequestFeedback,
     SplitChildEvidence,
     TransitionIntentRecord,
 )
@@ -156,6 +159,8 @@ def _decompose(
         )
         gitlab.ensure_decomposition_note(record.issue_iid, note)
         gitlab.close_issue(record.issue_iid)
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
     except GitLabError:
         return _record_retry(
             record,
@@ -163,6 +168,7 @@ def _decompose(
             gitlab=gitlab,
             now=now,
             error_code=ErrorCode.GITLAB_RETRYABLE,
+            allow_remote_exhaustion_side_effects=False,
         )
     except SegmentError as error:
         blocked = ledger.persist(
@@ -282,12 +288,301 @@ def _is_fresh_ordinary_preparation(record: LedgerRecord) -> bool:
     )
 
 
+def _feedback_is_qualifying(note: object, factory_username: str) -> bool:
+    """Keep only human, non-outcome MR feedback as untrusted task data."""
+    body = str(getattr(note, "body", ""))
+    author = getattr(note, "author", None)
+    return bool(
+        body.strip()
+        and not bool(getattr(note, "system", False))
+        and author
+        and author != factory_username
+        and not body.lstrip().startswith("<!-- agent-work-outcome:v1")
+        and not body.lstrip().startswith("<!-- agent-work-feedback-outcome:")
+    )
+
+
+def _acknowledge_feedback(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord:
+    """Acknowledge one already-decided item without replaying its worker."""
+    pending = record.pending_feedback
+    if pending is None or pending.outcome is None or not pending.acknowledgement_ready:
+        raise SegmentError("feedback acknowledgement has no durable outcome")
+    if record.merge_request_iid is None or record.source_sha is None:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Feedback acknowledgement lacks exact MR evidence.",
+        )
+    try:
+        _verify_authenticated_user(gitlab)
+        repository.verify_worktree(
+            record.worktree, record.source_branch, record.source_sha
+        )
+        if repository.has_changes(record.worktree):
+            raise RepositoryError("durable worktree must be clean")
+        mr = gitlab.fetch_merge_request(record.merge_request_iid)
+        if not _mr_evidence_is_exact(
+            record,
+            mr,
+            gitlab=gitlab,
+            repository=repository,
+            source_sha=record.source_sha,
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback acknowledgement MR evidence is not exact.",
+            )
+        _verify_authenticated_user(gitlab)
+        gitlab.comment_feedback_outcome(
+            record.merge_request_iid,
+            issue_iid=record.issue_iid,
+            source=pending.source,
+            note_id=pending.note_id,
+            discussion_id=pending.discussion_id,
+            selection_sha=pending.source_sha,
+            summary=pending.outcome,
+        )
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.POST_PUBLICATION,
+            feedback_cursor=pending.target_cursor,
+            pending_feedback=None,
+            merge_request_draft=None,
+            summary="Human feedback outcome acknowledged.",
+            next_action="Await human review or further feedback.",
+        )
+    )
+
+
+def _wake_for_feedback(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord | None:
+    """Atomically select unseen qualifying feedback for one exact open MR."""
+    if record.merge_request_iid is None or record.source_sha is None:
+        return None
+    try:
+        _verify_authenticated_user(gitlab)
+        mr = gitlab.fetch_merge_request(record.merge_request_iid)
+        cursor = record.feedback_cursor
+        if cursor is not None and cursor.feedback_source_sha != record.source_sha:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback cursor source SHA does not match recorded worktree.",
+            )
+        if not _mr_publication_identity_is_exact(
+            record, mr, repository=repository, source_sha=mr.sha
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback merge request evidence is not exact.",
+            )
+        if not gitlab.mr_closes_issue(mr.iid, record.issue_iid):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback merge request does not close its issue.",
+            )
+        feedback = tuple(
+            item
+            if isinstance(item, MergeRequestFeedback)
+            else MergeRequestFeedback.model_validate(item)
+            for item in gitlab.fetch_merge_request_feedback(mr.iid)
+        )
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+            allow_remote_exhaustion_side_effects=False,
+        )
+    except RepositoryError:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Feedback worktree evidence could not be verified.",
+        )
+    username = repository.config.factory_username
+    qualifying = tuple(
+        note for note in feedback if _feedback_is_qualifying(note, username)
+    )
+    cursor = record.feedback_cursor
+    unseen = tuple(
+        note
+        for note in qualifying
+        if (
+            (
+                note.source == "general"
+                and (
+                    cursor is None
+                    or note.id > (cursor.last_processed_general_note_id or 0)
+                )
+            )
+            or (
+                note.source == "discussion"
+                and (
+                    cursor is None
+                    or note.id > (cursor.last_processed_discussion_note_id or 0)
+                )
+            )
+        )
+    )
+    if not unseen:
+        return None
+    selected = min(unseen, key=lambda note: (note.created_at, note.id))
+    prior_general = None if cursor is None else cursor.last_processed_general_note_id
+    prior_discussion = (
+        None if cursor is None else cursor.last_processed_discussion_note_id
+    )
+    target = MergeRequestFeedbackCursor(
+        last_processed_general_note_id=(
+            selected.id if selected.source == "general" else prior_general
+        ),
+        last_processed_discussion_note_id=(
+            selected.id if selected.source == "discussion" else prior_discussion
+        ),
+        last_relevant_discussion_id=(
+            selected.discussion_id
+            if selected.source == "discussion"
+            else (None if cursor is None else cursor.last_relevant_discussion_id)
+        ),
+        feedback_source_sha=mr.sha,
+    )
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.REPAIR,
+            phase=WorkflowPhase.WORKFLOW,
+            pending_feedback=PendingMergeRequestFeedback(
+                target_cursor=target,
+                source_sha=mr.sha,
+                source=selected.source,
+                note_id=selected.id,
+                discussion_id=selected.discussion_id,
+            ),
+            # The recorded worktree stays at its durable head until the next
+            # segment can resync it after this selection is persisted.
+            source_sha=record.source_sha,
+            merge_request_draft=None,
+            summary="Unseen human merge-request feedback selected.",
+            next_action="Run one existing-MR feedback remediation workflow.",
+        )
+    )
+
+
+def _synchronize_pending_feedback(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord:
+    """Resume a durably selected feedback item before running its worker."""
+    pending = record.pending_feedback
+    if pending is None or pending.outcome is not None or record.source_sha is None:
+        return record
+    if record.source_sha == pending.source_sha:
+        return record
+    try:
+        _verify_authenticated_user(gitlab)
+        mr = gitlab.fetch_merge_request(record.merge_request_iid or 0)
+        if not (
+            _mr_publication_identity_is_exact(
+                record, mr, repository=repository, source_sha=pending.source_sha
+            )
+            and gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback merge request evidence is not exact.",
+            )
+        repository.sync_feedback_worktree(
+            record.worktree, record.source_branch, record.source_sha, pending.source_sha
+        )
+        repository.verify_worktree(
+            record.worktree, record.source_branch, pending.source_sha
+        )
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except RepositoryTransientError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    return ledger.persist(record.model_copy(update={"source_sha": pending.source_sha}))
+
+
 def select_record(
     ledger: LedgerPort,
     gitlab: GitLabPort,
     *,
     now: datetime,
     issue_iid: int | None = None,
+    repository: RepositoryPort,
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
     """Reconcile work before ranking eligible fresh issues by priority and age."""
     project = gitlab.verify_project()
@@ -324,13 +619,24 @@ def select_record(
         if not _due(record, now):
             return None, None
         return record, issues[record.issue_iid]
+    for waiting in sorted(
+        (record for record in records if record.state is RunnerState.AWAITING_HUMAN),
+        key=lambda record: record.issue_iid,
+    ):
+        woken = _wake_for_feedback(
+            waiting, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+        )
+        if woken is not None:
+            if woken.state is RunnerState.RETRY_WAIT:
+                return None, None
+            return woken, issues[woken.issue_iid]
     for reconciliable in (
         record for record in records if _can_reconcile_published_ordinary_work(record)
     ):
         try:
             if gitlab.open_merge_requests_by_branch(reconciliable.source_branch):
                 return reconciliable, issues[reconciliable.issue_iid]
-        except GitLabError:
+        except (GitLabError, TypeError):
             return reconciliable, issues[reconciliable.issue_iid]
     lifecycle = set(LIFECYCLE_LABELS)
     for record in records:
@@ -373,6 +679,20 @@ def select_record(
     )
 
 
+class IdentityVerificationTransportError(GitLabError):
+    """Mark an ordinary transport failure that leaves identity unverified."""
+
+
+def _verify_authenticated_user(gitlab: GitLabPort) -> None:
+    """Verify identity while preserving its distinct retry safety boundary."""
+    try:
+        gitlab.verify_authenticated_user()
+    except GitLabIdentityError:
+        raise
+    except GitLabError as error:
+        raise IdentityVerificationTransportError(str(error)) from error
+
+
 def _record_retry(
     record: LedgerRecord,
     *,
@@ -381,13 +701,14 @@ def _record_retry(
     now: datetime,
     error_code: ErrorCode,
     retry_delay: timedelta = timedelta(minutes=20),
+    allow_remote_exhaustion_side_effects: bool = True,
 ) -> LedgerRecord:
-    """Persist one bounded retry and project exhaustion as an actionable block."""
+    """Persist one bounded retry and optionally publish its exhaustion block."""
     outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
     if outcome.state is RunnerState.RETRY_WAIT:
         outcome = outcome.model_copy(update={"error_code": error_code})
     outcome = ledger.persist(outcome)
-    if outcome.state is RunnerState.BLOCKED:
+    if outcome.state is RunnerState.BLOCKED and allow_remote_exhaustion_side_effects:
         gitlab.transition_labels(record.issue_iid, label_for_state(outcome.state))
         gitlab.comment_outcome(
             record.issue_iid,
@@ -396,6 +717,38 @@ def _record_retry(
             next_action=outcome.next_action,
         )
     return outcome
+
+
+def _record_identity_retry(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+) -> LedgerRecord:
+    """Persist an unverified-identity retry without remote exhaustion effects."""
+    return _record_retry(
+        record,
+        ledger=ledger,
+        gitlab=gitlab,
+        now=now,
+        error_code=ErrorCode.GITLAB_RETRYABLE,
+        allow_remote_exhaustion_side_effects=False,
+    )
+
+
+def _resume_due_retry(record: LedgerRecord, *, ledger: LedgerPort) -> LedgerRecord:
+    """Restore a due retry's durable prior state before another retryable operation."""
+    if record.state is not RunnerState.RETRY_WAIT:
+        return record
+    return ledger.persist(
+        transition_record(
+            record,
+            record.prior_state or RunnerState.EXECUTING,
+            phase=record.prior_phase or record.phase,
+            retry_at=None,
+        )
+    )
 
 
 def _mr_publication_identity_is_exact(
@@ -489,6 +842,22 @@ def _block_publication_identity(
     return blocked
 
 
+def _block_identity_drift(
+    record: LedgerRecord, *, ledger: LedgerPort, summary: str
+) -> LedgerRecord:
+    """Fail closed locally when the authenticated service identity changed."""
+    updates = {
+        "error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+        "summary": summary,
+        "next_action": "Restore the configured service identity before resuming.",
+    }
+    return ledger.persist(
+        record.model_copy(update=updates)
+        if record.state is RunnerState.BLOCKED
+        else transition_record(record, RunnerState.BLOCKED, **updates)
+    )
+
+
 def _retry_or_block_recovery_transport_error(
     record: LedgerRecord,
     *,
@@ -503,13 +872,7 @@ def _retry_or_block_recovery_transport_error(
         return _block_publication_identity(
             record, ledger=ledger, gitlab=gitlab, summary=summary
         )
-    if record.state is RunnerState.RETRY_WAIT:
-        record = transition_record(
-            record,
-            record.prior_state or RunnerState.EXECUTING,
-            phase=record.prior_phase or record.phase,
-            retry_at=None,
-        )
+    record = _resume_due_retry(record, ledger=ledger)
     return _record_retry(
         record,
         ledger=ledger,
@@ -792,7 +1155,25 @@ def _execute(
     remaining_seconds: Callable[[], float] | None = None,
 ) -> LedgerRecord | None:
     try:
+        _verify_authenticated_user(gitlab)
         issue_notes = gitlab.fetch_issue_notes(record.issue_iid)
+        feedback = (
+            tuple(
+                item
+                if isinstance(item, MergeRequestFeedback)
+                else MergeRequestFeedback.model_validate(item)
+                for item in gitlab.fetch_merge_request_feedback(
+                    record.merge_request_iid
+                )
+            )
+            if record.pending_feedback is not None
+            and record.merge_request_iid is not None
+            else ()
+        )
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
     except GitLabError:
         return _record_retry(
             record,
@@ -807,15 +1188,36 @@ def _execute(
         if remaining <= 0:
             return None
         worker_timeout = max(1, math.ceil(remaining))
-    prompt = build_worker_prompt(
-        record.model_dump(mode="json"),
-        project_id=record.project_id,
-        issue_iid=record.issue_iid,
-        effective_worker_budget_seconds=worker_timeout,
-        issue_title=issue.title,
-        issue_description=issue.description,
-        issue_notes=issue_notes,
-    )
+    try:
+        prompt = build_worker_prompt(
+            record.model_dump(mode="json"),
+            project_id=record.project_id,
+            issue_iid=record.issue_iid,
+            effective_worker_budget_seconds=worker_timeout,
+            issue_title=issue.title,
+            issue_description=issue.description,
+            issue_notes=issue_notes,
+            merge_request_feedback=tuple(
+                {
+                    "id": note.id,
+                    "source": note.source,
+                    "discussion_id": note.discussion_id,
+                    "author": note.author,
+                    "created_at": note.created_at,
+                    "body": note.body,
+                    "unseen": True,
+                }
+                for note in feedback
+                if _feedback_is_qualifying(note, repository.config.factory_username)
+            ),
+        )
+    except ValueError as error:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary=f"Feedback selection cannot be rendered safely: {error}",
+        )
     invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
     if invocation.returncode != 0:
         worker_exit = (
@@ -846,10 +1248,13 @@ def _execute(
                 expected_revision=record.revision,
             )
         except ValueError:
-            outcome = plan_retry(
-                record, now=now, retry_delay=timedelta()
-            ).record.model_copy(
-                update={"error_code": ErrorCode.WORKER_PROTOCOL_INVALID}
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+                retry_delay=timedelta(),
             )
         else:
             if (
@@ -879,6 +1284,59 @@ def _execute(
                 )
             else:
                 outcome = outcome.model_copy(update={"worker_exit": None})
+    if (
+        record.state is RunnerState.REPAIR
+        and record.pending_feedback is not None
+        and not repository.changed_paths(record.worktree)
+    ):
+        is_noop = (
+            result.result_kind == "ready_to_publish"
+            and result.phase_status == "complete"
+            and result.expected_state is record.state
+            and result.expected_phase is record.phase
+        )
+        if is_noop:
+            pending = record.pending_feedback.model_copy(
+                update={
+                    "outcome": result.change_summary,
+                    "acknowledgement_ready": True,
+                }
+            )
+            decided = ledger.persist(
+                record.model_copy(
+                    update={
+                        "pending_feedback": pending,
+                        "receipts": outcome.receipts,
+                        "workflow_lane": outcome.workflow_lane,
+                        "worker_exit": None,
+                        "summary": "Feedback acknowledgement is pending retry.",
+                    }
+                )
+            )
+            return _acknowledge_feedback(
+                decided, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+            )
+    if record.pending_feedback is not None and result.result_kind == "ready_to_publish":
+        outcome = outcome.model_copy(
+            update={
+                "pending_feedback": record.pending_feedback.model_copy(
+                    update={"outcome": result.change_summary}
+                )
+            }
+        )
+    if record.pending_feedback is not None and outcome.source_sha != record.source_sha:
+        if outcome.pending_feedback is None:
+            raise SegmentError("feedback publication lost its pending acknowledgement")
+        settled_cursor = record.pending_feedback.target_cursor.model_copy(
+            update={"feedback_source_sha": outcome.source_sha}
+        )
+        outcome = outcome.model_copy(
+            update={
+                "pending_feedback": outcome.pending_feedback.model_copy(
+                    update={"target_cursor": settled_cursor}
+                )
+            }
+        )
     if outcome.state is RunnerState.AWAITING_HUMAN:
         if record.merge_request_iid is None or record.source_sha is None:
             return _block_publication_identity(
@@ -942,9 +1400,23 @@ def _publish(
     repository: RepositoryPort,
     now: datetime,
 ) -> LedgerRecord:
-    draft = record.merge_request_draft
+    try:
+        _verify_authenticated_user(gitlab)
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    draft = None if record.pending_feedback is not None else record.merge_request_draft
     baseline_sha = record.source_sha
-    remediation = record.work_kind in {
+    remediation = record.pending_feedback is not None or record.work_kind in {
         WorkKind.EXISTING_MR_REMEDIATION,
         WorkKind.MERGE_CONFLICT_REPAIR,
     }
@@ -1080,16 +1552,57 @@ def _publish(
                     next_action="Resolve the retained merge and rerun the full workflow.",
                 )
             )
-        sha = repository.push_prepared(
-            record.worktree, record.source_branch, publication_sha
-        )
+        already_published = False
+        if remediation:
+            _verify_authenticated_user(gitlab)
+            if record.merge_request_iid is None:
+                raise SegmentError(
+                    "remediation publication lacks its exact merge request"
+                )
+            retained_mr = gitlab.fetch_merge_request(record.merge_request_iid)
+            already_published = (
+                record.publication_sha is not None
+                and _mr_evidence_is_exact(
+                    record,
+                    retained_mr,
+                    gitlab=gitlab,
+                    repository=repository,
+                    source_sha=publication_sha,
+                )
+            )
+            expected_mr_sha = publication_sha if already_published else baseline_sha
+            if not _mr_evidence_is_exact(
+                record,
+                retained_mr,
+                gitlab=gitlab,
+                repository=repository,
+                source_sha=expected_mr_sha,
+            ):
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Feedback publication MR evidence is not exact.",
+                )
+        if already_published:
+            repository.verify_worktree(
+                record.worktree, record.source_branch, publication_sha
+            )
+            sha = publication_sha
+        else:
+            sha = repository.push_prepared(
+                record.worktree, record.source_branch, publication_sha
+            )
         if remediation:
             if record.merge_request_iid is None:
                 raise SegmentError(
                     "remediation publication lacks its exact merge request"
                 )
             mr = gitlab.fetch_merge_request(record.merge_request_iid)
-            if draft is not None:
+            if record.pending_feedback is not None:
+                # Feedback must retain every user-owned MR field verbatim.
+                pass
+            elif draft is not None:
                 mr = gitlab.reconcile_merge_request(
                     mr, issue_iid=record.issue_iid, draft=draft
                 )
@@ -1141,6 +1654,10 @@ def _publish(
             next_action=blocked.next_action,
         )
         return blocked
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
     except (RepositoryTransientError, GitLabError) as error:
         return _record_retry(
             record,
@@ -1191,6 +1708,16 @@ def _publish(
             now=now,
             error_code=ErrorCode.GITLAB_RETRYABLE,
         )
+    pending = record.pending_feedback
+    if pending is not None:
+        pending = pending.model_copy(
+            update={
+                "publication_sha": sha,
+                "target_cursor": pending.target_cursor.model_copy(
+                    update={"feedback_source_sha": sha}
+                ),
+            }
+        )
     return ledger.persist(
         transition_record(
             record,
@@ -1199,6 +1726,7 @@ def _publish(
             merge_request_iid=mr.iid,
             merge_request_url=mr.web_url,
             source_sha=sha,
+            pending_feedback=pending,
             intent=None,
             summary="Merge request published and verified.",
             next_action="Observe the exact source-SHA pipeline.",
@@ -1222,6 +1750,7 @@ def _observe(
     if record.merge_request_iid is None or record.source_sha is None:
         raise SegmentError("observation record lacks merge request evidence")
     try:
+        _verify_authenticated_user(gitlab)
         mr = gitlab.fetch_merge_request(record.merge_request_iid)
         exact = _mr_evidence_is_exact(
             record,
@@ -1231,51 +1760,31 @@ def _observe(
             source_sha=record.source_sha,
         )
         if exact and mr.has_conflicts:
-            reconciliation_sha = repository.reconcile_default_branch(
-                record.worktree, record.source_branch, record.source_sha
-            )
-            if reconciliation_sha is None:
-                return _record_retry(
-                    record,
-                    ledger=ledger,
-                    gitlab=gitlab,
-                    now=now,
-                    error_code=ErrorCode.MERGE_CONFLICT,
-                )
             return ledger.persist(
                 transition_record(
                     record,
-                    RunnerState.EXECUTING,
-                    phase=WorkflowPhase.WORKFLOW,
+                    RunnerState.REPAIR,
+                    phase=repair_phase,
                     work_kind=WorkKind.MERGE_CONFLICT_REPAIR,
                     error_code=ErrorCode.MERGE_CONFLICT,
-                    intent=None,
-                    publication_sha=None,
-                    summary=(
-                        "The exact merge request has conflicts; its retained worktree "
-                        "requires reconciliation."
-                    ),
-                    next_action="Resolve the retained merge and rerun the full workflow.",
+                    summary="The exact merge request has conflicts.",
+                    next_action="Run one bounded merge-conflict repair segment.",
                 )
             )
         pipeline = gitlab.latest_pipeline_for_sha(
             record.merge_request_iid, record.source_sha
         )
-    except (RepositoryTransientError, GitLabError) as error:
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
         return _record_retry(
             record,
             ledger=ledger,
             gitlab=gitlab,
             now=now,
-            error_code=(
-                ErrorCode.GIT_TRANSPORT_RETRYABLE
-                if isinstance(error, RepositoryTransientError)
-                else ErrorCode.GITLAB_RETRYABLE
-            ),
-        )
-    except RepositoryError as error:
-        return _block_publication_identity(
-            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            error_code=ErrorCode.GITLAB_RETRYABLE,
         )
     if not exact:
         return _block_publication_identity(
@@ -1303,6 +1812,23 @@ def _observe(
                 summary="The exact source-SHA pipeline needs repair.",
                 next_action="Run one bounded post-publication repair segment.",
             )
+        )
+    if (
+        record.pending_feedback is not None
+        and record.pending_feedback.outcome is not None
+    ):
+        return _acknowledge_feedback(
+            record.model_copy(
+                update={
+                    "pending_feedback": record.pending_feedback.model_copy(
+                        update={"acknowledgement_ready": True}
+                    )
+                }
+            ),
+            ledger=ledger,
+            gitlab=gitlab,
+            repository=repository,
+            now=now,
         )
     workflow_complete = _has_workflow_receipt(record)
     return ledger.persist(
@@ -1340,9 +1866,64 @@ def run_segment(
     remaining_seconds: Callable[[], float] | None = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
-    record, issue = select_record(ledger, gitlab, now=now, issue_iid=issue_iid)
+    record, issue = select_record(
+        ledger, gitlab, now=now, issue_iid=issue_iid, repository=repository
+    )
     if record is None or issue is None:
         return None
+    if (
+        record.state is RunnerState.BLOCKED
+        and record.error_code is ErrorCode.RETRY_EXHAUSTED
+        and record.prior_state is RunnerState.AWAITING_HUMAN
+        and record.merge_request_iid is not None
+    ):
+        return record
+    retryable_worker_errors = {
+        ErrorCode.WORKER_EXIT,
+        ErrorCode.WORKER_TIMEOUT,
+        ErrorCode.WORKER_PROTOCOL_INVALID,
+        ErrorCode.WORKER_RECEIPT_INVALID,
+    }
+    reexecute_due_worker_retry = (
+        record.state is RunnerState.RETRY_WAIT
+        and record.error_code in retryable_worker_errors
+    )
+    resumed_from_retry = record.state is RunnerState.RETRY_WAIT and _due(record, now)
+    if resumed_from_retry:
+        record = _resume_due_retry(record, ledger=ledger)
+    try:
+        _verify_authenticated_user(gitlab)
+    except GitLabIdentityError as error:
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+            allow_remote_exhaustion_side_effects=False,
+        )
+    if (
+        record.pending_feedback is not None
+        and record.pending_feedback.acknowledgement_ready
+        and record.state is RunnerState.REPAIR
+    ):
+        return _acknowledge_feedback(
+            record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+        )
+    if (
+        record.state is RunnerState.REPAIR
+        and record.pending_feedback is not None
+        and record.summary == "Unseen human merge-request feedback selected."
+    ):
+        return ledger.persist(
+            record.model_copy(
+                update={"summary": "Feedback workflow is ready to execute."}
+            )
+        )
     if issue.state != "opened":
         if record.state is RunnerState.COMPLETE:
             gitlab.transition_labels(issue.iid, None)
@@ -1360,6 +1941,20 @@ def run_segment(
         return complete
     if not _due(record, now):
         return None
+    if (
+        record.pending_feedback is not None
+        and record.pending_feedback.outcome is None
+        and record.source_sha != record.pending_feedback.source_sha
+    ):
+        record = _synchronize_pending_feedback(
+            record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+        )
+        if record.state in {RunnerState.BLOCKED, RunnerState.RETRY_WAIT}:
+            return record
+    if record.state is RunnerState.BLOCKED and record.summary.startswith(
+        "Feedback merge request"
+    ):
+        return record
     if _can_reconcile_published_ordinary_work(record):
         reconciled = _reconcile_published_ordinary_work(
             record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
@@ -1440,6 +2035,11 @@ def run_segment(
         issue = gitlab.transition_labels(issue.iid, expected_label)
     if record.state not in ACTIVE_STATES:
         return record
+    if resumed_from_retry:
+        if record.state is RunnerState.DECOMPOSING:
+            return _decompose(record, ledger=ledger, gitlab=gitlab, now=now)
+        if not reexecute_due_worker_retry:
+            return record
     if record.state is RunnerState.PREPARING:
         return _prepare(
             record,
@@ -1449,18 +2049,6 @@ def run_segment(
             repository=repository,
             now=now,
         )
-    if record.state is RunnerState.RETRY_WAIT:
-        resumed = ledger.persist(
-            transition_record(
-                record,
-                record.prior_state or RunnerState.EXECUTING,
-                phase=record.prior_phase or record.phase,
-                retry_at=None,
-            )
-        )
-        if resumed.state is RunnerState.DECOMPOSING:
-            return _decompose(resumed, ledger=ledger, gitlab=gitlab, now=now)
-        return resumed
     if record.state in {RunnerState.EXECUTING, RunnerState.REPAIR}:
         return _execute(
             record,

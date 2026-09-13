@@ -24,6 +24,7 @@ from .models import (
     LedgerRecord,
     MergeRequestDraft,
     MergeRequestEvidence,
+    MergeRequestFeedback,
     PipelineEvidence,
 )
 
@@ -56,6 +57,24 @@ class GitLabPort(Protocol):
     """GitLab reads and idempotent mutations."""
 
     def verify_project(self) -> GitLabProject: ...
+
+    def verify_authenticated_user(self) -> None: ...
+
+    def fetch_merge_request_feedback(
+        self, iid: int
+    ) -> tuple[MergeRequestFeedback, ...]: ...
+
+    def comment_feedback_outcome(
+        self,
+        iid: int,
+        *,
+        issue_iid: int,
+        source: str,
+        note_id: int,
+        discussion_id: str | None,
+        selection_sha: str,
+        summary: str,
+    ) -> None: ...
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]: ...
 
@@ -151,10 +170,16 @@ class RepositoryPort(Protocol):
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]: ...
 
+    def has_changes(self, worktree: Path) -> bool: ...
+
     def worktree_exists(self, worktree: Path) -> bool: ...
 
     def verify_worktree(
         self, worktree: Path, branch: str, expected_head: str
+    ) -> None: ...
+
+    def sync_feedback_worktree(
+        self, worktree: Path, branch: str, old_sha: str, new_sha: str
     ) -> None: ...
 
     def reconcile_default_branch(

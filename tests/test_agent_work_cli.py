@@ -26,6 +26,50 @@ from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview
 
 
+def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:
+    item = CommandItemReport.model_validate(
+        {
+            "issue_iid": 12,
+            "state": "retry-wait",
+            "phase": "coding-green",
+            "work_kind": "ordinary",
+            "attempt": 2,
+            "retries_remaining": 2,
+            "source_branch": "agent/issue-12",
+            "worktree": "/tmp/issue-12",
+            "worker_exit": {"returncode": -15, "diagnostic": "transport closed"},
+        }
+    )
+    report = CommandReport(
+        command="loop.run", applied=True, outcome="activation_complete", items=(item,)
+    )
+
+    def dispatch(_request: object, *, apply: bool) -> CommandReport:
+        assert apply
+        return report
+
+    output: list[str] = []
+    assert (
+        main(
+            ["loop", "run", "--apply", "--json"],
+            dispatch=dispatch,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output[0])["items"][0]["worker_exit"] == {
+        "returncode": -15,
+        "diagnostic": "transport closed",
+    }
+    output.clear()
+    assert (
+        main(["loop", "run", "--apply"], dispatch=dispatch, write_stdout=output.append)
+        == 0
+    )
+    assert "returncode=-15" in output[0]
+    assert "worker_diagnostic=transport closed" in output[0]
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -246,55 +290,6 @@ def test_human_output_reports_the_final_activation_checkpoint() -> None:
             "next_action=Continue from post-publication."
         )
     ]
-
-
-def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:
-    item = CommandItemReport.model_validate(
-        {
-            "issue_iid": 12,
-            "state": "retry-wait",
-            "phase": "coding-green",
-            "work_kind": "ordinary",
-            "attempt": 2,
-            "retries_remaining": 2,
-            "source_branch": "agent/issue-12",
-            "worktree": "/tmp/issue-12",
-            "worker_exit": {"returncode": -15, "diagnostic": "transport closed"},
-        }
-    )
-    report = CommandReport(
-        command="loop.run", applied=True, outcome="activation_complete", items=(item,)
-    )
-
-    def dispatch(_request: object, *, apply: bool) -> CommandReport:
-        assert apply
-        return report
-
-    output: list[str] = []
-    assert (
-        main(
-            ["loop", "run", "--apply", "--json"],
-            dispatch=dispatch,
-            write_stdout=output.append,
-        )
-        == 0
-    )
-    rendered_json = json.loads(output[0])
-    assert rendered_json["items"][0]["worker_exit"] == {
-        "returncode": -15,
-        "diagnostic": "transport closed",
-    }
-    output.clear()
-    assert (
-        main(
-            ["loop", "run", "--apply"],
-            dispatch=dispatch,
-            write_stdout=output.append,
-        )
-        == 0
-    )
-    assert "returncode=-15" in output[0]
-    assert "worker_diagnostic=transport closed" in output[0]
 
 
 @pytest.mark.parametrize(

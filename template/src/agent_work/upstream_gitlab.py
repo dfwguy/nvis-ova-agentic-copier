@@ -207,7 +207,7 @@ class UpstreamGitLabReader:
             assert isinstance(issues, tuple)
             for issue in issues:
                 assert isinstance(issue, _Issue)
-                if issue.state != "opened" or len(issue.description) > _MAX_DESCRIPTION:
+                if len(issue.description) > _MAX_DESCRIPTION:
                     raise UpstreamGitLabError("upstream response is invalid")
                 previous = seen.get(issue.iid)
                 if previous is not None:
@@ -217,6 +217,8 @@ class UpstreamGitLabReader:
                         )
                     continue
                 seen[issue.iid] = issue
+                if issue.state != "opened":
+                    continue
                 reserved_count = issue.description.count(_RESERVED)
                 exact_count = issue.description.count(marker)
                 if reserved_count != exact_count or exact_count > 1:

@@ -14,8 +14,10 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -30,6 +32,9 @@ from agent_work.models import (
     DecisionReviewSignal,
     MergeRequestDraft,
     MergeRequestEvidence,
+    MergeRequestFeedback,
+    MergeRequestFeedbackCursor,
+    PendingMergeRequestFeedback,
 )
 from agent_work.repository import (
     CommandResult,
@@ -75,6 +80,220 @@ def test_agent_work_config_requires_absolute_recorded_git_and_glab_paths(
         AgentWorkConfig.model_validate(payload | {"git_path": Path("git")})
 
 
+def test_sync_feedback_worktree_uses_the_exact_fast_forward_command_seam(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worktree = tmp_path / "state" / "worktrees" / "12"
+    old_sha = "a" * 40
+    new_sha = "b" * 40
+    calls: list[tuple[str, ...]] = []
+    responses = iter(
+        (
+            CommandResult(0, "", ""),
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, old_sha, ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, new_sha, ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, new_sha, ""),
+        )
+    )
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return next(responses)
+
+    GitRepository(config, fake).sync_feedback_worktree(
+        worktree, "agent/issue-12", old_sha, new_sha
+    )
+
+    assert [command[3:] for command in calls] == [
+        ("status", "--porcelain"),
+        ("branch", "--show-current"),
+        ("rev-parse", "HEAD"),
+        ("fetch", "origin", "agent/issue-12"),
+        ("rev-parse", "origin/agent/issue-12"),
+        ("merge", "--ff-only", "origin/agent/issue-12"),
+        ("branch", "--show-current"),
+        ("rev-parse", "HEAD"),
+    ]
+
+
+def test_sync_feedback_worktree_replay_at_new_sha_only_verifies_without_merging(
+    tmp_path: Path,
+) -> None:
+    """A crash after the fast-forward is a safe, side-effect-free replay."""
+    config = _config(tmp_path)
+    worktree = tmp_path / "state" / "worktrees" / "12"
+    old_sha = "a" * 40
+    new_sha = "b" * 40
+    calls: list[tuple[str, ...]] = []
+    responses = iter(
+        (
+            CommandResult(0, "", ""),
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, new_sha, ""),
+        )
+    )
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return next(responses)
+
+    GitRepository(config, fake).sync_feedback_worktree(
+        worktree, "agent/issue-12", old_sha, new_sha
+    )
+
+    assert [command[3:] for command in calls] == [
+        ("status", "--porcelain"),
+        ("branch", "--show-current"),
+        ("rev-parse", "HEAD"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("responses", "message"),
+    (
+        ((CommandResult(0, "dirty\n", ""),), "clean"),
+        ((CommandResult(0, "", ""), CommandResult(0, "other\n", "")), "branch"),
+        (
+            (
+                CommandResult(0, "", ""),
+                CommandResult(0, "agent/issue-12\n", ""),
+                CommandResult(0, "c" * 40, ""),
+            ),
+            "baseline",
+        ),
+        (
+            (
+                CommandResult(0, "", ""),
+                CommandResult(0, "agent/issue-12\n", ""),
+                CommandResult(0, "a" * 40, ""),
+                CommandResult(0, "", ""),
+                CommandResult(0, "c" * 40, ""),
+            ),
+            "remote branch",
+        ),
+    ),
+)
+def test_sync_feedback_worktree_rejects_dirty_or_inexact_git_evidence(
+    tmp_path: Path, responses: tuple[CommandResult, ...], message: str
+) -> None:
+    """The concrete Git repository rejects unsafe resume evidence before mutation."""
+    iterator = iter(responses)
+    repository = GitRepository(
+        _config(tmp_path), lambda *_args, **_kwargs: next(iterator)
+    )
+
+    with pytest.raises(RepositoryError, match=message):
+        repository.sync_feedback_worktree(
+            tmp_path / "worktree", "agent/issue-12", "a" * 40, "b" * 40
+        )
+
+
+def test_sync_feedback_worktree_rejects_unsafe_remote_without_merging(
+    tmp_path: Path,
+) -> None:
+    """Unsafe remote evidence cannot reach the merge mutation seam."""
+    calls: list[tuple[str, ...]] = []
+    responses = iter(
+        (
+            CommandResult(0, "", ""),
+            CommandResult(0, "agent/issue-12\n", ""),
+            CommandResult(0, "a" * 40, ""),
+            CommandResult(0, "", ""),
+            CommandResult(0, "c" * 40, ""),
+        )
+    )
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return next(responses)
+
+    with pytest.raises(RepositoryError, match="remote branch"):
+        GitRepository(_config(tmp_path), fake).sync_feedback_worktree(
+            tmp_path / "worktree", "agent/issue-12", "a" * 40, "b" * 40
+        )
+
+    assert not any("merge" in command for command in calls)
+
+
+@pytest.mark.parametrize(
+    ("source", "discussion_id", "message"),
+    [
+        pytest.param("general", "thread-1", "general feedback", id="general-id"),
+        pytest.param("discussion", None, "discussion feedback", id="missing-id"),
+        pytest.param("discussion", "", "discussion feedback", id="empty-id"),
+        pytest.param("discussion", " ", "discussion feedback", id="blank-id"),
+    ],
+)
+def test_feedback_model_rejects_incoherent_discussion_identity(
+    source: Literal["general", "discussion"],
+    discussion_id: str | None,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        MergeRequestFeedback(
+            id=1,
+            source=source,
+            discussion_id=discussion_id,
+            author="human",
+            created_at=datetime.fromisoformat("2026-09-13T00:00:00+00:00"),
+        )
+
+
+def test_gitlab_feedback_rejects_whitespace_raw_discussion_identity(
+    tmp_path: Path,
+) -> None:
+    discussion = [{"id": " \t", "notes": []}]
+    endpoints: list[str] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("GET") + 1]
+        endpoints.append(endpoint)
+        return CommandResult(
+            0, json.dumps([] if endpoint.endswith("/notes") else discussion), ""
+        )
+
+    with pytest.raises(GitLabError, match="invalid merge request feedback"):
+        GitLabGateway(_config(tmp_path), fake).fetch_merge_request_feedback(12)
+    assert endpoints == [
+        "projects/310967/merge_requests/12/notes",
+        "projects/310967/merge_requests/12/discussions",
+    ]
+
+
+def test_feedback_cursor_rejects_whitespace_discussion_identity() -> None:
+    with pytest.raises(ValidationError, match="discussion identity must be nonblank"):
+        MergeRequestFeedbackCursor(
+            last_processed_discussion_note_id=1,
+            last_relevant_discussion_id=" \t",
+            feedback_source_sha="a" * 40,
+        )
+
+
+def test_pending_feedback_rejects_whitespace_discussion_identity() -> None:
+    cursor = MergeRequestFeedbackCursor(
+        last_processed_discussion_note_id=1,
+        last_relevant_discussion_id="discussion-1",
+        feedback_source_sha="a" * 40,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="discussion pending feedback must select its discussion cursor",
+    ):
+        PendingMergeRequestFeedback(
+            target_cursor=cursor,
+            source_sha="a" * 40,
+            source="discussion",
+            note_id=1,
+            discussion_id=" \t",
+        )
+
+
 @pytest.mark.parametrize("path_name", ("AGENT_WORK_GIT", "AGENT_WORK_GLAB"))
 def test_discovery_rejects_missing_or_nonabsolute_recorded_executables(
     tmp_path: Path, path_name: str
@@ -84,6 +303,7 @@ def test_discovery_rejects_missing_or_nonabsolute_recorded_executables(
         "GITLAB_HOST": "gitlab.example.com",
         "GITLAB_PROJECT_ID": "310967",
         "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+        "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
         "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
     }
@@ -146,6 +366,7 @@ def test_discovery_and_git_repository_use_recorded_executables_and_environment(
             "GITLAB_HOST": "gitlab.example.com",
             "GITLAB_PROJECT_ID": "310967",
             "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+            "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
             "AGENT_WORK_GIT": str(git),
             "AGENT_WORK_GLAB": str(glab),
         },
@@ -222,6 +443,7 @@ def test_discovery_rejects_non_authoritative_https_origin(
                 "GITLAB_HOST": "gitlab.example.com",
                 "GITLAB_PROJECT_ID": "310967",
                 "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+                "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
                 "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
                 "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
             },
@@ -1378,6 +1600,7 @@ def test_discover_config_is_read_only_and_confirms_numeric_project(
             "GITLAB_HOST": "gitlab.example.com",
             "GITLAB_PROJECT_ID": "310967",
             "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+            "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
             "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
             "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
         },

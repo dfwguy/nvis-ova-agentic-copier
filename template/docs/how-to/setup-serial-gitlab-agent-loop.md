@@ -27,9 +27,8 @@ related:
 # How to set up the recoverable serial GitLab agent loop
 
 The installed service may process consecutive terminally handed-off issues in
-one invocation. Each issue still has its own bounded activation; empty queues,
-pipeline waits, and genuine future external retries yield back to the 20-minute
-timer. Retryable worker failures continue in the same activation.
+one invocation. Each issue still has its own bounded activation; empty queues
+and pipeline or retry waits yield back to the 20-minute timer.
 
 Use one dedicated checkout and one user timer for one GitLab project. The loop
 is authorized by enabling the project-level timer. It selects eligible open,
@@ -162,14 +161,11 @@ recurring Maintainer attestation. The observable branch and global approval
 checks above must pass; the runtime independently never approves or merges.
 The parentheses isolate strict shell options and preserve the block's status.
 
-## Preview an upstream finding safely
+## Preview an upstream finding
 
 Validate a supplied upstream-finding manifest against an explicit upstream
-target. Use a dedicated credential file, not the generated-project identity.
-The command performs network reads only: no issue is posted and failures leave
-no ledger, remote, or checkout mutation. Correct the input and safely rerun.
-Its optional JSON output contains structural fields, fingerprints, outcome, and
-a matching IID only when an open issue already has the exact reserved marker.
+target using a dedicated credential file. The command is read-only: it performs
+GET-only checks: no issue is posted and it never changes the checkout.
 
 ```bash
 uv run agent-work upstream-finding preview --manifest-file finding.yaml \
@@ -211,35 +207,12 @@ uv run agent-work loop status --json
 
 The service manager does not inherit an interactive `PATH` or checkout `direnv`
 variables. The environment file records the configured bare GitLab host and
-positive numeric project ID, but never a token. A regular, ignored `.envrc` in
-the dedicated checkout and an absolute executable `direnv` are required. The
-deterministic controller, AI workflow, and required nested agents use the same
-scoped Developer credential. Humans provide product and policy inputs and alone
-approve or merge. Before creating the environment file, configure the local
-password-store path, create its pass entry without printing its value, then
-create the complete ignored `.envrc`; replace the public target placeholders:
-
-```bash
-export GITLAB_TOKEN_PASS_PATH=teams/example-project/agent-token
-pass insert "$GITLAB_TOKEN_PASS_PATH"
-cat >.envrc <<'EOF'
-export GITLAB_HOST=gitlab.example.test
-export GITLAB_PROJECT_ID=123
-export GITLAB_TOKEN_PASS_PATH=teams/example-project/agent-token
-export GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"
-EOF
-git check-ignore -q .envrc
-direnv allow .
-direnv exec . /usr/bin/env bash -c 'test -n "$GITLAB_TOKEN" && exec glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" >/dev/null'
-```
-
-The wrapper routes API, preview/apply HTTPS Git, publication readiness, and the
-Python worker through this same `direnv exec` boundary, restoring the captured
-target and absolute `glab` helper controls afterward. Issue worktrees inherit
-this Python process environment and do not need their own `.envrc`. Never put
-the token in the service environment file, Git Credential Manager, logs,
-or ledger. Record absolute executable paths, install the units, and create a
-mode-600 environment file:
+positive numeric project ID, but never a token. Use `direnv` only when this
+dedicated checkout has its own regular `.envrc`; the wrapper refuses any other
+configured `direnv` route. It runs `direnv` only to obtain directory-scoped
+credentials and then restores the configured host and project ID. Record
+absolute executable paths, install the units, and create a mode-600 environment
+file:
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -252,24 +225,28 @@ agent_name="${AGENT_WORK_AGENT:-codex}"
 agent_path="$(command -v "$agent_name")"
 gitlab_host="${GITLAB_HOST:-}"
 gitlab_project_id="${GITLAB_PROJECT_ID:-}"
+factory_username="${AGENT_WORK_FACTORY_USERNAME:-}"
 case "$gitlab_host" in ''|*://*|*/*) exit 1;; esac
 case "$gitlab_project_id" in ''|0|00*|*[!0-9]*) exit 1;; esac
-[[ -f "$PWD/.envrc" && ! -L "$PWD/.envrc" ]] || exit 1
-direnv_path="$(command -v direnv || true)"
-[[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
+[[ "$factory_username" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || exit 1
+direnv_path=""
+if [[ -f "$PWD/.envrc" ]]; then
+  direnv_path="$(command -v direnv || true)"
+  [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
+fi
 [[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
 case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 
 env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
   AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
   AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
-  AGENT_WORK_BASE_BRANCH=agent/work-base GITLAB_HOST="$gitlab_host" \
+  AGENT_WORK_BASE_BRANCH=agent/work-base AGENT_WORK_FACTORY_USERNAME="$factory_username" GITLAB_HOST="$gitlab_host" \
   GITLAB_PROJECT_ID="$gitlab_project_id" \
   bash "$PWD/scripts/agent-work-systemd-run.sh"
 ```
@@ -345,7 +322,7 @@ systemctl --user status "$unit_name.service"
 
 Use `--max-segments` or `--max-activation-seconds` to apply smaller operational
 bounds. The activation advances only one issue and
-stops when it is idle, waiting for external progress or a future retry deadline,
+stops when it is idle, waiting for external progress or a retry deadline,
 reaches a terminal or human-facing state, or exhausts a configured bound. Its
 JSON `items` list records workflow results chronologically; `segments_run` and
 `stop_reason` summarize the activation.
@@ -369,11 +346,8 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-The initial attempt plus three retries are automatic workflow attempts. A
-retryable worker exit, timeout, malformed protocol, invalid receipt, or explicit
-retryable result is immediately due and continues in the same activation; an
-activation yields only when a retry deadline represents a genuine future
-external wait. When retries are
+The initial attempt plus three retries are automatic workflow attempts. An
+activation yields when a retry deadline is in the future. When retries are
 exhausted, the issue is `agent::blocked`; follow its recorded next action, then
 explicitly retry that exact IID after a human has resolved the condition. Do
 not change labels to resume blocked work.
@@ -448,11 +422,8 @@ uv run agent-work loop status --json
 systemctl --user enable --now <project-slug>-agent-work.timer
 ```
 
-If publication finds that the default branch advanced, the canary retains its
-durable worktree and returns to the complete workflow so the retained merge can
-be resolved and reviewed; do not rebase or force-push it. If the canary blocks
-or fails, keep the timer disabled, retain all worktrees and stashes, and act on
-the redacted `next_action` from status. See the
+If the canary blocks or fails, keep the timer disabled, retain all worktrees
+and stashes, and act on the redacted `next_action` from status. See the
 [reference](../reference/serial-gitlab-agent-loop.md) for exit meanings and the
 complete command contract.
 

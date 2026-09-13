@@ -48,6 +48,13 @@ invocation receives the positive, ceil-rounded time remaining from that single
 budget. Exhausting the budget follows the normal retry and durable-worktree
 recovery contract.
 
+`AGENT_WORK_FACTORY_USERNAME` is required and must equal the authenticated
+GitLab service username. While an exact open factory MR awaits review, the loop
+reads bounded general comments and inline discussion replies. New human feedback
+wakes only that issue for existing-MR remediation; no-change feedback is
+acknowledged once, while code changes reuse the same MR and preserve its title,
+description, and closing reference.
+
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
 not simulate a complete activation. `loop status` reports durable ledger
@@ -62,15 +69,15 @@ preview file and `--apply`; it does not resolve ambiguous evidence. `--json` emi
 the documented redacted JSON result. `--debug` adds local diagnostics without
 credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
 
-`upstream-finding preview` validates the local manifest, then performs GET-only
-reads against the explicit upstream target using its dedicated credential file.
-It never posts, updates, or closes an issue, and failures leave no ledger,
-remote, or checkout mutation. Successful output contains only structural fields,
-stable fingerprints, outcome, and a positive matching IID when one exists; it
-never prints project identity, finding text, validation evidence, or evidence URLs.
-Invalid manifests, credentials, access, API responses, and markers exit `1`
-with sanitized diagnostics. Correct the boundary input and safely rerun;
-`--apply` remains equally read-only.
+`upstream-finding preview` validates a manifest against an explicit upstream
+GitLab target through bounded GET-only requests. It never posts an issue or
+writes files. Its successful output contains only structural fields, stable
+fingerprints, counts, and the matching upstream issue IID for an exact marker;
+it never prints project identity, finding text, validation evidence, or evidence
+URLs. Invalid manifests and unreadable files
+exit `1` with sanitized diagnostics.
+`--apply` is accepted only for uniform command syntax and remains a harmless
+no-op for this read-only preview.
 
 ### Upstream-finding manifest v1
 
@@ -107,9 +114,13 @@ semantic fingerprint. NFC normalization and harmless surrounding whitespace
 produce the same fingerprints.
 
 JSON success output contains only `schema_version`, `command`, `outcome`, the
-three fingerprints, `copied_path_count`, and `evidence_link_count`. Human
-success output contains the outcome, three fingerprints, and the two counts.
-No manifest content is retained or printed. Valid
+three fingerprints, `copied_path_count`, `evidence_link_count`, and optional
+`matching_iid`; it appears only when an upstream issue description contains
+the exact reserved marker
+`<!-- agent-work-upstream-finding:v1 project=<project_fingerprint> revision=<revision_fingerprint> semantic=<semantic_finding_fingerprint> -->`.
+Human success output contains the outcome, three
+fingerprints, the two counts, and that matching IID when present. No manifest
+content is retained or printed. Valid
 previews exit `0`; sanitized read or validation failures exit `1`; argparse
 usage failures exit `2`.
 
@@ -123,18 +134,12 @@ creates a ledger record; an omitted value fails the command instead.
 The systemd wrapper requires a bare `GITLAB_HOST` and positive numeric
 `GITLAB_PROJECT_ID`; malformed or missing values exit `2` before execution. The
 mode-600 service environment file stores those public identity values and the
-recorded executable paths, never GitLab credentials. The wrapper requires an
-absolute executable `AGENT_WORK_DIRENV` and a regular, non-symlink
-`${AGENT_WORK_CHECKOUT}/.envrc`. The deterministic controller, AI workflow,
-and required nested agents use the same scoped Developer credential. Humans
-provide product and policy inputs and alone approve or merge. The canonical
-ignored `.envrc` exports the configured
-host, numeric project ID, locally configured `GITLAB_TOKEN_PASS_PATH`, and
-`GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"`. The wrapper runs the
-API, preview/apply HTTPS Git, readiness proof, and Python worker through that
-same `direnv exec` boundary, then restores the captured target and absolute
-`glab` Git-helper controls. Setup runs its preview under scrubbed `env -i`
-before enabling the timer.
+recorded executable paths, never GitLab credentials. A configured
+`AGENT_WORK_DIRENV` requires a regular `${AGENT_WORK_CHECKOUT}/.envrc` and an
+executable absolute path. It may provide directory-scoped credentials, but the
+wrapper invokes `/usr/bin/env` with the captured service host and project ID so
+that `direnv` cannot replace the configured target. Setup runs the wrapper's
+preview under a scrubbed `env -i` environment before enabling the timer.
 
 ## Lifecycle
 
@@ -182,25 +187,11 @@ Red, Red returns failing-test evidence to Green, Green fans out applicable
 read-only judges and repairs what it can, then returns consolidated feedback to
 the Architect for the final decision.
 
-Before a prepared commit is pushed, the runner fetches the current default
-branch and proves it is already an ancestor. If it is not, the runner retains
-a `git merge --no-ff --no-commit` in the durable worktree, clears the prepared
-publication binding, and reruns the complete workflow; it never rebases or
-force-pushes. A pending retained merge is recoverable only when it targets an
-ancestor of the freshly fetched default, while unrelated dirty state blocks.
-Resolving that merge creates one ordered merge commit whose first parent is the
-previous candidate and whose second parent is the retained merge target, which
-the runner verifies is an ancestor of the freshly fetched default.
-
-An exact-MR conflict uses that reconciliation before it re-enters `WORKFLOW`
-using the durable worktree. If GitLab still reports a conflict but no
-default-branch merge is needed, the runner keeps the existing bounded
-merge-conflict retry instead. Pipeline rejection enters its normal repair
-workflow; its later publication is protected by the same pre-push ancestry
-fence. Green performs any safe repair inside its workflow session, consolidates
-the follow-up reviews, and returns the result to the Architect. Immediately
-after post-publication observation, the runner revalidates exact MR evidence
-again before it records `awaiting-human`.
+Pipeline rejection or an exact-MR conflict enters `repair` at `WORKFLOW` using
+the same durable worktree. Green performs any safe repair inside its workflow
+session, consolidates the follow-up reviews, and returns the result to the
+Architect. Immediately after post-publication observation, the runner
+revalidates exact MR evidence again before it records `awaiting-human`.
 
 Each timer activation acquires the single-project lock and reconciles intent
 and observed evidence. It then advances only the selected or resumed issue.
@@ -213,9 +204,9 @@ active-work budget. The systemd wrapper continues only after `awaiting-human`,
 read-only eligibility check, and begins another activation only for `eligible`.
 Between issues it re-queries GitLab and fast-forwards the clean service base;
 this bounded housekeeping is outside the per-issue budget. An `idle`,
-`pipeline-wait`, a future `retry-wait`, `repair`, `time-limit`, or `segment-limit`
-result yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
-idle checks and yielded pipeline/future-external-retry checks. The service has no sequence-wide
+`pipeline-wait`, `retry-wait`, `repair`, `time-limit`, or `segment-limit` result
+yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
+idle checks and yielded pipeline/retry checks. The service has no sequence-wide
 timeout, so it cannot truncate an otherwise unbounded sequence of individually
 bounded activations. The loop is serial per host and project, not multi-host
 coordination.
@@ -408,18 +399,13 @@ resumes it.
 
 Worker exits, timeouts, malformed worker protocol, invalid receipts, and explicit
 `retryable` worker results are immediately due and continue in the same
-activation; transient GitLab or transport failures retain retry timing. The XDG `agent-work.log` records redacted
-outcomes; `--debug` adds local diagnostics without credentials or transcripts.
-For a nonzero worker exit, the optional `items[].worker_exit` object preserves
-the exact signed `returncode` and a `diagnostic` derived only from stderr. A
-negative return code denotes POSIX signal termination; positive values are not
-otherwise classified. The diagnostic is one safe line of at most 2048 UTF-8
-bytes: it excludes the worker prompt, issue content, stdout, credentials, raw
-terminal controls, and unbounded output. Legacy schema-v1 records omit the
-field. A fourth failed exit retains this evidence when retry exhaustion changes
-the error code to `retry_exhausted`; a validated successful worker result clears
-stale exit evidence. The systemd wrapper writes the same validated JSON report
-to stdout, making this bounded evidence visible in its journal.
+activation; transient GitLab or transport failures retain retry timing. The XDG
+`agent-work.log` records redacted outcomes; `--debug` adds local diagnostics
+without credentials or transcripts. For a nonzero worker exit, optional
+`items[].worker_exit` preserves its return code and a stderr-derived diagnostic.
+The diagnostic is one safe line of at most 2048 UTF-8 bytes; it excludes prompts,
+issue content, stdout, credentials, terminal controls, and unbounded output.
+Retry exhaustion retains it, while a validated successful worker result clears it.
 Migration preview follows every page of lifecycle projections. Apply preflights
 all actions against unchanged evidence, project identity, and absent ledger
 records before any mutation, and refuses the complete plan on mismatch.
@@ -457,9 +443,8 @@ which identifies why the activation yielded; its `items[]` lists workflow
 results in chronological order. Per-issue values—including `issue_iid`, state,
 coarse workflow phase, attempt, retry timing, source branch, durable worktree, MR reference,
 error code, optional `worker_exit`, summary, and next action—are objects in
-`items[]`. When present, human output names its fields as `returncode=<signed
-integer>` and `worker_diagnostic=<safe diagnostic>`; JSON uses
-`{"returncode": <signed integer>, "diagnostic": <safe string>}`. Migration
+`items[]`. Human output renders `returncode=<integer>` and
+`worker_diagnostic=<safe diagnostic>` when this evidence is present. Migration
 preview and apply return their proposed or applied migration actions in
 `actions[]`. Consumers must tolerate additional fields and never treat a
 diagnostic as authority or input.
