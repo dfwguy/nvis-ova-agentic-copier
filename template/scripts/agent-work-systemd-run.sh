@@ -41,10 +41,8 @@ esac
 if [[ "${AGENT_WORK_CHECKOUT:-}" != /* || ! -d "$AGENT_WORK_CHECKOUT" ]]; then
   stop 'AGENT_WORK_CHECKOUT must be an absolute directory'
 fi
-if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  if [[ ! -f "$AGENT_WORK_CHECKOUT/.envrc" || -L "$AGENT_WORK_CHECKOUT/.envrc" ]]; then
-    stop 'AGENT_WORK_DIRENV requires a regular AGENT_WORK_CHECKOUT/.envrc'
-  fi
+if [[ ! -f "$AGENT_WORK_CHECKOUT/.envrc" || -L "$AGENT_WORK_CHECKOUT/.envrc" ]]; then
+  stop 'AGENT_WORK_DIRENV requires a regular AGENT_WORK_CHECKOUT/.envrc'
 fi
 for name in AGENT_WORK_GIT AGENT_WORK_GLAB AGENT_WORK_JQ AGENT_WORK_FLOCK AGENT_WORK_UV; do
   require_path "$name"
@@ -70,12 +68,7 @@ case "$agent_name" in
     stop 'AGENT_WORK_AGENT must be one of: codex, claude, pi'
     ;;
 esac
-if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  if [[ ! -x "$AGENT_WORK_DIRENV" ]]; then
-    stop 'AGENT_WORK_DIRENV is not executable'
-  fi
-  require_path AGENT_WORK_DIRENV
-fi
+require_path AGENT_WORK_DIRENV
 
 git=("$AGENT_WORK_GIT" -c core.hooksPath=/dev/null)
 export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
@@ -87,6 +80,20 @@ export GIT_CONFIG_KEY_2=credential.useHttpPath GIT_CONFIG_VALUE_2=true
 export GIT_CONFIG_KEY_3=core.askPass GIT_CONFIG_VALUE_3=/bin/false
 unset GIT_CONFIG_PARAMETERS
 checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
+authenticated() {
+  "$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env -u GIT_CONFIG_PARAMETERS \
+    "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" \
+    "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" \
+    "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never" \
+    "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false" \
+    "GIT_CONFIG_COUNT=4" \
+    "GIT_CONFIG_KEY_0=credential.helper" "GIT_CONFIG_VALUE_0=" \
+    "GIT_CONFIG_KEY_1=credential.helper" \
+    "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential" \
+    "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true" \
+    "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false" \
+    "$@"
+}
 if ! top="$("${git[@]}" -C "$checkout" rev-parse --show-toplevel)"; then
   stop 'AGENT_WORK_CHECKOUT is not a Git checkout'
 fi
@@ -149,10 +156,7 @@ remote_ref=""
 verify_project() {
   local actual_id http json
   local project_command=("$AGENT_WORK_GLAB" api --hostname "$host" "projects/$project_id")
-  if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-    project_command=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "${project_command[@]}")
-  fi
-  if ! json="$("${project_command[@]}")"; then
+  if ! json="$(authenticated "${project_command[@]}")"; then
     stop 'cannot read configured GitLab project'
   fi
   if ! actual_id="$("$AGENT_WORK_JQ" -er '.id | if type == "number" then tostring else empty end' <<<"$json")"; then
@@ -184,7 +188,7 @@ refresh_base() {
   local grep_status
   verify_project
   clean
-  if ! "${git[@]}" -C "$checkout" fetch --no-tags --no-recurse-submodules origin "refs/heads/$default:$remote_ref"; then
+  if ! authenticated "${git[@]}" -C "$checkout" fetch --no-tags --no-recurse-submodules origin "refs/heads/$default:$remote_ref"; then
     stop 'cannot fetch verified default branch'
   fi
   if "${git[@]}" -C "$checkout" grep -q -E '(^|[[:space:]])filter(=|[[:space:]]|$)' "$remote_ref" -- .gitattributes '*/.gitattributes'; then
@@ -200,7 +204,7 @@ refresh_base() {
 
 if [[ "${1:-}" != --apply ]]; then
   verify_project
-  if ! lines="$("${git[@]}" -C "$checkout" ls-remote --exit-code origin "refs/heads/$default")"; then
+  if ! lines="$(authenticated "${git[@]}" -C "$checkout" ls-remote --exit-code origin "refs/heads/$default")"; then
     stop 'cannot read default branch from origin'
   fi
   if ! [[ "$lines" =~ ^[0-9a-f]{40}[[:space:]]refs/heads/ ]] || [[ "${lines%%$'\n'*}" != "$lines" ]]; then
@@ -212,33 +216,14 @@ if [[ "${1:-}" != --apply ]]; then
 else
   refresh_base
 fi
-readiness=(
-  /usr/bin/env -u GIT_CONFIG_PARAMETERS
-  "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id"
-  "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never"
-  "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false"
-  "GIT_CONFIG_COUNT=4"
-  "GIT_CONFIG_KEY_0=credential.helper" "GIT_CONFIG_VALUE_0="
-  "GIT_CONFIG_KEY_1=credential.helper"
-  "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential"
-  "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true"
-  "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false"
-  "$AGENT_WORK_GIT" -c core.hooksPath=/dev/null -C "$checkout"
-  push --dry-run origin "HEAD:refs/heads/agent/readiness"
-)
-if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  readiness=("$AGENT_WORK_DIRENV" exec "$checkout" "${readiness[@]}")
-fi
-if ! "${readiness[@]}" >/dev/null 2>&1; then
+if ! authenticated "$AGENT_WORK_GIT" -c core.hooksPath=/dev/null -C "$checkout" \
+  push --dry-run origin "HEAD:refs/heads/agent/readiness" >/dev/null 2>&1; then
   stop 'Git credential-helper publication readiness check failed'
-fi
-runner=("$AGENT_WORK_UV")
-if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  runner=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" "$AGENT_WORK_UV")
 fi
 cd "$checkout"
 if [[ "${1:-}" != --apply ]]; then
-  exec "${runner[@]}" run agent-work loop run --json
+  authenticated "$AGENT_WORK_UV" run agent-work loop run --json
+  exit $?
 fi
 
 validate_applied_report() {
@@ -272,7 +257,7 @@ preview_outcome() {
 }
 
 while :; do
-  if ! applied_report="$("${runner[@]}" run agent-work loop run --apply --json)"; then
+  if ! applied_report="$(authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json)"; then
     stop 'agent-work applied activation failed'
   fi
   if ! validate_applied_report "$applied_report"; then
@@ -289,7 +274,7 @@ while :; do
       exit 0
       ;;
   esac
-  if ! preview_report="$("${runner[@]}" run agent-work loop run --json)"; then
+  if ! preview_report="$(authenticated "$AGENT_WORK_UV" run agent-work loop run --json)"; then
     stop 'agent-work eligibility preview failed'
   fi
   if ! outcome="$(preview_outcome "$preview_report")"; then

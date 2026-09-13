@@ -1642,6 +1642,66 @@ def test_agent_profiles_are_argv_only_and_invocation_redacts_secrets(
     assert result.stdout == result.stderr == "[REDACTED]"
 
 
+def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
+    tmp_path: Path,
+) -> None:
+    """The AI and its children inherit only the checkout-scoped shared token."""
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    retained = "shared-gitlab-value"
+    filtered = (
+        "pass-path-value",
+        "unrelated-token-value",
+        "private-key-value",
+        "password-value",
+        "secret-value",
+        "credential-value",
+    )
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        if command[-1] == "--help":
+            return SimpleNamespace(
+                returncode=0, stdout="usage: codex exec --add-dir DIR", stderr=""
+            )
+        diagnostic = " ".join((retained, *filtered))
+        return SimpleNamespace(returncode=1, stdout=diagnostic, stderr=diagnostic)
+
+    environment = {
+        "AGENT_WORK_AGENT": "codex",
+        "AGENT_WORK_AGENT_PATH": "/codex",
+        "GITLAB_TOKEN": retained,
+        "GITLAB_TOKEN_PASS_PATH": filtered[0],
+        "UNRELATED_API_TOKEN": filtered[1],
+        "SSH_PRIVATE_KEY": filtered[2],
+        "DATABASE_PASSWORD": filtered[3],
+        "CLIENT_SECRET": filtered[4],
+        "CREDENTIAL_FILE": filtered[5],
+        "ORDINARY_SETTING": "retained-setting",
+    }
+    issue_worktree = tmp_path / "issue-worktree"
+    issue_worktree.mkdir()
+    assert not (issue_worktree / ".envrc").exists()
+    invoker = AgentInvoker(run_command, environment=environment)
+
+    invoker.preflight()
+    result = invoker.invoke(issue_worktree, "prompt", 10)
+
+    expected_environment = {
+        "AGENT_WORK_AGENT": "codex",
+        "AGENT_WORK_AGENT_PATH": "/codex",
+        "GITLAB_TOKEN": retained,
+        "ORDINARY_SETTING": "retained-setting",
+    }
+    assert [kwargs["environment"] for _, kwargs in calls] == [
+        expected_environment,
+        expected_environment,
+    ]
+    assert retained not in result.stdout + result.stderr
+    assert all(value not in result.stdout + result.stderr for value in filtered)
+    assert result.stdout == result.stderr
+    assert result.stdout.split() == ["[REDACTED]"] * (len(filtered) + 1)
+
+
 def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
     tmp_path: Path,
 ) -> None:

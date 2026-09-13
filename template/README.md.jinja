@@ -56,6 +56,13 @@ optional evidence excludes prompts, issue content, credentials, stdout, and
 terminal controls; retry exhaustion retains it for diagnosis. The systemd
 journal receives the same validated JSON through the wrapper's stdout.
 
+Scheduled operation uses an ignored checkout-local `.envrc` and an absolute
+`direnv` executable. The deterministic controller, AI workflow, and required
+nested agents use the same scoped Developer GitLab credential. Humans provide
+product and policy inputs and alone approve or merge. The setup guide defines the deployment-configured
+`pass`-backed `.envrc` and keeps the token out of service files, logs, and the
+ledger.
+
 ## Preview an upstream finding
 
 Validate a finding manifest against an explicit upstream GitLab project without

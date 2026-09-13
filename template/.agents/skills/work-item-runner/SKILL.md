@@ -29,8 +29,12 @@ Work only in the runner-provided durable per-issue worktree, never in an
 operator's active checkout. Own the complete repository workflow inside one
 live session for the coarse `workflow` phase. The worker edits and validates
 uncommitted changes and emits exactly one versioned `<agent-work-result>`
-envelope; it must not commit, push, call GitLab, create a merge request,
-approve, or merge.
+envelope; it may use GitLab only under the configured numeric project, but must
+not commit, push, create a merge request, approve, or merge.
+
+The deterministic controller, AI workflow, and required nested agents use the
+same scoped Developer GitLab credential. Humans provide product and policy
+inputs and alone approve or merge.
 
 Classify the whole change, then use either the Coding workflow manifest or the
 Documentation and agent-policy workflow manifest in `AGENTS.md` as the routing

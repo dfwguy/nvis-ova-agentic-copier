@@ -5,7 +5,7 @@ summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-12
+last_reviewed: 2026-09-13
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -211,12 +211,35 @@ uv run agent-work loop status --json
 
 The service manager does not inherit an interactive `PATH` or checkout `direnv`
 variables. The environment file records the configured bare GitLab host and
-positive numeric project ID, but never a token. Use `direnv` only when this
-dedicated checkout has its own regular `.envrc`; the wrapper refuses any other
-configured `direnv` route. It runs `direnv` only to obtain directory-scoped
-credentials and then restores the configured host and project ID. Record
-absolute executable paths, install the units, and create a mode-600 environment
-file:
+positive numeric project ID, but never a token. A regular, ignored `.envrc` in
+the dedicated checkout and an absolute executable `direnv` are required. The
+deterministic controller, AI workflow, and required nested agents use the same
+scoped Developer credential. Humans provide product and policy inputs and alone
+approve or merge. Before creating the environment file, configure the local
+password-store path, create its pass entry without printing its value, then
+create the complete ignored `.envrc`; replace the public target placeholders:
+
+```bash
+export GITLAB_TOKEN_PASS_PATH=teams/example-project/agent-token
+pass insert "$GITLAB_TOKEN_PASS_PATH"
+cat >.envrc <<'EOF'
+export GITLAB_HOST=gitlab.example.test
+export GITLAB_PROJECT_ID=123
+export GITLAB_TOKEN_PASS_PATH=teams/example-project/agent-token
+export GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"
+EOF
+git check-ignore -q .envrc
+direnv allow .
+direnv exec . /usr/bin/env bash -c 'test -n "$GITLAB_TOKEN" && exec glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID" >/dev/null'
+```
+
+The wrapper routes API, preview/apply HTTPS Git, publication readiness, and the
+Python worker through this same `direnv exec` boundary, restoring the captured
+target and absolute `glab` helper controls afterward. Issue worktrees inherit
+this Python process environment and do not need their own `.envrc`. Never put
+the token in the service environment file, Git Credential Manager, logs,
+or ledger. Record absolute executable paths, install the units, and create a
+mode-600 environment file:
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -231,11 +254,9 @@ gitlab_host="${GITLAB_HOST:-}"
 gitlab_project_id="${GITLAB_PROJECT_ID:-}"
 case "$gitlab_host" in ''|*://*|*/*) exit 1;; esac
 case "$gitlab_project_id" in ''|0|00*|*[!0-9]*) exit 1;; esac
-direnv_path=""
-if [[ -f "$PWD/.envrc" ]]; then
-  direnv_path="$(command -v direnv || true)"
-  [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
-fi
+[[ -f "$PWD/.envrc" && ! -L "$PWD/.envrc" ]] || exit 1
+direnv_path="$(command -v direnv || true)"
+[[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
 [[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
 case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
