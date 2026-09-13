@@ -60,6 +60,10 @@ Before taking repository action:
 8. Treat project-owned values and workflow policy as human-controlled. Never
    change them merely to clear a validation or pipeline gate; obtain explicit
    human approval for the exact policy or value change first.
+9. Write human-facing workflow statuses, blockers, handoffs, and final reports
+   in plain language. Traceability identifiers may appear only when their
+   meaning is explained in plain language on first use; machine-readable
+   structured audit evidence may retain stable internal identifiers unchanged.
 
 ## Instruction loading
 
