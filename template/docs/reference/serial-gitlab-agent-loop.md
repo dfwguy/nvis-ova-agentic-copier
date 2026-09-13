@@ -182,11 +182,25 @@ Red, Red returns failing-test evidence to Green, Green fans out applicable
 read-only judges and repairs what it can, then returns consolidated feedback to
 the Architect for the final decision.
 
-Pipeline rejection or an exact-MR conflict enters `repair` at `WORKFLOW` using
-the same durable worktree. Green performs any safe repair inside its workflow
-session, consolidates the follow-up reviews, and returns the result to the
-Architect. Immediately after post-publication observation, the runner
-revalidates exact MR evidence again before it records `awaiting-human`.
+Before a prepared commit is pushed, the runner fetches the current default
+branch and proves it is already an ancestor. If it is not, the runner retains
+a `git merge --no-ff --no-commit` in the durable worktree, clears the prepared
+publication binding, and reruns the complete workflow; it never rebases or
+force-pushes. A pending retained merge is recoverable only when it targets an
+ancestor of the freshly fetched default, while unrelated dirty state blocks.
+Resolving that merge creates one ordered merge commit whose first parent is the
+previous candidate and whose second parent is the retained merge target, which
+the runner verifies is an ancestor of the freshly fetched default.
+
+An exact-MR conflict uses that reconciliation before it re-enters `WORKFLOW`
+using the durable worktree. If GitLab still reports a conflict but no
+default-branch merge is needed, the runner keeps the existing bounded
+merge-conflict retry instead. Pipeline rejection enters its normal repair
+workflow; its later publication is protected by the same pre-push ancestry
+fence. Green performs any safe repair inside its workflow session, consolidates
+the follow-up reviews, and returns the result to the Architect. Immediately
+after post-publication observation, the runner revalidates exact MR evidence
+again before it records `awaiting-human`.
 
 Each timer activation acquires the single-project lock and reconciles intent
 and observed evidence. It then advances only the selected or resumed issue.

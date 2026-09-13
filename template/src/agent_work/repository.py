@@ -357,6 +357,59 @@ class GitRepository:
             raise error_type("Git operation failed")
         return result.stdout.strip()
 
+    def _merge_head(self, worktree: Path) -> str | None:
+        """Return the pending merge target, if this worktree is merging."""
+        result = self._run_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "rev-parse",
+                "-q",
+                "--verify",
+                "MERGE_HEAD",
+            ),
+            environment=self._environment,
+        )
+        if result.returncode not in {0, 1}:
+            raise RepositoryError("Git operation failed")
+        return result.stdout.strip() or None
+
+    def _is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
+        """Return whether Git proves one commit is an ancestor of another."""
+        result = self._run_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ),
+            environment=self._environment,
+        )
+        if result.returncode not in {0, 1}:
+            raise RepositoryError("Git operation failed")
+        return result.returncode == 0
+
+    def _merge_current_default(self, default_sha: str, worktree: Path) -> None:
+        """Start a merge, retaining Git's conflict state for workflow repair."""
+        result = self._run_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                default_sha,
+            ),
+            environment=self._environment,
+        )
+        if result.returncode not in {0, 1}:
+            raise RepositoryError("Git operation failed")
+
     def refresh_base(self) -> None:
         """Require a clean base checkout and fast-forward it."""
         expected = self.config.base_branch
@@ -465,6 +518,30 @@ class GitRepository:
         if self.head(worktree) != expected_head:
             raise RepositoryError("durable worktree baseline changed")
 
+    def reconcile_default_branch(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str | None:
+        """Start or recover the exact merge needed to include current default."""
+        self.verify_worktree(worktree, branch, expected_head)
+        self._git("fetch", "origin", self.config.default_branch, transient=True)
+        default_sha = self._git(
+            "rev-parse", f"origin/{self.config.default_branch}", cwd=worktree
+        )
+        merge_head = self._merge_head(worktree)
+        if merge_head:
+            if not self._is_ancestor(merge_head, default_sha, worktree):
+                raise RepositoryError("pending merge does not target current default")
+            return merge_head
+        if self.has_changes(worktree):
+            raise RepositoryError("publication worktree has uncommitted changes")
+        if not self._is_ancestor(default_sha, expected_head, worktree):
+            self._merge_current_default(default_sha, worktree)
+            merge_head = self._merge_head(worktree)
+            if merge_head != default_sha:
+                raise RepositoryError("pending merge does not target fetched default")
+            return default_sha
+        return None
+
     def prepare_commit(
         self,
         worktree: Path,
@@ -477,18 +554,37 @@ class GitRepository:
         if self._git("branch", "--show-current", cwd=worktree) != branch:
             raise RepositoryError("publication worktree is on the wrong branch")
         current_head = self.head(worktree)
-        changed = self.has_changes(worktree)
-        if current_head == expected_head and changed:
+        merge_head = self._merge_head(worktree)
+        resolved_merge = merge_head and not self._git(
+            "ls-files", "--unmerged", cwd=worktree
+        )
+        ordinary_candidate = not merge_head and self.has_changes(worktree)
+        if current_head == expected_head and (resolved_merge or ordinary_candidate):
             self._git("add", "--all", cwd=worktree)
             self._git("commit", "-m", f"Resolve issue #{issue_iid}", cwd=worktree)
         else:
             message = (
                 "worker-created commits cannot be published"
                 if current_head != expected_head
-                else "worker made no changes to publish"
+                else (
+                    "pending merge is not resolved"
+                    if merge_head
+                    else "worker made no changes to publish"
+                )
             )
             raise RepositoryError(message)
-        return self._git("rev-parse", "HEAD", cwd=worktree)
+        prepared = self._git("rev-parse", "HEAD", cwd=worktree)
+        parents = self._git(
+            "rev-list", "--parents", "-n", "1", prepared, cwd=worktree
+        ).split()
+        expected_parents = (
+            [prepared, expected_head, merge_head]
+            if merge_head
+            else [prepared, expected_head]
+        )
+        if parents != expected_parents:
+            raise RepositoryError("prepared publication merge parents are not exact")
+        return prepared
 
     def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
         """Push only the exact durable prepared commit."""
@@ -521,13 +617,29 @@ class GitRepository:
         parents = self._git(
             "rev-list", "--parents", "-n", "1", head, cwd=worktree
         ).split()
-        if parents != [head, baseline_sha]:
+        if parents == [head, baseline_sha]:
+            pass
+        elif len(parents) == 3 and parents[1] == baseline_sha:
+            self._git("fetch", "origin", self.config.default_branch, transient=True)
+            current_default = self._git(
+                "rev-parse", f"origin/{self.config.default_branch}", cwd=worktree
+            )
+            if not self._is_ancestor(parents[2], current_default, worktree):
+                raise RepositoryError("retained merge does not include current default")
+        else:
             raise RepositoryError(
                 "retained publication commit is not based on baseline"
             )
+        expected_count = "1"
         if (
-            self._git("rev-list", "--count", f"{baseline_sha}..{head}", cwd=worktree)
-            != "1"
+            self._git(
+                "rev-list",
+                "--first-parent",
+                "--count",
+                f"{baseline_sha}..{head}",
+                cwd=worktree,
+            )
+            != expected_count
         ):
             raise RepositoryError("retained publication history is not exact")
         if (

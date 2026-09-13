@@ -157,6 +157,10 @@ class RepositoryPort(Protocol):
         self, worktree: Path, branch: str, expected_head: str
     ) -> None: ...
 
+    def reconcile_default_branch(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str | None: ...
+
     def prepare_commit(
         self,
         worktree: Path,

@@ -365,6 +365,11 @@ class FakeRepository:
         self.binds = 0
         self.bound_sha = "a" * 40
         self.verified_heads: list[str] = []
+        self.reconciled_heads: list[str] = []
+        self.reconciliation_sha: str | None = None
+        self.reconciliation_error: RepositoryError | None = None
+        self.prepared_sha = "a" * 40
+        self.publication_events: list[tuple[str, str]] = []
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
         ] = (
@@ -416,6 +421,17 @@ class FakeRepository:
         if not self.worktree_valid:
             raise RepositoryError("worktree branch or baseline changed")
 
+    def reconcile_default_branch(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str | None:
+        """Model reconciliation of the candidate with the current default branch."""
+        del worktree, branch
+        self.reconciled_heads.append(expected_head)
+        self.publication_events.append(("reconcile", expected_head))
+        if self.reconciliation_error is not None:
+            raise self.reconciliation_error
+        return self.reconciliation_sha
+
     def prepare_commit(
         self,
         worktree: Path,
@@ -426,7 +442,8 @@ class FakeRepository:
         del worktree, branch, issue_iid, expected_head
         if self.prepare_error is not None:
             raise self.prepare_error
-        return "a" * 40
+        self.publication_events.append(("prepare", self.prepared_sha))
+        return self.prepared_sha
 
     def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
         del worktree, branch
@@ -2404,7 +2421,9 @@ def test_observation_revalidates_exact_merge_request_evidence(
     assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
 
 
-def test_observation_routes_conflicts_to_durable_repair(tmp_path: Path) -> None:
+def test_observation_retries_conflicts_without_a_pending_default_merge(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
     ledger.persist(
@@ -2426,10 +2445,57 @@ def test_observation_routes_conflicts_to_durable_repair(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.REPAIR
-    assert outcome.phase is WorkflowPhase.CODING_GREEN
-    assert outcome.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.error_code is ErrorCode.MERGE_CONFLICT
+
+
+@pytest.mark.parametrize(
+    ("reconciliation_error", "expected_state", "expected_error"),
+    (
+        (
+            RepositoryTransientError("temporary fetch failure"),
+            RunnerState.RETRY_WAIT,
+            ErrorCode.GIT_TRANSPORT_RETRYABLE,
+        ),
+        (
+            RepositoryError("worktree no longer matches the candidate"),
+            RunnerState.BLOCKED,
+            ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+        ),
+    ),
+)
+def test_observation_classifies_existing_merge_request_reconciliation_errors(
+    tmp_path: Path,
+    reconciliation_error: RepositoryError,
+    expected_state: RunnerState,
+    expected_error: ErrorCode,
+) -> None:
+    """Existing-MR reconciliation preserves transient and identity error policy."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.existing_mr = _mr(has_conflicts=True)
+    repository = FakeRepository(config)
+    repository.reconciliation_error = reconciliation_error
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is expected_state
+    assert outcome.error_code is expected_error
 
 
 def test_observation_gitlab_failure_schedules_retry(tmp_path: Path) -> None:
@@ -5033,3 +5099,147 @@ def test_migration_rejects_pending_replay_when_issue_state_changed(
 
     assert gitlab.labels == []
     assert ledger.load(12) == pending
+
+
+@pytest.mark.parametrize(
+    ("reconciliation_sha", "expected_state", "expected_pushes"),
+    ((None, RunnerState.OBSERVING, 1), ("b" * 40, RunnerState.EXECUTING, 0)),
+)
+def test_publication_pushes_an_ancestor_or_replays_workflow_after_default_advances(
+    tmp_path: Path,
+    reconciliation_sha: str | None,
+    expected_state: RunnerState,
+    expected_pushes: int,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Closes #12"
+                )
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.reconciliation_sha = reconciliation_sha
+    if reconciliation_sha is not None:
+        repository.prepared_sha = "c" * 40
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is expected_state
+    assert repository.pushes == expected_pushes
+    expected_candidate = "c" * 40 if reconciliation_sha is not None else "a" * 40
+    assert repository.reconciled_heads == [expected_candidate]
+    assert repository.publication_events[:2] == [
+        ("prepare", expected_candidate),
+        ("reconcile", expected_candidate),
+    ]
+    if reconciliation_sha is not None:
+        assert outcome.phase is WorkflowPhase.WORKFLOW
+        assert outcome.source_sha == expected_candidate
+        assert outcome.intent is None and outcome.publication_sha is None
+
+
+def test_conflicted_existing_merge_request_reconciles_before_replaying_full_workflow(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={"merge_request_iid": 88, "receipts": _complete_workflow_receipts()}
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(has_conflicts=True)
+    repository = FakeRepository(config)
+    repository.reconciliation_sha = "b" * 40
+    invoker = FakeInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.WORKFLOW
+    assert outcome.merge_request_iid == record.merge_request_iid
+    assert outcome.source_branch == record.source_branch
+    assert repository.reconciled_heads == ["a" * 40]
+    assert repository.pushes == 0
+    assert invoker.prompts == []
+
+
+def test_pipeline_repair_default_advance_runs_workflow_without_stale_recovery(
+    tmp_path: Path,
+) -> None:
+    """A retained merge resumes workflow instead of stale ordinary-MR recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": "https://gitlab.example.com/mr/88",
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Closes #12"
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.existing_mr = _mr()
+    repository = FakeRepository(config)
+    repository.prepared_sha = "c" * 40
+    repository.reconciliation_sha = "b" * 40
+
+    reconciled = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert reconciled is not None and reconciled.state is RunnerState.EXECUTING
+    assert reconciled.phase is WorkflowPhase.WORKFLOW
+    assert reconciled.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
+    repository.existing_worktree_error = RepositoryError(
+        "unexpected stale ordinary-MR recovery"
+    )
+    invoker = FakeInvoker()
+
+    replayed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert replayed is not None and replayed.state is RunnerState.RETRY_WAIT
+    assert invoker.prompts

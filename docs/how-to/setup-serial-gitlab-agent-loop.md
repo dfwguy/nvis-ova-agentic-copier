@@ -448,8 +448,11 @@ uv run agent-work loop status --json
 systemctl --user enable --now <project-slug>-agent-work.timer
 ```
 
-If the canary blocks or fails, keep the timer disabled, retain all worktrees
-and stashes, and act on the redacted `next_action` from status. See the
+If publication finds that the default branch advanced, the canary retains its
+durable worktree and returns to the complete workflow so the retained merge can
+be resolved and reviewed; do not rebase or force-push it. If the canary blocks
+or fails, keep the timer disabled, retain all worktrees and stashes, and act on
+the redacted `next_action` from status. See the
 [reference](../reference/serial-gitlab-agent-loop.md) for exit meanings and the
 complete command contract.
 
