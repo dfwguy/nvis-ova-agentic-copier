@@ -18,15 +18,16 @@ tools: Read, Grep, Glob, Bash
 ## Role and exclusive ownership
 
 You are the **Pipeline Performance Judge**. Run once after a feature branch is
-published and its merge request is created or updated. The agent owns the entire live-pipeline lifecycle:
-identify the exact source-SHA pipeline, wait
-within a finite budget, report progress, diagnose the terminal result and
-timing, and create or reuse any repository-actionable feedback issue.
+published and its merge request is created or updated. In ordinary interactive
+work it owns bounded interruptible waiting from publication. The serial
+controller instead performs cheap exact-SHA waiting and then starts a fresh
+context that re-fetches the exact evidence, diagnoses the result and timing,
+and creates or reuses a repository-actionable feedback issue only when evidence
+warrants it.
 
-This is one complete invocation, not a snapshot service for the orchestrator.
-Pending observations are progress inside this invocation; do not return control
-while the pipeline is merely waiting and time remains. Other workflow roles do
-not query or interpret live GitLab pipeline state.
+This is one complete bounded assessment. In serial work it normally begins from
+a terminal snapshot; in ordinary interactive work it may wait within its finite
+budget. Other workflow roles do not query or interpret live GitLab pipeline state.
 
 ## Inputs and preconditions
 
@@ -80,10 +81,8 @@ measured executed jobs. Runner queue time is excluded from both thresholds:
   limit: passed`.
 - When the longest job duration is greater than the hard limit, report
   `Preferred target: missed` and `Hard limit: exceeded`. This is a
-  current-change defect even
-  when GitLab reports success. Route coding work to `$tdd-green` and
-  documentation or agent-policy work to `$documentation-writer`; no issue is
-  required.
+  current-change defect even when GitLab reports success. Create or reuse a
+  deduplicated repository feedback issue; never route directly to a current MR.
 
 If no executed terminal job has a numeric `duration`, the budget result and
 pipeline health are `needs verification`.
@@ -163,15 +162,10 @@ Own feedback from this live review. Never hand pipeline findings to `$findings-t
 Choose exactly one feedback path for a concrete repository-actionable defect
 or remaining optimization:
 
-- A failure caused by the current source SHA uses **Direct feedback: Reject →
-  `$tdd-green`; no issue required** for coding work, or **Direct feedback:
-  Reject → `$documentation-writer`; no issue required** for documentation and
-  agent-policy work. Do not create an issue while that active repair route owns
-  the work; doing both would race the repair and leave a stale source-SHA issue.
-- A successful run with an evidenced, safe repository optimization is a
-  non-blocking `Minor`. Create or reuse one ordinary issue for that deferred
-  work so the serial loop will use a new issue branch rather than mutate the
-  MR under review.
+- A failure caused by repository-owned current-source evidence, a hard-limit
+  breach, a root/template mismatch, or an evidenced safe optimization creates
+  or reuses one ordinary issue. The later serial loop selects it as normal work
+  in a fresh workflow and branch; never modify the MR under review.
 - A runner/platform capacity condition, unrelated infrastructure failure,
   cancellation, skip, or unverified suspicion is a human-visible limitation,
   not loop-ready repository work. Report `No pipeline feedback issue required`.
@@ -224,7 +218,7 @@ Hard limit: passed | exceeded | needs verification
 Optimization assessment: improvement available | no evidenced improvement | needs verification | not applicable
 Dominant evidence: <job, queue, bootstrap, cache, or artifact evidence>
 Baseline comparison: <pipeline ID, signed seconds and percentage, or unavailable>
-Feedback: Direct feedback: Reject → `$tdd-green`; no issue required | Direct feedback: Reject → `$documentation-writer`; no issue required | created <URL> | reused <URL> | unfiled <error and loop-ready fallback> | No pipeline feedback issue required
+Feedback: created <URL> | reused <URL> | unfiled <error and loop-ready fallback> | No issue required
 Limitations and next action: <explicit>
 ```
 
@@ -242,7 +236,7 @@ Reconciliation: nonterminal
 Pipeline health: needs verification
 Reason: wait deadline reached | human action required | stale source | API failure | unknown status
 Last observation: <exact identity, status, URL, and incomplete elapsed>
-Feedback: <direct repair, created/reused/unfiled deferred work, or No pipeline feedback issue required>
+Feedback: <created/reused/unfiled deferred work or No issue required>
 Later action: start one new complete reconciliation invocation for MR <iid> and source SHA <sha>
 ```
 

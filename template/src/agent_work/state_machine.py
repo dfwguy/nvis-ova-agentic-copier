@@ -116,6 +116,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         ),
         RunnerState.AWAITING_HUMAN: frozenset(
             {
+                RunnerState.AWAITING_HUMAN,
                 RunnerState.REPAIR,
                 RunnerState.RETRY_WAIT,
                 RunnerState.COMPLETE,
@@ -146,10 +147,7 @@ REQUIRED_RECEIPTS: Final = MappingProxyType(
         WorkflowPhase.CONTENT_WRITE: ("$documentation-writer",),
         WorkflowPhase.CONTENT_REVIEW: ("$diataxis-judge", "$agent-policy-judge"),
         WorkflowPhase.CONTENT_FINALIZE: ("$documentation-finalizer",),
-        WorkflowPhase.POST_PUBLICATION: (
-            "$pipeline-performance-judge",
-            "$findings-triage",
-        ),
+        WorkflowPhase.POST_PUBLICATION: ("$pipeline-performance-judge",),
     }
 )
 
@@ -242,7 +240,7 @@ REJECTION_ROUTES: Final = MappingProxyType(
         WorkflowPhase.CONTENT_FINALIZE: frozenset(
             {WorkflowPhase.CONTENT_WRITE, WorkflowPhase.CONTENT_REVIEW}
         ),
-        WorkflowPhase.POST_PUBLICATION: frozenset({WorkflowPhase.CODING_GREEN}),
+        WorkflowPhase.POST_PUBLICATION: frozenset({WorkflowPhase.POST_PUBLICATION}),
     }
 )
 

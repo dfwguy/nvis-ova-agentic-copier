@@ -173,8 +173,11 @@ defer it.
 
 The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication
-enters `observing`, which can enter `repair`, return to `publishing`, or finish
-at `awaiting-human`. A human-blocked condition becomes `blocked`; after the
+enters `observing`, where the controller waits for the exact-SHA terminal state
+before a fresh Pipeline Performance Judge assesses it. A healthy result finishes
+at `awaiting-human`; a concrete repository-actionable problem is recorded as a
+deduplicated ordinary issue for later normal selection, not direct repair of the
+published MR. A human-blocked condition becomes `blocked`; after the
 recorded action is complete, an operator explicitly retries that IID. Human
 merge or closure ends an awaiting-human record.
 
@@ -190,11 +193,11 @@ diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
 draft with the final interface, fans out applicable read-only judges, and
 returns consolidated feedback to Architect for the final decision.
 
-Pipeline rejection or an exact-MR conflict enters `repair` at `WORKFLOW` using
-the same durable worktree. Green performs any safe repair inside its workflow
-session, consolidates the follow-up reviews, and returns the result to the
-Architect. Immediately after post-publication observation, the runner
-revalidates exact MR evidence again before it records `awaiting-human`.
+Post-publication pipeline assessment is a fresh context after terminal
+exact-SHA evidence. It does not edit the published MR or directly enter a
+repair session. A concrete repository-actionable finding creates or reuses a
+deduplicated issue, which later normal reconciliation may select for a new
+applicable workflow; unverified evidence produces no repository work.
 
 Each timer activation acquires the single-project lock and reconciles intent
 and observed evidence. It then advances only the selected or resumed issue.

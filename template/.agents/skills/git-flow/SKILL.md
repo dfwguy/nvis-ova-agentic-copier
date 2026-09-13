@@ -105,7 +105,7 @@ Derive the task's kebab-case slug (≤40 characters) and intended branch before
 checking the current checkout:
 
 ```bash
-intended_branch="claude/<slug>"
+intended_branch="clanker/<slug>"
 ```
 
 The `agent/issue-<iid>` form is reserved for the serial `work-item-runner` in
@@ -149,7 +149,7 @@ git rev-parse --abbrev-ref HEAD
   workflow phase on this branch. `agent-work loop run --apply` is the parent
   invocation that selected it; never invoke `agent-work` recursively.
 
-- **Already on a `claude/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
+- **Already on a `clanker/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
    ```bash
    git fetch origin --prune
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=$(git rev-parse --abbrev-ref HEAD)"
@@ -161,7 +161,11 @@ git rev-parse --abbrev-ref HEAD
 
 - **On `main` / `master`** → this is the expected starting point. Run the pre-flight checks below first; only create the feature branch once all are clean.
 
-- **On any other branch** (detached `HEAD`, or a non-`claude/` branch) → stop and surface it. You are not at a known-good starting point; let the user say whether to switch to `main` first rather than guessing.
+- **On any other branch** (detached `HEAD`, or a branch outside the ordinary
+  `clanker/` convention) → stop and surface it. The sole exception is the
+  mechanically verified reserved `agent/issue-<iid>` runner branch above; do
+  not widen ordinary branch authority. You are not at a known-good starting
+  point; let the user say whether to switch to `main` first rather than guessing.
 
 ### Pre-flight checks (only when starting from `main`)
 
@@ -298,7 +302,9 @@ edits or a local commit complete.
 
 ## Step 4: Hand off without waiting for merge
 
-After publication, report the result as `awaiting_human` and end the active run.
+After publication, ordinary interactive work delegates and completes the
+Fast `$pipeline-performance-judge` before reporting `awaiting_human`; serial
+work invokes that judge in a fresh context after its cheap exact-SHA gate.
 AI must never approve or merge the MR itself, so human review and merge
 determine whether the change lands. They do not prevent unrelated work.
 
@@ -336,7 +342,7 @@ determine whether the change lands. They do not prevent unrelated work.
    ```bash
    git checkout main
    git pull --ff-only
-   git branch -D claude/<slug>
+   git branch -D clanker/<slug>
    git fetch --prune
    ```
    Use `-D`, not `-d`, because squash merge creates a different commit on

@@ -82,7 +82,8 @@ Before taking repository action:
    and every applicable child in the widest same-number phase. Count a
    conditional role as N/A only when demonstrably false; uncertainty is
    applicable. Coding requires at most 13 live slots: main, Architect, Green,
-   and ten Phase-4 reviewers. Documentation/policy requires at most 3: main,
+   and ten concurrent pre-license Phase-4 reviewers; License and post-publication
+   work are sequential. Documentation/policy requires at most 3: main,
    Architect, and the current writer or finalizer child. If capacity is unknown
    or insufficient, stop before delegation and return `needs_human`. Report
    the workflow lane, required total live slots, available total or `unknown`,
@@ -184,11 +185,12 @@ the content-only boundary.
 | 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
 | 4k `$license-checker` | Required; child of Green | Delegated; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and every Phase 4 review receipt | License-policy receipt → Green |
 | 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record including Phase-2 writer evidence and Phase-4 comparison verdict, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
-| 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
+| 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip |
+| 7 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Judge receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
 
 Green waits for every initially applicable Phase 4 reviewer, consolidates the
-complete finding set, and makes one repair pass for all findings it can resolve
-per invocation. A finding is concrete and resolvable only when it names an
+complete finding set, and makes a consolidated correction for all findings it can resolve.
+A finding is concrete and resolvable only when it names an
 owner or domain, path or scope, evidence, requested outcome, and a correction
 within the approved design and authority. A policy or authority ambiguity,
 conflicting valid requirements or reviewers, acceptance controversy,
@@ -223,7 +225,7 @@ approves merge. Unsafe or unvalidated diffs, or ambiguous publication authority,
 return `needs_human` without publication. Normal clean approval is unchanged.
 
 The read-only license-checker runs after the other Phase 4 reviews and before
-finalization; a violation returns to Green for its single consolidated repair.
+finalization; a violation returns to Green for a consolidated correction.
 
 ## Documentation and agent-policy workflow manifest
 
@@ -237,11 +239,13 @@ because they control how future changes are performed.
 | 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Content and mirror boundaries plus final decision |
 | 2 `$documentation-writer` | Required; child of Architect and sole mutator | Delegated | Balanced / `gpt-5.6-terra` `medium` | Approved content design and shared worktree | Documentation report and edits; scope expansion → coding workflow |
 | 3 `$documentation-finalizer` | Required; child of Architect | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, content report, and applicable Diátaxis/policy context | Consolidated content, policy, mirror, and source-of-truth verdict → Architect |
-| 4 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
+| 4 `$git-flow` | Required after Architect accepts finalizer approval | Main; never delegate | Current enabled | Architect's final receipt | Commit, push, and verified MR URL plus branch tip |
+| 5 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Judge receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
 
-The writer receives one consolidated finalizer result and may repair it once.
-Another rejection or scope expansion stops for human direction. Do not add
-code judges, post-publication analysis, or automated findings triage to a
+The writer receives the consolidated finalizer result, corrects it while material
+progress exists, and stops for repeated findings, unchanged evidence, scope expansion,
+or human direction. Do not add
+code judges or automated findings triage to a
 strictly content-only workflow.
 
 ## GitLab publication

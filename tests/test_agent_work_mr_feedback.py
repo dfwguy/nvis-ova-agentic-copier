@@ -1009,6 +1009,7 @@ def test_noop_feedback_posts_once_advances_cursor_and_never_publishes(
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
+    assert woken is not None and woken.pending_feedback is not None
     final = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -1017,8 +1018,6 @@ def test_noop_feedback_posts_once_advances_cursor_and_never_publishes(
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
-
-    assert woken is not None and woken.pending_feedback is not None
     assert final is not None and final.state is RunnerState.AWAITING_HUMAN
     assert final.feedback_cursor is not None
     assert final.feedback_cursor.last_processed_general_note_id == 31
@@ -1301,11 +1300,21 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         sha=published.source_sha,
         web_url="https://gitlab.example/pipelines/1",
     )
-    final = run_segment(
+    assessed = run_segment(
         ledger=ledger,
         gitlab=gitlab,
         repository=repository,
         invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert assessed is not None and assessed.state is RunnerState.EXECUTING
+    assert assessed.phase is WorkflowPhase.POST_PUBLICATION
+    final = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=SingleSessionInvoker(),
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]

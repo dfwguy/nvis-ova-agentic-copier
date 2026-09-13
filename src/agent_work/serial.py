@@ -259,7 +259,11 @@ def _due(record: LedgerRecord, now: datetime) -> bool:
 
 def _can_reconcile_published_ordinary_work(record: LedgerRecord) -> bool:
     """Return whether a stale ordinary record may already have an opened MR."""
-    if record.work_kind is not WorkKind.ORDINARY or record.revision == 0:
+    if (
+        record.work_kind is not WorkKind.ORDINARY
+        or record.revision == 0
+        or record.phase is WorkflowPhase.POST_PUBLICATION
+    ):
         return False
     if record.state in {
         RunnerState.PREPARING,
@@ -1316,11 +1320,28 @@ def _execute(
             return _acknowledge_feedback(
                 decided, ledger=ledger, gitlab=gitlab, repository=repository, now=now
             )
-    if record.pending_feedback is not None and result.result_kind == "ready_to_publish":
+    if (
+        record.pending_feedback is not None
+        and record.pending_feedback.outcome is None
+        and result.result_kind == "ready_to_publish"
+    ):
         outcome = outcome.model_copy(
             update={
                 "pending_feedback": record.pending_feedback.model_copy(
                     update={"outcome": result.change_summary}
+                )
+            }
+        )
+    if (
+        record.phase is WorkflowPhase.POST_PUBLICATION
+        and outcome.state is RunnerState.AWAITING_HUMAN
+        and outcome.pending_feedback is not None
+        and outcome.pending_feedback.outcome is not None
+    ):
+        outcome = outcome.model_copy(
+            update={
+                "pending_feedback": outcome.pending_feedback.model_copy(
+                    update={"acknowledgement_ready": True}
                 )
             }
         )
@@ -1377,6 +1398,15 @@ def _execute(
                 summary="Post-publication merge request evidence is not exact.",
             )
     outcome = ledger.persist(outcome)
+    if (
+        record.phase is WorkflowPhase.POST_PUBLICATION
+        and outcome.state is RunnerState.AWAITING_HUMAN
+        and outcome.pending_feedback is not None
+        and outcome.pending_feedback.acknowledgement_ready
+    ):
+        return _acknowledge_feedback(
+            outcome, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+        )
     if outcome.state is RunnerState.DECOMPOSING:
         return _decompose(
             outcome, ledger=ledger, gitlab=gitlab, now=now, close_parent=False
@@ -1742,11 +1772,6 @@ def _observe(
     repository: RepositoryPort,
     now: datetime,
 ) -> LedgerRecord:
-    repair_phase = (
-        WorkflowPhase.WORKFLOW
-        if _has_workflow_receipt(record)
-        else WorkflowPhase.CODING_GREEN
-    )
     if record.merge_request_iid is None or record.source_sha is None:
         raise SegmentError("observation record lacks merge request evidence")
     try:
@@ -1760,6 +1785,11 @@ def _observe(
             source_sha=record.source_sha,
         )
         if exact and mr.has_conflicts:
+            repair_phase = (
+                WorkflowPhase.WORKFLOW
+                if _has_workflow_receipt(record)
+                else WorkflowPhase.CODING_GREEN
+            )
             return ledger.persist(
                 transition_record(
                     record,
@@ -1768,7 +1798,7 @@ def _observe(
                     work_kind=WorkKind.MERGE_CONFLICT_REPAIR,
                     error_code=ErrorCode.MERGE_CONFLICT,
                     summary="The exact merge request has conflicts.",
-                    next_action="Run one bounded merge-conflict repair segment.",
+                    next_action="Run the bounded merge-conflict repair segment.",
                 )
             )
         pipeline = gitlab.latest_pipeline_for_sha(
@@ -1802,54 +1832,14 @@ def _observe(
         "running",
     }:
         return record
-    if pipeline.status not in {"success", "skipped", "manual"}:
-        return ledger.persist(
-            transition_record(
-                record,
-                RunnerState.REPAIR,
-                phase=repair_phase,
-                error_code=ErrorCode.PIPELINE_REJECTED,
-                summary="The exact source-SHA pipeline needs repair.",
-                next_action="Run one bounded post-publication repair segment.",
-            )
-        )
-    if (
-        record.pending_feedback is not None
-        and record.pending_feedback.outcome is not None
-    ):
-        return _acknowledge_feedback(
-            record.model_copy(
-                update={
-                    "pending_feedback": record.pending_feedback.model_copy(
-                        update={"acknowledgement_ready": True}
-                    )
-                }
-            ),
-            ledger=ledger,
-            gitlab=gitlab,
-            repository=repository,
-            now=now,
-        )
-    workflow_complete = _has_workflow_receipt(record)
     return ledger.persist(
         transition_record(
             record,
-            (
-                RunnerState.AWAITING_HUMAN
-                if workflow_complete
-                else RunnerState.EXECUTING
-            ),
-            phase=(
-                WorkflowPhase.PIPELINE_WAIT
-                if workflow_complete
-                else WorkflowPhase.POST_PUBLICATION
-            ),
-            summary="The exact source-SHA pipeline completed.",
-            next_action=(
-                "Review and merge the verified merge request."
-                if workflow_complete
-                else "Run post-publication review and triage."
-            ),
+            RunnerState.EXECUTING,
+            phase=WorkflowPhase.POST_PUBLICATION,
+            error_code=None,
+            summary="The exact source-SHA pipeline reached a terminal state.",
+            next_action="Run the fresh post-publication pipeline assessment.",
         )
     )
 
@@ -1909,7 +1899,6 @@ def run_segment(
     if (
         record.pending_feedback is not None
         and record.pending_feedback.acknowledgement_ready
-        and record.state is RunnerState.REPAIR
     ):
         return _acknowledge_feedback(
             record, ledger=ledger, gitlab=gitlab, repository=repository, now=now

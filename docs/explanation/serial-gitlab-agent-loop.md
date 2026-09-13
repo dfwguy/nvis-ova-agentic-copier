@@ -73,7 +73,7 @@ worktree mutation.
 | Lane | What runs, and when |
 | --- | --- |
 | Coding | The Architect delegates Red behavior tests and the Diátaxis Writer in parallel. After their receipts, Green is the sole mutator: it implements and reconciles documentation, then coordinates review and repair before returning final validation to the Architect. |
-| Documentation and agent policy | The Architect delegates the Documentation Writer as the sole mutator, then the Documentation Finalizer. The writer may make one consolidated repair pass. |
+| Documentation and agent policy | The Architect delegates the Documentation Writer as the sole mutator, then the Documentation Finalizer. Evidence-based repair/finalization cycles continue only while material progress exists; no arbitrary repair count applies. |
 
 Architecture, behavior tests, implementation, documentation, every applicable
 review role, license review, and final validation therefore stay nested in the
@@ -106,6 +106,22 @@ not restore individual agents, their prompts, chain-of-thought, mailboxes, or
 unbounded internal output. An oversized issue is instead handed back as a
 structured split plan; the trusted controller creates any child issues only
 after validating that plan.
+
+## Publication separates observation from repair
+
+After controller publication creates or updates an MR, the controller cheaply
+waits only for the exact source-SHA pipeline to reach a terminal state. It then
+starts a fresh Pipeline Performance Judge context. That Fast/low role evaluates
+the live evidence without changing code, the MR, jobs, approvals, or merge.
+Healthy evidence has no external side effect. Concrete, repository-actionable
+evidence creates or reuses one deduplicated GitLab problem issue; incomplete or
+unverified evidence does not manufacture work.
+
+The controller selects that problem issue only in a later ordinary
+reconciliation. Its retained or newly prepared worktree begins a fresh complete
+workflow session, rather than a direct continuation of pipeline observation.
+This preserves an auditable recovery boundary and does not promise same-session
+repair.
 
 ## Credentials, audit, and human handoff
 

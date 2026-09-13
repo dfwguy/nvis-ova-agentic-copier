@@ -40,5 +40,6 @@ Do not edit, stage, commit, push, call remote APIs, or delegate more judges.
 
 Approve only when classification, mirrors, documentation structure, policy,
 and source-of-truth synchronization all pass. Return every blocking finding in
-one receipt. The writer may repair the complete set once; a second rejection
-returns to Architect for human direction or coding-lane reclassification.
+one receipt. The writer corrects the complete set while material progress is
+recorded; repeated findings, unchanged evidence, scope expansion, or authority
+ambiguity return to Architect for human direction or coding-lane reclassification.

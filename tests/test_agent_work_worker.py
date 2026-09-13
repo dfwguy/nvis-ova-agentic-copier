@@ -150,6 +150,62 @@ def test_worker_prompt_requires_draft_policy_handoff_metadata() -> None:
     assert "unchanged project-owned values" in prompt
 
 
+def test_post_publication_prompt_exclusively_routes_pipeline_performance_judge() -> (
+    None
+):
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "post-publication",
+            "workflow_lane": "coding",
+            "source_branch": "agent/issue-12",
+            "source_sha": "a" * 40,
+            "merge_request_iid": 88,
+            "merge_request_url": "https://gitlab.example.com/mr/88",
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    )
+
+    assert "$pipeline-performance-judge" in prompt
+    assert "$findings-triage" not in prompt
+    assert "310967" in prompt
+    assert "#88" in prompt
+    assert "agent/issue-12" in prompt
+    assert "a" * 40 in prompt
+    assert "coding" in prompt
+    assert "1800 seconds" in prompt
+    assert "create or reuse only a deduplicated GitLab issue" in prompt
+    assert "no MR/code/pipeline mutation/approval/merge" in prompt
+    assert "externally quiet on healthy evidence" in prompt
+
+
+def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "merge_request_draft": None,
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "red and diátaxis writer concurrently" in prompt
+    assert (
+        "reconciles documentation against final implemented code, configuration, and interfaces"
+        in prompt
+    )
+    assert "evidence-based correction cycles while material progress exists" in prompt
+    assert "repeated or reopened fingerprint" in prompt
+    assert "unchanged relevant evidence" in prompt
+    assert "one consolidated repair" not in prompt
+    assert "revise its design once" not in prompt
+
+
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (
     None
 ):
@@ -203,7 +259,9 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     red = prompt.index("delegates Red")
     green = prompt.index("then delegates Green")
     fan_out = prompt.index("delegates every applicable independent judge concurrently")
-    repair = prompt.index("Green performs one consolidated repair")
+    repair = prompt.index(
+        "evidence-based correction cycles while material progress exists"
+    )
     feedback = prompt.index("returns all receipts and unresolved findings")
     assert architect < red < green < fan_out < repair < feedback
     assert "Green is the sole mutable owner" in prompt
