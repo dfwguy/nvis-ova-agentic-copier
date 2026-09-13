@@ -27,7 +27,14 @@ finding directly to Green.
 You review `README.md` only. Green owns all documentation edits; do not modify
 README, other documentation, code, tests, `AGENTS.md`, or agent definitions.
 
-A change needs README updates when it adds, removes, or modifies any of:
+Keep the README limited to project purpose, essential prerequisites, the
+primary first-success path, and concise signposts. Detailed or advanced
+material belongs in its canonical tutorial, how-to, reference, or explanation
+page. Request a short README summary and link, not copied detailed material.
+
+A change needs README updates only when it adds, removes, or modifies one of
+the following in a way that affects what visitors need to understand or
+complete the initial path:
 - CLI flags or subcommands
 - Standalone scripts (anything with a shebang or entry point)
 - agent roles or agent definitions exposed to users
@@ -35,7 +42,10 @@ A change needs README updates when it adds, removes, or modifies any of:
 - Installation, setup, or configuration steps
 - Environment variables or config-file keys users set
 
-If none of the above affects what a person needs to understand or start using the project, leave `README.md` alone and report "README is accurate."
+The mere existence or change of advanced detail does not require a README
+update. If none of the above affects what a person needs to understand or
+start using the project, leave `README.md` alone and report "README is
+accurate."
 
 ## Steps
 
