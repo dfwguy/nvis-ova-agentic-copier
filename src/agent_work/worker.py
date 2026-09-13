@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .domain import AGENT_OUTCOME_NOTE_MARKER
-from .models import GitLabIssueNote, WorkerResultEnvelope
+from .models import GitLabIssueNote, WorkerExitEvidence, WorkerResultEnvelope
 from .ports import CommandRunner
 
 
@@ -34,6 +35,13 @@ _TITLE_MAX_BYTES = 4 * 1024
 _DESCRIPTION_MAX_BYTES = 12 * 1024
 _NOTE_MAX_BYTES = 4 * 1024
 _NOTE_MAX_COUNT = 50
+_WORKER_DIAGNOSTIC_MAX_BYTES = 2048
+_WORKER_DIAGNOSTIC_FALLBACK = "worker exited without diagnostic output"
+_ANSI_SEQUENCE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+    r"|\x1b[PX^_][^\x1b\x9c]*(?:\x1b\\|\x9c))"
+)
 
 
 @dataclass(frozen=True)
@@ -328,7 +336,8 @@ def _redact(output: str, environment: Mapping[str, str]) -> str:
         (
             value
             for name, value in environment.items()
-            if value and re.search(r"token|secret|password|key", name, re.IGNORECASE)
+            if value
+            and re.search(r"token|secret|password|key|credential", name, re.IGNORECASE)
         ),
         key=len,
         reverse=True,
@@ -337,6 +346,44 @@ def _redact(output: str, environment: Mapping[str, str]) -> str:
     for secret in secrets:
         redacted = redacted.replace(str(secret), "[REDACTED]")
     return redacted
+
+
+def _truncate_utf8(value: str, limit: int) -> str:
+    """Bound text by encoded size without splitting a Unicode character."""
+    if len(value.encode("utf-8")) <= limit:
+        return value
+    low = 0
+    high = len(value)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(value[:midpoint].encode("utf-8")) <= limit:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return value[:low]
+
+
+def worker_exit_evidence(
+    returncode: int,
+    diagnostic: str,
+    *,
+    prompt: str,
+    environment: Mapping[str, str] | None = None,
+) -> WorkerExitEvidence:
+    """Build safe, deterministic durable evidence for a nonzero worker exit."""
+    suppressed = diagnostic.replace(prompt, "") if prompt else diagnostic
+    redacted = _redact(suppressed, environment or {})
+    without_ansi = _ANSI_SEQUENCE.sub("", redacted)
+    safe = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in without_ansi
+    )
+    normalized = " ".join(safe.split())
+    bounded = _truncate_utf8(normalized, _WORKER_DIAGNOSTIC_MAX_BYTES)
+    return WorkerExitEvidence(
+        returncode=returncode,
+        diagnostic=" ".join(bounded.split()) or _WORKER_DIAGNOSTIC_FALLBACK,
+    )
 
 
 def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -390,8 +437,16 @@ class AgentInvoker:
             )
         except RuntimeError as error:
             return WorkerInvocation(None, stderr=str(error))
+        diagnostic = (
+            worker_exit_evidence(
+                result.returncode,
+                result.stderr,
+                prompt=prompt,
+                environment=self._environment,
+            ).diagnostic
+            if result.returncode not in {None, 0}
+            else _redact(result.stderr, self._environment)
+        )
         return WorkerInvocation(
-            result.returncode,
-            _redact(result.stdout, self._environment),
-            _redact(result.stderr, self._environment),
+            result.returncode, _redact(result.stdout, self._environment), diagnostic
         )

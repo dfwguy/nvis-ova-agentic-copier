@@ -72,6 +72,7 @@ def _item(record: LedgerRecord) -> CommandItemReport:
         merge_request_iid=record.merge_request_iid,
         merge_request_url=record.merge_request_url,
         error_code=record.error_code,
+        worker_exit=record.worker_exit,
         summary=record.summary,
         next_action=record.next_action,
     )

@@ -146,6 +146,13 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
         )
         if item.next_action:
             details.append(f"next_action={item.next_action}")
+        if item.worker_exit:
+            details.extend(
+                (
+                    f"returncode={item.worker_exit.returncode}",
+                    f"worker_diagnostic={item.worker_exit.diagnostic}",
+                )
+            )
     return " ".join(details)
 
 

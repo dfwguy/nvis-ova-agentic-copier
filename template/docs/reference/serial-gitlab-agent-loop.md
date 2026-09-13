@@ -388,6 +388,16 @@ Worker exits, timeouts, malformed worker protocol, invalid receipts, and explici
 `retryable` worker results are immediately due and continue in the same
 activation; transient GitLab or transport failures retain retry timing. The XDG `agent-work.log` records redacted
 outcomes; `--debug` adds local diagnostics without credentials or transcripts.
+For a nonzero worker exit, the optional `items[].worker_exit` object preserves
+the exact signed `returncode` and a `diagnostic` derived only from stderr. A
+negative return code denotes POSIX signal termination; positive values are not
+otherwise classified. The diagnostic is one safe line of at most 2048 UTF-8
+bytes: it excludes the worker prompt, issue content, stdout, credentials, raw
+terminal controls, and unbounded output. Legacy schema-v1 records omit the
+field. A fourth failed exit retains this evidence when retry exhaustion changes
+the error code to `retry_exhausted`; a validated successful worker result clears
+stale exit evidence. The systemd wrapper writes the same validated JSON report
+to stdout, making this bounded evidence visible in its journal.
 Migration preview follows every page of lifecycle projections. Apply preflights
 all actions against unchanged evidence, project identity, and absent ledger
 records before any mutation, and refuses the complete plan on mismatch.
@@ -424,7 +434,10 @@ The common top-level fields are `schema_version`, `command`, `applied`,
 which identifies why the activation yielded; its `items[]` lists workflow
 results in chronological order. Per-issue values—including `issue_iid`, state,
 coarse workflow phase, attempt, retry timing, source branch, durable worktree, MR reference,
-error code, summary, and next action—are objects in `items[]`. Migration
+error code, optional `worker_exit`, summary, and next action—are objects in
+`items[]`. When present, human output names its fields as `returncode=<signed
+integer>` and `worker_diagnostic=<safe diagnostic>`; JSON uses
+`{"returncode": <signed integer>, "diagnostic": <safe string>}`. Migration
 preview and apply return their proposed or applied migration actions in
 `actions[]`. Consumers must tolerate additional fields and never treat a
 diagnostic as authority or input.

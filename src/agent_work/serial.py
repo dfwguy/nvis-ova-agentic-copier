@@ -46,7 +46,7 @@ from .state_machine import (
     plan_retry,
     transition_record,
 )
-from .worker import build_worker_prompt, parse_worker_result
+from .worker import build_worker_prompt, parse_worker_result, worker_exit_evidence
 
 
 class SegmentError(RuntimeError):
@@ -818,8 +818,15 @@ def _execute(
     )
     invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
     if invocation.returncode != 0:
+        worker_exit = (
+            worker_exit_evidence(
+                invocation.returncode, invocation.stderr, prompt=prompt
+            )
+            if invocation.returncode is not None
+            else None
+        )
         return _record_retry(
-            record,
+            record.model_copy(update={"worker_exit": worker_exit}),
             ledger=ledger,
             gitlab=gitlab,
             now=now,
@@ -870,6 +877,8 @@ def _execute(
                     error_code=ErrorCode.WORKER_RECEIPT_INVALID,
                     retry_delay=timedelta(),
                 )
+            else:
+                outcome = outcome.model_copy(update={"worker_exit": None})
     if outcome.state is RunnerState.AWAITING_HUMAN:
         if record.merge_request_iid is None or record.source_sha is None:
             return _block_publication_identity(

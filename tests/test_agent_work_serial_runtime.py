@@ -20,9 +20,10 @@ from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
 import pytest
+from pydantic import ValidationError
 
 from agent_work.domain import (
     LIFECYCLE_LABELS,
@@ -49,8 +50,10 @@ from agent_work.models import (
     PipelineEvidence,
     SplitChildEvidence,
     TransitionIntentRecord,
+    WorkerExitEvidence,
     WorkflowReceiptRecord,
 )
+from agent_work.ports import CommandResult
 from agent_work.repository import (
     PublicationError,
     RepositoryError,
@@ -60,7 +63,7 @@ from agent_work.repository import (
 from agent_work.runtime import RuntimeDependencies, dispatch
 from agent_work.serial import SegmentError, run_segment, select_record
 from agent_work.state_machine import WORKFLOW_RECEIPTS
-from agent_work.worker import WorkerInvocation, WorkerProtocolError
+from agent_work.worker import AgentInvoker, WorkerInvocation, WorkerProtocolError
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
@@ -466,9 +469,15 @@ def _dependencies(
 
 
 class FakeInvoker:
-    def __init__(self, output: str = "", returncode: int | None = 0) -> None:
+    def __init__(
+        self,
+        output: str = "",
+        returncode: int | None = 0,
+        stderr: str = "safe diagnostic",
+    ) -> None:
         self.output = output
         self.returncode = returncode
+        self.stderr = stderr
         self.prompts: list[str] = []
 
     def preflight(self) -> None:
@@ -477,7 +486,7 @@ class FakeInvoker:
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
-        return WorkerInvocation(self.returncode, self.output, "safe diagnostic")
+        return WorkerInvocation(self.returncode, self.output, self.stderr)
 
 
 class BatchingInvoker:
@@ -1197,13 +1206,187 @@ def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None
         ledger=ledger,
         gitlab=FakeGitLab(),  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(returncode=1),  # type: ignore[arg-type]
+        invoke=FakeInvoker(returncode=-9, stderr="connection refused"),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.retry_at == NOW
     assert outcome.error_code is ErrorCode.WORKER_EXIT
+    assert outcome.worker_exit is not None
+    assert outcome.worker_exit.returncode == -9
+    assert outcome.worker_exit.diagnostic == "connection refused"
+    legacy_payload = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+    ).model_dump()
+    legacy_payload.pop("worker_exit", None)
+    legacy = LedgerRecord.model_validate(legacy_payload)
+    assert legacy.worker_exit is None
+
+
+def test_worker_exit_evidence_is_safe_bounded_and_does_not_persist_echoed_prompt(
+    tmp_path: Path,
+) -> None:
+    """A failed worker stores only safe stderr-derived diagnostic evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    secret = "credential-value-that-must-not-persist"
+    cutoff_credential = "cutoff-credential-value-that-must-not-persist"
+    issue_description = "untrusted issue description that must not persist"
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command
+        prompt = kwargs["stdin"]
+        assert isinstance(prompt, str)
+        return cast(
+            CommandResult,
+            type(
+                "Result",
+                (),
+                {
+                    "returncode": 23,
+                    "stdout": "stdout must never be used",
+                    "stderr": (
+                        f"{prompt}\r\n\x1b[31mtransport failed "
+                        + "x" * 2020
+                        + cutoff_credential
+                        + f"\n{secret}\x9b0m"
+                    ),
+                },
+            )(),
+        )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(_issue(description=issue_description)),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=AgentInvoker(
+            run_command,
+            environment={
+                "AGENT_WORK_AGENT": "codex",
+                "AGENT_WORK_AGENT_PATH": "/codex",
+                "SECRET_TOKEN": secret,
+                "SERVICE_CREDENTIAL": cutoff_credential,
+            },
+        ),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.worker_exit is not None
+    assert outcome.worker_exit.returncode == 23
+    diagnostic = outcome.worker_exit.diagnostic
+    assert secret not in diagnostic
+    assert cutoff_credential not in diagnostic
+    assert "cutoff" not in diagnostic
+    assert "Continue one bounded agent-work segment" not in diagnostic
+    assert issue_description not in diagnostic
+    assert "stdout must never be used" not in diagnostic
+    assert (
+        "\n" not in diagnostic and "\r" not in diagnostic and "\x1b" not in diagnostic
+    )
+    assert len(diagnostic.encode("utf-8")) <= 2048
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"returncode": 0, "diagnostic": "apparently successful"},
+        {"returncode": 1, "diagnostic": "first\u2028second"},
+        {"returncode": -9, "diagnostic": "first\u2029second"},
+    ),
+)
+def test_worker_exit_evidence_rejects_success_and_noncanonical_lines(
+    payload: dict[str, int | str],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkerExitEvidence.model_validate(payload)
+
+
+def test_agent_invoker_accepts_a_successful_worker_result(tmp_path: Path) -> None:
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command, kwargs
+        return cast(
+            CommandResult,
+            type("Result", (), {"returncode": 0, "stdout": "result", "stderr": ""})(),
+        )
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    ).invoke(tmp_path, "safe prompt", 10)
+
+    assert invocation.returncode == 0
+    assert invocation.stdout == "result"
+
+
+def test_worker_exit_evidence_uses_a_deterministic_fallback_for_blank_stderr(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(returncode=1, stderr="\x1b[2J\r\n"),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    assert outcome.worker_exit is not None
+    assert outcome.worker_exit.diagnostic == "worker exited without diagnostic output"
+
+
+def test_successful_worker_progress_clears_prior_worker_exit_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    prior_payload = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+    ).model_dump(mode="json") | {
+        "worker_exit": {"returncode": -9, "diagnostic": "previous signal exit"}
+    }
+    record = ledger.persist(LedgerRecord.model_validate(prior_payload))
+    result_payload = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "coding-green",
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "phase_status": "complete",
+        "completed_phase": "coding-green",
+        "receipts": ["$tdd-green: green"],
+        "change_summary": "Green complete.",
+        "next_action": "Review timing.",
+    }
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(result_payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    persisted = ledger.load(12)
+    assert outcome is not None and outcome.worker_exit is None
+    assert persisted is not None and persisted.worker_exit is None
 
 
 def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -> None:
@@ -1239,6 +1422,7 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         )
         assert outcome is not None and outcome.error_code is expected
         assert outcome.retry_at == NOW
+        assert outcome.worker_exit is None
 
 
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
@@ -4227,7 +4411,7 @@ def test_apply_relaunches_immediately_due_worker_exits_until_retry_exhaustion(
         )
     )
     repository = FakeRepository(config)
-    invoker = FakeInvoker(returncode=1)
+    invoker = FakeInvoker(returncode=127, stderr="agent executable unavailable")
     clock_reads = 0
 
     def clock() -> datetime:
@@ -4252,6 +4436,9 @@ def test_apply_relaunches_immediately_due_worker_exits_until_retry_exhaustion(
     assert report.items[0].retry_at == NOW
     assert all(item.issue_iid == 12 for item in report.items)
     assert persisted is not None and persisted.error_code is ErrorCode.RETRY_EXHAUSTED
+    assert persisted.worker_exit is not None
+    assert persisted.worker_exit.returncode == 127
+    assert persisted.worker_exit.diagnostic == "agent executable unavailable"
     assert repository.prepared is False
     assert repository.verified_heads == ["a" * 40] * 4
 
