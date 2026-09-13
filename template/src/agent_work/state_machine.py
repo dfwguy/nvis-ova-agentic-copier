@@ -105,7 +105,12 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
             }
         ),
         RunnerState.BLOCKED: frozenset(
-            {RunnerState.PREPARING, RunnerState.OBSERVING, RunnerState.COMPLETE}
+            {
+                RunnerState.PREPARING,
+                RunnerState.PUBLISHING,
+                RunnerState.OBSERVING,
+                RunnerState.COMPLETE,
+            }
         ),
         RunnerState.AWAITING_HUMAN: frozenset(
             {RunnerState.REPAIR, RunnerState.COMPLETE, RunnerState.BLOCKED}
@@ -398,6 +403,11 @@ def apply_worker_result(
             workflow_lane=result.workflow_lane,
             receipts=(*record.receipts, receipt),
             merge_request_draft=merge_request_draft,
+            publication_sha=(
+                None
+                if next_phase is WorkflowPhase.READY_TO_PUBLISH
+                else record.publication_sha
+            ),
             summary=result.change_summary,
             next_action=result.next_action,
             error_code=None,

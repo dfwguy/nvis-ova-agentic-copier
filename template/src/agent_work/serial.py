@@ -39,7 +39,7 @@ from .models import (
     TransitionIntentRecord,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
-from .repository import RepositoryError, RepositoryTransientError
+from .repository import PublicationError, RepositoryError, RepositoryTransientError
 from .state_machine import (
     apply_worker_result,
     has_complete_workflow_receipt,
@@ -438,7 +438,15 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
         and revision_is_canonical
         and revision_is_older
         and intent.expected_evidence
-        == {"branch": record.source_branch, "baseline_sha": baseline_sha}
+        == (
+            {
+                "branch": record.source_branch,
+                "baseline_sha": baseline_sha,
+                "publication_sha": record.publication_sha,
+            }
+            if record.publication_sha is not None
+            else {"branch": record.source_branch, "baseline_sha": baseline_sha}
+        )
     )
 
 
@@ -569,6 +577,13 @@ def _reconcile_published_ordinary_work(
             summary="Opened merge request inventory for the recorded branch is ambiguous.",
         )
     mr = candidates[0]
+    if record.publication_sha is not None and record.publication_sha != mr.sha:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Discovered merge request SHA does not match durable publication evidence.",
+        )
     if (
         record.merge_request_iid is not None and record.merge_request_iid != mr.iid
     ) or (
@@ -997,12 +1012,40 @@ def _publish(
             )
         )
     try:
-        sha = repository.commit_and_push(
-            record.worktree,
-            record.source_branch,
-            record.issue_iid,
-            expected_head=baseline_sha,
-            allow_replay=replaying,
+        if record.publication_sha is None:
+            if replaying:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Retained publication commit was not durably bound.",
+                )
+            prepared_sha = repository.prepare_commit(
+                record.worktree,
+                record.source_branch,
+                record.issue_iid,
+                expected_head=baseline_sha,
+            )
+            if record.intent is None:
+                raise SegmentError("publication intent is missing")
+            record = ledger.persist(
+                record.model_copy(
+                    update={
+                        "publication_sha": prepared_sha,
+                        "intent": record.intent.model_copy(
+                            update={
+                                "expected_evidence": record.intent.expected_evidence
+                                | {"publication_sha": prepared_sha}
+                            }
+                        ),
+                    }
+                )
+            )
+        publication_sha = record.publication_sha
+        if publication_sha is None:
+            raise SegmentError("publication commit is not durably bound")
+        sha = repository.push_prepared(
+            record.worktree, record.source_branch, publication_sha
         )
         if remediation:
             if record.merge_request_iid is None:
@@ -1043,6 +1086,25 @@ def _publish(
         closes_issue = identity_exact and gitlab.mr_closes_issue(
             mr.iid, record.issue_iid
         )
+    except PublicationError as error:
+        blocked = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.BLOCKED,
+                error_code=error.code,
+                summary=f"{error.code}: {error.failure.summary}",
+                next_action=error.failure.next_action,
+                retry_at=None,
+            )
+        )
+        gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
+        gitlab.comment_outcome(
+            record.issue_iid,
+            error_code=str(blocked.error_code),
+            summary=blocked.summary,
+            next_action=blocked.next_action,
+        )
+        return blocked
     except (RepositoryTransientError, GitLabError) as error:
         return _record_retry(
             record,

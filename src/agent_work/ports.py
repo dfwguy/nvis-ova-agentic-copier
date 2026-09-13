@@ -157,14 +157,21 @@ class RepositoryPort(Protocol):
         self, worktree: Path, branch: str, expected_head: str
     ) -> None: ...
 
-    def commit_and_push(
+    def prepare_commit(
         self,
         worktree: Path,
         branch: str,
         issue_iid: int,
         *,
         expected_head: str,
-        allow_replay: bool = False,
+    ) -> str: ...
+
+    def push_prepared(
+        self, worktree: Path, branch: str, publication_sha: str
+    ) -> str: ...
+
+    def bind_retained_commit(
+        self, worktree: Path, branch: str, issue_iid: int, baseline_sha: str
     ) -> str: ...
 
     def inventory(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]: ...

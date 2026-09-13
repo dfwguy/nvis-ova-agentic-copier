@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-12
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -353,3 +353,8 @@ and versioned workflow sessions; idempotent publication and existing-MR
 remediation; post-publication observation and repair; then wrapper, timer,
 status, and operational-documentation updates. Each slice follows the full
 coding workflow.
+
+
+## Publication credential readiness and retained recovery
+
+Publication is deliberately split between a bounded readiness proof and durable replay. The wrapper replaces ambient credential-helper configuration with the absolute `glab` helper and disables prompts, so unattended Git cannot fall back to interactive or persisted helper state. Its dry-run push proves the write-auth path without remote mutation. Safe classification separates permanent authentication, authorization, policy, and configuration failures from known transient transport failures. A permanent failure retains the exact publication intent; explicit recovery re-enters publishing rather than replaying implementation, preventing duplicate commits and merge requests. The setup guide contains the operator procedure, and the reference defines the exact contract.

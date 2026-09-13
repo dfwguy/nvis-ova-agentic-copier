@@ -382,6 +382,27 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
     assert outcome.record.phase is WorkflowPhase.READY_TO_PUBLISH
 
 
+def test_ready_to_publish_clears_stale_publication_sha() -> None:
+    record = _record().model_copy(
+        update={
+            "phase": WorkflowPhase.CODING_FINALIZE,
+            "publication_sha": "a" * 40,
+        }
+    )
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": WorkflowPhase.CODING_FINALIZE,
+            "completed_phase": WorkflowPhase.CODING_FINALIZE,
+            "receipts": ("$tdd-finalizer: approved",),
+            "merge_request_draft": MergeRequestDraft(
+                title="Change", description="Details"
+            ),
+        }
+    )
+    outcome = apply_worker_result(record, result, now=NOW)
+    assert outcome.record.publication_sha is None
+
+
 @pytest.mark.parametrize(
     "receipts",
     [

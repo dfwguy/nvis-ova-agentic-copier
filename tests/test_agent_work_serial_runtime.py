@@ -15,6 +15,7 @@ import ast
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -50,7 +51,12 @@ from agent_work.models import (
     TransitionIntentRecord,
     WorkflowReceiptRecord,
 )
-from agent_work.repository import RepositoryError, RepositoryTransientError
+from agent_work.repository import (
+    PublicationError,
+    RepositoryError,
+    RepositoryTransientError,
+    classify_publication_failure,
+)
 from agent_work.runtime import RuntimeDependencies, dispatch
 from agent_work.serial import SegmentError, run_segment, select_record
 from agent_work.state_machine import WORKFLOW_RECEIPTS
@@ -65,6 +71,8 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         project_id=310967,
         checkout=tmp_path / "checkout",
         state_root=tmp_path / "state",
+        git_path=tmp_path / "bin" / "git",
+        glab_path=tmp_path / "bin" / "glab",
         base_branch="agent/work-base",
     )
 
@@ -348,6 +356,11 @@ class FakeRepository:
         self.worktree_present = True
         self.worktree_valid = True
         self.existing_worktree_error: RepositoryError | None = None
+        self.prepare_error: RepositoryError | None = None
+        self.push_error: RepositoryError | None = None
+        self.push_observer: Callable[[str], None] | None = None
+        self.binds = 0
+        self.bound_sha = "a" * 40
         self.verified_heads: list[str] = []
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
@@ -400,17 +413,33 @@ class FakeRepository:
         if not self.worktree_valid:
             raise RepositoryError("worktree branch or baseline changed")
 
-    def commit_and_push(
+    def prepare_commit(
         self,
         worktree: Path,
         branch: str,
         issue_iid: int,
         expected_head: str | None = None,
-        allow_replay: bool = False,
     ) -> str:
-        del worktree, branch, issue_iid, expected_head, allow_replay
-        self.pushes += 1
+        del worktree, branch, issue_iid, expected_head
+        if self.prepare_error is not None:
+            raise self.prepare_error
         return "a" * 40
+
+    def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
+        del worktree, branch
+        if self.push_error is not None:
+            raise self.push_error
+        if self.push_observer is not None:
+            self.push_observer(publication_sha)
+        self.pushes += 1
+        return publication_sha
+
+    def bind_retained_commit(
+        self, worktree: Path, branch: str, issue_iid: int, baseline_sha: str
+    ) -> str:
+        del worktree, branch, issue_iid, baseline_sha
+        self.binds += 1
+        return self.bound_sha
 
     def inventory(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         return self.inventory_result
@@ -688,6 +717,7 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
         "next_action": "Review timing.",
     }
     gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr().model_copy(update={"sha": "b" * 40})
 
     outcome = run_segment(
         ledger=ledger,
@@ -1849,6 +1879,7 @@ def test_recovery_blocks_when_existing_mr_cannot_be_bound_to_durable_work(
             phase=WorkflowPhase.READY_TO_PUBLISH,
         ).model_copy(
             update={
+                "publication_sha": "a" * 40,
                 "merge_request_draft": MergeRequestDraft(
                     title="Change", description="Details"
                 ),
@@ -1891,7 +1922,7 @@ def test_preintent_publication_without_draft_recovers_to_lane_finalizer(
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
-    original = ledger.persist(
+    ledger.persist(
         _record(
             tmp_path,
             state=RunnerState.PUBLISHING,
@@ -1918,10 +1949,51 @@ def test_preintent_publication_without_draft_recovers_to_lane_finalizer(
     assert recovered is not None
     assert recovered.state is RunnerState.EXECUTING
     assert recovered.phase is finalizer
-    assert recovered.source_sha == original.source_sha
-    assert recovered.receipts == original.receipts
+    assert recovered.intent is None
+    assert recovered.publication_sha is None
     assert repository.pushes == 0
-    assert gitlab.created_merge_requests == 0
+    assert not repository.prepared
+    assert not gitlab.created_merge_requests
+
+
+def test_recovery_blocks_mr_sha_mismatch_with_durable_publication_sha(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+        ).model_copy(
+            update={
+                "publication_sha": "b" * 40,
+                "receipts": _complete_workflow_receipts(),
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.open_branch_merge_requests = (_mr(sha="a" * 40),)
+    repository = FakeRepository(config)
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert (
+        outcome is not None
+        and outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    )
+    assert (
+        repository.pushes == 0
+        and gitlab.created_merge_requests == 0
+        and not gitlab.reconciled_drafts
+    )
 
 
 @pytest.mark.parametrize("durable_field", ["merge_request_iid", "merge_request_url"])
@@ -2212,9 +2284,10 @@ def test_publication_transport_failure_schedules_a_recoverable_retry(
             phase=WorkflowPhase.READY_TO_PUBLISH,
         ).model_copy(
             update={
+                "publication_sha": "a" * 40,
                 "merge_request_draft": MergeRequestDraft(
                     title="Change", description="Details"
-                )
+                ),
             }
         )
     )
@@ -2233,6 +2306,192 @@ def test_publication_transport_failure_schedules_a_recoverable_retry(
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.error_code is ErrorCode.GITLAB_RETRYABLE
     assert outcome.intent is not None
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        ErrorCode.GIT_AUTHENTICATION,
+        ErrorCode.GIT_AUTHORIZATION,
+        ErrorCode.GIT_POLICY,
+        ErrorCode.GIT_PUBLICATION_CONFIGURATION,
+    ),
+)
+def test_permanent_git_publication_failure_blocks_without_consuming_retry_budget(
+    tmp_path: Path, error_code: ErrorCode
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    initial = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "retry_count": 2,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+
+    failure = classify_publication_failure(
+        {
+            ErrorCode.GIT_AUTHENTICATION: "fatal: Authentication failed",
+            ErrorCode.GIT_AUTHORIZATION: "remote: You are not allowed to push",
+            ErrorCode.GIT_POLICY: "remote: pre-receive hook declined",
+            ErrorCode.GIT_PUBLICATION_CONFIGURATION: "fatal: unexpected failure",
+        }[error_code]
+    )
+    assert failure.code is error_code
+    repository.push_error = PublicationError(failure)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is error_code
+    assert outcome.retry_count == initial.retry_count
+    assert outcome.retry_at is None
+    assert outcome.intent is not None and outcome.intent.kind == "publish_merge_request"
+    assert gitlab.labels[-1] == "agent::blocked"
+    assert str(error_code) in gitlab.comments[-1]
+
+
+def test_fresh_publication_persists_sha_before_push(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                )
+            }
+        )
+    )
+    repository = FakeRepository(config)
+
+    def observe(sha: str) -> None:
+        record = ledger.load(12)
+        assert record is not None and record.publication_sha == sha
+        assert record.intent is not None
+        assert record.intent.expected_evidence["publication_sha"] == sha
+
+    repository.push_observer = observe
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+
+
+def test_replay_without_durable_publication_sha_blocks_without_git_mutation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:1",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                    },
+                ),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert (
+        outcome is not None
+        and outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    )
+    assert not repository.prepared and repository.pushes == 0
+
+
+def test_explicit_legacy_retry_binds_then_replays_exact_commit(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.READY_TO_PUBLISH
+        ).model_copy(
+            update={
+                "source_sha": "a" * 40,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:1",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                    },
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr().model_copy(update={"sha": "b" * 40})
+    repository = FakeRepository(config)
+    repository.bound_sha = "b" * 40
+    dispatch(
+        CommandRequest(command="loop.retry", issue_iid=12),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    bound = ledger.load(12)
+    assert bound is not None and bound.state is RunnerState.PUBLISHING
+    assert bound.publication_sha == "b" * 40 and repository.binds == 1
+    assert (
+        bound.intent is not None
+        and bound.intent.expected_evidence["publication_sha"] == "b" * 40
+    )
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert repository.pushes == 1 and not repository.prepared
+    assert gitlab.created_merge_requests == 0
 
 
 def test_publication_retry_exhaustion_projects_an_actionable_block(
@@ -2283,6 +2542,7 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
             phase=WorkflowPhase.READY_TO_PUBLISH,
         ).model_copy(
             update={
+                "publication_sha": "a" * 40,
                 "merge_request_draft": MergeRequestDraft(
                     title="Change", description="Details"
                 ),
@@ -2292,6 +2552,7 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
                     expected_evidence={
                         "branch": "agent/issue-12",
                         "baseline_sha": "a" * 40,
+                        "publication_sha": "a" * 40,
                     },
                 ),
             }
@@ -2359,6 +2620,7 @@ def test_replayed_publication_reconciles_the_recorded_mr_with_decision_review(
         ).model_copy(
             update={
                 "merge_request_iid": 88,
+                "publication_sha": "a" * 40,
                 "merge_request_draft": draft,
                 "intent": TransitionIntentRecord(
                     operation_id="12:publish:0",
@@ -2366,6 +2628,7 @@ def test_replayed_publication_reconciles_the_recorded_mr_with_decision_review(
                     expected_evidence={
                         "branch": "agent/issue-12",
                         "baseline_sha": "a" * 40,
+                        "publication_sha": "a" * 40,
                     },
                 ),
             }
@@ -4087,6 +4350,64 @@ def test_runtime_migration_preview_and_blocked_retry_are_explicit(
     assert retry_preview.outcome == "retry_preview"
     assert retried.items[0].state is RunnerState.PREPARING
     assert fake_gitlab.labels == ["agent::blocked", "agent::running"]
+
+
+def test_retry_replays_retained_publication_intent_without_restarting_workflow(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.BLOCKED,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.RETRY_EXHAUSTED,
+                "retry_count": 3,
+                "source_sha": "a" * 40,
+                "publication_sha": "a" * 40,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:1",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                        "publication_sha": "a" * 40,
+                    },
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+
+    replay = dispatch(
+        CommandRequest(command="loop.retry", issue_iid=12),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    resumed = replay.items[0]
+    assert replay.outcome == "retry_scheduled"
+    assert resumed.state is RunnerState.PUBLISHING
+    assert resumed.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert resumed.source_sha == retained.source_sha
+    assert resumed.source_branch == retained.source_branch
+    persisted = ledger.load(12)
+    assert persisted is not None
+    assert persisted.merge_request_draft == retained.merge_request_draft
+    assert (
+        persisted.intent is not None
+        and persisted.intent.kind == "publish_merge_request"
+    )
+    assert repository.prepared is False
+    assert repository.pushes == 0
+    assert gitlab.labels == ["agent::running"]
 
 
 @pytest.mark.parametrize("mutation", ["wrong-project", "tampered-action"])

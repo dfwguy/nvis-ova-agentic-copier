@@ -431,3 +431,8 @@ numeric project ID, and the ledger stores no token, agent credential,
 issue-body authority, issue-note context, or unredacted transcript. Protected
 agent-policy work is a human-directed lane. There is no automatic approval,
 merge, stash apply, or stash deletion.
+
+
+## Publication credential and retry contract
+
+Git uses only the configured absolute `glab` credential helper with prompts disabled. The wrapper verifies the credential-free HTTPS origin and performs a non-mutating `git push --dry-run` before worker invocation. Authentication, authorization, policy, and configuration categories block immediately; only known transport failures are retryable. A blocked record retaining an exact `publish_merge_request` intent transitions directly to `publishing` on explicit retry while retaining its branch, SHA, draft, and intent. See the setup guide for the recovery procedure.

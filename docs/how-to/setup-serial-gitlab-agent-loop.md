@@ -464,3 +464,10 @@ The timer must report `UnitFileState=disabled` and `ActiveState=inactive`
 before migration or a manual evidence review. If `journalctl --user` access is
 denied, ask the host administrator for the appropriate journal access; do not
 change journald storage settings or use another credential route.
+
+
+## Publication credential readiness and retained recovery
+
+The wrapper uses the configured absolute `glab` executable as Git's only credential helper in a noninteractive, scrubbed environment. Before either preview or apply invokes the worker, it verifies the configured credential-free HTTPS origin and runs a non-mutating `git push --dry-run` readiness check. Authentication, authorization, policy, and configuration failures block immediately with a safe error code; only known transport failures consume the bounded retry path. Local diagnostics never include command output, URLs with credentials, or tokens.
+
+For retained publication recovery, first inspect status, the source branch, local `HEAD`, recorded source SHA, and the exact pending publication intent. Run preview, then explicitly run `agent-work loop retry --issue-iid IID --apply`. A retained publish intent moves directly back to publishing: it keeps the same branch, SHA, draft evidence, and intent, and replays the clean committed head without a second commit or merge request. Do not copy credentials or command output into the ledger or issue.

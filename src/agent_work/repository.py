@@ -14,13 +14,15 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from .domain import ErrorCode
 from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandRunner
@@ -32,6 +34,140 @@ class RepositoryError(RuntimeError):
 
 class RepositoryTransientError(RepositoryError):
     """A Git transport operation may be retried safely."""
+
+
+class PublicationFailureCategory(str, Enum):
+    """Safe categories for failed Git publication."""
+
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    POLICY = "policy"
+    TRANSPORT = "transport"
+    CONFIGURATION = "configuration"
+
+
+@dataclass(frozen=True)
+class PublicationFailure:
+    """Safe immutable publication-failure record."""
+
+    category: PublicationFailureCategory
+    code: ErrorCode
+    retryable: bool
+    summary: str
+    next_action: str
+
+
+class PublicationError(RepositoryError):
+    """A permanent, safely classified Git publication failure."""
+
+    def __init__(self, failure: PublicationFailure) -> None:
+        self.failure = failure
+        self.code = failure.code
+        super().__init__(failure.summary)
+
+
+def classify_publication_failure(stderr: str) -> PublicationFailure:
+    """Classify push stderr without retaining or exposing its content."""
+    value = stderr.lower()
+    categories = (
+        (
+            PublicationFailureCategory.AUTHENTICATION,
+            ErrorCode.GIT_AUTHENTICATION,
+            (
+                "gpg_tty",
+                "could not read username",
+                "terminal prompts",
+                "authentication failed",
+                "credential helper",
+                "auth failed",
+            ),
+            "Git authentication failed.",
+            "Repair the configured Git credential helper, then retry explicitly.",
+        ),
+        (
+            PublicationFailureCategory.AUTHORIZATION,
+            ErrorCode.GIT_AUTHORIZATION,
+            ("not allowed to push", "forbidden", "permission denied"),
+            "Git authorization to publish was denied.",
+            "Request the required repository write authorization, then retry explicitly.",
+        ),
+        (
+            PublicationFailureCategory.POLICY,
+            ErrorCode.GIT_POLICY,
+            ("pre-receive", "protected branch", "remote rejected", "hook declined"),
+            "Git publication was rejected by repository policy.",
+            "Resolve the repository policy requirement, then retry explicitly.",
+        ),
+        (
+            PublicationFailureCategory.TRANSPORT,
+            ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            (
+                "timed out",
+                "timeout",
+                "connection reset",
+                "connection refused",
+                "could not resolve host",
+                "temporary failure in name resolution",
+                "remote end hung up",
+                "tls handshake timeout",
+                "http 500",
+                "http 502",
+                "http 503",
+                "http 504",
+                "requested url returned error: 500",
+                "requested url returned error: 502",
+                "requested url returned error: 503",
+                "requested url returned error: 504",
+            ),
+            "Git publication transport failed.",
+            "The runner will retry the transport failure within its bounded retry policy.",
+        ),
+    )
+    for category, code, patterns, summary, next_action in categories:
+        if any(pattern in value for pattern in patterns):
+            return PublicationFailure(
+                category,
+                code,
+                category is PublicationFailureCategory.TRANSPORT,
+                summary,
+                next_action,
+            )
+    return PublicationFailure(
+        PublicationFailureCategory.CONFIGURATION,
+        ErrorCode.GIT_PUBLICATION_CONFIGURATION,
+        False,
+        "Git publication configuration failed.",
+        "Verify the configured Git publication route, then retry explicitly.",
+    )
+
+
+def build_git_environment(
+    service_environment: Mapping[str, str], glab_path: Path
+) -> dict[str, str]:
+    """Build the noninteractive, glab-only credential environment for Git."""
+    environment = dict(service_environment)
+    environment.pop("GIT_CONFIG_PARAMETERS", None)
+    for key in tuple(environment):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            del environment[key]
+    environment["GIT_ASKPASS"] = "/bin/false"
+    environment["SSH_ASKPASS"] = "/bin/false"
+    environment.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "never",
+            "GIT_CONFIG_COUNT": "4",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": f"{glab_path} auth git-credential",
+            "GIT_CONFIG_KEY_2": "credential.useHttpPath",
+            "GIT_CONFIG_VALUE_2": "true",
+            "GIT_CONFIG_KEY_3": "core.askPass",
+            "GIT_CONFIG_VALUE_3": "/bin/false",
+        }
+    )
+    return environment
 
 
 @dataclass(frozen=True)
@@ -96,19 +232,32 @@ def discover_config(
     base_branch = environment.get("AGENT_WORK_BASE_BRANCH", "")
     if not base_branch:
         raise RepositoryError("AGENT_WORK_BASE_BRANCH is required")
+    git_path = Path(environment.get("AGENT_WORK_GIT", ""))
+    glab_path = Path(environment.get("AGENT_WORK_GLAB", ""))
+    if not git_path.is_absolute() or not glab_path.is_absolute():
+        raise RepositoryError(
+            "AGENT_WORK_GIT and AGENT_WORK_GLAB must be absolute executable paths"
+        )
     start = current_directory.resolve()
     checkout = Path(
         _confirmed(
             run_command,
-            ("git", "-C", str(start), "rev-parse", "--show-toplevel"),
+            (str(git_path), "-C", str(start), "rev-parse", "--show-toplevel"),
             "current directory is not inside a Git checkout",
         )
     ).resolve()
     origin = _confirmed(
         run_command,
-        ("git", "-C", str(checkout), "remote", "get-url", "origin"),
+        (str(git_path), "-C", str(checkout), "remote", "get-url", "origin"),
         "checkout origin could not be read",
     )
+    parsed_origin = urlparse(origin.strip())
+    if (
+        parsed_origin.scheme != "https"
+        or parsed_origin.username
+        or parsed_origin.password
+    ):
+        raise RepositoryError("checkout origin must be credential-free HTTPS")
     origin_host, project_path = _origin_identity(origin)
     host = environment.get("GITLAB_HOST", "")
     project_id_text = environment.get("GITLAB_PROJECT_ID", "")
@@ -119,7 +268,7 @@ def discover_config(
     project_id = int(project_id_text)
     numeric = _confirmed(
         run_command,
-        ("glab", "api", "--hostname", host, f"projects/{project_id}"),
+        (str(glab_path), "api", "--hostname", host, f"projects/{project_id}"),
         "GitLab numeric project confirmation failed",
     )
     try:
@@ -133,6 +282,15 @@ def discover_config(
         or project.get("path_with_namespace") != project_path
     ):
         raise RepositoryError("GitLab project identity did not match the checkout")
+    project_origin = str(project.get("http_url_to_repo") or "")
+    parsed_project_origin = urlparse(project_origin)
+    if (
+        parsed_project_origin.scheme != "https"
+        or parsed_project_origin.username
+        or parsed_project_origin.password
+        or project_origin.removesuffix(".git") != origin.strip().removesuffix(".git")
+    ):
+        raise RepositoryError("GitLab project HTTPS origin did not match the checkout")
     state_root = project_state_path(
         host=host, project_id=project_id, environment=environment
     )
@@ -145,6 +303,8 @@ def discover_config(
             default_branch=str(project.get("default_branch") or "main"),
             base_branch=base_branch,
             journal_tag=environment.get("AGENT_WORK_LOG_TAG") or "agent-work",
+            git_path=git_path,
+            glab_path=glab_path,
         )
     except ValidationError as error:
         raise RepositoryError("agent-work configuration is invalid") from error
@@ -153,17 +313,46 @@ def discover_config(
 class GitRepository:
     """Own durable worktrees and publication Git operations."""
 
-    def __init__(self, config: AgentWorkConfig, run_command: CommandRunner) -> None:
+    def __init__(
+        self,
+        config: AgentWorkConfig,
+        run_command: CommandRunner,
+        *,
+        service_environment: Mapping[str, str] | None = None,
+        diagnostic_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         self.config = config
         self._run_command = run_command
+        self._environment = build_git_environment(
+            service_environment or {}, config.glab_path
+        )
+        self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
 
     def _git(
         self, *arguments: str, cwd: Path | None = None, transient: bool = False
     ) -> str:
         result = self._run_command(
-            ("git", "-C", str(cwd or self.config.checkout), *arguments)
+            (
+                str(self.config.git_path),
+                "-C",
+                str(cwd or self.config.checkout),
+                *arguments,
+            ),
+            environment=self._environment,
         )
         if result.returncode != 0:
+            if arguments and arguments[0] == "push":
+                failure = classify_publication_failure(result.stderr)
+                self._diagnostic_sink(
+                    {
+                        "category": failure.category.value,
+                        "operation": "push",
+                        "returncode": result.returncode,
+                    }
+                )
+                if failure.retryable:
+                    raise RepositoryTransientError(failure.summary)
+                raise PublicationError(failure)
             error_type = RepositoryTransientError if transient else RepositoryError
             raise error_type("Git operation failed")
         return result.stdout.strip()
@@ -197,7 +386,7 @@ class GitRepository:
         local_exists = bool(self._git("branch", "--list", branch))
         remote = self._run_command(
             (
-                "git",
+                str(self.config.git_path),
                 "-C",
                 str(self.config.checkout),
                 "show-ref",
@@ -276,16 +465,15 @@ class GitRepository:
         if self.head(worktree) != expected_head:
             raise RepositoryError("durable worktree baseline changed")
 
-    def commit_and_push(
+    def prepare_commit(
         self,
         worktree: Path,
         branch: str,
         issue_iid: int,
         *,
         expected_head: str,
-        allow_replay: bool = False,
     ) -> str:
-        """Idempotently publish the worktree and return its exact SHA."""
+        """Create exactly one runner commit and return its unpushed SHA."""
         if self._git("branch", "--show-current", cwd=worktree) != branch:
             raise RepositoryError("publication worktree is on the wrong branch")
         current_head = self.head(worktree)
@@ -293,26 +481,61 @@ class GitRepository:
         if current_head == expected_head and changed:
             self._git("add", "--all", cwd=worktree)
             self._git("commit", "-m", f"Resolve issue #{issue_iid}", cwd=worktree)
-        elif not (allow_replay and current_head != expected_head and not changed):
+        else:
             message = (
                 "worker-created commits cannot be published"
                 if current_head != expected_head
                 else "worker made no changes to publish"
             )
             raise RepositoryError(message)
-        sha = self._git("rev-parse", "HEAD", cwd=worktree)
+        return self._git("rev-parse", "HEAD", cwd=worktree)
+
+    def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
+        """Push only the exact durable prepared commit."""
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("publication worktree is on the wrong branch")
+        if self.has_changes(worktree) or self.head(worktree) != publication_sha:
+            raise RepositoryError("prepared publication commit no longer matches")
         self._git(
             "push",
-            "--set-upstream",
             "origin",
-            branch,
+            f"{publication_sha}:refs/heads/{branch}",
             cwd=worktree,
             transient=True,
         )
         remote_sha = self._git("rev-parse", f"origin/{branch}", cwd=worktree)
-        if sha != remote_sha:
+        if publication_sha != remote_sha:
             raise RepositoryError("published branch SHA could not be verified")
-        return sha
+        return publication_sha
+
+    def bind_retained_commit(
+        self, worktree: Path, branch: str, issue_iid: int, baseline_sha: str
+    ) -> str:
+        """Bind a legacy retained runner commit only after strict verification."""
+        if (
+            self.has_changes(worktree)
+            or self._git("branch", "--show-current", cwd=worktree) != branch
+        ):
+            raise RepositoryError("retained publication worktree is not exact")
+        head = self.head(worktree)
+        parents = self._git(
+            "rev-list", "--parents", "-n", "1", head, cwd=worktree
+        ).split()
+        if parents != [head, baseline_sha]:
+            raise RepositoryError(
+                "retained publication commit is not based on baseline"
+            )
+        if (
+            self._git("rev-list", "--count", f"{baseline_sha}..{head}", cwd=worktree)
+            != "1"
+        ):
+            raise RepositoryError("retained publication history is not exact")
+        if (
+            self._git("log", "-1", "--format=%s", head, cwd=worktree)
+            != f"Resolve issue #{issue_iid}"
+        ):
+            raise RepositoryError("retained publication commit identity is not exact")
+        return head
 
     def inventory(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         """Return legacy branches, worktrees, and stash subjects without mutation."""

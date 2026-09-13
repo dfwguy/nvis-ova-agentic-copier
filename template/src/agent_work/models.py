@@ -48,6 +48,8 @@ class AgentWorkConfig(BoundaryModel):
     project_id: int = Field(gt=0)
     checkout: Path
     state_root: Path
+    git_path: Path
+    glab_path: Path
     default_branch: str = Field(default="main", min_length=1)
     base_branch: str = Field(pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$")
     journal_tag: str = Field(default="agent-work", min_length=1)
@@ -60,7 +62,7 @@ class AgentWorkConfig(BoundaryModel):
             raise ValueError("host must be a bare hostname")
         return value
 
-    @field_validator("checkout", "state_root")
+    @field_validator("checkout", "state_root", "git_path", "glab_path")
     @classmethod
     def validate_absolute_path(cls, value: Path) -> Path:
         """Require explicit absolute paths."""
@@ -353,6 +355,7 @@ class LedgerRecord(BoundaryModel):
     merge_request_iid: int | None = Field(default=None, gt=0)
     merge_request_url: str | None = None
     source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    publication_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     merge_request_draft: MergeRequestDraft | None = None
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
@@ -481,6 +484,7 @@ class CommandItemReport(BoundaryModel):
     retries_remaining: int = Field(ge=0)
     retry_at: datetime | None = None
     source_branch: str
+    source_sha: str | None = None
     worktree: Path
     merge_request_iid: int | None = None
     merge_request_url: str | None = None
