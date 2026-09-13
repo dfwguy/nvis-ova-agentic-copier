@@ -442,12 +442,12 @@ def test_incomplete_duplicate_or_wrong_lane_workflow_receipts_fail_closed(
         apply_worker_result(record, result, now=NOW)
 
 
-def test_retryable_result_schedules_twenty_minutes_after_now() -> None:
+def test_retryable_worker_result_is_immediately_due() -> None:
     outcome = apply_worker_result(_record(), _result("retryable"), now=NOW)
 
     assert outcome.record.state is RunnerState.RETRY_WAIT
     assert outcome.record.retry_count == 1
-    assert outcome.record.retry_at == NOW + timedelta(minutes=20)
+    assert outcome.record.retry_at == NOW
 
 
 def test_fourth_retryable_result_blocks_instead_of_failing() -> None:

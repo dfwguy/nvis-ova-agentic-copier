@@ -27,8 +27,9 @@ related:
 # How to set up the recoverable serial GitLab agent loop
 
 The installed service may process consecutive terminally handed-off issues in
-one invocation. Each issue still has its own bounded activation; empty queues
-and pipeline or retry waits yield back to the 20-minute timer.
+one invocation. Each issue still has its own bounded activation; empty queues,
+pipeline waits, and genuine future external retries yield back to the 20-minute
+timer. Retryable worker failures continue in the same activation.
 
 Use one dedicated checkout and one user timer for one GitLab project. The loop
 is authorized by enabling the project-level timer. It selects eligible open,
@@ -319,7 +320,7 @@ systemctl --user status "$unit_name.service"
 
 Use `--max-segments` or `--max-activation-seconds` to apply smaller operational
 bounds. The activation advances only one issue and
-stops when it is idle, waiting for external progress or a retry deadline,
+stops when it is idle, waiting for external progress or a future retry deadline,
 reaches a terminal or human-facing state, or exhausts a configured bound. Its
 JSON `items` list records workflow results chronologically; `segments_run` and
 `stop_reason` summarize the activation.
@@ -343,8 +344,11 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-The initial attempt plus three retries are automatic workflow attempts. An
-activation yields when a retry deadline is in the future. When retries are
+The initial attempt plus three retries are automatic workflow attempts. A
+retryable worker exit, timeout, malformed protocol, invalid receipt, or explicit
+retryable result is immediately due and continues in the same activation; an
+activation yields only when a retry deadline represents a genuine future
+external wait. When retries are
 exhausted, the issue is `agent::blocked`; follow its recorded next action, then
 explicitly retry that exact IID after a human has resolved the condition. Do
 not change labels to resume blocked work.

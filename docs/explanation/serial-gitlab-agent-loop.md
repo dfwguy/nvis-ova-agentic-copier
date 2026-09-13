@@ -30,8 +30,9 @@ related:
 
 The systemd boundary coordinates, but does not replace, the Python state
 machine. It validates each JSON report and starts another one-issue activation
-only after a terminal handoff and a fresh eligible preview. Pipeline, retry,
-repair, and budget yields return to the timer; they never become a busy loop.
+only after a terminal handoff and a fresh eligible preview. Pipeline, genuine
+future external retry, repair, and budget yields return to the timer; they never
+become a busy loop. Retryable worker failures continue in the same activation.
 
 The agent loop is a recoverable finite-state machine, not a long-running agent
 session. Every systemd activation is bounded, but its worker owns the complete
@@ -106,11 +107,11 @@ Red evidence to Green, and Green's consolidated judge feedback back to the
 Architect. The activation continues only on its current issue; it never
 consumes a second issue merely because capacity remains.
 
-The activation yields for terminal or human-facing states, a future retry, a
+The activation yields for terminal or human-facing states, a future external retry, a
 pending external result, lack of progress, or its workflow or wall-time limit.
 The 20-minute timer delay begins only after the complete activation finishes,
 so it serves idle polling and external waits rather than pacing internal
-workflow phases. There is no sequence-wide service timeout: each worker
+workflow phases or retryable worker failures. There is no sequence-wide service timeout: each worker
 activation retains its own three-hour overall work budget. This does not claim
 distributed coordination: operators must not run a second timer for the same
 project.

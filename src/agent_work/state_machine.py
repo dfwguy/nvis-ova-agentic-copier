@@ -261,7 +261,12 @@ def transition_record(
     return record.model_copy(update={"state": target, **updates})
 
 
-def plan_retry(record: LedgerRecord, *, now: datetime) -> PlannedOutcome:
+def plan_retry(
+    record: LedgerRecord,
+    *,
+    now: datetime,
+    retry_delay: timedelta = timedelta(minutes=20),
+) -> PlannedOutcome:
     """Schedule a bounded retry or block after the retry budget is exhausted."""
     if record.retry_count >= 3:
         return PlannedOutcome(
@@ -284,7 +289,7 @@ def plan_retry(record: LedgerRecord, *, now: datetime) -> PlannedOutcome:
             prior_state=record.state,
             prior_phase=record.phase,
             retry_count=record.retry_count + 1,
-            retry_at=now + timedelta(minutes=20),
+            retry_at=now + retry_delay,
             error_code=None,
             summary="Transient failure; retry scheduled.",
             next_action="Resume when the retry deadline is due.",
@@ -297,7 +302,7 @@ def apply_worker_result(
 ) -> PlannedOutcome:
     """Apply one validated worker result to a durable record."""
     if result.result_kind == "retryable":
-        return plan_retry(record, now=now)
+        return plan_retry(record, now=now, retry_delay=timedelta())
     if result.result_kind == "needs_human":
         return PlannedOutcome(
             transition_record(

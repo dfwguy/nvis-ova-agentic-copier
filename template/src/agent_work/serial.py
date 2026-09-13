@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
@@ -380,9 +380,10 @@ def _record_retry(
     gitlab: GitLabPort,
     now: datetime,
     error_code: ErrorCode,
+    retry_delay: timedelta = timedelta(minutes=20),
 ) -> LedgerRecord:
     """Persist one bounded retry and project exhaustion as an actionable block."""
-    outcome = plan_retry(record, now=now).record
+    outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
     if outcome.state is RunnerState.RETRY_WAIT:
         outcome = outcome.model_copy(update={"error_code": error_code})
     outcome = ledger.persist(outcome)
@@ -827,6 +828,7 @@ def _execute(
                 if invocation.returncode is None
                 else ErrorCode.WORKER_EXIT
             ),
+            retry_delay=timedelta(),
         )
     else:
         try:
@@ -837,7 +839,9 @@ def _execute(
                 expected_revision=record.revision,
             )
         except ValueError:
-            outcome = plan_retry(record, now=now).record.model_copy(
+            outcome = plan_retry(
+                record, now=now, retry_delay=timedelta()
+            ).record.model_copy(
                 update={"error_code": ErrorCode.WORKER_PROTOCOL_INVALID}
             )
         else:
@@ -853,6 +857,7 @@ def _execute(
                     gitlab=gitlab,
                     now=now,
                     error_code=result.error_code or ErrorCode.WORKER_EXIT,
+                    retry_delay=timedelta(),
                 )
             try:
                 outcome = apply_worker_result(record, result, now=now).record
@@ -863,6 +868,7 @@ def _execute(
                     gitlab=gitlab,
                     now=now,
                     error_code=ErrorCode.WORKER_RECEIPT_INVALID,
+                    retry_delay=timedelta(),
                 )
     if outcome.state is RunnerState.AWAITING_HUMAN:
         if record.merge_request_iid is None or record.source_sha is None:

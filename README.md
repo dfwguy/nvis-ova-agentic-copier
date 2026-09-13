@@ -42,10 +42,12 @@ worker session, while saved work resumes from its durable worktree and recorded
 outer phase. Use `--max-segments` or `--max-activation-seconds` to tighten the
 activation bounds.
 
-The systemd wrapper keeps each Python activation bounded to one issue, then
-continues immediately only after a terminal handoff and a fresh eligible preview.
-It yields to the timer for an empty queue, pipeline or retry wait, repair, or a
-per-issue budget limit. For scheduled operation, safeguards, status checks, and troubleshooting, see
+The systemd wrapper keeps each Python activation bounded to one issue, continues
+immediately for a due retry of that issue, and begins another issue only after a
+terminal handoff and a fresh eligible preview.
+It yields to the timer for an empty queue, pipeline or other future external
+wait, repair, or a per-issue budget limit. Retryable worker failures continue
+in the same activation. For scheduled operation, safeguards, status checks, and troubleshooting, see
 [How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
 
 ## Preview an upstream finding
