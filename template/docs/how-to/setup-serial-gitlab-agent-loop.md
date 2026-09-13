@@ -26,6 +26,10 @@ related:
 
 # How to set up the recoverable serial GitLab agent loop
 
+The installed service may process consecutive terminally handed-off issues in
+one invocation. Each issue still has its own bounded activation; empty queues
+and pipeline or retry waits yield back to the 20-minute timer.
+
 Use one dedicated checkout and one user timer for one GitLab project. The loop
 is authorized by enabling the project-level timer. It selects eligible open,
 non-confidential issues without a lifecycle projection or ledger record, never
@@ -269,9 +273,9 @@ becomes inactive. Within an activation, one worker owns the issue's complete
 workflow session; its Architect, Red, Green, and read-only judges hand context
 directly to one another. The runner recovers only the durable worktree and
 coarse `WORKFLOW` state, not a sidecar checkpoint for each internal role. The
-installed service allows 190 minutes: the three-hour overall work budget plus
-a bounded ten-minute orderly shutdown margin. Run only one timer host for a
-project. The service's environment and XDG state directory must be writable
+service has no sequence-wide timeout; each worker activation retains its own
+bounded work budget. Run only one timer host for a project. The service's
+environment and XDG state directory must be writable
 only by the operator.
 If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
 user-manager socket; do not retry using a different credential, host, or

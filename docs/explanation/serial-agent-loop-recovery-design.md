@@ -26,6 +26,11 @@ related:
 
 # Recoverable serial agent-loop architecture
 
+Each activation owns one bounded issue workflow. After a terminal handoff, the
+systemd wrapper validates the report, refreshes authoritative project and
+default-branch evidence for a newly eligible issue, and starts a separate
+activation. Waiting and budget outcomes yield to the timer instead.
+
 This document explains the recoverable architecture used by the serial agent
 loop. The [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
 reference, and setup guide describe its operator-facing behavior.
@@ -175,9 +180,8 @@ positive, ceil-rounded time remaining from that budget. An exhausted budget is
 handled by the normal durable-worktree retry and recovery path. The timer waits
 20 minutes after the complete activation, so that interval controls idle
 polling and external waits rather than spacing internal handoffs. The systemd
-service allows 190 minutes: the work budget plus a bounded ten-minute orderly
-shutdown margin. The timer does not own workflow state or perform checkout
-cleanup.
+service has no sequence-wide timeout; each worker activation retains the work
+budget. The timer does not own workflow state or perform checkout cleanup.
 
 ## Durable ledger and worktrees
 

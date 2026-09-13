@@ -144,44 +144,62 @@ if [[ "${origin_urls%%$'\n'*}" != "$origin_urls" ]]; then
   stop 'checkout origin has ambiguous URLs'
 fi
 origin="$origin_urls"
-project_command=("$AGENT_WORK_GLAB" api --hostname "$host" "projects/$project_id")
-if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  project_command=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "${project_command[@]}")
-fi
-if ! json="$("${project_command[@]}")"; then
-  stop 'cannot read configured GitLab project'
-fi
-if ! actual_id="$("$AGENT_WORK_JQ" -er '.id | if type == "number" then tostring else empty end' <<<"$json")"; then
-  stop 'GitLab project response has no numeric id'
-fi
-if [[ "$actual_id" != "$project_id" ]]; then
-  stop 'GitLab project id does not match configured project'
-fi
-if ! default="$("$AGENT_WORK_JQ" -er '.default_branch | strings | select(length > 0)' <<<"$json")"; then
-  stop 'GitLab project response has no default branch'
-fi
-if ! "${git[@]}" -C "$checkout" check-ref-format --branch "$default" >/dev/null; then
-  stop 'GitLab default branch is not valid'
-fi
-if ! http="$("$AGENT_WORK_JQ" -er '.http_url_to_repo | strings | select(length > 0)' <<<"$json")"; then
-  stop 'GitLab project response has no HTTP origin'
-fi
-case "$http" in
-  https://*) ;;
-  *) stop 'GitLab project HTTP origin must use credential-free HTTPS' ;;
-esac
-if [[ "$http" == https://*@* ]]; then
-  stop 'GitLab project HTTP origin must use credential-free HTTPS'
-fi
-if [[ "$(normal_url "$origin")" != "$(normal_url "$http")" ]]; then
-  stop 'origin must match configured GitLab HTTPS project URL'
-fi
-if [[ "$("${git[@]}" -C "$checkout" config --get "branch.$base.remote")" != origin || "$("${git[@]}" -C "$checkout" config --get "branch.$base.merge")" != "refs/heads/$default" ]]; then
-  stop 'checkout upstream is not origin default branch'
-fi
+default=""
+remote_ref=""
+verify_project() {
+  local actual_id http json
+  local project_command=("$AGENT_WORK_GLAB" api --hostname "$host" "projects/$project_id")
+  if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
+    project_command=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "${project_command[@]}")
+  fi
+  if ! json="$("${project_command[@]}")"; then
+    stop 'cannot read configured GitLab project'
+  fi
+  if ! actual_id="$("$AGENT_WORK_JQ" -er '.id | if type == "number" then tostring else empty end' <<<"$json")"; then
+    stop 'GitLab project response has no numeric id'
+  fi
+  if [[ "$actual_id" != "$project_id" ]]; then
+    stop 'GitLab project id does not match configured project'
+  fi
+  if ! default="$("$AGENT_WORK_JQ" -er '.default_branch | strings | select(length > 0)' <<<"$json")"; then
+    stop 'GitLab project response has no default branch'
+  fi
+  if ! "${git[@]}" -C "$checkout" check-ref-format --branch "$default" >/dev/null; then
+    stop 'GitLab default branch is not valid'
+  fi
+  if ! http="$("$AGENT_WORK_JQ" -er '.http_url_to_repo | strings | select(length > 0)' <<<"$json")"; then
+    stop 'GitLab project response has no HTTP origin'
+  fi
+  case "$http" in https://*) ;; *) stop 'GitLab project HTTP origin must use credential-free HTTPS' ;; esac
+  if [[ "$http" == https://*@* || "$(normal_url "$origin")" != "$(normal_url "$http")" ]]; then
+    stop 'origin must match configured GitLab HTTPS project URL'
+  fi
+  if [[ "$("${git[@]}" -C "$checkout" config --get "branch.$base.remote")" != origin || "$("${git[@]}" -C "$checkout" config --get "branch.$base.merge")" != "refs/heads/$default" ]]; then
+    stop 'checkout upstream is not origin default branch'
+  fi
+  remote_ref="refs/remotes/origin/$default"
+}
 
-remote_ref="refs/remotes/origin/$default"
+refresh_base() {
+  local grep_status
+  verify_project
+  clean
+  if ! "${git[@]}" -C "$checkout" fetch --no-tags --no-recurse-submodules origin "refs/heads/$default:$remote_ref"; then
+    stop 'cannot fetch verified default branch'
+  fi
+  if "${git[@]}" -C "$checkout" grep -q -E '(^|[[:space:]])filter(=|[[:space:]]|$)' "$remote_ref" -- .gitattributes '*/.gitattributes'; then
+    stop 'target branch contains filter attributes'
+  else
+    grep_status="$?"
+    if [[ "$grep_status" != 1 ]]; then stop 'cannot inspect target Git attributes'; fi
+  fi
+  if ! "${git[@]}" -C "$checkout" merge --ff-only "$remote_ref"; then stop 'cannot fast-forward checkout to verified default branch'; fi
+  clean
+  if [[ "$("${git[@]}" -C "$checkout" rev-parse HEAD)" != "$("${git[@]}" -C "$checkout" rev-parse "$remote_ref")" ]]; then stop 'checkout HEAD is not the refreshed origin default branch'; fi
+}
+
 if [[ "${1:-}" != --apply ]]; then
+  verify_project
   if ! lines="$("${git[@]}" -C "$checkout" ls-remote --exit-code origin "refs/heads/$default")"; then
     stop 'cannot read default branch from origin'
   fi
@@ -192,26 +210,7 @@ if [[ "${1:-}" != --apply ]]; then
     stop 'preview checkout is not current with origin default branch'
   fi
 else
-  if ! "${git[@]}" -C "$checkout" fetch --no-tags --no-recurse-submodules origin "refs/heads/$default:$remote_ref"; then
-    stop 'cannot fetch verified default branch'
-  fi
-  if "${git[@]}" -C "$checkout" grep -q -E '(^|[[:space:]])filter(=|[[:space:]]|$)' "$remote_ref" -- .gitattributes '*/.gitattributes'; then
-    stop 'target branch contains filter attributes'
-  else
-    grep_status="$?"
-    if [[ "$grep_status" != 1 ]]; then
-      stop 'cannot inspect target Git attributes'
-    fi
-  fi
-  if ! "${git[@]}" -C "$checkout" merge --ff-only "$remote_ref"; then
-    stop 'cannot fast-forward checkout to verified default branch'
-  fi
-fi
-clean
-if [[ "${1:-}" == --apply ]]; then
-  if [[ "$("${git[@]}" -C "$checkout" rev-parse HEAD)" != "$("${git[@]}" -C "$checkout" rev-parse "$remote_ref")" ]]; then
-    stop 'checkout HEAD is not the refreshed origin default branch'
-  fi
+  refresh_base
 fi
 readiness=(
   /usr/bin/env -u GIT_CONFIG_PARAMETERS
@@ -238,7 +237,67 @@ if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
   runner=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" "$AGENT_WORK_UV")
 fi
 cd "$checkout"
-if [[ "${1:-}" == --apply ]]; then
-  exec "${runner[@]}" run agent-work loop run --apply --json
+if [[ "${1:-}" != --apply ]]; then
+  exec "${runner[@]}" run agent-work loop run --json
 fi
-exec "${runner[@]}" run agent-work loop run --json
+
+validate_applied_report() {
+  local report="$1"
+  "$AGENT_WORK_JQ" -e -s '
+    length == 1 and (.[0] | (
+      .schema_version == 1 and .command == "loop.run" and .applied == true and
+      ((.stop_reason == "idle" and .outcome == "idle") or
+       (.stop_reason == "awaiting_human" and .outcome == "activation_complete") or
+       (.stop_reason == "blocked" and .outcome == "activation_complete") or
+       (.stop_reason == "failed" and .outcome == "activation_complete") or
+       (.stop_reason == "complete" and .outcome == "activation_complete") or
+       (.stop_reason == "pipeline_wait" and .outcome == "activation_complete") or
+       (.stop_reason == "retry_wait" and .outcome == "activation_complete") or
+       (.stop_reason == "repair" and .outcome == "activation_complete") or
+       (.stop_reason == "time_limit" and .outcome == "activation_complete") or
+       (.stop_reason == "segment_limit" and .outcome == "activation_complete"))
+    ))
+  ' <<<"$report" >/dev/null
+}
+
+preview_outcome() {
+  local report="$1"
+  if ! "$AGENT_WORK_JQ" -e -s '
+    length == 1 and (.[0] | .schema_version == 1 and .command == "loop.run" and
+    .applied == false and (.outcome == "eligible" or .outcome == "idle"))
+  ' <<<"$report" >/dev/null; then
+    return 1
+  fi
+  "$AGENT_WORK_JQ" -er '.[0].outcome' <<<"[$report]"
+}
+
+while :; do
+  if ! applied_report="$("${runner[@]}" run agent-work loop run --apply --json)"; then
+    stop 'agent-work applied activation failed'
+  fi
+  if ! validate_applied_report "$applied_report"; then
+    stop 'agent-work applied activation returned an invalid report'
+  fi
+  printf '%s\n' "$applied_report"
+  if ! stop_reason="$("$AGENT_WORK_JQ" -er '.[0].stop_reason' <<<"[$applied_report]")"; then
+    stop 'agent-work applied activation report has no stop reason'
+  fi
+  case "$stop_reason" in
+    awaiting_human|blocked|failed|complete)
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
+  if ! preview_report="$("${runner[@]}" run agent-work loop run --json)"; then
+    stop 'agent-work eligibility preview failed'
+  fi
+  if ! outcome="$(preview_outcome "$preview_report")"; then
+    stop 'agent-work eligibility preview returned an invalid report'
+  fi
+  printf '%s\n' "$preview_report"
+  if [[ "$outcome" == idle ]]; then
+    exit 0
+  fi
+  refresh_base
+done
