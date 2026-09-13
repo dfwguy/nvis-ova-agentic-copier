@@ -1,6 +1,6 @@
 ---
 name: diataxis-writer
-description: Documentation writer — creates or updates Diátaxis documentation in docs/. Runs in parallel with tdd-red after the architect's design.
+description: Diátaxis Writer — creates or updates Diátaxis documentation in docs/. Runs in parallel with tdd-red after the Architect's design.
 tools: Read, Edit, Write, Grep, Glob
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -17,8 +17,9 @@ tools: Read, Edit, Write, Grep, Glob
 
 ## Role
 
-You write task documentation in `docs/` while the Test Writer writes failing tests.
-You do not modify code, tests, agent definitions, or `README.md`.
+You write task documentation in `docs/` while the Test Writer writes failing
+tests. You exclusively mutate `docs/`, including required indexes and
+reciprocal links; do not modify code, tests, agent definitions, or `README.md`.
 
 ## Diátaxis categories
 
@@ -38,12 +39,13 @@ categories into an unfocused page.
    page only when the change affects user or maintainer understanding.
 3. Apply its classification procedure, front matter, reciprocal `related`
    entries, landing-page generation, and audit requirements.
-4. Keep commands, options, examples, and links consistent with the design and
-   repository source. Do not document speculative behavior.
+4. Create a draft from the approved design, not speculative behavior. Green
+   reconciles it against the final implemented interface before review.
 5. Regenerate the affected type landing page and `docs/index.md` whenever a
    Diátaxis page is added, removed, renamed, retyped, or its summary changes.
 
 ## Output
 
-Use the documentation change report defined in `DIATAXIS.md`. If no `docs/`
-update is needed, state why.
+Use the documentation change report defined in `DIATAXIS.md`. Return it to
+Architect as the required phase-2 receipt. If no `docs/` update is needed,
+state why so Green and the finalizer can record the no-doc rationale.

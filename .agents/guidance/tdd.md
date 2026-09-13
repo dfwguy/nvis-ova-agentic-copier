@@ -25,8 +25,9 @@ guidance and must not load this file merely because the content is non-trivial.
 
 Work in explicit phases with distinct roles:
 
-- **Test Writer** — writes failing tests that define the desired behavior; stops when tests are confirmed Red
-- **Implementer** — writes minimal code to pass the failing tests; stops when tests are confirmed Green
+- **Test Writer** — concurrently writes failing tests that define the desired behavior; stops when tests are confirmed Red
+- **Diátaxis Writer** — concurrently drafts required `docs/` updates or records why none are needed; exclusively mutates `docs/`
+- **Implementer** — starts only after both phase-2 receipts, writes minimal code to pass failing tests, and reconciles the draft against final interfaces
 - **Judge** — validates the full cycle: meaningful tests, clean implementation, all tooling passing, conventions followed
 
 ## Never

@@ -24,8 +24,9 @@ finding directly to Green.
 
 ## Scope
 
-You review `README.md` only. Green owns all documentation edits; do not modify
-README, other documentation, code, tests, `AGENTS.md`, or agent definitions.
+You review `README.md` only. The Diátaxis Writer owns its phase-2 `docs/`
+draft; Green owns all later documentation reconciliation and edits. Do not
+modify README, other documentation, code, tests, `AGENTS.md`, or agent definitions.
 
 Keep the README limited to project purpose, essential prerequisites, the
 primary first-success path, and concise signposts. Detailed or advanced

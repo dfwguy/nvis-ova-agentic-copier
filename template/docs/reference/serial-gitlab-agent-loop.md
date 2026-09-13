@@ -182,10 +182,13 @@ A newly selected issue attempts its complete applicable repository workflow in
 the same activation. A durable record resumes from its coarse `WORKFLOW`
 boundary and durable worktree; the first rollout does not add a sidecar
 checkpoint for every role or phase. Existing legacy phase-ledger values finish
-their recorded route; new work uses `WORKFLOW`. Within that session, the Architect hands the approved design to
-Red, Red returns failing-test evidence to Green, Green fans out applicable
-read-only judges and repairs what it can, then returns consolidated feedback to
-the Architect for the final decision.
+their recorded route; new work uses `WORKFLOW`. Within that session, Architect
+hands the approved design concurrently to Red and the Diátaxis Writer. Red
+exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`.
+Architect waits for both receipts before Green starts with the design, Red test
+diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
+draft with the final interface, fans out applicable read-only judges, and
+returns consolidated feedback to Architect for the final decision.
 
 Pipeline rejection or an exact-MR conflict enters `repair` at `WORKFLOW` using
 the same durable worktree. Green performs any safe repair inside its workflow

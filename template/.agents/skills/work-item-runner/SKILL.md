@@ -42,8 +42,11 @@ contract. Mixed or uncertain work uses the coding workflow. For each phase,
 read and activate the exact `$skill-id`.
 Do not infer a skill from a display name or from a rolled-up label such as
 "final judges."
-Delegate one live `$architect`. For coding, Architect delegates `$tdd-red`,
-then `$tdd-green`; Green alone mutates after Red, fans out all applicable
+Delegate one live `$architect`. For coding, Architect concurrently delegates
+`$tdd-red` and `$diataxis-writer`, then waits for both receipts before
+`$tdd-green`; Red exclusively mutates `tests/`, the Diátaxis Writer exclusively
+mutates `docs/`, and Green alone mutates thereafter, reconciles the draft with
+the implemented interface, and fans out all applicable
 read-only judges concurrently, repairs their consolidated findings once, and
 returns to Architect for finalization. Architect may authorize further focused
 Green cycles while a recorded cycle ledger shows material progress; each Green

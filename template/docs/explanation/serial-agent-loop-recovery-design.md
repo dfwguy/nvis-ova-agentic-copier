@@ -226,9 +226,11 @@ The implementation must maintain these invariants:
 - Publication is idempotent and accepted only from exact GitLab and Git
   evidence.
 - The full repository workflow remains intact inside one workflow-owning
-  session. Green is the sole mutable owner after Red; applicable judges fan out
-  read-only and return their findings to Green, which consolidates them for the
-  Architect's final decision.
+  session. Red and the Diátaxis Writer concurrently and exclusively mutate
+  `tests/` and `docs/`, respectively; Green begins only after both receipts,
+  then becomes sole mutable owner, reconciles the documentation draft, and
+  consolidates applicable read-only judge findings for the Architect's final
+  decision.
 - Expected durable outcomes do not make the systemd unit fail.
 - The runner never approves or merges and never widens authority from issue
   text, labels, comments, or worker output.
@@ -266,11 +268,16 @@ creates a merge request.
 
 Architecture, Red/Green, documentation, review, finalization,
 post-publication observation, and repair remain required according to
-`AGENTS.md`. The Architect carries approved design to Red; Red returns its
-failing-test evidence to Green; Green owns modifications, concurrent read-only
-judge fan-out, repair, and feedback consolidation before the Architect makes
-the final decision. Publication no longer prevents later post-publication work
-because `observing` and `repair` are durable states.
+`AGENTS.md`. The Architect carries approved design concurrently to Red and the
+Diátaxis Writer, waits for both receipts, then gives Green the test evidence
+and documentation draft or no-doc rationale. Green reconciles documentation
+with implemented interfaces, owns subsequent modifications, concurrent
+read-only judge fan-out, repair, and feedback consolidation before the
+Architect makes the final decision. The Diátaxis Judge compares the design,
+writer receipt, final docs, and final interface; its comparison verdict and
+the writer evidence remain required finalizer evidence. Publication no longer
+prevents later post-publication work because `observing` and `repair` are
+durable states.
 
 ## Failure taxonomy and process exits
 

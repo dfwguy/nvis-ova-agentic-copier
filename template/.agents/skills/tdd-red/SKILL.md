@@ -23,5 +23,6 @@ skill entry point for Claude Code, Codex, and Pi.
 
 ## Model selection
 
-The live Architect delegates this phase and waits for its complete receipt.
+The live Architect delegates this phase concurrently with `$diataxis-writer`
+and waits for both complete phase-2 receipts before Green starts.
 Request the `balanced` capability tier defined in `AGENTS.md`.
