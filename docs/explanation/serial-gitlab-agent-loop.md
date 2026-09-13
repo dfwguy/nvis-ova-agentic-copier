@@ -28,6 +28,11 @@ related:
 
 # Why the agent loop is serial and GitLab-native
 
+The systemd boundary coordinates, but does not replace, the Python state
+machine. It validates each JSON report and starts another one-issue activation
+only after a terminal handoff and a fresh eligible preview. Pipeline, retry,
+repair, and budget yields return to the timer; they never become a busy loop.
+
 The agent loop is a recoverable finite-state machine, not a long-running agent
 session. Every systemd activation is bounded, but its worker owns the complete
 applicable workflow session for one issue. A later activation reconciles the
@@ -105,10 +110,10 @@ The activation yields for terminal or human-facing states, a future retry, a
 pending external result, lack of progress, or its workflow or wall-time limit.
 The 20-minute timer delay begins only after the complete activation finishes,
 so it serves idle polling and external waits rather than pacing internal
-workflow phases. A 190-minute service timeout leaves room for the three-hour
-overall work budget and a bounded ten-minute orderly shutdown margin. This does
-not claim distributed coordination: operators must not run a second timer for
-the same project.
+workflow phases. There is no sequence-wide service timeout: each worker
+activation retains its own three-hour overall work budget. This does not claim
+distributed coordination: operators must not run a second timer for the same
+project.
 
 The activation deadline is the workflow-owning worker's one overall work
 budget. Each invocation receives the positive, ceil-rounded time remaining. If

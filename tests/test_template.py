@@ -770,10 +770,11 @@ def test_copier_answers_file_generated(generated_project: Path) -> None:
 def test_agent_loop_wrapper_leaves_recovery_to_the_python_state_machine(
     generated_project: Path,
 ) -> None:
-    """The systemd wrapper only validates configuration and execs one segment."""
+    """The systemd wrapper keeps recovery in Python while coordinating activations."""
     wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
 
-    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' in wrapper
+    assert '"${runner[@]}" run agent-work loop run --apply --json' in wrapper
+    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' not in wrapper
     assert "logger" not in wrapper
     assert "git stash" not in wrapper
     assert "git switch" not in wrapper
@@ -903,7 +904,7 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
     )
     _write_command(
         commands / "uv",
-        'printf \'{"git":"%s","glab":"%s"}\\n\' "$AGENT_WORK_GIT" "$AGENT_WORK_GLAB" > "$UV_MARKER"',
+        'printf \'{"git":"%s","glab":"%s"}\\n\' "$AGENT_WORK_GIT" "$AGENT_WORK_GLAB" > "$UV_MARKER"\nprintf \'{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"idle"}\\n\'',
     )
     environment |= {
         "AGENT_WORK_DIRENV": str(commands / "direnv"),
@@ -952,6 +953,209 @@ def test_agent_loop_wrapper_fast_forwards_before_applied_worker(
     assert (checkout / "version").read_text() == "two\n"
     assert marker.read_text() == "two\nrun agent-work loop run --apply --json\n"
     assert not hook_marker.exists()
+
+
+def test_agent_loop_wrapper_drains_terminal_handoffs_while_work_remains_eligible(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Terminal handoffs repeatedly preview and start distinct eligible activations."""
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (
+            _applied_report("complete"),
+            _preview_report("eligible"),
+            _applied_report("blocked"),
+            _preview_report("eligible"),
+            _applied_report("awaiting_human"),
+            _preview_report("idle"),
+        ),
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+    assert _test_git_output(checkout, "rev-parse", "--show-toplevel") == str(checkout)
+
+
+def test_agent_loop_wrapper_reemits_each_validated_report_once(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """The service journal retains every validated applied and preview report."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    reports = (_applied_report("complete"), _preview_report("idle"))
+    _scripted_wrapper_worker(tmp_path, environment, reports)
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert all(result.stdout.count(report) == 1 for report in reports)
+
+
+@pytest.mark.parametrize(
+    "stop_reason", ("awaiting_human", "blocked", "failed", "complete")
+)
+def test_agent_loop_wrapper_terminal_handoff_previews_once_then_yields_on_idle(
+    project_root: Path, tmp_path: Path, stop_reason: str
+) -> None:
+    """Every terminal issue result makes one fresh authoritative eligibility check."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (_applied_report(stop_reason), _preview_report("idle")),
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
+def test_agent_loop_wrapper_skips_open_dependent_work_after_terminal_handoff(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """An authoritative idle preview for open dependencies starts no second activation."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (_applied_report("complete"), _preview_report("idle")),
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    ("idle", "pipeline_wait", "retry_wait", "repair", "time_limit", "segment_limit"),
+)
+def test_agent_loop_wrapper_nonterminal_result_yields_without_eligibility_polling(
+    project_root: Path, tmp_path: Path, stop_reason: str
+) -> None:
+    """Wait, recovery, and budget results return control to the timer without spinning."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path, environment, (_applied_report(stop_reason),)
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+def test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """A continuation verifies and fast-forwards the configured base before applying."""
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    writer = checkout.parent / "future-writer"
+    subprocess.run(
+        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (writer / "version").write_text("two\n")
+    _commit_repository_state(writer, "prepare future default branch")
+    _run_test_git(writer, "push", "origin", "HEAD:future")
+    advance = tmp_path / "advance-default-branch"
+    _write_command(
+        advance,
+        'sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/future)"\n'
+        'exec "$REAL_GIT" --git-dir "$LOCAL_ORIGIN" update-ref refs/heads/main "$sha"',
+    )
+    environment["UV_ADVANCE"] = str(advance)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (
+            _applied_report("complete"),
+            _preview_report("eligible"),
+            _applied_report("complete"),
+            _preview_report("idle"),
+        ),
+        advance_after_first_apply=True,
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        calls.read_text().splitlines()[2]
+        == "two|run agent-work loop run --apply --json"
+    )
+    assert (checkout / "version").read_text() == "two\n"
+
+
+@pytest.mark.parametrize(
+    "report",
+    (
+        "not-json",
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"activation_complete","stop_reason":"unknown"}',
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"complete"}',
+    ),
+)
+def test_agent_loop_wrapper_fails_closed_for_malformed_or_unexpected_reports(
+    project_root: Path, tmp_path: Path, report: str
+) -> None:
+    """The coordinator does not continue after an untrusted worker report."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(tmp_path, environment, (report,))
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "report",
+    (
+        "not-json",
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"eligible"}',
+        '{"schema_version":1,"command":"loop.run","applied":false,"outcome":"blocked"}',
+    ),
+)
+def test_agent_loop_wrapper_fails_closed_for_invalid_eligibility_preview(
+    project_root: Path, tmp_path: Path, report: str
+) -> None:
+    """A terminal handoff never continues through an untrusted preview."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path, environment, (_applied_report("complete"), report)
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode != 0
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
 
 
 @pytest.mark.parametrize("state", ("dirty", "diverged"))
@@ -1362,7 +1566,7 @@ def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
     _write_command(
         commands / "uv",
         'printf \'{"host":"%s","project_id":"%s","arguments":"%s"}\\n\' '
-        '"$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$*" > "$MARKER"',
+        '"$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$*" > "$MARKER"\nprintf \'{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"idle"}\\n\'',
     )
     _write_command(commands / "agent", "exit 0")
 
@@ -1692,7 +1896,8 @@ def _wrapper_checkout_environment(
     _write_command(
         commands / "uv",
         'printf \'%s\\n\' "$(cat version)" > "$UV_MARKER"\n'
-        'printf \'%s\\n\' "$*" >> "$UV_MARKER"',
+        'printf \'%s\\n\' "$*" >> "$UV_MARKER"\n'
+        'printf \'{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"idle"}\\n\'',
     )
     _write_command(commands / "agent", "exit 0")
     command_paths = {
@@ -1716,6 +1921,7 @@ def _wrapper_checkout_environment(
         "LOCAL_ORIGIN": str(remote),
         **{key: str(value) for key, value in command_paths.items()},
     }
+    environment.pop("AGENT_WORK_DIRENV", None)
     return checkout, environment, marker, glab_marker
 
 
@@ -1748,6 +1954,63 @@ def _run_wrapper(
         env=environment,
         text=True,
     )
+
+
+def _applied_report(stop_reason: str) -> str:
+    """Return one minimal valid applied loop report for a wrapper worker fake."""
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "idle" if stop_reason == "idle" else "activation_complete",
+            "stop_reason": stop_reason,
+        }
+    )
+
+
+def _preview_report(outcome: str) -> str:
+    """Return one minimal valid read-only loop report for a wrapper worker fake."""
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": False,
+            "outcome": outcome,
+        }
+    )
+
+
+def _scripted_wrapper_worker(
+    tmp_path: Path,
+    environment: dict[str, str],
+    reports: tuple[str, ...],
+    *,
+    advance_after_first_apply: bool = False,
+) -> Path:
+    """Install a JSON-reporting UV seam and return its ordered invocation record."""
+    reports_path = tmp_path / "worker-reports.jsonl"
+    reports_path.write_text("\n".join(reports) + "\n")
+    calls = tmp_path / "worker-calls"
+    commands = tmp_path / "scripted-worker"
+    _write_command(
+        commands,
+        'printf "%s|%s\\n" "$(cat version)" "$*" >> "$UV_CALLS"\n'
+        'call_count="$(wc -l < "$UV_CALLS")"\n'
+        'if [ "$*" = "run agent-work loop run --apply --json" ]; then\n'
+        '  apply_count="$(grep -c -- "--apply --json" "$UV_CALLS")"\n'
+        '  if [ "$apply_count" = 1 ] && [ -n "${UV_ADVANCE:-}" ]; then "$UV_ADVANCE"; fi\n'
+        "fi\n"
+        'sed -n "${call_count}p" "$UV_REPORTS"',
+    )
+    environment |= {
+        "AGENT_WORK_UV": str(commands),
+        "UV_CALLS": str(calls),
+        "UV_REPORTS": str(reports_path),
+    }
+    if not advance_after_first_apply:
+        environment.pop("UV_ADVANCE", None)
+    return calls
 
 
 def _run_copier_tasks(
@@ -2807,7 +3070,8 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
         in root_service
     )
     assert 'agent_name="${AGENT_WORK_AGENT:-codex}"' in wrapper
-    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' in wrapper
+    assert '"${runner[@]}" run agent-work loop run --apply --json' in wrapper
+    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' not in wrapper
     assert "AGENT_WORK_DIRENV is not executable" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not set" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not executable" in wrapper
@@ -2823,8 +3087,10 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
         in generated_service
     )
     assert "Unit=my_test_project-agent-work.service" in generated_timer
-    assert "TimeoutStartSec=190min" in root_service
-    assert "TimeoutStartSec=190min" in generated_service
+    assert "TimeoutStartSec=infinity" in root_service
+    assert "TimeoutStartSec=infinity" in generated_service
+    assert "TimeoutStartSec=190min" not in root_service
+    assert "TimeoutStartSec=190min" not in generated_service
     assert "OnUnitInactiveSec=20min" in generated_timer
     assert "RandomizedDelaySec=60s" in generated_timer
     assert "FixedRandomDelay=true" in generated_timer

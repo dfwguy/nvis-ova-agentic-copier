@@ -185,13 +185,17 @@ and observed evidence. It then advances only the selected or resumed issue.
 Recovery applies at the worktree and coarse workflow boundary, not at every
 internal agent handoff.
 
-An activation stops when it is idle; makes no progress while waiting for
-external evidence such as a pending pipeline; reaches `retry-wait`, `blocked`,
-`failed`, `awaiting-human`, or completion; or exhausts its workflow or wall-time
-limit. The timer uses `OnUnitInactiveSec=20min`, measured after the complete
-activation finishes, for idle polling and external waits. The service timeout
-is 190 minutes: the three-hour work budget plus a bounded ten-minute orderly
-shutdown margin. The loop is serial per host and project, not multi-host
+Each Python activation advances at most one issue and retains its 10,800-second
+active-work budget. The systemd wrapper continues only after `awaiting-human`,
+`blocked`, `failed`, or `complete`: it validates that report, makes one fresh
+read-only eligibility check, and begins another activation only for `eligible`.
+Between issues it re-queries GitLab and fast-forwards the clean service base;
+this bounded housekeeping is outside the per-issue budget. An `idle`,
+`pipeline-wait`, `retry-wait`, `repair`, `time-limit`, or `segment-limit` result
+yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
+idle checks and yielded pipeline/retry checks. The service has no sequence-wide
+timeout, so it cannot truncate an otherwise unbounded sequence of individually
+bounded activations. The loop is serial per host and project, not multi-host
 coordination.
 
 ## Ledger and worktrees
