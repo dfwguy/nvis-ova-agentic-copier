@@ -67,6 +67,7 @@ def _item(record: LedgerRecord) -> CommandItemReport:
         retries_remaining=retries_remaining(record.retry_count),
         retry_at=record.retry_at,
         source_branch=record.source_branch,
+        source_sha=record.source_sha,
         worktree=record.worktree,
         merge_request_iid=record.merge_request_iid,
         merge_request_url=record.merge_request_url,
@@ -136,16 +137,22 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
     config = discover_config(
         current_directory=Path.cwd(), environment=os.environ, run_command=run_subprocess
     )
+    logger = _build_local_logger(config, debug=debug)
     return RuntimeDependencies(
         config=config,
         ledger=JsonLedger(config.state_root),
         gitlab=GitLabGateway(config, run_subprocess),
-        repository=GitRepository(config, run_subprocess),
+        repository=GitRepository(
+            config,
+            run_subprocess,
+            service_environment=os.environ,
+            diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
+        ),
         invoke=AgentInvoker(run_subprocess, environment=os.environ),
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
         clock=lambda: datetime.now(UTC),
         monotonic=time.monotonic,
-        logger=_build_local_logger(config, debug=debug),
+        logger=logger,
         read_plan=lambda path: path.read_bytes(),
     )
 
@@ -368,15 +375,49 @@ def dispatch(
             record = ledger.load(request.issue_iid)
             if record is None or record.state is not RunnerState.BLOCKED:
                 raise RuntimeError("only a recorded blocked issue can be retried")
+            retained_publication = (
+                record.intent is not None
+                and record.intent.kind == "publish_merge_request"
+            )
+            if retained_publication and record.publication_sha is None:
+                if record.source_sha is None:
+                    raise RuntimeError("retained publication has no baseline SHA")
+                publication_sha = wired.repository.bind_retained_commit(
+                    record.worktree,
+                    record.source_branch,
+                    record.issue_iid,
+                    record.source_sha,
+                )
+                if record.intent is None:
+                    raise RuntimeError("retained publication has no exact intent")
+                record = ledger.persist(
+                    record.model_copy(
+                        update={
+                            "publication_sha": publication_sha,
+                            "intent": record.intent.model_copy(
+                                update={
+                                    "expected_evidence": record.intent.expected_evidence
+                                    | {"publication_sha": publication_sha}
+                                }
+                            ),
+                        }
+                    )
+                )
             resumed = ledger.persist(
                 transition_record(
                     record,
-                    RunnerState.PREPARING,
+                    RunnerState.PUBLISHING
+                    if retained_publication
+                    else RunnerState.PREPARING,
                     retry_count=0,
                     retry_at=None,
                     error_code=None,
                     summary="Human-directed retry requested.",
-                    next_action="Reconcile and resume preparation.",
+                    next_action=(
+                        "Replay the retained publication intent."
+                        if retained_publication
+                        else "Reconcile and resume preparation."
+                    ),
                 )
             )
             gitlab.transition_labels(record.issue_iid, label_for_state(resumed.state))

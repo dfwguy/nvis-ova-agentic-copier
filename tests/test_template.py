@@ -798,6 +798,142 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
     }
 
 
+@pytest.mark.parametrize("helper_succeeds", (True, False))
+def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
+    project_root: Path, tmp_path: Path, *, helper_succeeds: bool
+) -> None:
+    """The runner starts only after the scrubbed glab-helper dry-run succeeds."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    commands = tmp_path / "commands"
+    git = commands / "git"
+    push_marker = tmp_path / "push-dry-run.json"
+    _run_test_git(
+        checkout,
+        "remote",
+        "set-url",
+        "origin",
+        "https://gitlab.example.test/group/project.git",
+    )
+    project_json = json.dumps(
+        {
+            "id": 123,
+            "default_branch": "main",
+            "http_url_to_repo": "https://gitlab.example.test/group/project.git",
+            "ssh_url_to_repo": "git@gitlab.example.test:group/project.git",
+        }
+    )
+    _write_command(
+        commands / "glab",
+        'if [ "$1" = auth ]; then exit "${GLAB_HELPER_EXIT:-0}"; fi\n'
+        f"printf '%s\\n' '{project_json}'",
+    )
+    _write_command(
+        git,
+        'case " $* " in\n'
+        '  *" push --dry-run "*)\n'
+        '    printf \'{"arguments":"%s","helper0":"%s","helper1":"%s","prompt":"%s"}\\n\' "$*" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_VALUE_1" "$GIT_TERMINAL_PROMPT" > "$PUSH_MARKER"\n'
+        "    set -- $GIT_CONFIG_VALUE_1\n"
+        '    "$@"\n'
+        "    ;;\n"
+        '  *" ls-remote "*)\n'
+        '    sha="$("$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" rev-parse HEAD)"\n'
+        '    printf "%s\\trefs/heads/main\\n" "$sha"\n'
+        "    ;;\n"
+        '  *) exec "$REAL_GIT" "$@" ;;\n'
+        "esac",
+    )
+    environment |= {
+        "AGENT_WORK_GIT": str(git),
+        "PUSH_MARKER": str(push_marker),
+        "REAL_GIT": str(shutil.which("git")),
+        "GLAB_HELPER_EXIT": "0" if helper_succeeds else "23",
+        "GIT_CONFIG_VALUE_0": "ambient-helper-must-be-cleared",
+    }
+
+    before_head = _test_git_output(checkout, "rev-parse", "HEAD")
+    result = _run_wrapper(project_root, environment)
+
+    assert push_marker.exists()
+    assert _test_git_output(checkout, "rev-parse", "HEAD") == before_head
+    readiness = json.loads(push_marker.read_text())
+    assert "push --dry-run" in readiness["arguments"]
+    assert readiness["helper0"] == ""
+    assert readiness["helper1"] == f"{commands / 'glab'} auth git-credential"
+    assert readiness["prompt"] == "0"
+    if helper_succeeds:
+        assert result.returncode == 0, result.stderr
+        assert marker.exists()
+    else:
+        assert result.returncode != 0
+        assert not marker.exists()
+
+
+@pytest.mark.parametrize("arguments", ((), ("--apply",)))
+@pytest.mark.parametrize("helper_succeeds", (True, False))
+def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
+    project_root: Path,
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    *,
+    helper_succeeds: bool,
+) -> None:
+    """Direnv cannot replace the target or Git credential controls at readiness."""
+    checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    (checkout / ".envrc").write_text("# test boundary\n")
+    _commit_repository_state(checkout, "add checkout envrc")
+    _run_test_git(checkout, "push", environment["LOCAL_ORIGIN"], "HEAD:main")
+    _run_test_git(
+        checkout, "fetch", environment["LOCAL_ORIGIN"], "main:refs/remotes/origin/main"
+    )
+    commands = tmp_path / "commands"
+    readiness = tmp_path / "readiness.json"
+    _write_command(
+        commands / "direnv",
+        "export GITLAB_HOST=poison.example GITLAB_PROJECT_ID=999 GIT_CONFIG_VALUE_1=poison GIT_ASKPASS=poison GIT_CONFIG_PARAMETERS=credential.helper=poison AGENT_WORK_GIT=/poison/git AGENT_WORK_GLAB=/poison/glab\n"
+        'shift 2\nexec "$@"',
+    )
+    _write_command(
+        commands / "glab",
+        'if [ "$1" = auth ]; then [ "${HELPER_OK:-0}" = 1 ] || { echo secret-helper-output >&2; exit 23; }; exit 0; fi\n'
+        'printf "%s\\n" \'{"id":123,"default_branch":"main","http_url_to_repo":"https://gitlab.example.test/group/project.git"}\'',
+    )
+    _write_command(
+        commands / "git",
+        'case " $* " in *" push --dry-run "*) printf \'{"host":"%s","project":"%s","helper":"%s","askpass":"%s","parameters":"%s"}\\n\' "$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$GIT_CONFIG_VALUE_1" "$GIT_ASKPASS" "${GIT_CONFIG_PARAMETERS:-}" > "$READINESS"; set -- $GIT_CONFIG_VALUE_1; "$@" ;; *" ls-remote "*) sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;; *fetch*) for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;; *) exec "$REAL_GIT" "$@" ;; esac',
+    )
+    _write_command(
+        commands / "uv",
+        'printf \'{"git":"%s","glab":"%s"}\\n\' "$AGENT_WORK_GIT" "$AGENT_WORK_GLAB" > "$UV_MARKER"',
+    )
+    environment |= {
+        "AGENT_WORK_DIRENV": str(commands / "direnv"),
+        "AGENT_WORK_GLAB": str(commands / "glab"),
+        "AGENT_WORK_GIT": str(commands / "git"),
+        "READINESS": str(readiness),
+        "HELPER_OK": "1" if helper_succeeds else "0",
+    }
+    result = _run_wrapper(project_root, environment, *arguments)
+    assert readiness.exists(), result.stderr
+    observed = json.loads(readiness.read_text())
+    assert observed == {
+        "host": "gitlab.example.test",
+        "project": "123",
+        "helper": f"{commands / 'glab'} auth git-credential",
+        "askpass": "/bin/false",
+        "parameters": "",
+    }
+    if helper_succeeds:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(marker.read_text()) == {
+            "git": str(commands / "git"),
+            "glab": str(commands / "glab"),
+        }
+    else:
+        assert result.returncode != 0
+        assert "secret-helper-output" not in result.stderr + result.stdout
+        assert not marker.exists()
+
+
 def test_agent_loop_wrapper_fast_forwards_before_applied_worker(
     project_root: Path, tmp_path: Path
 ) -> None:
@@ -1210,8 +1346,10 @@ def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
     checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
     (checkout / ".envrc").write_text("# fake direnv authorization boundary\n")
     _commit_repository_state(checkout, "add checkout envrc")
-    _run_test_git(checkout, "push", "origin", "HEAD:main")
-    _run_test_git(checkout, "fetch", "origin", "main:refs/remotes/origin/main")
+    _run_test_git(checkout, "push", environment["LOCAL_ORIGIN"], "HEAD:main")
+    _run_test_git(
+        checkout, "fetch", environment["LOCAL_ORIGIN"], "main:refs/remotes/origin/main"
+    )
     commands = tmp_path / "commands"
     marker = tmp_path / "runner-identity.json"
     _write_command(
@@ -1525,7 +1663,9 @@ def _wrapper_checkout_environment(
     commands.mkdir()
     marker = tmp_path / "uv-marker"
     glab_marker = tmp_path / "glab-marker"
-    project_url = reported_origin or str(remote)
+    checkout_url = "https://gitlab.example.test/group/project.git"
+    project_url = reported_origin or checkout_url
+    _run_test_git(checkout, "remote", "set-url", "origin", checkout_url)
     project_json = json.dumps(
         {
             "id": int(reported_project_id),
@@ -1541,13 +1681,22 @@ def _wrapper_checkout_environment(
         f"printf '%s\\n' '{project_json}'",
     )
     _write_command(
+        commands / "git",
+        'case " $* " in\n'
+        '  *" ls-remote "*) sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;;\n'
+        '  *" push --dry-run "*) "$AGENT_WORK_GLAB" auth git-credential >/dev/null 2>&1 ;;\n'
+        '  *fetch*) for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;;\n'
+        '  *) exec "$REAL_GIT" "$@" ;;\n'
+        "esac",
+    )
+    _write_command(
         commands / "uv",
         'printf \'%s\\n\' "$(cat version)" > "$UV_MARKER"\n'
         'printf \'%s\\n\' "$*" >> "$UV_MARKER"',
     )
     _write_command(commands / "agent", "exit 0")
     command_paths = {
-        "AGENT_WORK_GIT": shutil.which("git"),
+        "AGENT_WORK_GIT": str(commands / "git"),
         "AGENT_WORK_JQ": shutil.which("jq"),
         "AGENT_WORK_FLOCK": shutil.which("flock"),
     }
@@ -1563,6 +1712,8 @@ def _wrapper_checkout_environment(
         "GITLAB_PROJECT_ID": "123",
         "UV_MARKER": str(marker),
         "GLAB_MARKER": str(glab_marker),
+        "REAL_GIT": str(shutil.which("git")),
+        "LOCAL_ORIGIN": str(remote),
         **{key: str(value) for key, value in command_paths.items()},
     }
     return checkout, environment, marker, glab_marker

@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from pytest_subprocess import FakeProcess
 
 from agent_work.cli import main
-from agent_work.domain import LIFECYCLE_LABELS
+from agent_work.domain import LIFECYCLE_LABELS, ErrorCode
 from agent_work.gitlab import GitLabError, GitLabGateway
 from agent_work.models import (
     AgentWorkConfig,
@@ -34,8 +34,12 @@ from agent_work.models import (
 from agent_work.repository import (
     CommandResult,
     GitRepository,
+    PublicationError,
+    PublicationFailureCategory,
     RepositoryError,
     _origin_identity,
+    build_git_environment,
+    classify_publication_failure,
     discover_config,
     run_subprocess,
 )
@@ -49,8 +53,364 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         project_id=310967,
         checkout=tmp_path / "checkout",
         state_root=tmp_path / "state",
+        git_path=tmp_path / "bin" / "git",
+        glab_path=tmp_path / "bin" / "glab",
         base_branch="agent/work-base",
     )
+
+
+def test_agent_work_config_requires_absolute_recorded_git_and_glab_paths(
+    tmp_path: Path,
+) -> None:
+    payload = _config(tmp_path).model_dump() | {
+        "git_path": tmp_path / "bin" / "git",
+        "glab_path": tmp_path / "bin" / "glab",
+    }
+
+    config = AgentWorkConfig.model_validate(payload)
+
+    assert config.git_path == tmp_path / "bin" / "git"
+    assert config.glab_path == tmp_path / "bin" / "glab"
+    with pytest.raises(ValidationError, match="absolute"):
+        AgentWorkConfig.model_validate(payload | {"git_path": Path("git")})
+
+
+@pytest.mark.parametrize("path_name", ("AGENT_WORK_GIT", "AGENT_WORK_GLAB"))
+def test_discovery_rejects_missing_or_nonabsolute_recorded_executables(
+    tmp_path: Path, path_name: str
+) -> None:
+    environment = {
+        "XDG_STATE_HOME": str(tmp_path / "xdg"),
+        "GITLAB_HOST": "gitlab.example.com",
+        "GITLAB_PROJECT_ID": "310967",
+        "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+        "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
+        "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
+    }
+    environment[path_name] = "git" if path_name == "AGENT_WORK_GIT" else ""
+
+    with pytest.raises(RepositoryError, match="absolute executable"):
+        discover_config(
+            current_directory=tmp_path,
+            environment=environment,
+            run_command=lambda *_args, **_kwargs: CommandResult(0, "", ""),
+        )
+
+
+def test_discovery_and_git_repository_use_recorded_executables_and_environment(
+    tmp_path: Path,
+) -> None:
+    git = tmp_path / "bin" / "git"
+    glab = tmp_path / "bin" / "glab"
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    git_environments: list[dict[str, str]] = []
+
+    def fake(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append((command, kwargs))
+        environment = kwargs.get("environment")
+        if isinstance(environment, dict):
+            captured_environment: dict[str, str] = {}
+            for key, value in environment.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    break
+                captured_environment[key] = value
+            else:
+                git_environments.append(captured_environment)
+        if command[-1:] == ("--show-toplevel",):
+            return CommandResult(0, f"{tmp_path / 'checkout'}\n", "")
+        if command[-3:] == ("remote", "get-url", "origin"):
+            return CommandResult(
+                0, "https://gitlab.example.com/group/project.git\n", ""
+            )
+        if command[0] == str(glab):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "id": 310967,
+                        "path_with_namespace": "group/project",
+                        "default_branch": "main",
+                        "http_url_to_repo": "https://gitlab.example.com/group/project.git",
+                    }
+                ),
+                "",
+            )
+        if command[-2:] == ("rev-parse", "HEAD"):
+            return CommandResult(0, "a" * 40, "")
+        return CommandResult(0, "", "")
+
+    config = discover_config(
+        current_directory=tmp_path,
+        environment={
+            "XDG_STATE_HOME": str(tmp_path / "xdg"),
+            "GITLAB_HOST": "gitlab.example.com",
+            "GITLAB_PROJECT_ID": "310967",
+            "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+            "AGENT_WORK_GIT": str(git),
+            "AGENT_WORK_GLAB": str(glab),
+        },
+        run_command=fake,
+    )
+    repository = GitRepository(
+        config,
+        fake,
+        service_environment={"GITLAB_TOKEN": "not-in-argv"},
+    )
+    assert repository.head(tmp_path / "worktree") == "a" * 40
+
+    assert config.git_path == git
+    assert config.glab_path == glab
+    assert calls[0][0][0] == str(git)
+    assert any(command[0] == str(glab) for command, _ in calls)
+    git_call = calls[-1]
+    assert git_call[0][0] == str(git)
+    assert "not-in-argv" not in " ".join(git_call[0])
+    assert git_environments[-1]["GIT_CONFIG_VALUE_1"] == f"{glab} auth git-credential"
+
+
+@pytest.mark.parametrize(
+    ("checkout_origin", "api_origin"),
+    (
+        (
+            "http://gitlab.example.com/group/project.git",
+            "https://gitlab.example.com/group/project.git",
+        ),
+        (
+            "https://user@gitlab.example.com/group/project.git",
+            "https://gitlab.example.com/group/project.git",
+        ),
+        (
+            "https://gitlab.example.com/group/project.git",
+            "http://gitlab.example.com/group/project.git",
+        ),
+        (
+            "https://gitlab.example.com/group/project.git",
+            "https://user:password@gitlab.example.com/group/project.git",
+        ),
+        (
+            "https://gitlab.example.com/group/project.git",
+            "https://gitlab.example.com/group/other.git",
+        ),
+    ),
+)
+def test_discovery_rejects_non_authoritative_https_origin(
+    tmp_path: Path, checkout_origin: str, api_origin: str
+) -> None:
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1:] == ("--show-toplevel",):
+            return CommandResult(0, f"{tmp_path / 'checkout'}\n", "")
+        if command[-3:] == ("remote", "get-url", "origin"):
+            return CommandResult(0, checkout_origin, "")
+        return CommandResult(
+            0,
+            json.dumps(
+                {
+                    "id": 310967,
+                    "default_branch": "main",
+                    "path_with_namespace": "group/project",
+                    "http_url_to_repo": api_origin,
+                }
+            ),
+            "",
+        )
+
+    with pytest.raises(RepositoryError, match="HTTPS|identity"):
+        discover_config(
+            current_directory=tmp_path,
+            environment={
+                "XDG_STATE_HOME": str(tmp_path / "xdg"),
+                "GITLAB_HOST": "gitlab.example.com",
+                "GITLAB_PROJECT_ID": "310967",
+                "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+                "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
+                "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
+            },
+            run_command=fake,
+        )
+
+
+def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
+    tmp_path: Path,
+) -> None:
+    config = AgentWorkConfig.model_validate(
+        _config(tmp_path).model_dump()
+        | {
+            "git_path": tmp_path / "bin" / "git",
+            "glab_path": tmp_path / "bin" / "glab",
+        }
+    )
+    head = "a" * 40
+    status = "M changed.py\n"
+    calls: list[tuple[str, ...]] = []
+    diagnostics: list[dict[str, object]] = []
+    raw_failure = "https://user:token@example.test secret-token authentication failed"
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal head, status
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{head}\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, status, "")
+        if arguments[:2] == ("commit", "-m"):
+            head = "b" * 40
+            status = ""
+            return CommandResult(0, "", "")
+        if arguments[:1] == ("push",):
+            if len([call for call in calls if call[3:4] == ("push",)]) == 1:
+                return CommandResult(1, "", raw_failure)
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "origin/agent/issue-12"):
+            return CommandResult(0, f"{head}\n", "")
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(
+        config,
+        fake,
+        service_environment={"GITLAB_TOKEN": "secret-token"},
+        diagnostic_sink=diagnostics.append,
+    )
+    worktree = tmp_path / "worktree"
+    prepared = repository.prepare_commit(
+        worktree, "agent/issue-12", 12, expected_head="a" * 40
+    )
+    with pytest.raises(PublicationError) as failure:
+        repository.push_prepared(worktree, "agent/issue-12", prepared)
+    replayed = repository.push_prepared(worktree, "agent/issue-12", prepared)
+
+    assert replayed == "b" * 40
+    assert len([call for call in calls if call[3:4] == ("commit",)]) == 1
+    assert [call[3:] for call in calls if call[3:4] == ("push",)] == [
+        ("push", "origin", f"{'b' * 40}:refs/heads/agent/issue-12"),
+        ("push", "origin", f"{'b' * 40}:refs/heads/agent/issue-12"),
+    ]
+    assert failure.value.code is ErrorCode.GIT_AUTHENTICATION
+    assert diagnostics == [
+        {
+            "category": "authentication",
+            "operation": "push",
+            "returncode": 1,
+        }
+    ]
+    assert raw_failure not in str(diagnostics)
+    assert "secret-token" not in str(failure.value)
+
+
+def test_git_credential_environment_disables_prompts_and_uses_only_glab_helper(
+    tmp_path: Path,
+) -> None:
+    glab = tmp_path / "bin" / "glab"
+    environment = build_git_environment(
+        {
+            "GITLAB_TOKEN": "secret-value",
+            "PATH": "/untrusted/bin",
+            "GIT_CONFIG_PARAMETERS": "credential.helper=hostile",
+        },
+        glab,
+    )
+
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["GCM_INTERACTIVE"] == "never"
+    assert environment["GIT_CONFIG_COUNT"] == "4"
+    assert environment["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert environment["GIT_CONFIG_VALUE_0"] == ""
+    assert environment["GIT_CONFIG_KEY_1"] == "credential.helper"
+    assert environment["GIT_CONFIG_VALUE_1"] == f"{glab} auth git-credential"
+    assert environment["GIT_CONFIG_KEY_2"] == "credential.useHttpPath"
+    assert environment["GIT_CONFIG_VALUE_2"] == "true"
+    assert environment["GIT_ASKPASS"] == "/bin/false"
+    assert environment["SSH_ASKPASS"] == "/bin/false"
+    assert environment["GIT_CONFIG_KEY_3"] == "core.askPass"
+    assert environment["GIT_CONFIG_VALUE_3"] == "/bin/false"
+    assert environment["GITLAB_TOKEN"] == "secret-value"
+    assert "GIT_CONFIG_PARAMETERS" not in environment
+
+
+@pytest.mark.parametrize(
+    ("stderr", "category", "code", "retryable"),
+    [
+        (
+            "fatal: could not read Username for 'https://gitlab.example.com'",
+            "authentication",
+            ErrorCode.GIT_AUTHENTICATION,
+            False,
+        ),
+        (
+            "remote: You are not allowed to push code to this project",
+            "authorization",
+            ErrorCode.GIT_AUTHORIZATION,
+            False,
+        ),
+        (
+            "remote: GitLab: You are not allowed to force push code to a protected branch",
+            "policy",
+            ErrorCode.GIT_POLICY,
+            False,
+        ),
+        (
+            "fatal: unable to access: Connection timed out",
+            "transport",
+            ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            True,
+        ),
+        (
+            "fatal: unexpected failure",
+            "configuration",
+            ErrorCode.GIT_PUBLICATION_CONFIGURATION,
+            False,
+        ),
+    ],
+)
+def test_publication_failure_classification_is_safe_and_deterministic(
+    stderr: str,
+    category: PublicationFailureCategory,
+    code: ErrorCode,
+    *,
+    retryable: bool,
+) -> None:
+    failure = classify_publication_failure(stderr)
+
+    assert failure.category == category
+    assert failure.code is code
+    assert failure.retryable is retryable
+    assert stderr not in failure.summary
+    assert stderr not in failure.next_action
+    assert "Username" not in str(PublicationError(failure))
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    (
+        "temporary failure in name resolution",
+        "connection reset by peer",
+        "connection refused",
+        "TLS handshake timeout",
+        "remote end hung up unexpectedly",
+        "The requested URL returned error: 500",
+        "The requested URL returned error: 502",
+        "The requested URL returned error: 503",
+        "The requested URL returned error: 504",
+    ),
+)
+def test_publication_classifier_accepts_only_known_transport_signatures(
+    stderr: str,
+) -> None:
+    assert classify_publication_failure(stderr).retryable
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    ("TLS certificate verification failed", "bad config line 5", "temporary failure"),
+)
+def test_publication_classifier_rejects_generic_or_permanent_signatures(
+    stderr: str,
+) -> None:
+    failure = classify_publication_failure(stderr)
+    assert failure.category is PublicationFailureCategory.CONFIGURATION
+    assert not failure.retryable
 
 
 def _issue_payload(
@@ -1003,6 +1363,7 @@ def test_discover_config_is_read_only_and_confirms_numeric_project(
                     "id": 310967,
                     "default_branch": "main",
                     "path_with_namespace": "group/project",
+                    "http_url_to_repo": "https://gitlab.example.com/group/project.git",
                 }
             ),
             "",
@@ -1015,6 +1376,8 @@ def test_discover_config_is_read_only_and_confirms_numeric_project(
             "GITLAB_HOST": "gitlab.example.com",
             "GITLAB_PROJECT_ID": "310967",
             "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+            "AGENT_WORK_GIT": str(tmp_path / "bin" / "git"),
+            "AGENT_WORK_GLAB": str(tmp_path / "bin" / "glab"),
         },
         run_command=fake,
     )
@@ -1044,8 +1407,10 @@ def test_repository_prepares_publishes_and_inventories(
     config.checkout.mkdir()
     responses: dict[tuple[str, ...], CommandResult] = {}
     calls: list[tuple[str, ...]] = []
+    head = "a" * 40
 
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal head
         calls.append(command)
         args = command[3:]
         if args in responses:
@@ -1059,11 +1424,15 @@ def test_repository_prepares_publishes_and_inventories(
             return CommandResult(0, f"{branch}\n", "")
         if args == ("status", "--porcelain"):
             return CommandResult(0, "M file\n", "")
+        if args[:2] == ("commit", "-m"):
+            head = "b" * 40
+            responses[("status", "--porcelain")] = CommandResult(0, "", "")
+            return CommandResult(0, "", "")
         if args == ("rev-parse", "HEAD") or args == (
             "rev-parse",
             "origin/agent/issue-12",
         ):
-            return CommandResult(0, "a" * 40, "")
+            return CommandResult(0, head, "")
         if args[:2] == ("for-each-ref", "--format=%(refname:short)"):
             return CommandResult(0, "agent/issue-12\n", "")
         if args[:2] == ("worktree", "list"):
@@ -1081,16 +1450,127 @@ def test_repository_prepares_publishes_and_inventories(
     assert worktree == config.state_root / "worktrees" / "12"
     responses[("status", "--porcelain")] = CommandResult(0, "M file\n", "")
     assert (
-        repository.commit_and_push(
-            worktree, "agent/issue-12", 12, expected_head="a" * 40
+        repository.push_prepared(
+            worktree,
+            "agent/issue-12",
+            repository.prepare_commit(
+                worktree, "agent/issue-12", 12, expected_head="a" * 40
+            ),
         )
-        == "a" * 40
+        == "b" * 40
     )
     branches, worktrees, stashes = repository.inventory()
     assert branches == ("agent/issue-12",)
     assert worktrees == (str(config.checkout),)
     assert stashes == ("agent-work recovery issue-12",)
     assert any("pull" in command for command in calls)
+
+
+def test_push_prepared_rejects_a_changed_head_without_push(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, "b" * 40, "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError, match="no longer matches"):
+        GitRepository(config, fake).push_prepared(
+            tmp_path / "worktree", "agent/issue-12", "a" * 40
+        )
+    assert not any(call[3:4] == ("push",) for call in calls)
+
+
+def test_bind_retained_commit_returns_only_the_exact_legacy_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, "b" * 40, "")
+        if arguments == ("rev-list", "--parents", "-n", "1", "b" * 40):
+            return CommandResult(0, f"{'b' * 40} {'a' * 40}\n", "")
+        if arguments == ("rev-list", "--count", f"{'a' * 40}..{'b' * 40}"):
+            return CommandResult(0, "1\n", "")
+        if arguments == ("log", "-1", "--format=%s", "b" * 40):
+            return CommandResult(0, "Resolve issue #12\n", "")
+        return CommandResult(0, "", "")
+
+    assert (
+        GitRepository(config, fake).bind_retained_commit(
+            tmp_path / "worktree", "agent/issue-12", 12, "a" * 40
+        )
+        == "b" * 40
+    )
+    assert not any(call[3:4] == ("push",) for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("status", "branch", "parents", "count", "subject"),
+    (
+        (
+            "M changed.py\n",
+            "agent/issue-12",
+            "b" * 40 + " " + "a" * 40,
+            "1",
+            "Resolve issue #12",
+        ),
+        ("", "other", "b" * 40 + " " + "a" * 40, "1", "Resolve issue #12"),
+        ("", "agent/issue-12", "b" * 40 + " " + "c" * 40, "1", "Resolve issue #12"),
+        (
+            "",
+            "agent/issue-12",
+            "b" * 40 + " " + "a" * 40 + " " + "c" * 40,
+            "1",
+            "Resolve issue #12",
+        ),
+        ("", "agent/issue-12", "b" * 40 + " " + "a" * 40, "2", "Resolve issue #12"),
+        ("", "agent/issue-12", "b" * 40 + " " + "a" * 40, "1", "Other subject"),
+    ),
+)
+def test_bind_retained_commit_rejects_nonexact_legacy_state(
+    tmp_path: Path, status: str, branch: str, parents: str, count: str, subject: str
+) -> None:
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, status, "")
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, branch, "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, "b" * 40, "")
+        if arguments == ("rev-list", "--parents", "-n", "1", "b" * 40):
+            return CommandResult(0, f"{parents}\n", "")
+        if arguments == ("rev-list", "--count", f"{'a' * 40}..{'b' * 40}"):
+            return CommandResult(0, f"{count}\n", "")
+        if arguments == ("log", "-1", "--format=%s", "b" * 40):
+            return CommandResult(0, subject, "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(config, fake).bind_retained_commit(
+            tmp_path / "worktree", "agent/issue-12", 12, "a" * 40
+        )
+    assert not any(call[3:4] == ("push",) for call in calls)
 
 
 def test_existing_mr_worktree_requires_the_recorded_remote_sha(tmp_path: Path) -> None:
@@ -1137,11 +1617,8 @@ def test_publication_rejects_wrong_branch_worker_commits_and_empty_changes(
     repository = GitRepository(config, fake)
 
     with pytest.raises(RepositoryError):
-        repository.commit_and_push(
-            tmp_path / "worktree",
-            "agent/issue-12",
-            12,
-            expected_head="a" * 40,
+        repository.prepare_commit(
+            tmp_path / "worktree", "agent/issue-12", 12, expected_head="a" * 40
         )
 
 

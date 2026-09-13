@@ -78,6 +78,14 @@ if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
 fi
 
 git=("$AGENT_WORK_GIT" -c core.hooksPath=/dev/null)
+export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
+export GIT_CONFIG_COUNT=4 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
+export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
+export GIT_CONFIG_KEY_1=credential.helper
+export GIT_CONFIG_VALUE_1="$AGENT_WORK_GLAB auth git-credential"
+export GIT_CONFIG_KEY_2=credential.useHttpPath GIT_CONFIG_VALUE_2=true
+export GIT_CONFIG_KEY_3=core.askPass GIT_CONFIG_VALUE_3=/bin/false
+unset GIT_CONFIG_PARAMETERS
 checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
 if ! top="$("${git[@]}" -C "$checkout" rev-parse --show-toplevel)"; then
   stop 'AGENT_WORK_CHECKOUT is not a Git checkout'
@@ -158,11 +166,15 @@ fi
 if ! http="$("$AGENT_WORK_JQ" -er '.http_url_to_repo | strings | select(length > 0)' <<<"$json")"; then
   stop 'GitLab project response has no HTTP origin'
 fi
-if ! ssh="$("$AGENT_WORK_JQ" -er '.ssh_url_to_repo | strings | select(length > 0)' <<<"$json")"; then
-  stop 'GitLab project response has no SSH origin'
+case "$http" in
+  https://*) ;;
+  *) stop 'GitLab project HTTP origin must use credential-free HTTPS' ;;
+esac
+if [[ "$http" == https://*@* ]]; then
+  stop 'GitLab project HTTP origin must use credential-free HTTPS'
 fi
-if [[ "$(normal_url "$origin")" != "$(normal_url "$http")" && "$(normal_url "$origin")" != "$(normal_url "$ssh")" ]]; then
-  stop 'origin does not match configured GitLab project'
+if [[ "$(normal_url "$origin")" != "$(normal_url "$http")" ]]; then
+  stop 'origin must match configured GitLab HTTPS project URL'
 fi
 if [[ "$("${git[@]}" -C "$checkout" config --get "branch.$base.remote")" != origin || "$("${git[@]}" -C "$checkout" config --get "branch.$base.merge")" != "refs/heads/$default" ]]; then
   stop 'checkout upstream is not origin default branch'
@@ -201,9 +213,29 @@ if [[ "${1:-}" == --apply ]]; then
     stop 'checkout HEAD is not the refreshed origin default branch'
   fi
 fi
+readiness=(
+  /usr/bin/env -u GIT_CONFIG_PARAMETERS
+  "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id"
+  "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never"
+  "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false"
+  "GIT_CONFIG_COUNT=4"
+  "GIT_CONFIG_KEY_0=credential.helper" "GIT_CONFIG_VALUE_0="
+  "GIT_CONFIG_KEY_1=credential.helper"
+  "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential"
+  "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true"
+  "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false"
+  "$AGENT_WORK_GIT" -c core.hooksPath=/dev/null -C "$checkout"
+  push --dry-run origin "HEAD:refs/heads/agent/readiness"
+)
+if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
+  readiness=("$AGENT_WORK_DIRENV" exec "$checkout" "${readiness[@]}")
+fi
+if ! "${readiness[@]}" >/dev/null 2>&1; then
+  stop 'Git credential-helper publication readiness check failed'
+fi
 runner=("$AGENT_WORK_UV")
 if [[ -n "${AGENT_WORK_DIRENV:-}" ]]; then
-  runner=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "$AGENT_WORK_UV")
+  runner=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" "$AGENT_WORK_UV")
 fi
 cd "$checkout"
 if [[ "${1:-}" == --apply ]]; then

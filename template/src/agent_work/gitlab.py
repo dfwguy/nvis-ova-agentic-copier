@@ -134,7 +134,7 @@ class GitLabGateway:
         self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
     ) -> object:
         command = (
-            "glab",
+            str(self._config.glab_path),
             "api",
             "--hostname",
             self._config.host,
