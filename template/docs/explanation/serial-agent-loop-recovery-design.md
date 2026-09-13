@@ -95,8 +95,8 @@ recoverable execution detail that does not belong in labels.
 stateDiagram-v2
     [*] --> Preparing: claim eligible issue and reconcile
     Preparing --> Executing: durable worktree ready
-    Executing --> RetryWait: transient failure
-    RetryWait --> Executing: retry becomes due
+    Executing --> RetryWait: retryable failure
+    RetryWait --> Executing: immediately due worker retry or external retry becomes due
     Executing --> Publishing: worker result is ready_to_publish
     Publishing --> Observing: exact MR evidence verified
     Observing --> Repair: pipeline or MR needs repair
@@ -152,7 +152,7 @@ handoff:
    and closing-issue evidence.
 10. Record one safe, actionable outcome. Continue immediately with the same
     issue when progress is safe, or yield when the activation reaches idle,
-    no progress or an external wait, `retry-wait`, a terminal or human-facing
+    no progress or a future external wait, a terminal or human-facing
     state, or its workflow or wall-time bound.
 
 An interrupted ordinary workflow can have completed publication before its
@@ -177,9 +177,10 @@ Architect, Red, Green, documentation, or judges.
 The default activation runs at most 16 workflow attempts within one 10,800-second
 (three-hour) overall work budget. Each workflow-owning invocation receives the
 positive, ceil-rounded time remaining from that budget. An exhausted budget is
-handled by the normal durable-worktree retry and recovery path. The timer waits
+handled by the normal durable-worktree retry and recovery path. Retryable worker
+failures are immediately due and continue in that activation; the timer waits
 20 minutes after the complete activation, so that interval controls idle
-polling and external waits rather than spacing internal handoffs. The systemd
+polling and genuine external waits rather than spacing internal handoffs. The systemd
 service has no sequence-wide timeout; each worker activation retains the work
 budget. The timer does not own workflow state or perform checkout cleanup.
 
@@ -242,7 +243,8 @@ evidence before changing state.
 
 `ready_to_publish` means the bounded workflow session produced validated changes or a
 validated repair that the trusted runner may publish. `retryable` names a
-transient category and retry deadline. `needs_human` names the blocked reason
+transient category and is immediately retried within the activation. External
+transient failures retain their future retry deadline. `needs_human` names the blocked reason
 and a concrete action without treating a deliberate stop as failure.
 
 For every new-MR work kind, including protected policy work, the coding or

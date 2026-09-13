@@ -511,6 +511,8 @@ def dispatch(
                 stop_reason = record.state.value.replace("-", "_")
                 break
             if record.state is RunnerState.RETRY_WAIT:
+                if record.retry_at is not None and record.retry_at <= wired.clock():
+                    continue
                 stop_reason = "retry_wait"
                 break
             if (

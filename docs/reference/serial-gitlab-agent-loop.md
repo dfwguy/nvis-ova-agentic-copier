@@ -191,9 +191,9 @@ active-work budget. The systemd wrapper continues only after `awaiting-human`,
 read-only eligibility check, and begins another activation only for `eligible`.
 Between issues it re-queries GitLab and fast-forwards the clean service base;
 this bounded housekeeping is outside the per-issue budget. An `idle`,
-`pipeline-wait`, `retry-wait`, `repair`, `time-limit`, or `segment-limit` result
-yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
-idle checks and yielded pipeline/retry checks. The service has no sequence-wide
+`pipeline-wait`, a future `retry-wait`, `repair`, `time-limit`, or `segment-limit`
+result yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
+idle checks and yielded pipeline/future-external-retry checks. The service has no sequence-wide
 timeout, so it cannot truncate an otherwise unbounded sequence of individually
 bounded activations. The loop is serial per host and project, not multi-host
 coordination.
@@ -384,8 +384,9 @@ The initial workflow attempt plus at most three retry attempts are bounded.
 the recorded human action, `loop retry --issue-iid IID --apply` explicitly
 resumes it.
 
-Worker exits, timeouts, and transient GitLab or transport failures carry stable
-error codes and retry timing. The XDG `agent-work.log` records redacted
+Worker exits, timeouts, malformed worker protocol, invalid receipts, and explicit
+`retryable` worker results are immediately due and continue in the same
+activation; transient GitLab or transport failures retain retry timing. The XDG `agent-work.log` records redacted
 outcomes; `--debug` adds local diagnostics without credentials or transcripts.
 Migration preview follows every page of lifecycle projections. Apply preflights
 all actions against unchanged evidence, project identity, and absent ledger

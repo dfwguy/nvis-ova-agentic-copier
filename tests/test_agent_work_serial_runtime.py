@@ -734,6 +734,65 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
     assert len(outcome.receipts) == 1
 
 
+def test_invalid_worker_receipt_is_immediately_due(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    payload = {
+        "protocol_version": 1,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "coding-green",
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "phase_status": "complete",
+        "completed_phase": "coding-green",
+        "receipts": ["$wrong-skill: complete"],
+        "change_summary": "Invalid receipt.",
+        "next_action": "Retry.",
+    }
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert outcome.retry_at == NOW
+
+
+def test_malformed_worker_protocol_is_immediately_due(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker("<agent-work-result>not-json</agent-work-result>"),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.retry_at == NOW
+
+
 def test_split_required_workflow_creates_children_in_order_then_closes_parent(
     tmp_path: Path,
 ) -> None:
@@ -937,6 +996,7 @@ def test_malformed_split_envelope_blocks_before_any_decomposition_mutation(
     )
 
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.retry_at == NOW
     assert gitlab.created_children == []
     assert gitlab.decomposition_notes == []
     assert gitlab.closed_issues == []
@@ -1142,7 +1202,7 @@ def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None
         now=NOW,
     )
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
-    assert outcome.retry_at is not None
+    assert outcome.retry_at == NOW
     assert outcome.error_code is ErrorCode.WORKER_EXIT
 
 
@@ -1178,6 +1238,7 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
             now=NOW,
         )
         assert outcome is not None and outcome.error_code is expected
+        assert outcome.retry_at == NOW
 
 
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
@@ -4150,6 +4211,49 @@ def test_apply_resumes_a_due_retry_and_continues_in_the_same_activation(
     assert report.stop_reason == "pipeline_wait"
     assert report.items[0].state is RunnerState.EXECUTING
     assert invoker.phases == ["coding-finalize"]
+
+
+def test_apply_relaunches_immediately_due_worker_exits_until_retry_exhaustion(
+    tmp_path: Path,
+) -> None:
+    """Worker exits retry in one bounded activation on the retained worktree."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    repository = FakeRepository(config)
+    invoker = FakeInvoker(returncode=1)
+    clock_reads = 0
+
+    def clock() -> datetime:
+        nonlocal clock_reads
+        value = NOW + timedelta(seconds=clock_reads)
+        clock_reads += 1
+        return value
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=8, max_activation_seconds=3600),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, FakeGitLab(), repository),
+            invoke=invoker,
+            clock=clock,
+        ),
+    )
+
+    persisted = ledger.load(12)
+    assert report.stop_reason == "blocked"
+    assert len(invoker.prompts) == 4
+    assert report.items[0].retry_at == NOW
+    assert all(item.issue_iid == 12 for item in report.items)
+    assert persisted is not None and persisted.error_code is ErrorCode.RETRY_EXHAUSTED
+    assert repository.prepared is False
+    assert repository.verified_heads == ["a" * 40] * 4
 
 
 def test_apply_yields_without_mutation_for_a_future_retry(tmp_path: Path) -> None:
