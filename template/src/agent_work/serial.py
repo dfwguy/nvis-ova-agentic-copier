@@ -1059,6 +1059,27 @@ def _publish(
         publication_sha = record.publication_sha
         if publication_sha is None:
             raise SegmentError("publication commit is not durably bound")
+        reconciliation_sha = repository.reconcile_default_branch(
+            record.worktree, record.source_branch, publication_sha
+        )
+        if reconciliation_sha is not None:
+            return ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.EXECUTING,
+                    phase=WorkflowPhase.WORKFLOW,
+                    work_kind=(
+                        WorkKind.MERGE_CONFLICT_REPAIR
+                        if record.merge_request_iid is not None
+                        else record.work_kind
+                    ),
+                    source_sha=publication_sha,
+                    intent=None,
+                    publication_sha=None,
+                    summary="Current default branch requires reconciliation before publication.",
+                    next_action="Resolve the retained merge and rerun the full workflow.",
+                )
+            )
         sha = repository.push_prepared(
             record.worktree, record.source_branch, publication_sha
         )
@@ -1210,27 +1231,51 @@ def _observe(
             source_sha=record.source_sha,
         )
         if exact and mr.has_conflicts:
+            reconciliation_sha = repository.reconcile_default_branch(
+                record.worktree, record.source_branch, record.source_sha
+            )
+            if reconciliation_sha is None:
+                return _record_retry(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    error_code=ErrorCode.MERGE_CONFLICT,
+                )
             return ledger.persist(
                 transition_record(
                     record,
-                    RunnerState.REPAIR,
-                    phase=repair_phase,
+                    RunnerState.EXECUTING,
+                    phase=WorkflowPhase.WORKFLOW,
                     work_kind=WorkKind.MERGE_CONFLICT_REPAIR,
                     error_code=ErrorCode.MERGE_CONFLICT,
-                    summary="The exact merge request has conflicts.",
-                    next_action="Run one bounded merge-conflict repair segment.",
+                    intent=None,
+                    publication_sha=None,
+                    summary=(
+                        "The exact merge request has conflicts; its retained worktree "
+                        "requires reconciliation."
+                    ),
+                    next_action="Resolve the retained merge and rerun the full workflow.",
                 )
             )
         pipeline = gitlab.latest_pipeline_for_sha(
             record.merge_request_iid, record.source_sha
         )
-    except GitLabError:
+    except (RepositoryTransientError, GitLabError) as error:
         return _record_retry(
             record,
             ledger=ledger,
             gitlab=gitlab,
             now=now,
-            error_code=ErrorCode.GITLAB_RETRYABLE,
+            error_code=(
+                ErrorCode.GIT_TRANSPORT_RETRYABLE
+                if isinstance(error, RepositoryTransientError)
+                else ErrorCode.GITLAB_RETRYABLE
+            ),
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
         )
     if not exact:
         return _block_publication_identity(

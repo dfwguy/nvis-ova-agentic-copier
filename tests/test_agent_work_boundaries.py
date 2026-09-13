@@ -253,6 +253,8 @@ def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
             return CommandResult(0, "agent/issue-12\n", "")
         if arguments == ("rev-parse", "HEAD"):
             return CommandResult(0, f"{head}\n", "")
+        if arguments == ("rev-list", "--parents", "-n", "1", "b" * 40):
+            return CommandResult(0, f"{'b' * 40} {'a' * 40}\n", "")
         if arguments == ("status", "--porcelain"):
             return CommandResult(0, status, "")
         if arguments[:2] == ("commit", "-m"):
@@ -1433,6 +1435,8 @@ def test_repository_prepares_publishes_and_inventories(
             "origin/agent/issue-12",
         ):
             return CommandResult(0, head, "")
+        if args == ("rev-list", "--parents", "-n", "1", "b" * 40):
+            return CommandResult(0, f"{'b' * 40} {'a' * 40}\n", "")
         if args[:2] == ("for-each-ref", "--format=%(refname:short)"):
             return CommandResult(0, "agent/issue-12\n", "")
         if args[:2] == ("worktree", "list"):
@@ -1505,7 +1509,12 @@ def test_bind_retained_commit_returns_only_the_exact_legacy_commit(
             return CommandResult(0, "b" * 40, "")
         if arguments == ("rev-list", "--parents", "-n", "1", "b" * 40):
             return CommandResult(0, f"{'b' * 40} {'a' * 40}\n", "")
-        if arguments == ("rev-list", "--count", f"{'a' * 40}..{'b' * 40}"):
+        if arguments == (
+            "rev-list",
+            "--first-parent",
+            "--count",
+            f"{'a' * 40}..{'b' * 40}",
+        ):
             return CommandResult(0, "1\n", "")
         if arguments == ("log", "-1", "--format=%s", "b" * 40):
             return CommandResult(0, "Resolve issue #12\n", "")
@@ -1532,13 +1541,6 @@ def test_bind_retained_commit_returns_only_the_exact_legacy_commit(
         ),
         ("", "other", "b" * 40 + " " + "a" * 40, "1", "Resolve issue #12"),
         ("", "agent/issue-12", "b" * 40 + " " + "c" * 40, "1", "Resolve issue #12"),
-        (
-            "",
-            "agent/issue-12",
-            "b" * 40 + " " + "a" * 40 + " " + "c" * 40,
-            "1",
-            "Resolve issue #12",
-        ),
         ("", "agent/issue-12", "b" * 40 + " " + "a" * 40, "2", "Resolve issue #12"),
         ("", "agent/issue-12", "b" * 40 + " " + "a" * 40, "1", "Other subject"),
     ),
@@ -1560,7 +1562,12 @@ def test_bind_retained_commit_rejects_nonexact_legacy_state(
             return CommandResult(0, "b" * 40, "")
         if arguments == ("rev-list", "--parents", "-n", "1", "b" * 40):
             return CommandResult(0, f"{parents}\n", "")
-        if arguments == ("rev-list", "--count", f"{'a' * 40}..{'b' * 40}"):
+        if arguments == (
+            "rev-list",
+            "--first-parent",
+            "--count",
+            f"{'a' * 40}..{'b' * 40}",
+        ):
             return CommandResult(0, f"{count}\n", "")
         if arguments == ("log", "-1", "--format=%s", "b" * 40):
             return CommandResult(0, subject, "")
@@ -1833,3 +1840,217 @@ def test_local_operational_log_records_command_outcomes_and_failures(
     contents = (_config(tmp_path).state_root / "agent-work.log").read_text()
     assert "outcome=status command=loop.status" in contents
     assert "failure=ledger unavailable" in contents
+
+
+@pytest.mark.parametrize(
+    ("branch", "candidate", "merge_head", "merge_head_is_current", "raises"),
+    (
+        ("agent/issue-12", "b" * 40, None, True, False),
+        ("agent/issue-12", "a" * 40, None, True, False),
+        ("agent/issue-12", "a" * 40, "b" * 40, True, False),
+        ("agent/issue-12", "a" * 40, "c" * 40, False, True),
+        ("other", "a" * 40, None, True, True),
+    ),
+)
+def test_repository_reconciles_current_default_or_recovers_only_exact_pending_merge(
+    tmp_path: Path,
+    branch: str,
+    candidate: str,
+    merge_head: str | None,
+    merge_head_is_current: bool,
+    raises: bool,
+) -> None:
+    """Only the recorded candidate may start or recover a current-default merge."""
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, f"{branch}\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{candidate}\n", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{'b' * 40}\n", "")
+        if arguments == ("merge-base", "--is-ancestor", "b" * 40, candidate):
+            return CommandResult(0 if candidate == "b" * 40 else 1, "", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            merge_started = any(call[3:4] == ("merge",) for call in calls)
+            pending = merge_head or (
+                "b" * 40 if candidate == "a" * 40 and merge_started else None
+            )
+            return CommandResult(0 if pending else 1, f"{pending or ''}\n", "")
+        if arguments == ("merge-base", "--is-ancestor", merge_head, "b" * 40):
+            return CommandResult(0 if merge_head_is_current else 1, "", "")
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(config, fake)
+    if raises:
+        with pytest.raises(RepositoryError):
+            repository.reconcile_default_branch(
+                tmp_path / "worktree", "agent/issue-12", candidate
+            )
+        return
+
+    result = repository.reconcile_default_branch(
+        tmp_path / "worktree", "agent/issue-12", candidate
+    )
+
+    assert result == (None if candidate == "b" * 40 else "b" * 40)
+    assert any(call[3:5] == ("fetch", "origin") for call in calls)
+    assert any(
+        call[3:] == ("rev-parse", "-q", "--verify", "MERGE_HEAD") for call in calls
+    )
+    if candidate == "a" * 40 and merge_head is None:
+        assert any(
+            call[3:] == ("merge", "--no-ff", "--no-commit", "b" * 40) for call in calls
+        )
+
+
+def test_repository_reconciliation_rejects_dirty_worktree_without_pending_merge(
+    tmp_path: Path,
+) -> None:
+    """Unrelated changes cannot be folded into a default-branch reconciliation."""
+    config = _config(tmp_path)
+    candidate, default = "a" * 40, "b" * 40
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{candidate}\n", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{default}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "M unrelated.py\n", "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError, match="uncommitted changes"):
+        GitRepository(config, fake).reconcile_default_branch(
+            tmp_path / "worktree", "agent/issue-12", candidate
+        )
+
+
+@pytest.mark.parametrize(
+    ("unmerged", "porcelain", "parents", "raises"),
+    (
+        (False, "M changed.py\n", ("a" * 40, "b" * 40), False),
+        (False, "", ("a" * 40, "b" * 40), False),
+        (True, "M changed.py\n", ("a" * 40, "b" * 40), True),
+        (False, "M changed.py\n", ("b" * 40, "a" * 40), True),
+    ),
+)
+def test_prepare_commit_requires_a_resolved_pending_merge_and_exact_ordered_parents(
+    tmp_path: Path,
+    unmerged: bool,
+    porcelain: str,
+    parents: tuple[str, str],
+    raises: bool,
+) -> None:
+    """Trusted publication commits a resolved pending merge with candidate then default."""
+    config = _config(tmp_path)
+    candidate, default, prepared = "a" * 40, "b" * 40, "c" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(
+                0, f"{candidate if len(calls) < 6 else prepared}\n", ""
+            )
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, porcelain, "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(0, f"{default}\n", "")
+        if arguments == ("ls-files", "--unmerged"):
+            return CommandResult(
+                0, "100644 deadbeef 1\tchanged.py\n" if unmerged else "", ""
+            )
+        if arguments == ("rev-list", "--parents", "-n", "1", prepared):
+            return CommandResult(0, f"{prepared} {' '.join(parents)}\n", "")
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(config, fake)
+    if raises:
+        with pytest.raises(RepositoryError):
+            repository.prepare_commit(
+                tmp_path / "worktree", "agent/issue-12", 12, expected_head=candidate
+            )
+    else:
+        assert (
+            repository.prepare_commit(
+                tmp_path / "worktree", "agent/issue-12", 12, expected_head=candidate
+            )
+            == prepared
+        )
+        assert any(
+            call[3:] == ("rev-list", "--parents", "-n", "1", prepared) for call in calls
+        )
+
+
+@pytest.mark.parametrize(
+    ("parents", "second_parent_is_current", "raises"),
+    (
+        (("a" * 40, "b" * 40), True, False),
+        (("c" * 40, "b" * 40), True, True),
+        (("a" * 40, "c" * 40), False, True),
+    ),
+)
+def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
+    tmp_path: Path,
+    parents: tuple[str, str],
+    second_parent_is_current: bool,
+    raises: bool,
+) -> None:
+    """A crash replay may bind only the exact clean runner merge already in progress."""
+    config = _config(tmp_path)
+    baseline, prepared, current_default = "a" * 40, "d" * 40, "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{prepared}\n", "")
+        if arguments == ("rev-list", "--parents", "-n", "1", prepared):
+            return CommandResult(0, f"{prepared} {' '.join(parents)}\n", "")
+        if arguments == (
+            "rev-list",
+            "--first-parent",
+            "--count",
+            f"{baseline}..{prepared}",
+        ):
+            return CommandResult(0, "1\n", "")
+        if arguments == ("log", "-1", "--format=%s", prepared):
+            return CommandResult(0, "Resolve issue #12\n", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{current_default}\n", "")
+        if arguments == ("merge-base", "--is-ancestor", parents[1], current_default):
+            return CommandResult(0 if second_parent_is_current else 1, "", "")
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(config, fake)
+    if raises:
+        with pytest.raises(RepositoryError):
+            repository.bind_retained_commit(
+                tmp_path / "worktree", "agent/issue-12", 12, baseline
+            )
+    else:
+        assert (
+            repository.bind_retained_commit(
+                tmp_path / "worktree", "agent/issue-12", 12, baseline
+            )
+            == prepared
+        )
+        assert any(call[3:5] == ("fetch", "origin") for call in calls)
