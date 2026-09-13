@@ -19,6 +19,45 @@ validation, repair, and publication proceed without an inner-loop human decision
 Safe bounded uncertainty is recorded as a structured Draft handoff; capacity and
 technical transients are execution blockers or retryable unless authority is needed.
 
+## Software factory operating model
+
+Humans provide the product and policy inputs. They review every resulting merge
+request and are the only people who approve or merge it. The deterministic
+controller and the AI workflow prepare work and publish or update the merge
+request; neither crosses that human boundary.
+
+For each bounded activation, the deterministic controller locks the configured
+project, refreshes its dedicated checkout, and reconciles observable GitLab,
+ledger, branch, merge-request, and retained-worktree evidence. It resumes a
+recoverable item before it selects at most one eligible new issue. After it
+creates or recovers that issue's retained worktree, it invokes one
+workflow-owning AI session. It validates the session's bounded result, updates
+the same branch and merge request when publication is justified, records the
+next action and evidence, then exits. The AI begins only after issue selection
+and worktree preparation; the controller is not a second workflow engine.
+
+The AI session keeps all work nested under its live Architect. In the coding
+lane, the Architect delegates Red behavior tests and the Diátaxis Writer in
+parallel, then Green implements and reconciles their results, runs every
+applicable parallel review, performs license review after those reviews, and
+obtains final validation. In the documentation and agent-policy lane, the Architect instead
+delegates the Documentation Writer, then the Documentation Finalizer. These
+roles run inside the same session, not as independently restored phases.
+
+Before publication, the controller reconciles current `main` into the retained
+worktree using normal Git evidence; it never discards work to do so. After a
+crash, it preserves that worktree and restarts from observable repository and
+ledger state, repeating validation when needed. It restores the coarse session
+boundary only, never individual agents, prompts, mailboxes, or internal phases.
+
+The controller and every nested AI role use the same scoped Developer GitLab
+credential. Their split is a determinism and recoverability boundary, not a
+security boundary. The bounded audit records decisions, evidence, tests,
+reviewers, correction outcomes, branch and merge-request identity, and the
+next action. It excludes credentials, prompts, chain-of-thought, and unbounded
+output. See the serial-loop explanation and reference for operating details;
+this section states the portable policy boundary.
+
 ## Agent session checklist
 
 Before taking repository action:

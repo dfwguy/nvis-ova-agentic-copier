@@ -28,137 +28,102 @@ related:
 
 # Why the agent loop is serial and GitLab-native
 
-The systemd boundary coordinates, but does not replace, the Python state
-machine. It validates each JSON report and starts another one-issue activation
-only after a terminal handoff and a fresh eligible preview. Pipeline, genuine
-future external retry, repair, and budget yields return to the timer; they never
-become a busy loop. Retryable worker failures continue in the same activation.
+This is a simple, serial software factory. Humans supply product and policy
+input, then review, approve, and merge the result. The deterministic controller
+and the AI workflow do the routine work, but neither may approve or merge.
+GitLab is the shared, operator-visible work record; the local ledger and
+retained worktree make one host's execution recoverable rather than becoming a
+second workflow engine or queue.
 
-The agent loop is a recoverable finite-state machine, not a long-running agent
-session. Every systemd activation is bounded, but its worker owns the complete
-applicable workflow session for one issue. A later activation reconciles the
-durable worktree and coarse workflow state before it considers new work.
+## One issue, one bounded activation
 
-For a fresh issue, this means attempting the complete applicable workflow in
-one activation. For recovered work, the runner restores the durable worktree
-and re-enters the workflow session at its coarse `WORKFLOW` boundary; it does
-not manufacture sidecar checkpoints for Architect, Red, Green, or judges.
+For each activation, the controller performs these stages in order:
 
-Before choosing the coding or content lane, the live Architect decides whether
-the issue describes one independently reviewable and mergeable outcome that
-can reasonably finish the complete applicable workflow inside the bounded
-worker budget. This is a semantic architecture decision based on capability,
-dependency order, and workflow breadth, not a line-count or point threshold.
-Making it before Red, documentation writing, or any worktree mutation avoids
-spending the worker budget on a change that cannot reach a reviewable handoff.
+1. **Lock and refresh** — lock the configured project and refresh its dedicated
+   checkout.
+2. **Reconcile** — compare the ledger with GitLab issues and merge requests,
+   Git branches, and any retained worktree. Recoverable work always comes
+   before new work.
+3. **Select** — select at most one eligible issue, or stop when no safe item is
+   available. Fresh selection is deterministic: exact high priority, then
+   normal, then exact low priority; creation time and IID break ties.
+4. **Prepare worktree** — create or recover that issue's retained worktree.
+   Only after selection and preparation does the controller invoke AI.
+5. **Run the workflow session** — one bounded, workflow-owning AI session
+   handles the issue.
+6. **Validate and publish** — validate the bounded result against the ledger,
+   Git, required receipts, and configured project. When justified, publish or
+   update the same branch and merge request, then verify the exact handoff.
+7. **Record and exit** — persist evidence and the next safe action, then exit
+   rather than taking another issue.
 
-An oversized issue enters a durable decomposition state, not a transient
-failure. The worker returns `split_required` with a validated structured plan,
-then stops without creating child issues or retrying. The trusted runner owns
-the external work: it creates or recovers marker-bound child issues in
-dependency order, records its progress after each child, and closes the parent.
-This makes recovery safe across a crash while allowing every child to retain its
-own merge-request lifecycle.
+The controller updates current `main` before publication through normal Git
+reconciliation in the retained worktree. It does not discard work to refresh
+the base. Pipeline observation, a future external retry, no progress, a budget
+limit, or a human-facing state ends the activation; retryable worker failures
+can continue within it when time remains.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Preparing: select eligible issue
-    Preparing --> Executing
-    Executing --> RetryWait: transient failure
-    RetryWait --> Executing: retry due
-    Executing --> Publishing: validated result
-    Publishing --> Observing
-    Observing --> Repair: repair needed
-    Repair --> Publishing
-    Observing --> AwaitingHuman: evidence verified
-    Preparing --> Blocked
-    Executing --> Blocked
-    Repair --> Blocked
-    Blocked --> Preparing: explicit retry after human action
-```
+## The work stays inside one AI session
 
-GitLab is the shared, operator-visible projection: active or resumable work is
-`agent::running`, an exact verified merge-request handoff is
-`agent::awaiting-human`, and a required decision is `agent::blocked`.
-`agent::failed` is reserved for an exceptional condition the runner cannot
-safely reconcile or record. Labels deliberately do not carry the transaction
-history; the local ledger does.
+The controller starts one session only after it has selected the issue and
+prepared its worktree. A live Architect owns that session and decides whether
+the issue is one reviewable, mergeable outcome within the budget before any
+worktree mutation.
 
-Fresh selection is deliberately separate from recovery. Once the runner has
-handled active/resumable work and eligibility filtering, exact
-`agent-priority::high` is first, normal work (including unknown priority-like
-labels) is second, and exact `agent-priority::low` is third. Absolute creation
-time and IID make each rank deterministic without trusting GitLab API ordering;
-invalid timestamp evidence fails closed. Humans use high, low, or label removal
-to target, defer, or normalize new work.
+| Lane | What runs, and when |
+| --- | --- |
+| Coding | The Architect delegates Red behavior tests and the Diátaxis Writer in parallel. After their receipts, Green is the sole mutator: it implements and reconciles documentation, then coordinates review and repair before returning final validation to the Architect. |
+| Documentation and agent policy | The Architect delegates the Documentation Writer as the sole mutator, then the Documentation Finalizer. The writer may make one consolidated repair pass. |
 
-The ledger fills the gap GitLab labels cannot safely represent. It remembers
-the selected issue, coarse workflow state, attempt, retry deadline, durable
-worktree, branch and MR evidence, workflow receipts, transition intent, and
-redacted next action. Persisting intent before an external mutation makes a
-partial operation replayable after a process, host, or API interruption. A
-durable worktree keeps ordinary uncommitted evidence in place; a stash is
-emergency evidence that the runner inventories but never applies or drops.
+Architecture, behavior tests, implementation, documentation, every applicable
+review role, license review, and final validation therefore stay nested in the
+same session. The controller does not restore an individual Architect, writer,
+implementer, reviewer, or internal phase after a crash.
 
-Serial execution is a local safety boundary. One host owns unattended work for
-a project and a single-project lock prevents overlapping activations. Within
-an activation, Architect hands its design concurrently to Red and the Diátaxis
-Writer, waits for both receipts, then gives their combined evidence to Green.
-Green returns consolidated judge feedback to Architect. The activation
-continues only on its current issue; it never consumes a second issue merely
-because capacity remains.
+After implementation, Green starts the parallel review fan-out: the
+Non-functional Reviewer, Implementation Judge, Diátaxis Judge, Quality Judge,
+Test Judge, CI/CD Judge, and README Reviewer. The CLI Syntax Judge, Filesystem
+Structure Judge, and Agent-policy Judge join that fan-out only when their
+subjects apply. Once every initially applicable reviewer returns, Green
+consolidates and repairs actionable findings. The License Checker runs after
+those reviews, not in the parallel fan-out. The Architect then receives the
+complete result and delegates the Finalizer. This order makes documentation
+writing happen before implementation, implementation happen before reviews,
+and final validation happen after review and license evidence.
 
-The activation yields for terminal or human-facing states, a future external retry, a
-pending external result, lack of progress, or its workflow or wall-time limit.
-The 20-minute timer delay begins only after the complete activation finishes,
-so it serves idle polling and external waits rather than pacing internal
-workflow phases or retryable worker failures. There is no sequence-wide service timeout: each worker
-activation retains its own three-hour overall work budget. This does not claim
-distributed coordination: operators must not run a second timer for the same
-project.
+## Recovery is coarse and observable
 
-The activation deadline is the workflow-owning worker's one overall work
-budget. Each invocation receives the positive, ceil-rounded time remaining. If
-that budget is exhausted, the runner records the timeout and recovers the
-durable worktree through the normal retry path rather than losing its changes.
+An activation is bounded, but its evidence is durable. The ledger records the
+selected issue, coarse workflow state, retry information, retained worktree,
+branch and merge-request evidence, receipts, transition intent, and a redacted
+next action. GitLab labels project a simple status while the ledger holds the
+transaction detail.
 
-GitLab remains preferable to a webhook receiver or a filesystem queue because
-it already supplies the human work record and MR handoff. The local ledger is
-not a second shared queue; it is durability for the host that owns execution.
-Enabling the project-level loop authorizes open, non-confidential issues with
-no lifecycle projection and no ledger record; unrelated labels are irrelevant.
-Resumable running work always has priority. A blocked item resumes only through
-an explicit retry after its recorded human action.
+After an interruption, the controller reconciles observable repository state
+and preserves the retained worktree. It restarts at the coarse workflow-session
+boundary and repeats validation or publication checks when necessary. It does
+not restore individual agents, their prompts, chain-of-thought, mailboxes, or
+unbounded internal output. An oversized issue is instead handed back as a
+structured split plan; the trusted controller creates any child issues only
+after validating that plan.
 
-The worker is intentionally less trusted than the runner. It reports a
-versioned `ready_to_publish`, `retryable`, or `needs_human` envelope; the
-trusted runner validates it against the ledger, Git, required workflow
-receipts, and the configured numeric GitLab project. Publication and
-existing-MR remediation are idempotent. The loop never approves or merges and
-does not let issue text, labels, comments, or worker output widen authority.
+## Credentials, audit, and human handoff
 
-The deterministic controller, AI workflow, and required nested agents use the
-same scoped Developer GitLab credential. Humans provide product and policy
-inputs and alone approve or merge.
-The wrapper routes each authenticated API, Git transport, readiness, and Python
-boundary through the same checkout-local `direnv` environment. The token remains
-in `pass` and the ignored `.envrc`-loaded process environment, never the
-service file, journal, or ledger.
+The deterministic controller, AI workflow, and its nested roles share the same
+scoped Developer GitLab credential. Their separation exists for deterministic,
+recoverable execution—not as a security boundary. The credential remains in
+the checkout-local environment rather than the service file, journal, or
+ledger.
 
-Issue discussion can still help a worker understand the current work. For that
-reason, the runner fetches notes only immediately before an execution, excludes
-system and runner-outcome notes, and passes ordinary human and bot discussion
-as untrusted context. It does not persist that context in the ledger or
-lifecycle log. The workflow session itself carries the context needed by its
-Architect, Red, Green, and judge handoffs; it does not need a new top-level
-worker for each handoff. A 32 KiB JSON bound keeps the context
-bounded; when pruning is necessary, the newest useful notes win while their
-chronological order is preserved. Note retrieval and validation use the same
-bounded GitLab retry path as other temporary GitLab failures, so a worker never
-runs with an unvalidated partial note set.
+The bounded audit records decisions, evidence, tests, reviewers, correction
+outcomes, branch and merge-request identity, and the next action. It excludes
+credentials, prompts, chain-of-thought, and unbounded output. The worker
+returns only a versioned bounded result, which the controller validates before
+publication. A verified merge request is the handoff to a human reviewer; only
+the human approves or merges it.
 
-Retries are for temporary conditions, not for concealing a decision. The
-initial attempt plus three retries are bounded; exhaustion becomes blocked with
-an actionable next step. The operator-facing commands, JSON contract, exits,
-and migration procedure are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md)
-and [setup guide](../how-to/setup-serial-gitlab-agent-loop.md).
+For exact lifecycle states, commands, recovery procedures, and protocol fields,
+use the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md)
+and [setup guide](../how-to/setup-serial-gitlab-agent-loop.md). For the deeper
+controller design and AI role routing, see [the recovery design](serial-agent-loop-recovery-design.md)
+and [the agent workflow explanation](agentic-workflow.md).
