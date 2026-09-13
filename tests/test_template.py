@@ -33,6 +33,79 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+def test_root_envrc_is_ignored_in_source_template_and_rendered_project(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """The checkout credential source remains local and untracked everywhere."""
+    for root in (project_root, template_dir, generated_project):
+        assert "/.envrc" in (root / ".gitignore").read_text().splitlines()
+
+
+def test_agent_loop_policy_and_guidance_remain_team_portable(
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Portable policy and guidance avoid source identity and alternate modes."""
+    source_specific_path = Path("gitlab", "nvis-ova", "token").as_posix()
+    alternate_mode_terms = tuple(
+        separator.join(words)
+        for words in (
+            ("convenience", "mode"),
+            ("selected", "mode"),
+            ("gated", "alternative", "mode"),
+        )
+        for separator in (" ", "-")
+    )
+    relevant_paths = tuple(
+        path
+        for root in (project_root, template_dir, generated_project)
+        for directory in (root / ".agents", root / "docs")
+        for path in directory.rglob("*.md")
+    ) + (
+        project_root / "AGENTS.md",
+        project_root / "README.md",
+        template_dir / "AGENTS.md",
+        template_dir / "README.md.jinja",
+        generated_project / "AGENTS.md",
+        generated_project / "README.md",
+    )
+    content_by_path = {path: path.read_text() for path in relevant_paths}
+    violations = {
+        "source-specific password-store path": [
+            str(path)
+            for path, content in content_by_path.items()
+            if source_specific_path in content
+        ],
+        "alternate credential mode framing": [
+            str(path)
+            for path, content in content_by_path.items()
+            if any(term in content.casefold() for term in alternate_mode_terms)
+        ],
+    }
+
+    assert violations == {
+        "source-specific password-store path": [],
+        "alternate credential mode framing": [],
+    }
+    for root in (project_root, template_dir, generated_project):
+        policy = " ".join(content_by_path[root / "AGENTS.md"].split())
+        assert (
+            "deterministic controller, AI workflow, and required nested agents"
+            in policy
+        )
+        assert "same scoped Developer GitLab credential" in policy
+        assert (
+            "Humans provide product and policy inputs and alone approve or merge."
+            in policy
+        )
+    guidance = " ".join(content_by_path.values()).replace("\n", " ")
+    assert "locally configured `GITLAB_TOKEN_PASS_PATH`" in guidance
+    assert 'GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"' in guidance
+
+
 def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> None:
     """Test that generated projects do not fetch remote hook repositories."""
     config = (generated_project / ".pre-commit-config.yaml").read_text()
@@ -773,8 +846,14 @@ def test_agent_loop_wrapper_leaves_recovery_to_the_python_state_machine(
     """The systemd wrapper keeps recovery in Python while coordinating activations."""
     wrapper = (generated_project / "scripts" / "agent-work-systemd-run.sh").read_text()
 
-    assert '"${runner[@]}" run agent-work loop run --apply --json' in wrapper
-    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' not in wrapper
+    assert (
+        'authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json'
+        in wrapper
+    )
+    assert (
+        'exec authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json'
+        not in wrapper
+    )
     assert "logger" not in wrapper
     assert "git stash" not in wrapper
     assert "git switch" not in wrapper
@@ -797,6 +876,41 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
         "host": "gitlab.example.test",
         "project_id": "123",
     }
+
+
+@pytest.mark.parametrize(
+    ("configured_direnv", "expected_error"),
+    (
+        (None, "AGENT_WORK_DIRENV must be an absolute executable path"),
+        ("direnv", "AGENT_WORK_DIRENV must be an absolute executable path"),
+        (
+            "absolute-nonexecutable",
+            "AGENT_WORK_DIRENV must be an absolute executable path",
+        ),
+    ),
+)
+def test_agent_loop_wrapper_requires_an_absolute_executable_direnv(
+    project_root: Path,
+    tmp_path: Path,
+    configured_direnv: str | None,
+    expected_error: str,
+) -> None:
+    """The service cannot run authenticated boundaries outside direnv."""
+    _, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    if configured_direnv is None:
+        environment.pop("AGENT_WORK_DIRENV")
+    elif configured_direnv == "direnv":
+        environment["AGENT_WORK_DIRENV"] = configured_direnv
+    elif configured_direnv == "absolute-nonexecutable":
+        candidate = tmp_path / "commands" / "direnv-disabled"
+        candidate.write_text("#!/bin/sh\nexit 0\n")
+        environment["AGENT_WORK_DIRENV"] = str(candidate)
+
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("helper_succeeds", (True, False))
@@ -881,11 +995,6 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
     """Direnv cannot replace the target or Git credential controls at readiness."""
     checkout, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
     (checkout / ".envrc").write_text("# test boundary\n")
-    _commit_repository_state(checkout, "add checkout envrc")
-    _run_test_git(checkout, "push", environment["LOCAL_ORIGIN"], "HEAD:main")
-    _run_test_git(
-        checkout, "fetch", environment["LOCAL_ORIGIN"], "main:refs/remotes/origin/main"
-    )
     commands = tmp_path / "commands"
     readiness = tmp_path / "readiness.json"
     _write_command(
@@ -933,6 +1042,110 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
         assert result.returncode != 0
         assert "secret-helper-output" not in result.stderr + result.stdout
         assert not marker.exists()
+
+
+@pytest.mark.parametrize("arguments", ((), ("--apply",)))
+def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
+    project_root: Path,
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+) -> None:
+    """API, HTTPS Git, readiness, and Python share one evaluated envrc."""
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    configured_pass_path = "teams/example-project/agent-token"
+    (checkout / ".envrc").write_text(
+        "export GITLAB_HOST=gitlab.example.test\n"
+        "export GITLAB_PROJECT_ID=123\n"
+        f"export GITLAB_TOKEN_PASS_PATH={configured_pass_path}\n"
+        'export GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"\n'
+    )
+    commands = tmp_path / "commands"
+    stage_marker = tmp_path / "authenticated-stages"
+    _write_command(
+        commands / "pass",
+        '[ "$1" = show ] && [ "$2" = "$EXPECTED_PASS_PATH" ] || exit 21\n'
+        'printf "%s" "$TEST_SENTINEL"',
+    )
+    _write_command(
+        commands / "direnv",
+        'test "$1" = exec || exit 22\n'
+        'checkout="$2"\n'
+        "shift 2\n"
+        'PATH="$COMMANDS:$PATH"\n'
+        "export PATH\n"
+        'set -a; . "$checkout/.envrc"; set +a\n'
+        "export GITLAB_HOST=poison.example.test GITLAB_PROJECT_ID=999\n"
+        "export GIT_CONFIG_VALUE_1=poison GIT_ASKPASS=poison\n"
+        "export GIT_CONFIG_PARAMETERS=credential.helper=poison\n"
+        'exec "$@"',
+    )
+    project_json = json.dumps(
+        {
+            "id": 123,
+            "default_branch": "main",
+            "http_url_to_repo": "https://gitlab.example.test/group/project.git",
+        }
+    )
+    _write_command(
+        commands / "glab",
+        '[ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] || exit 23\n'
+        'case "$1" in\n'
+        '  api) [ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] || exit 24; printf "api:ok\\n" >> "$STAGE_MARKER"; '
+        f"printf '%s\\n' '{project_json}' ;;\n"
+        '  auth) printf "helper:ok\\n" >> "$STAGE_MARKER" ;;\n'
+        "  *) exit 25 ;;\n"
+        "esac",
+    )
+    _write_command(
+        commands / "git",
+        "check_boundary() {\n"
+        '  [ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] &&\n'
+        '  [ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] &&\n'
+        '  [ "$GIT_CONFIG_VALUE_0" = "" ] &&\n'
+        '  [ "$GIT_CONFIG_VALUE_1" = "$AGENT_WORK_GLAB auth git-credential" ] &&\n'
+        '  [ "$GIT_ASKPASS" = /bin/false ] &&\n'
+        '  [ -z "${GIT_CONFIG_PARAMETERS:-}" ]\n'
+        "}\n"
+        'case " $* " in\n'
+        '  *" ls-remote "*) check_boundary || exit 26; printf "ls-remote:ok\\n" >> "$STAGE_MARKER"; sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;;\n'
+        '  *" fetch "*) check_boundary || exit 27; printf "fetch:ok\\n" >> "$STAGE_MARKER"; for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;;\n'
+        '  *" push --dry-run "*) check_boundary || exit 28; printf "readiness:ok\\n" >> "$STAGE_MARKER"; set -- $GIT_CONFIG_VALUE_1; "$@" ;;\n'
+        '  *) exec "$REAL_GIT" "$@" ;;\n'
+        "esac",
+    )
+    _write_command(
+        commands / "uv",
+        '[ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] || exit 29\n'
+        '[ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] || exit 30\n'
+        '[ "$GIT_CONFIG_VALUE_1" = "$AGENT_WORK_GLAB auth git-credential" ] || exit 31\n'
+        '[ "$GIT_ASKPASS" = /bin/false ] || exit 32\n'
+        '[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || exit 33\n'
+        'printf "runner:ok\\n" >> "$STAGE_MARKER"\n'
+        'printf \'{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"idle"}\\n\'',
+    )
+    environment |= {
+        "AGENT_WORK_DIRENV": str(commands / "direnv"),
+        "AGENT_WORK_GIT": str(commands / "git"),
+        "AGENT_WORK_GLAB": str(commands / "glab"),
+        "AGENT_WORK_UV": str(commands / "uv"),
+        "COMMANDS": str(commands),
+        "EXPECTED_PASS_PATH": configured_pass_path,
+        "STAGE_MARKER": str(stage_marker),
+        "TEST_SENTINEL": "test-only-shared-value",
+    }
+
+    result = _run_wrapper(project_root, environment, *arguments)
+
+    assert result.returncode == 0, result.stderr
+    stages = stage_marker.read_text().splitlines()
+    expected_transport = "fetch:ok" if arguments else "ls-remote:ok"
+    assert stages.count("api:ok") == 1
+    assert expected_transport in stages
+    assert "readiness:ok" in stages
+    assert "helper:ok" in stages
+    assert "runner:ok" in stages
+    assert environment["TEST_SENTINEL"] not in stage_marker.read_text()
+    assert environment["TEST_SENTINEL"] not in result.stdout + result.stderr
 
 
 def test_agent_loop_wrapper_fast_forwards_before_applied_worker(
@@ -1549,11 +1762,6 @@ def test_agent_loop_wrapper_preserves_configured_identity_after_direnv(
     """Direnv credentials cannot replace the service's GitLab target identity."""
     checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
     (checkout / ".envrc").write_text("# fake direnv authorization boundary\n")
-    _commit_repository_state(checkout, "add checkout envrc")
-    _run_test_git(checkout, "push", environment["LOCAL_ORIGIN"], "HEAD:main")
-    _run_test_git(
-        checkout, "fetch", environment["LOCAL_ORIGIN"], "main:refs/remotes/origin/main"
-    )
     commands = tmp_path / "commands"
     marker = tmp_path / "runner-identity.json"
     _write_command(
@@ -1844,8 +2052,12 @@ def _wrapper_checkout_environment(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     _initialize_test_repository(checkout)
+    (checkout / ".gitignore").write_text("/.envrc\n")
     (checkout / "version").write_text("one\n")
     _commit_repository_state(checkout, "initial")
+    (checkout / ".envrc").write_text("# isolated authorization boundary\n")
+    assert _test_git_output(checkout, "check-ignore", ".envrc") == ".envrc"
+    assert ".envrc" not in _test_git_output(checkout, "ls-files").splitlines()
     _run_test_git(checkout, "remote", "add", "origin", str(remote))
     _run_test_git(checkout, "push", "-u", "origin", "main")
     _run_test_git(checkout, "switch", "-c", "agent/work-base")
@@ -1899,6 +2111,7 @@ def _wrapper_checkout_environment(
         'printf \'%s\\n\' "$*" >> "$UV_MARKER"\n'
         'printf \'{"schema_version":1,"command":"loop.run","applied":true,"outcome":"idle","stop_reason":"idle"}\\n\'',
     )
+    _write_command(commands / "direnv", 'shift 2\nexec "$@"')
     _write_command(commands / "agent", "exit 0")
     command_paths = {
         "AGENT_WORK_GIT": str(commands / "git"),
@@ -1912,6 +2125,7 @@ def _wrapper_checkout_environment(
         "AGENT_WORK_UV": str(commands / "uv"),
         "AGENT_WORK_AGENT": "codex",
         "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
+        "AGENT_WORK_DIRENV": str(commands / "direnv"),
         "AGENT_WORK_GLAB": str(commands / "glab"),
         "GITLAB_HOST": "gitlab.example.test",
         "GITLAB_PROJECT_ID": "123",
@@ -1921,7 +2135,6 @@ def _wrapper_checkout_environment(
         "LOCAL_ORIGIN": str(remote),
         **{key: str(value) for key, value in command_paths.items()},
     }
-    environment.pop("AGENT_WORK_DIRENV", None)
     return checkout, environment, marker, glab_marker
 
 
@@ -3077,9 +3290,15 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
         in root_service
     )
     assert 'agent_name="${AGENT_WORK_AGENT:-codex}"' in wrapper
-    assert '"${runner[@]}" run agent-work loop run --apply --json' in wrapper
-    assert 'exec "${runner[@]}" run agent-work loop run --apply --json' not in wrapper
-    assert "AGENT_WORK_DIRENV is not executable" in wrapper
+    assert (
+        'authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json'
+        in wrapper
+    )
+    assert (
+        'exec authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json'
+        not in wrapper
+    )
+    assert "require_path AGENT_WORK_DIRENV" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not set" in wrapper
     assert "AGENT_WORK_AGENT_PATH is not executable" in wrapper
     assert "Unit=agentic-copier-agent-work.service" in root_timer

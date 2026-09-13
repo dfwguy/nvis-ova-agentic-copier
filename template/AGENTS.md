@@ -214,8 +214,17 @@ git pull --ff-only
 glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
 ```
 
-When `.envrc` supplies `GITLAB_TOKEN`, run API commands through
-`direnv exec . glab api ...`; `glab auth status` cannot verify that route.
+The deterministic controller, AI workflow, and required nested agents use the
+same scoped Developer GitLab credential. Humans provide product and policy
+inputs and alone approve or merge.
+
+The canonical regular-checkout `.envrc` exports `GITLAB_HOST`, a numeric
+`GITLAB_PROJECT_ID`, a locally configured `GITLAB_TOKEN_PASS_PATH`, and
+`GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"`. It is ignored, never
+copied to a service environment file, log, or ledger. Run API commands
+through `direnv exec . /usr/bin/env bash -c 'exec glab api --hostname
+"$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'`; the quoted variables expand
+only after `.envrc` loads. `glab auth status` cannot verify that route.
 Every repository change must publish through `$git-flow`. Never approve or
 merge. A publication failure is a blocker, not completion.
 
@@ -234,8 +243,9 @@ deliverable work returns `result_kind=split_required` with a validated, ordered
 `split_plan`; it does not select a lane, mutate the worktree, create child
 issues, execute slices, or retry automatically. The trusted runner persists
 the plan, creates or recovers the child issues with dependency markers, and
-closes the parent. The worker edits and validates its prepared per-issue worktree but must
-not commit, push, create a merge request, call GitLab, approve, or merge; the
+closes the parent. The worker edits and validates its prepared per-issue worktree and may
+use GitLab only under the configured numeric project, but must not commit, push,
+create a merge request, approve, or merge; the
 trusted runner owns publication, exact pipeline observation, and durable
 recovery. Existing ledgers at legacy phases may finish that recorded route;
 new work must not launch a fresh top-level agent for each internal role. This

@@ -221,8 +221,9 @@ def build_worker_prompt(
             "tests, README, and documentation, then delegates every applicable independent "
             "judge concurrently as read-only work. Give each judge the final diff, its relevant "
             "instructions, and current test or JUnit evidence. Quality Judge receives the architecture; "
-            "Test Judge receives the Red receipt and test diff. Do not give judges credentials "
-            "or publication authority. Wait for every judge and collect the complete finding "
+            "Test Judge receives the Red receipt and test diff. The shared scoped Developer "
+            "GitLab credential is available for repository work, but never grants approval or "
+            "merge authority. Wait for every judge and collect the complete finding "
             "set without failing fast. Green performs one consolidated repair, reruns affected "
             "checks and reviews, and returns all receipts and unresolved findings to the still-"
             "live Architect. Architect decides whether to finalize, revise its design once, "
@@ -387,11 +388,12 @@ def worker_exit_evidence(
 
 
 def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Remove credential-shaped variables from an untrusted worker process."""
+    """Retain only the shared GitLab token among credential-shaped variables."""
     return {
         name: value
         for name, value in environment.items()
-        if not re.search(r"token|secret|password|key|credential", name, re.IGNORECASE)
+        if name == "GITLAB_TOKEN"
+        or not re.search(r"token|secret|password|key|credential", name, re.IGNORECASE)
     }
 
 

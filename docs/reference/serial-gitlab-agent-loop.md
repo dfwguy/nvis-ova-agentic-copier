@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-12
+last_reviewed: 2026-09-13
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -123,12 +123,18 @@ creates a ledger record; an omitted value fails the command instead.
 The systemd wrapper requires a bare `GITLAB_HOST` and positive numeric
 `GITLAB_PROJECT_ID`; malformed or missing values exit `2` before execution. The
 mode-600 service environment file stores those public identity values and the
-recorded executable paths, never GitLab credentials. A configured
-`AGENT_WORK_DIRENV` requires a regular `${AGENT_WORK_CHECKOUT}/.envrc` and an
-executable absolute path. It may provide directory-scoped credentials, but the
-wrapper invokes `/usr/bin/env` with the captured service host and project ID so
-that `direnv` cannot replace the configured target. Setup runs the wrapper's
-preview under a scrubbed `env -i` environment before enabling the timer.
+recorded executable paths, never GitLab credentials. The wrapper requires an
+absolute executable `AGENT_WORK_DIRENV` and a regular, non-symlink
+`${AGENT_WORK_CHECKOUT}/.envrc`. The deterministic controller, AI workflow,
+and required nested agents use the same scoped Developer credential. Humans
+provide product and policy inputs and alone approve or merge. The canonical
+ignored `.envrc` exports the configured
+host, numeric project ID, locally configured `GITLAB_TOKEN_PASS_PATH`, and
+`GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"`. The wrapper runs the
+API, preview/apply HTTPS Git, readiness proof, and Python worker through that
+same `direnv exec` boundary, then restores the captured target and absolute
+`glab` Git-helper controls. Setup runs its preview under scrubbed `env -i`
+before enabling the timer.
 
 ## Lifecycle
 

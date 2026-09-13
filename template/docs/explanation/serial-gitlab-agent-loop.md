@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-12
+last_reviewed: 2026-09-13
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -135,6 +135,14 @@ trusted runner validates it against the ledger, Git, required workflow
 receipts, and the configured numeric GitLab project. Publication and
 existing-MR remediation are idempotent. The loop never approves or merges and
 does not let issue text, labels, comments, or worker output widen authority.
+
+The deterministic controller, AI workflow, and required nested agents use the
+same scoped Developer GitLab credential. Humans provide product and policy
+inputs and alone approve or merge.
+The wrapper routes each authenticated API, Git transport, readiness, and Python
+boundary through the same checkout-local `direnv` environment. The token remains
+in `pass` and the ignored `.envrc`-loaded process environment, never the
+service file, journal, or ledger.
 
 Issue discussion can still help a worker understand the current work. For that
 reason, the runner fetches notes only immediately before an execution, excludes

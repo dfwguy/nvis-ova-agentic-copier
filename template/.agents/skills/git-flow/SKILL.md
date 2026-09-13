@@ -62,8 +62,9 @@ sandbox proxy. Do not change a working remote or credential configuration just
 because it differs from another developer's VM.
 
 When a checkout supplies `GITLAB_TOKEN` through `.envrc`, run every API
-command through `direnv exec . glab api` (for example, `direnv exec . glab api
---hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"`). Use that numeric
+command through `direnv exec . /usr/bin/env bash -c` so variables expand after
+the environment loads (for example, `direnv exec . /usr/bin/env bash -c 'exec
+glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'`). Use that numeric
 endpoint to diagnose access: a path-based `404` is not evidence that the
 directory-scoped token lacks project access. `glab auth status` checks only
 stored logins and cannot verify this route.

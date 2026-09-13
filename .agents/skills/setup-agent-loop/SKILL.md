@@ -117,13 +117,17 @@ before checking repository safeguards.
    and the agent in its environment file; the runner invokes that recorded
    absolute agent path directly, rather than relying on the service manager PATH.
    Record the bare `GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID` in
-   the mode-600 environment file with those paths, but never a token. If the
-   GitLab token is directory-scoped through `direnv`, select it only when the
-   dedicated checkout has a regular checkout-local `.envrc`, record an absolute
-   executable `direnv` path, and run the runner through `direnv exec
-   <checkout>`. The wrapper rejects a configured `direnv` route without that
-   local file and restores the recorded host and project ID after `direnv`
-   supplies credentials. Before enabling the timer, execute the wrapper's
+   the mode-600 environment file with those paths, but never a token. The
+   dedicated checkout requires a regular, ignored checkout-local `.envrc`, an
+   absolute executable `direnv` path, and every authenticated boundary through
+   `direnv exec <checkout>`. Its canonical file exports the configured host,
+   numeric project ID, locally configured `GITLAB_TOKEN_PASS_PATH`, and
+   `GITLAB_TOKEN="$(pass show "$GITLAB_TOKEN_PASS_PATH")"`. The deterministic
+   controller, AI workflow, and required nested agents use the same scoped
+   Developer credential. Humans provide product and policy inputs and alone
+   approve or merge. The wrapper restores
+   recorded host, project ID, and Git helper controls after `direnv` supplies
+   credentials. Before enabling the timer, execute the wrapper's
    no-`--apply` preview through `env -i` with exactly the public service
    variables and minimal service baseline so an interactive credential or
    identity cannot mask the configured route. The user manager does not inherit
@@ -140,11 +144,9 @@ before checking repository safeguards.
    gitlab_project_id="${GITLAB_PROJECT_ID:-}"
    case "$gitlab_host" in ''|*://*|*/*) exit 1;; esac
    case "$gitlab_project_id" in ''|0|00*|*[!0-9]*) exit 1;; esac
-   direnv_path=""
-   if [[ -f "$PWD/.envrc" ]]; then
-     direnv_path="$(command -v direnv || true)"
-     [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
-   fi
+   [[ -f "$PWD/.envrc" && ! -L "$PWD/.envrc" ]] || exit 1
+   direnv_path="$(command -v direnv || true)"
+   [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
    git_path="$(command -v git)"; glab_path="$(command -v glab)"; jq_path="$(command -v jq)"; flock_path="$(command -v flock)"
    [[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
    case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
