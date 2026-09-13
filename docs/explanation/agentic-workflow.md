@@ -121,49 +121,127 @@ keeps the same boundary when it processes an issue.
 
 ## Workflow topology
 
-The following compact notation is deliberately kept as text until the diagrams
-are converted to Mermaid: `->` is a sequential handoff, `[...]` contains roles
-that run concurrently, and `**` starts a fresh AI context or coarse recovery
-boundary. An unmarked parent remains resident while its child roles work.
+The diagrams show the normal clean-publication path and the separate stops
+that require human direction. A resident parent remains live while its child
+roles work. A fresh-context node is a deliberately new AI context, not a
+continuation of an interrupted agent.
 
-```text
-Ordinary interactive coding
-Main/git-flow -> Architect -> [TDD Red, Diátaxis Writer] -> Green
--> [Non-functional Reviewer, TDD Judge, Diátaxis Judge, Quality Judge,
-Test Judge, CI/CD Judge, README Reviewer, conditional CLI Syntax Judge,
-conditional Filesystem Structure Judge, conditional Agent-policy Judge]
--> License Checker -> Green/Architect correction convergence while material
-progress exists -> TDD Finalizer
--> Architect decision -> Main publication -> MR -> Pipeline Performance Judge
--> human review, approval, and merge
-
-Documentation or agent-policy work
-Main/git-flow -> Architect -> Documentation Writer -> Documentation Finalizer
--> Documentation Writer/Finalizer convergence while material progress exists
--> Architect decision -> Main publication -> MR -> Pipeline Performance Judge
--> human review, approval, and merge
-
-Serial controller publication and observation
-Controller reconcile/select/prepare retained worktree -> ** Architect
--> applicable full workflow -> controller publication -> MR
--> controller waits cheaply for exact-SHA terminal state
--> ** Pipeline Performance Judge -> human review, approval, and merge
-
-Pipeline problem re-entry
-Pipeline Performance Judge -> create or reuse one deduplicated problem issue
--> later controller reconciliation/select/prepare -> ** applicable full workflow
-
-Recovery and sizing
-interruption -> retain worktree and evidence -> controller reconciliation
--> ** applicable full workflow
-oversized intake -> structured split plan -> controller creates or recovers
-ordered child issues -> later selection of each child -> ** applicable full workflow
+```mermaid
+flowchart TD
+    main["Main / $git-flow"] --> architect["Resident Architect"]
+    subgraph phase2["Phase 2: parallel preparation"]
+        red["$tdd-red"]
+        writer["$diataxis-writer"]
+    end
+    architect --> red
+    architect --> writer
+    red --> green["$tdd-green"]
+    writer --> green
+    subgraph phase4["Phase 4: initially applicable reviewers run in parallel"]
+        nonfunctional["$nonfunctional-review"]
+        judge["$tdd-judge"]
+        diataxis["$diataxis-judge"]
+        quality["$judge-quality"]
+        testjudge["$judge-test"]
+        cicd["$judge-cicd"]
+        readme["$tdd-document"]
+        cli["$cli-syntax-judge (conditional)"]
+        filesystem["$filesystem-structure-judge (conditional)"]
+        policy["$agent-policy-judge (conditional)"]
+    end
+    green --> nonfunctional
+    green --> judge
+    green --> diataxis
+    green --> quality
+    green --> testjudge
+    green --> cicd
+    green --> readme
+    green --> cli
+    green --> filesystem
+    green --> policy
+    nonfunctional --> reviews["All initially applicable reviews returned"]
+    judge --> reviews
+    diataxis --> reviews
+    quality --> reviews
+    testjudge --> reviews
+    cicd --> reviews
+    readme --> reviews
+    cli --> reviews
+    filesystem --> reviews
+    policy --> reviews
+    reviews --> phase4outcome{"Concrete, resolvable Phase-4 findings with material progress?"}
+    phase4outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
+    focusedgreen --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
+    selective --> phase4outcome
+    phase4outcome -- "no findings" --> license["$license-checker (sequential)"]
+    phase4outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
+    license --> licenseoutcome{"License clean or resolvable violation with material progress?"}
+    licenseoutcome -- "clean" --> finalizer["$tdd-finalizer"]
+    licenseoutcome -- "resolvable violation" --> focusedgreen
+    licenseoutcome -- "no progress or human-judgment blocker" --> humanstop
+    finalizer --> decision{"Architect accepts finalizer verdict?"}
+    decision -- "normal approval" --> publish["Main publication"]
+    decision -- "needs human" --> humanstop
+    publish --> mr["Merge request"]
+    mr --> pipeline["$pipeline-performance-judge"]
+    pipeline --> human["Human review, approval, and merge"]
 ```
 
-The review bracket is the concurrent Phase-4 read-only fan-out. The License
-Checker is deliberately sequential after every initially applicable reviewer
-returns; only then can Green consolidate the findings and run evidence-led
-correction cycles.
+```mermaid
+flowchart TD
+    docmain["Main / $git-flow"] --> docarchitect["Resident Architect"]
+    docarchitect --> docwriter["$documentation-writer"]
+    docwriter --> docfinalizer["$documentation-finalizer"]
+    docfinalizer --> docprogress{"Resolvable finding and material progress?"}
+    docprogress -- "yes: evidence-led repair" --> docwriter
+    docprogress -- "no findings" --> docdecision{"Architect accepts finalizer approval?"}
+    docprogress -- "no progress, scope expansion, or human direction" --> dochuman["Architect: human direction; no automatic publication"]
+    docdecision -- "yes" --> docpublish["Main publication"]
+    docdecision -- "no" --> dochuman
+    docpublish --> docmr["Merge request"]
+    docmr --> docpipeline["$pipeline-performance-judge"]
+    docpipeline --> dochumanreview["Human review, approval, and merge"]
+```
+
+```mermaid
+flowchart TD
+    reconcile["Controller: reconcile, select, and prepare retained worktree"]
+    reconcile --> fresharchitect["Fresh AI context: Architect"]
+    fresharchitect --> fullworkflow["Applicable full workflow"]
+    fullworkflow --> controllerpublish["Controller publication"]
+    controllerpublish --> serialmr["Merge request"]
+    serialmr --> wait["Cheap wait for exact-SHA terminal state"]
+    wait --> freshpipeline["Fresh AI context: Pipeline Performance Judge"]
+    freshpipeline --> serialhuman["Human review, approval, and merge"]
+```
+
+```mermaid
+flowchart TD
+    judgeentry["Pipeline Performance Judge"] --> actionable{"Concrete repository-actionable problem?"}
+    actionable -- "yes" --> issue["Create or reuse one deduplicated problem issue"]
+    issue --> later["Later normal controller reconciliation, selection, and preparation"]
+    later --> freshworkflow["Fresh AI context: applicable full workflow"]
+    actionable -- "no: healthy evidence" --> quiet["Externally quiet"]
+```
+
+```mermaid
+flowchart TD
+    interruption["Interruption"] --> retain["Retain worktree and evidence"]
+    retain --> recovery["Controller reconciliation"]
+    recovery --> recoveryworkflow["Fresh AI context: applicable full workflow"]
+    oversized["Oversized intake"] --> split["Structured split plan"]
+    split --> children["Controller creates or recovers ordered child issues"]
+    children --> selection["Later selection of each child"]
+    selection --> childworkflow["Fresh AI context: applicable full workflow"]
+```
+
+The coding review fan-out is concurrent only for initially applicable Phase-4
+reviewers. Green consolidates and corrects their evidence-led findings before
+the sequential License Checker examines the final diff and complete Phase-4
+receipts. A license violation re-enters focused correction and affected
+reviewer reruns before License examines the resulting final diff again. A
+Draft publication, when an explicit draft-safety verdict permits it, remains a
+separate human handoff rather than an automatic consequence of a stop.
 
 The ordinary interactive branch convention is `clanker/<slug>`. The serial
 controller reserves `agent/issue-<iid>` for its issue worktrees. These names
