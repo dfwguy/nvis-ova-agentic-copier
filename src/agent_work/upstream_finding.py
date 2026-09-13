@@ -288,23 +288,42 @@ class UpstreamFindingPreview:
     semantic_finding_fingerprint: str
     copied_path_count: int
     evidence_link_count: int
+    matching_iid: int | None = None
 
     def as_json(self) -> str:
         """Serialize the safe preview as stable compact JSON."""
+        payload: dict[str, int | str] = {
+            "schema_version": self.schema_version,
+            "command": self.command,
+            "outcome": self.outcome,
+            "project_fingerprint": self.project_fingerprint,
+            "revision_fingerprint": self.revision_fingerprint,
+            "semantic_finding_fingerprint": self.semantic_finding_fingerprint,
+            "copied_path_count": self.copied_path_count,
+            "evidence_link_count": self.evidence_link_count,
+        }
+        if self.matching_iid is not None:
+            payload["matching_iid"] = self.matching_iid
         return json.dumps(
-            {
-                "schema_version": self.schema_version,
-                "command": self.command,
-                "outcome": self.outcome,
-                "project_fingerprint": self.project_fingerprint,
-                "revision_fingerprint": self.revision_fingerprint,
-                "semantic_finding_fingerprint": self.semantic_finding_fingerprint,
-                "copied_path_count": self.copied_path_count,
-                "evidence_link_count": self.evidence_link_count,
-            },
+            payload,
             sort_keys=True,
             separators=(",", ":"),
         )
+
+
+def render_reserved_marker(preview: UpstreamFindingPreview) -> str:
+    """Render the sole canonical marker used to identify an upstream finding."""
+    fingerprints = (
+        preview.project_fingerprint,
+        preview.revision_fingerprint,
+        preview.semantic_finding_fingerprint,
+    )
+    if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in fingerprints):
+        raise ValueError("finding fingerprints are invalid")
+    return (
+        "<!-- agent-work-upstream-finding:v1 project="
+        f"{fingerprints[0]} revision={fingerprints[1]} semantic={fingerprints[2]} -->"
+    )
 
 
 def _fingerprint(value: object) -> str:

@@ -22,6 +22,7 @@ from agent_work.cli import build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
 from agent_work.ledger import LockBusy
 from agent_work.models import CommandItemReport, CommandReport
+from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview
 
 
@@ -362,10 +363,17 @@ def test_upstream_finding_preview_is_local_json_and_bypasses_runtime_dispatch() 
                 "preview",
                 "--manifest-file",
                 "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
                 "--json",
             ],
             dispatch=dispatch_must_not_run,
             preview_manifest=preview_manifest,
+            preview_upstream=lambda preview, **_kwargs: preview,
             read_bytes=lambda _path: b"unused",
             write_stdout=output.append,
         )
@@ -395,12 +403,24 @@ def test_upstream_finding_preview_help_and_harmless_apply_contract(
     help_text = capsys.readouterr().out
     assert help_exit.value.code == 0
     assert (
-        "local" in help_text.lower()
+        "read-only" in help_text.lower()
         and "GitLab" in help_text
         and "write" in help_text.lower()
     )
     parsed = build_parser().parse_args(
-        ["upstream-finding", "preview", "--manifest-file", "finding.yaml", "--apply"]
+        [
+            "upstream-finding",
+            "preview",
+            "--manifest-file",
+            "finding.yaml",
+            "--upstream-host",
+            "upstream.example.com",
+            "--upstream-project-id",
+            "77",
+            "--upstream-credential-file",
+            "/dedicated/token",
+            "--apply",
+        ]
     )
     assert parsed.apply is True
 
@@ -439,10 +459,17 @@ def test_upstream_finding_preview_apply_remains_local_and_bypasses_dispatch() ->
                 "preview",
                 "--manifest-file",
                 "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
                 "--apply",
             ],
             dispatch=dispatch_must_not_run,
             preview_manifest=preview_manifest,
+            preview_upstream=lambda preview, **_kwargs: preview,
             read_bytes=read_bytes,
             write_stdout=output.append,
         )
@@ -481,8 +508,20 @@ def test_upstream_finding_preview_renders_safe_human_summary_and_sanitizes_error
 
     assert (
         main(
-            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
+            ],
             preview_manifest=preview_success,
+            preview_upstream=lambda preview, **_kwargs: preview,
             write_stdout=output.append,
         )
         == 0
@@ -502,7 +541,18 @@ def test_upstream_finding_preview_renders_safe_human_summary_and_sanitizes_error
 
     assert (
         main(
-            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
+            ],
             preview_manifest=preview_failure,
             write_stderr=errors.append,
         )
@@ -528,10 +578,264 @@ def test_upstream_finding_preview_requires_a_manifest_file_and_returns_one_for_r
 
     assert (
         main(
-            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"],
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
+            ],
             preview_manifest=unreadable,
             write_stderr=errors.append,
         )
         == 1
     )
     assert errors == ["manifest file could not be read"]
+
+
+def test_upstream_finding_preview_requires_explicit_upstream_boundary_and_apply_stays_read_only() -> (
+    None
+):
+    """Preview takes no generated-project identity and never reaches dispatch."""
+    with pytest.raises(SystemExit) as missing_upstream:
+        build_parser().parse_args(
+            ["upstream-finding", "preview", "--manifest-file", "finding.yaml"]
+        )
+    assert missing_upstream.value.code == 2
+
+    output: list[str] = []
+    calls: list[tuple[str, int, Path]] = []
+
+    def dispatch_must_not_run(*_args: object, **_kwargs: object) -> CommandReport:
+        raise AssertionError("runtime dispatch must not run for an upstream preview")
+
+    def local_preview(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=0,
+        )
+
+    def upstream_preview(
+        preview: UpstreamFindingPreview,
+        *,
+        host: str,
+        project_id: int,
+        credential_file: Path,
+        read_credential: object,
+        run_command: object,
+        environment: object,
+    ) -> UpstreamFindingPreview:
+        assert preview.outcome == "valid"
+        assert callable(read_credential) and callable(run_command)
+        assert isinstance(environment, dict)
+        calls.append((host, project_id, credential_file))
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="match",
+            project_fingerprint=preview.project_fingerprint,
+            revision_fingerprint=preview.revision_fingerprint,
+            semantic_finding_fingerprint=preview.semantic_finding_fingerprint,
+            copied_path_count=preview.copied_path_count,
+            evidence_link_count=preview.evidence_link_count,
+            matching_iid=23,
+        )
+
+    assert (
+        main(
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
+                "--apply",
+                "--json",
+            ],
+            dispatch=dispatch_must_not_run,
+            preview_manifest=local_preview,
+            preview_upstream=upstream_preview,
+            read_bytes=lambda _path: b"unused",
+            read_credential=lambda _path: b"dedicated-token",
+            run_command=lambda *_args, **_kwargs: CommandResult(0, "", ""),
+            environment={"GITLAB_TOKEN": "generated-token"},
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert calls == [("upstream.example.com", 77, Path("/dedicated/token"))]
+    rendered = json.loads(output[0])
+    assert rendered["outcome"] == "match"
+    assert rendered["matching_iid"] == 23
+
+
+def test_upstream_finding_preview_composes_the_default_read_only_boundary() -> None:
+    """The CLI wires only the dedicated token into its GET-only reader."""
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    credential_paths: list[Path] = []
+    output: list[str] = []
+
+    def local_preview(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=0,
+        )
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append((command, kwargs))
+        response = (
+            '{"id":77,"issues_enabled":true,"permissions":'
+            '{"project_access":{"access_level":20},"group_access":null}}'
+            if command[-1] == "projects/77"
+            else "[]"
+        )
+        return CommandResult(0, response, "")
+
+    def read_credential(path: Path) -> bytes:
+        credential_paths.append(path)
+        return b"dedicated-token"
+
+    def dispatch_must_not_run(*_args: object, **_kwargs: object) -> CommandReport:
+        raise AssertionError("runtime dispatch must not run for an upstream preview")
+
+    assert (
+        main(
+            [
+                "upstream-finding",
+                "preview",
+                "--manifest-file",
+                "finding.yaml",
+                "--upstream-host",
+                "upstream.example.com",
+                "--upstream-project-id",
+                "77",
+                "--upstream-credential-file",
+                "/dedicated/token",
+            ],
+            dispatch=dispatch_must_not_run,
+            preview_manifest=local_preview,
+            read_credential=read_credential,
+            run_command=run,
+            environment={"GITLAB_TOKEN": "generated-token"},
+            find_executable=lambda name: "/opt/bin/glab" if name == "glab" else None,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert credential_paths == [Path("/dedicated/token")]
+    assert "outcome=would-create" in output[0]
+    assert [command[-1] for command, _kwargs in calls] == [
+        "projects/77",
+        "projects/77/issues?state=opened&per_page=100&page=1",
+    ]
+    for command, kwargs in calls:
+        assert command[1:6] == (
+            "api",
+            "--hostname",
+            "upstream.example.com",
+            "-X",
+            "GET",
+        )
+        assert kwargs["environment"] == {"GITLAB_TOKEN": "dedicated-token"}
+
+
+def test_upstream_finding_preview_maps_sanitized_reader_failure_to_one_and_hides_absent_iid() -> (
+    None
+):
+    """The read boundary has distinct syntax, operational, and success exits."""
+    from agent_work.upstream_gitlab import UpstreamGitLabError
+
+    def local_preview(path: Path, *, read_bytes: object) -> UpstreamFindingPreview:
+        del path, read_bytes
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="valid",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=0,
+        )
+
+    def failure(*_args: object, **_kwargs: object) -> UpstreamFindingPreview:
+        raise UpstreamGitLabError("upstream access failed")
+
+    arguments = [
+        "upstream-finding",
+        "preview",
+        "--manifest-file",
+        "finding.yaml",
+        "--upstream-host",
+        "upstream.example.com",
+        "--upstream-project-id",
+        "77",
+        "--upstream-credential-file",
+        "/dedicated/token",
+    ]
+    errors: list[str] = []
+    assert (
+        main(
+            arguments,
+            preview_manifest=local_preview,
+            preview_upstream=failure,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert errors == ["upstream access failed"]
+    with pytest.raises(UpstreamGitLabError):
+        main(
+            [*arguments, "--debug"],
+            preview_manifest=local_preview,
+            preview_upstream=failure,
+        )
+
+    def would_create(*_args: object, **_kwargs: object) -> UpstreamFindingPreview:
+        return UpstreamFindingPreview(
+            schema_version=1,
+            command="upstream-finding.preview",
+            outcome="would-create",
+            project_fingerprint="a" * 64,
+            revision_fingerprint="b" * 64,
+            semantic_finding_fingerprint="c" * 64,
+            copied_path_count=1,
+            evidence_link_count=0,
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            arguments,
+            preview_manifest=local_preview,
+            preview_upstream=would_create,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert "outcome=would-create" in output[0]
+    assert "matching_iid" not in output[0]

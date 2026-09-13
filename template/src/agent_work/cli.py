@@ -13,17 +13,26 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .ledger import LockBusy
 from .models import CommandReport
+from .ports import CommandRunner
+from .repository import run_subprocess
 from .runtime import dispatch as default_dispatch
 from .upstream_finding import ManifestError, UpstreamFindingPreview
 from .upstream_finding import preview_manifest as default_preview_manifest
+from .upstream_gitlab import (
+    UpstreamGitLabConfig,
+    UpstreamGitLabError,
+    UpstreamGitLabReader,
+)
 
 
 class _PreviewManifest(Protocol):
@@ -31,6 +40,22 @@ class _PreviewManifest(Protocol):
 
     def __call__(
         self, path: Path, *, read_bytes: Callable[[Path], bytes]
+    ) -> UpstreamFindingPreview: ...
+
+
+class _PreviewUpstream(Protocol):
+    """Typed read-only upstream preview boundary."""
+
+    def __call__(
+        self,
+        preview: UpstreamFindingPreview,
+        *,
+        host: str,
+        project_id: int,
+        credential_file: Path,
+        read_credential: Callable[[Path], bytes],
+        run_command: CommandRunner,
+        environment: Mapping[str, str],
     ) -> UpstreamFindingPreview: ...
 
 
@@ -109,15 +134,20 @@ def build_parser() -> argparse.ArgumentParser:
     _common(apply_parser)
     apply_parser.add_argument("--plan-file", type=Path, required=True)
     finding = resources.add_parser(
-        "upstream-finding", help="validate a strictly local upstream finding"
+        "upstream-finding", help="preview a read-only upstream finding"
     )
     finding_actions = finding.add_subparsers(dest="action", required=True)
     finding_preview = finding_actions.add_parser(
         "preview",
-        help="validate locally without GitLab access or writes",
-        description="Strictly local manifest preview; it does not contact GitLab or write files.",
+        help="validate and deduplicate an upstream finding without writes",
+        description="Read-only upstream GitLab preview; it never posts an issue or writes files.",
     )
     finding_preview.add_argument("--manifest-file", type=Path, required=True)
+    finding_preview.add_argument("--upstream-host", required=True)
+    finding_preview.add_argument(
+        "--upstream-project-id", type=_positive_integer, required=True
+    )
+    finding_preview.add_argument("--upstream-credential-file", type=Path, required=True)
     _common(
         finding_preview,
         apply_help="accepted for command consistency; preview remains read-only",
@@ -157,19 +187,49 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
 
 
 def _render_finding_preview(preview: UpstreamFindingPreview, *, as_json: bool) -> str:
-    """Render the intentionally content-free local preview."""
+    """Render the intentionally content-free upstream preview."""
     if as_json:
         return preview.as_json()
-    return " ".join(
-        (
-            f"outcome={preview.outcome}",
-            f"project_fingerprint={preview.project_fingerprint}",
-            f"revision_fingerprint={preview.revision_fingerprint}",
-            f"semantic_finding_fingerprint={preview.semantic_finding_fingerprint}",
-            f"paths={preview.copied_path_count}",
-            f"evidence_links={preview.evidence_link_count}",
+    details = [
+        f"outcome={preview.outcome}",
+        f"project_fingerprint={preview.project_fingerprint}",
+        f"revision_fingerprint={preview.revision_fingerprint}",
+        f"semantic_finding_fingerprint={preview.semantic_finding_fingerprint}",
+        f"paths={preview.copied_path_count}",
+        f"evidence_links={preview.evidence_link_count}",
+    ]
+    if preview.matching_iid is not None:
+        details.append(f"matching_iid={preview.matching_iid}")
+    return " ".join(details)
+
+
+def _default_preview_upstream(
+    preview: UpstreamFindingPreview,
+    *,
+    host: str,
+    project_id: int,
+    credential_file: Path,
+    read_credential: Callable[[Path], bytes],
+    run_command: CommandRunner,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+) -> UpstreamFindingPreview:
+    """Compose the explicitly configured read-only upstream boundary."""
+    configured = environment.get("AGENT_WORK_GLAB")
+    candidate = configured if configured else find_executable("glab")
+    if candidate is None or not Path(candidate).is_absolute():
+        raise UpstreamGitLabError("upstream glab is unavailable")
+    try:
+        config = UpstreamGitLabConfig(
+            host, project_id, credential_file, Path(candidate).resolve()
         )
-    )
+    except (OSError, ValueError):
+        raise UpstreamGitLabError("upstream configuration is invalid") from None
+    return UpstreamGitLabReader(
+        config,
+        read_credential=read_credential,
+        run_command=run_command,
+    ).preview(preview)
 
 
 def main(
@@ -178,6 +238,11 @@ def main(
     dispatch: Callable[..., CommandReport] = default_dispatch,
     preview_manifest: _PreviewManifest = default_preview_manifest,
     read_bytes: Callable[[Path], bytes] = Path.read_bytes,
+    preview_upstream: _PreviewUpstream | None = None,
+    read_credential: Callable[[Path], bytes] = Path.read_bytes,
+    run_command: CommandRunner = run_subprocess,
+    environment: Mapping[str, str] = os.environ,
+    find_executable: Callable[[str], str | None] = shutil.which,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
@@ -186,7 +251,28 @@ def main(
     if parsed.resource == "upstream-finding" and parsed.action == "preview":
         try:
             preview = preview_manifest(parsed.manifest_file, read_bytes=read_bytes)
-        except ManifestError as error:
+            if preview_upstream is None:
+                preview = _default_preview_upstream(
+                    preview,
+                    host=parsed.upstream_host,
+                    project_id=parsed.upstream_project_id,
+                    credential_file=parsed.upstream_credential_file,
+                    read_credential=read_credential,
+                    run_command=run_command,
+                    environment=environment,
+                    find_executable=find_executable,
+                )
+            else:
+                preview = preview_upstream(
+                    preview,
+                    host=parsed.upstream_host,
+                    project_id=parsed.upstream_project_id,
+                    credential_file=parsed.upstream_credential_file,
+                    read_credential=read_credential,
+                    run_command=run_command,
+                    environment=environment,
+                )
+        except (ManifestError, UpstreamGitLabError) as error:
             if parsed.debug:
                 raise
             write_stderr(str(error))

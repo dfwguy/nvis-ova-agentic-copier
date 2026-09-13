@@ -58,11 +58,14 @@ journal receives the same validated JSON through the wrapper's stdout.
 
 ## Preview an upstream finding
 
-Validate a finding manifest locally, without GitLab access or writes. JSON emits
-only structural fields, fingerprints, and copied-path/evidence-link counts:
+Validate a finding manifest against an explicit upstream GitLab project without
+posting or changing anything. Supply a dedicated credential file; JSON emits
+only structural fields, fingerprints, outcome, and an existing matching IID:
 
 ```bash
-uv run agent-work upstream-finding preview --manifest-file finding.yaml --json
+uv run agent-work upstream-finding preview --manifest-file finding.yaml \
+  --upstream-host gitlab.example.com --upstream-project-id 123 \
+  --upstream-credential-file /secure/upstream-token --json
 ```
 
 ## Check the scheduled agent loop

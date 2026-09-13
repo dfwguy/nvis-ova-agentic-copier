@@ -162,15 +162,19 @@ recurring Maintainer attestation. The observable branch and global approval
 checks above must pass; the runtime independently never approves or merges.
 The parentheses isolate strict shell options and preserve the block's status.
 
-## Preview an upstream finding locally
+## Preview an upstream finding safely
 
-Validate a supplied upstream-finding manifest without accessing GitLab or
-changing the checkout. The optional JSON output is safe to attach to a review:
-it contains structural fields, fingerprints, and copied-path/evidence-link
-counts only.
+Validate a supplied upstream-finding manifest against an explicit upstream
+target. Use a dedicated credential file, not the generated-project identity.
+The command performs network reads only: no issue is posted and failures leave
+no ledger, remote, or checkout mutation. Correct the input and safely rerun.
+Its optional JSON output contains structural fields, fingerprints, outcome, and
+a matching IID only when an open issue already has the exact reserved marker.
 
 ```bash
-uv run agent-work upstream-finding preview --manifest-file finding.yaml --json
+uv run agent-work upstream-finding preview --manifest-file finding.yaml \
+  --upstream-host gitlab.example.com --upstream-project-id 123 \
+  --upstream-credential-file /secure/upstream-token --json
 ```
 
 See the complete syntax and exit behavior in the
