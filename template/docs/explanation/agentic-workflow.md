@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-12
+last_reviewed: 2026-09-13
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -60,8 +60,9 @@ The coding lane is the default for a whole diff that changes executable code,
 tests, CI, packaging, configuration, schemas, command contracts, or executable
 automation. It uses the full TDD route: architecture, Red, Green, timing
 review, validation, and the applicable implementation, test, CI, CLI, and
-filesystem reviews. Green owns any coding-lane documentation after Red, so the
-same sole mutator keeps behavior, tests, and documentation synchronized.
+filesystem reviews. Red and the Diátaxis Writer prepare disjoint phase-2 test
+and documentation changes in parallel; Green then becomes the sole mutator and
+reconciles the documentation with behavior, tests, and final interfaces.
 
 The documentation and agent-policy lane is for a whole diff limited to
 documentation and the instructions that govern agent work. It does not invent
@@ -123,7 +124,9 @@ flowchart TD
     branch[Feature branch] --> classify{Classify whole diff}
     classify --> coding_architect[Architect: coding lane]
     coding_architect --> tests[Test Writer: Red]
+    coding_architect --> diataxis[Diátaxis Writer]
     tests --> implementer[Implementer: Green]
+    diataxis --> implementer
     implementer --> judges[Concurrent read-only judges]
     judges --> implementer
     implementer --> coding_architect
@@ -146,14 +149,14 @@ balanced work, and `gpt-5.6-luna` / `low` for focused checks. Other supported
 frontends resolve only their enabled equivalent; Frontier is never a fallback.
 
 For coding work, the Architect owns one workflow session rather than launching
-an unrelated top-level process for each phase. It hands its design directly to
-Red; Red's returned failing-test evidence is handed directly to Green. Green is
-the sole mutable owner: it reads the actual diff, fans out concurrent read-only
-judges when their subjects apply, repairs actionable feedback, and consolidates
-the results for the Architect. The Architect decides whether the complete
-workflow is ready for finalization. This keeps the context that matters with
-the agents that need it while judges use the diff and focused evidence instead
-of a full workflow transcript.
+an unrelated top-level process for each phase. It hands its design concurrently
+to Red and the Diátaxis Writer. Red exclusively mutates `tests/`; the Diátaxis
+Writer exclusively mutates `docs/`, including required indexes and reciprocal
+links. Architect waits for both receipts before handing Green the design, Red
+test diff, and Diátaxis draft/report or no-doc rationale. Green is then the
+sole mutable owner: it reconciles the draft against the implemented interface,
+fans out concurrent read-only judges when their subjects apply, repairs
+actionable feedback, and consolidates the results for the Architect.
 
 For coding work, Green makes required README and documentation edits before
 the read-only review fan-out; no second agent mutates the shared worktree. In
@@ -239,8 +242,9 @@ approval and merge boundary.
 | Architect | Owns the coding workflow session, design, context handoff, and final decision | Write production changes or tests |
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
-| Documentation Writer | Main-owned editor for documentation and agent-policy changes | Change executable scope or manufacture behavior tests |
-| Implementer | Green's sole mutable owner; implements code and documentation, reads the diff, and consolidates judge feedback | Waive failed review evidence |
+| Diátaxis Writer | Coding-lane `docs/` owner running alongside Red; drafts documentation for Green to reconcile | Change executable scope, tests, README, or agent policy |
+| Documentation Writer | Architect-delegated editor confined to the content-only documentation and agent-policy lane | Change executable scope or manufacture behavior tests |
+| Implementer | Green's sole mutable owner after Phase 2; implements code and reconciles documentation, reads the diff, and consolidates judge feedback | Waive failed review evidence |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |

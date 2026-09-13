@@ -29,6 +29,10 @@ JUnit evidence; Bash changes use
 syntax and ShellCheck gates; mixed changes use both. Do not fix issues yourself
 — report them and route back to the appropriate agent.
 
+The record must also contain the required Phase-2 Diátaxis Writer receipt or
+no-doc rationale, and the Diátaxis Judge's comparison verdict against the
+design, draft/report, final documentation, and implemented interface.
+
 ## When This Runs
 
 For normal approval, run after `nonfunctional-review`, `tdd-judge`, and

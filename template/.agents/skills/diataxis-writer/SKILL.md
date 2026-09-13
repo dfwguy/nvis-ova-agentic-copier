@@ -14,9 +14,10 @@ metadata:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# Documentation Writer
+# Diátaxis Writer
 
-Use this portable workflow skill for the documentation writer phase. Read and
+Use this portable workflow skill for the coding lane's concurrent Diátaxis
+writer phase. Read and
 follow [the role instructions](../../agents/diataxis-writer.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.

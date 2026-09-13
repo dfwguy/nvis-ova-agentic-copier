@@ -23,6 +23,6 @@ skill entry point for Claude Code, Codex, and Pi.
 
 ## Model selection
 
-The live Architect delegates this phase after Red and waits while Green owns
-all subsequent worktree mutations and review feedback. Request the `balanced`
+The live Architect delegates this phase after both phase-2 receipts and waits
+while Green owns all subsequent worktree mutations and review feedback. Request the `balanced`
 capability tier defined in `AGENTS.md`.

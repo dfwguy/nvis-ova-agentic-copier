@@ -16,7 +16,8 @@ metadata:
 
 # Documentation Judge
 
-Use this portable workflow skill for the documentation judge phase. Read and
+Use this portable workflow skill for the comparison-based documentation judge
+phase. Read and
 follow [the role instructions](../../agents/diataxis-judge.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.

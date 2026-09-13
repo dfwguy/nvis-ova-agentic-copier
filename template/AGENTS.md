@@ -130,11 +130,12 @@ the content-only boundary.
 |---|---|---|---|---|---|
 | 0 `$git-flow` | Every mutation | Main; never delegate | Current enabled | Session checklist | Verified target and feature branch; stop on failed access preflight |
 | 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Design, context boundaries, and final decision; ambiguity → user |
-| 2 `$tdd-red` | Required; child of Architect | Delegated | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
-| 3 `$tdd-green` | Required; child of Architect and sole mutator after Red | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt, test diff, and shared worktree | Green suite, documentation edits, current JUnit evidence, and correction-cycle ledger |
+| 2a `$tdd-red` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
+| 2b `$diataxis-writer` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and documentation boundaries | Diátaxis draft/report, required index and reciprocal-link updates, or a reason no docs update is needed → Architect |
+| 3 `$tdd-green` | Required; child of Architect and sole mutator after Phase 2 | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt/test diff, Diátaxis draft/report or no-doc rationale, and shared worktree | Green suite, reconciled documentation, current JUnit evidence, and correction-cycle ledger |
 | 4a `$nonfunctional-review` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Current JUnit evidence | Complete timing verdict → Green |
 | 4b `$tdd-judge` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final diff and validation evidence | Complete validation verdict → Green |
-| 4c `$diataxis-judge` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Documentation diff or N/A context | Complete documentation verdict → Green |
+| 4c `$diataxis-judge` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Architect design, Diátaxis Writer receipt/report, final docs diff, and final implemented interface/source diff | Comparison-based documentation verdict → Green |
 | 4d `$judge-quality` | Required; child of Green | Delegated in parallel | Most capable / `gpt-5.6-sol` `high` | Production diff and design | Complete severity report → Green |
 | 4e `$judge-test` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Test diff, Red receipt, and JUnit evidence | Complete test report → Green |
 | 4f `$judge-cicd` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | CI/config diff and validation evidence | Complete CI report → Green |
@@ -143,7 +144,7 @@ the content-only boundary.
 | 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
 | 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
 | 4k `$license-checker` | Required; child of Green | Delegated; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and every Phase 4 review receipt | License-policy receipt → Green |
-| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
+| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record including Phase-2 writer evidence and Phase-4 comparison verdict, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
 | 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip; then return `awaiting_human` |
 
 Green waits for every initially applicable Phase 4 reviewer, consolidates the

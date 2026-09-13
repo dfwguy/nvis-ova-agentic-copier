@@ -102,10 +102,11 @@ emergency evidence that the runner inventories but never applies or drops.
 
 Serial execution is a local safety boundary. One host owns unattended work for
 a project and a single-project lock prevents overlapping activations. Within
-an activation, the workflow session directly hands Architect context to Red,
-Red evidence to Green, and Green's consolidated judge feedback back to the
-Architect. The activation continues only on its current issue; it never
-consumes a second issue merely because capacity remains.
+an activation, Architect hands its design concurrently to Red and the Diátaxis
+Writer, waits for both receipts, then gives their combined evidence to Green.
+Green returns consolidated judge feedback to Architect. The activation
+continues only on its current issue; it never consumes a second issue merely
+because capacity remains.
 
 The activation yields for terminal or human-facing states, a future external retry, a
 pending external result, lack of progress, or its workflow or wall-time limit.
