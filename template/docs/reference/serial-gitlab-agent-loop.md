@@ -36,7 +36,7 @@ agent-work loop status [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
-agent-work upstream-finding preview --manifest-file PATH [--apply] [--json] [--debug]
+agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
 ```
 
 An applied `loop run` performs one bounded, recoverable activation for one
@@ -62,13 +62,15 @@ preview file and `--apply`; it does not resolve ambiguous evidence. `--json` emi
 the documented redacted JSON result. `--debug` adds local diagnostics without
 credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
 
-`upstream-finding preview` is a strictly local, read-only manifest validator.
-It neither contacts GitLab nor writes files. Its successful output contains only
-structural fields, stable fingerprints, and counts; it never prints project identity, finding text,
-validation evidence, or evidence URLs. Invalid manifests and unreadable files
-exit `1` with sanitized diagnostics.
-`--apply` is accepted only for uniform command syntax and remains a harmless
-no-op for this strictly local preview.
+`upstream-finding preview` validates the local manifest, then performs GET-only
+reads against the explicit upstream target using its dedicated credential file.
+It never posts, updates, or closes an issue, and failures leave no ledger,
+remote, or checkout mutation. Successful output contains only structural fields,
+stable fingerprints, outcome, and a positive matching IID when one exists; it
+never prints project identity, finding text, validation evidence, or evidence URLs.
+Invalid manifests, credentials, access, API responses, and markers exit `1`
+with sanitized diagnostics. Correct the boundary input and safely rerun;
+`--apply` remains equally read-only.
 
 ### Upstream-finding manifest v1
 
