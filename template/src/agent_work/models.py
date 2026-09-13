@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import html
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -335,6 +336,35 @@ class SplitChildEvidence(BoundaryModel):
     issue_iid: int = Field(gt=0)
 
 
+class WorkerExitEvidence(BoundaryModel):
+    """Bounded, safe diagnostic evidence from one failed worker process."""
+
+    returncode: int
+    diagnostic: str = Field(min_length=1)
+
+    @field_validator("returncode")
+    @classmethod
+    def validate_nonzero_returncode(cls, value: int) -> int:
+        """Keep exit evidence exclusive to a failed worker process."""
+        if value == 0:
+            raise ValueError("worker exit returncode must be nonzero")
+        return value
+
+    @field_validator("diagnostic")
+    @classmethod
+    def validate_diagnostic(cls, value: str) -> str:
+        """Reject control-bearing or oversized durable diagnostic text."""
+        if len(value.encode("utf-8")) > 2048:
+            raise ValueError("worker exit diagnostic exceeds 2048 UTF-8 bytes")
+        if any(unicodedata.category(character) in {"Cc", "Cf"} for character in value):
+            raise ValueError(
+                "worker exit diagnostic contains unsafe control characters"
+            )
+        if " ".join(value.split()) != value:
+            raise ValueError("worker exit diagnostic must be one canonical line")
+        return value
+
+
 class LedgerRecord(BoundaryModel):
     """Durable state for one issue."""
 
@@ -360,6 +390,7 @@ class LedgerRecord(BoundaryModel):
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
     error_code: ErrorCode | None = None
+    worker_exit: WorkerExitEvidence | None = None
     decomposition_plan: SplitPlan | None = None
     decomposition_progress: tuple[SplitChildEvidence, ...] = ()
     summary: str = ""
@@ -489,6 +520,7 @@ class CommandItemReport(BoundaryModel):
     merge_request_iid: int | None = None
     merge_request_url: str | None = None
     error_code: ErrorCode | None = None
+    worker_exit: WorkerExitEvidence | None = None
     summary: str = ""
     next_action: str = ""
 

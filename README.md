@@ -50,6 +50,12 @@ wait, repair, or a per-issue budget limit. Retryable worker failures continue
 in the same activation. For scheduled operation, safeguards, status checks, and troubleshooting, see
 [How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
 
+When a worker exits nonzero, status JSON can include a bounded `worker_exit`
+object with its signed return code and a safe stderr-derived diagnostic. This
+optional evidence excludes prompts, issue content, credentials, stdout, and
+terminal controls; retry exhaustion retains it for diagnosis. The systemd
+journal receives the same validated JSON through the wrapper's stdout.
+
 ## Preview an upstream finding
 
 Validate a finding manifest locally, without GitLab access or writes. JSON emits
