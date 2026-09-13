@@ -33,11 +33,15 @@ case "$host" in
     ;;
 esac
 project_id="${GITLAB_PROJECT_ID:-}"
+factory_username="${AGENT_WORK_FACTORY_USERNAME:-}"
 case "$project_id" in
   ''|0|00*|*[!0-9]*)
     stop 'GITLAB_PROJECT_ID must be a positive integer'
     ;;
 esac
+if [[ ! "$factory_username" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  stop 'AGENT_WORK_FACTORY_USERNAME must be a safe GitLab username'
+fi
 if [[ "${AGENT_WORK_CHECKOUT:-}" != /* || ! -d "$AGENT_WORK_CHECKOUT" ]]; then
   stop 'AGENT_WORK_CHECKOUT must be an absolute directory'
 fi
@@ -83,16 +87,15 @@ checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
 authenticated() {
   "$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env -u GIT_CONFIG_PARAMETERS \
     "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" \
+    "AGENT_WORK_FACTORY_USERNAME=$factory_username" \
     "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" \
     "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never" \
     "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false" \
-    "GIT_CONFIG_COUNT=4" \
-    "GIT_CONFIG_KEY_0=credential.helper" "GIT_CONFIG_VALUE_0=" \
-    "GIT_CONFIG_KEY_1=credential.helper" \
+    "GIT_CONFIG_COUNT=4" "GIT_CONFIG_KEY_0=credential.helper" \
+    "GIT_CONFIG_VALUE_0=" "GIT_CONFIG_KEY_1=credential.helper" \
     "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential" \
     "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true" \
-    "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false" \
-    "$@"
+    "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false" "$@"
 }
 if ! top="$("${git[@]}" -C "$checkout" rev-parse --show-toplevel)"; then
   stop 'AGENT_WORK_CHECKOUT is not a Git checkout'

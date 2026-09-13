@@ -68,18 +68,20 @@ with actual behavior, expected behavior, file evidence, acceptance criteria,
 relevant commit and MR context, and the marker in Additional context.
 
 Use the configured numeric project ID for every API operation. When `.envrc`
-supplies `GITLAB_TOKEN`, use `direnv exec . glab api --hostname
-"$GITLAB_HOST"`; never print or inspect token values. Before the first write,
+supplies `GITLAB_TOKEN`, use `direnv exec . /usr/bin/env bash -c 'exec glab api
+--hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'` for reads and the
+same quoted form with the required API arguments for writes, so variables expand
+only after `.envrc` loads; never print or inspect token values. Before the first write,
 complete the repository's required submission-identity and approval-policy
 audits.
 
 Create only the deduplicated issue through:
 
 ```bash
-direnv exec . glab api --hostname "$GITLAB_HOST" -X POST \
+direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" -X POST \
   "projects/$GITLAB_PROJECT_ID/issues" \
   -f title="<concise finding title>" \
-  -f description="<Bug-template body>"
+  -f description="<Bug-template body>"'
 ```
 
 If authentication, search, or creation fails, record the non-secret error as

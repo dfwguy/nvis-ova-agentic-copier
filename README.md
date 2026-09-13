@@ -21,6 +21,7 @@ or GitLab:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
+export AGENT_WORK_FACTORY_USERNAME=your-service-account
 uv run agent-work loop run --json
 ```
 
@@ -31,6 +32,7 @@ place, process one issue in a bounded pass:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
+export AGENT_WORK_FACTORY_USERNAME=your-service-account
 uv run agent-work loop run --apply --json
 ```
 
@@ -42,32 +44,29 @@ worker session, while saved work resumes from its durable worktree and recorded
 outer phase. Use `--max-segments` or `--max-activation-seconds` to tighten the
 activation bounds.
 
-The systemd wrapper keeps each Python activation bounded to one issue, continues
-immediately for a due retry of that issue, and begins another issue only after a
-terminal handoff and a fresh eligible preview.
-It yields to the timer for an empty queue, pipeline or other future external
-wait, repair, or a per-issue budget limit. Retryable worker failures continue
-in the same activation. For scheduled operation, safeguards, status checks, and troubleshooting, see
+`AGENT_WORK_FACTORY_USERNAME` is required and must exactly match the
+authenticated GitLab service username. Human general comments and inline
+replies on an awaiting-review merge request wake only that exact work item for
+same-MR remediation. The runner preserves the draft state, title, description,
+and closing relationship; no-action feedback is acknowledged without a commit.
+
+When a worker exits nonzero, status JSON includes bounded `worker_exit` evidence
+with its validated nonzero return code and a safe stderr-derived diagnostic. This excludes
+prompts, issue content, credentials, stdout, and terminal controls; retry
+exhaustion retains it for diagnosis.
+
+The systemd wrapper keeps each Python activation bounded to one issue, then
+continues immediately only after a terminal handoff and a fresh eligible preview.
+It yields to the timer for an empty queue, pipeline or retry wait, repair, or a
+per-issue budget limit. For scheduled operation, safeguards, status checks, and troubleshooting, see
 [How to set up the recoverable serial GitLab agent loop](docs/how-to/setup-serial-gitlab-agent-loop.md).
-
-When a worker exits nonzero, status JSON can include a bounded `worker_exit`
-object with its signed return code and a safe stderr-derived diagnostic. This
-optional evidence excludes prompts, issue content, credentials, stdout, and
-terminal controls; retry exhaustion retains it for diagnosis. The systemd
-journal receives the same validated JSON through the wrapper's stdout.
-
-Scheduled operation uses an ignored checkout-local `.envrc` and an absolute
-`direnv` executable. The deterministic controller, AI workflow, and required
-nested agents use the same scoped Developer GitLab credential. Humans provide
-product and policy inputs and alone approve or merge. The setup guide defines the deployment-configured
-`pass`-backed `.envrc` and keeps the token out of service files, logs, and the
-ledger.
 
 ## Preview an upstream finding
 
-Validate a finding manifest against an explicit upstream GitLab project without
-posting or changing anything. Supply a dedicated credential file; JSON emits
-only structural fields, fingerprints, outcome, and an existing matching IID:
+Validate a finding manifest against an explicit upstream GitLab target. The
+read-only preview makes bounded GitLab GET requests, never posts an issue, and
+never writes the checkout. JSON emits only structural fields, fingerprints,
+counts, and an upstream issue IID when it finds an exact existing marker:
 
 ```bash
 uv run agent-work upstream-finding preview --manifest-file finding.yaml \
@@ -156,8 +155,8 @@ flowchart TD
 For unattended work, one workflow-owning agent session preserves context from
 Architect through Red, Green, concurrent review, consolidated repair, and
 finalization. The trusted runner alone publishes and observes the exact source-
-SHA pipeline; no post-publication agent invocation delays human handoff. Coding-
-lane GitLab validation lists its nine gates as native jobs with individual green or red status indicators.
+SHA pipeline. Coding-lane GitLab validation lists its nine gates as native jobs
+with individual green or red status indicators.
 The root jobs use the repository's immutable prebuilt validation image without
 runtime dependency setup. Python 3.11 and 3.14.3 retain separate suites, logs,
 and coverage reports.

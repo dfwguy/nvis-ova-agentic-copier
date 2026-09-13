@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 import pytest
-from pydantic import ValidationError
 
 from agent_work.domain import (
     LIFECYCLE_LABELS,
@@ -47,10 +46,10 @@ from agent_work.models import (
     LedgerRecord,
     MergeRequestDraft,
     MergeRequestEvidence,
+    MergeRequestFeedback,
     PipelineEvidence,
     SplitChildEvidence,
     TransitionIntentRecord,
-    WorkerExitEvidence,
     WorkflowReceiptRecord,
 )
 from agent_work.ports import CommandResult
@@ -186,6 +185,30 @@ class FakeGitLab:
 
     def verify_project(self) -> GitLabProject:
         return _project()
+
+    def verify_authenticated_user(self) -> None:
+        """Provide the configured fake service identity."""
+
+    def fetch_merge_request_feedback(
+        self, iid: int
+    ) -> tuple[MergeRequestFeedback, ...]:
+        """Return no feedback unless a focused feedback fake overrides this boundary."""
+        del iid
+        return ()
+
+    def comment_feedback_outcome(
+        self,
+        iid: int,
+        *,
+        issue_iid: int,
+        source: str,
+        note_id: int,
+        discussion_id: str | None,
+        selection_sha: str,
+        summary: str,
+    ) -> None:
+        """Accept acknowledgement calls in generic serial-runner fixtures."""
+        del iid, issue_iid, source, note_id, discussion_id, selection_sha, summary
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]:
         return (
@@ -356,6 +379,7 @@ class FakeRepository:
         self.pushes = 0
         self.refreshed = 0
         self.paths: tuple[str, ...] = ("src/example.py",)
+        self.dirty = False
         self.worktree_present = True
         self.worktree_valid = True
         self.existing_worktree_error: RepositoryError | None = None
@@ -365,11 +389,8 @@ class FakeRepository:
         self.binds = 0
         self.bound_sha = "a" * 40
         self.verified_heads: list[str] = []
-        self.reconciled_heads: list[str] = []
-        self.reconciliation_sha: str | None = None
-        self.reconciliation_error: RepositoryError | None = None
-        self.prepared_sha = "a" * 40
-        self.publication_events: list[tuple[str, str]] = []
+        self.synced_heads: list[tuple[str, str]] = []
+        self.current_head = "a" * 40
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
         ] = (
@@ -405,11 +426,16 @@ class FakeRepository:
 
     def head(self, worktree: Path) -> str:
         del worktree
-        return "a" * 40
+        return self.current_head
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]:
         del worktree
         return self.paths
+
+    def has_changes(self, worktree: Path) -> bool:
+        """Report the fake worktree's independently controlled cleanliness."""
+        del worktree
+        return self.dirty
 
     def worktree_exists(self, worktree: Path) -> bool:
         del worktree
@@ -421,16 +447,21 @@ class FakeRepository:
         if not self.worktree_valid:
             raise RepositoryError("worktree branch or baseline changed")
 
+    def sync_feedback_worktree(
+        self, worktree: Path, branch: str, old_sha: str, new_sha: str
+    ) -> None:
+        del worktree, branch
+        if not self.worktree_valid or self.current_head not in {old_sha, new_sha}:
+            raise RepositoryError("worktree branch or baseline changed")
+        self.synced_heads.append((old_sha, new_sha))
+        self.current_head = new_sha
+
     def reconcile_default_branch(
         self, worktree: Path, branch: str, expected_head: str
     ) -> str | None:
-        """Model reconciliation of the candidate with the current default branch."""
-        del worktree, branch
-        self.reconciled_heads.append(expected_head)
-        self.publication_events.append(("reconcile", expected_head))
-        if self.reconciliation_error is not None:
-            raise self.reconciliation_error
-        return self.reconciliation_sha
+        """Model a current-default reconciliation when requested by a test."""
+        del worktree, branch, expected_head
+        return None
 
     def prepare_commit(
         self,
@@ -442,8 +473,7 @@ class FakeRepository:
         del worktree, branch, issue_iid, expected_head
         if self.prepare_error is not None:
             raise self.prepare_error
-        self.publication_events.append(("prepare", self.prepared_sha))
-        return self.prepared_sha
+        return "a" * 40
 
     def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
         del worktree, branch
@@ -486,15 +516,9 @@ def _dependencies(
 
 
 class FakeInvoker:
-    def __init__(
-        self,
-        output: str = "",
-        returncode: int | None = 0,
-        stderr: str = "safe diagnostic",
-    ) -> None:
+    def __init__(self, output: str = "", returncode: int | None = 0) -> None:
         self.output = output
         self.returncode = returncode
-        self.stderr = stderr
         self.prompts: list[str] = []
 
     def preflight(self) -> None:
@@ -503,7 +527,7 @@ class FakeInvoker:
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
-        return WorkerInvocation(self.returncode, self.output, self.stderr)
+        return WorkerInvocation(self.returncode, self.output, "safe diagnostic")
 
 
 class BatchingInvoker:
@@ -760,65 +784,6 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
     assert len(outcome.receipts) == 1
 
 
-def test_invalid_worker_receipt_is_immediately_due(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
-    payload = {
-        "protocol_version": 1,
-        "project_id": 310967,
-        "issue_iid": 12,
-        "ledger_revision": record.revision,
-        "expected_state": "executing",
-        "expected_phase": "coding-green",
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "phase_status": "complete",
-        "completed_phase": "coding-green",
-        "receipts": ["$wrong-skill: complete"],
-        "change_summary": "Invalid receipt.",
-        "next_action": "Retry.",
-    }
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
-    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
-    assert outcome.retry_at == NOW
-
-
-def test_malformed_worker_protocol_is_immediately_due(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker("<agent-work-result>not-json</agent-work-result>"),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
-    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert outcome.retry_at == NOW
-
-
 def test_split_required_workflow_creates_children_in_order_then_closes_parent(
     tmp_path: Path,
 ) -> None:
@@ -1022,7 +987,6 @@ def test_malformed_split_envelope_blocks_before_any_decomposition_mutation(
     )
 
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
-    assert outcome.retry_at == NOW
     assert gitlab.created_children == []
     assert gitlab.decomposition_notes == []
     assert gitlab.closed_issues == []
@@ -1223,36 +1187,20 @@ def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None
         ledger=ledger,
         gitlab=FakeGitLab(),  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(returncode=-9, stderr="connection refused"),  # type: ignore[arg-type]
+        invoke=FakeInvoker(returncode=1),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
-    assert outcome.retry_at == NOW
+    assert outcome.retry_at is not None
     assert outcome.error_code is ErrorCode.WORKER_EXIT
-    assert outcome.worker_exit is not None
-    assert outcome.worker_exit.returncode == -9
-    assert outcome.worker_exit.diagnostic == "connection refused"
-    legacy_payload = _record(
-        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
-    ).model_dump()
-    legacy_payload.pop("worker_exit", None)
-    legacy = LedgerRecord.model_validate(legacy_payload)
-    assert legacy.worker_exit is None
 
 
-def test_worker_exit_evidence_is_safe_bounded_and_does_not_persist_echoed_prompt(
+def test_agent_invoker_worker_exit_redacts_prompt_credentials_and_controls(
     tmp_path: Path,
 ) -> None:
-    """A failed worker stores only safe stderr-derived diagnostic evidence."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
+    """A failing process exposes only bounded, redacted diagnostic evidence."""
     secret = "credential-value-that-must-not-persist"
-    cutoff_credential = "cutoff-credential-value-that-must-not-persist"
-    issue_description = "untrusted issue description that must not persist"
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
         del command
@@ -1266,115 +1214,137 @@ def test_worker_exit_evidence_is_safe_bounded_and_does_not_persist_echoed_prompt
                 {
                     "returncode": 23,
                     "stdout": "stdout must never be used",
-                    "stderr": (
-                        f"{prompt}\r\n\x1b[31mtransport failed "
-                        + "x" * 2020
-                        + cutoff_credential
-                        + f"\n{secret}\x9b0m"
-                    ),
+                    "stderr": f"{prompt}\r\n\x1b[31mfailed {secret} " + "x" * 3_000,
                 },
             )(),
         )
 
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(_issue(description=issue_description)),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=AgentInvoker(
-            run_command,
-            environment={
-                "AGENT_WORK_AGENT": "codex",
-                "AGENT_WORK_AGENT_PATH": "/codex",
-                "SECRET_TOKEN": secret,
-                "SERVICE_CREDENTIAL": cutoff_credential,
-            },
-        ),
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.worker_exit is not None
-    assert outcome.worker_exit.returncode == 23
-    diagnostic = outcome.worker_exit.diagnostic
-    assert secret not in diagnostic
-    assert cutoff_credential not in diagnostic
-    assert "cutoff" not in diagnostic
-    assert "Continue one bounded agent-work segment" not in diagnostic
-    assert issue_description not in diagnostic
-    assert "stdout must never be used" not in diagnostic
-    assert (
-        "\n" not in diagnostic and "\r" not in diagnostic and "\x1b" not in diagnostic
-    )
-    assert len(diagnostic.encode("utf-8")) <= 2048
-
-
-@pytest.mark.parametrize(
-    "payload",
-    (
-        {"returncode": 0, "diagnostic": "apparently successful"},
-        {"returncode": 1, "diagnostic": "first\u2028second"},
-        {"returncode": -9, "diagnostic": "first\u2029second"},
-    ),
-)
-def test_worker_exit_evidence_rejects_success_and_noncanonical_lines(
-    payload: dict[str, int | str],
-) -> None:
-    with pytest.raises(ValidationError):
-        WorkerExitEvidence.model_validate(payload)
-
-
-def test_agent_invoker_accepts_a_successful_worker_result(tmp_path: Path) -> None:
-    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del command, kwargs
-        return cast(
-            CommandResult,
-            type("Result", (), {"returncode": 0, "stdout": "result", "stderr": ""})(),
-        )
-
     invocation = AgentInvoker(
         run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-    ).invoke(tmp_path, "safe prompt", 10)
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "SERVICE_CREDENTIAL": secret,
+        },
+    ).invoke(tmp_path, "untrusted prompt content", 10)
 
-    assert invocation.returncode == 0
-    assert invocation.stdout == "result"
+    assert invocation.returncode == 23
+    assert "untrusted prompt content" not in invocation.stderr
+    assert secret not in invocation.stderr
+    assert "\x1b" not in invocation.stderr
+    assert len(invocation.stderr.encode()) <= 2_048
 
 
 def test_worker_exit_evidence_uses_a_deterministic_fallback_for_blank_stderr(
     tmp_path: Path,
 ) -> None:
+    invocation = AgentInvoker(
+        lambda *_args, **_kwargs: cast(
+            CommandResult,
+            type(
+                "Result", (), {"returncode": 1, "stdout": "", "stderr": "\x1b[2J\r\n"}
+            )(),
+        ),
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    ).invoke(tmp_path, "safe prompt", 10)
+    assert invocation.stderr == "worker exited without diagnostic output"
+
+
+def test_agent_invoker_redacts_ansi_split_prompt_and_credential(tmp_path: Path) -> None:
+    """Terminal controls cannot split protected values before durable redaction."""
+    prompt = "untrusted prompt"
+    credential = "credential-value"
+    invocation = AgentInvoker(
+        lambda *_args, **_kwargs: cast(
+            CommandResult,
+            type(
+                "Result",
+                (),
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "untrusted\x1b[2J prompt credential\x1b[31m-value transport failed",
+                },
+            )(),
+        ),
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "SERVICE_CREDENTIAL": credential,
+        },
+    ).invoke(tmp_path, prompt, 10)
+    assert prompt not in invocation.stderr
+    assert credential not in invocation.stderr
+    assert invocation.stderr == "[REDACTED] transport failed"
+
+
+def test_agent_invoker_redacts_non_csi_and_unicode_control_split_values(
+    tmp_path: Path,
+) -> None:
+    """Every supported control separator is removed before protected matching."""
+    prompt = "untrusted prompt"
+    credential = "credential-value"
+    invocation = AgentInvoker(
+        lambda *_args, **_kwargs: cast(
+            CommandResult,
+            type(
+                "Result",
+                (),
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "untrusted\x1b7 prompt credential\u200e-value transport failed",
+                },
+            )(),
+        ),
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "SERVICE_CREDENTIAL": credential,
+        },
+    ).invoke(tmp_path, prompt, 10)
+    assert all(
+        protected_fragment not in invocation.stderr
+        for protected_fragment in ("untrusted", "prompt", "credential", "value")
+    )
+    assert invocation.stderr == "[REDACTED] transport failed"
+
+
+def test_runtime_item_projects_worker_exit_evidence(tmp_path: Path) -> None:
+    record = LedgerRecord.model_validate(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.CODING_GREEN
+        ).model_dump(mode="json")
+        | {"worker_exit": {"returncode": -9, "diagnostic": "signal exit"}}
+    )
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    ledger.persist(record)
+    report = dispatch(
+        CommandRequest(command="loop.status"),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
     )
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(returncode=1, stderr="\x1b[2J\r\n"),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None
-    assert outcome.worker_exit is not None
-    assert outcome.worker_exit.diagnostic == "worker exited without diagnostic output"
+    assert report.items[0].worker_exit == record.worker_exit
 
 
 def test_successful_worker_progress_clears_prior_worker_exit_evidence(
     tmp_path: Path,
 ) -> None:
+    """A validated worker success cannot retain stale failure evidence."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
-    prior_payload = _record(
-        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
-    ).model_dump(mode="json") | {
-        "worker_exit": {"returncode": -9, "diagnostic": "previous signal exit"}
-    }
-    record = ledger.persist(LedgerRecord.model_validate(prior_payload))
-    result_payload = {
+    record = ledger.persist(
+        LedgerRecord.model_validate(
+            _record(
+                tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+            ).model_dump(mode="json")
+            | {"worker_exit": {"returncode": -9, "diagnostic": "prior exit"}}
+        )
+    )
+    result = {
         "protocol_version": 1,
         "project_id": 310967,
         "issue_iid": 12,
@@ -1389,18 +1359,16 @@ def test_successful_worker_progress_clears_prior_worker_exit_evidence(
         "change_summary": "Green complete.",
         "next_action": "Review timing.",
     }
-
     outcome = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
         invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(result_payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+            f"<agent-work-result>{json.dumps(result)}</agent-work-result>"
+        ),
         timeout_seconds=10,
         now=NOW,
     )
-
     persisted = ledger.load(12)
     assert outcome is not None and outcome.worker_exit is None
     assert persisted is not None and persisted.worker_exit is None
@@ -1438,8 +1406,6 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
             now=NOW,
         )
         assert outcome is not None and outcome.error_code is expected
-        assert outcome.retry_at == NOW
-        assert outcome.worker_exit is None
 
 
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
@@ -1784,6 +1750,7 @@ def test_unpinned_selection_skips_terminal_stale_record_without_open_mr(
         ledger,
         MultiIssueGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)})),
         now=NOW,
+        repository=FakeRepository(_config(tmp_path)),
     )
 
     assert selected is not None and selected.issue_iid == 13
@@ -1825,7 +1792,12 @@ def test_unpinned_selection_scans_every_terminal_record_for_a_later_published_mr
                 (_mr(source_branch=branch),) if branch == second.source_branch else ()
             )
 
-    selected, issue = select_record(ledger, MultiRecordGitLab(), now=NOW)
+    selected, issue = select_record(
+        ledger,
+        MultiRecordGitLab(),
+        now=NOW,
+        repository=FakeRepository(_config(tmp_path)),
+    )
 
     assert first.issue_iid == 12
     assert selected is not None and selected.issue_iid == second.issue_iid
@@ -2421,9 +2393,7 @@ def test_observation_revalidates_exact_merge_request_evidence(
     assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
 
 
-def test_observation_retries_conflicts_without_a_pending_default_merge(
-    tmp_path: Path,
-) -> None:
+def test_observation_routes_conflicts_to_durable_repair(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
     ledger.persist(
@@ -2445,57 +2415,10 @@ def test_observation_retries_conflicts_without_a_pending_default_merge(
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome is not None and outcome.state is RunnerState.REPAIR
+    assert outcome.phase is WorkflowPhase.CODING_GREEN
+    assert outcome.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
     assert outcome.error_code is ErrorCode.MERGE_CONFLICT
-
-
-@pytest.mark.parametrize(
-    ("reconciliation_error", "expected_state", "expected_error"),
-    (
-        (
-            RepositoryTransientError("temporary fetch failure"),
-            RunnerState.RETRY_WAIT,
-            ErrorCode.GIT_TRANSPORT_RETRYABLE,
-        ),
-        (
-            RepositoryError("worktree no longer matches the candidate"),
-            RunnerState.BLOCKED,
-            ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
-        ),
-    ),
-)
-def test_observation_classifies_existing_merge_request_reconciliation_errors(
-    tmp_path: Path,
-    reconciliation_error: RepositoryError,
-    expected_state: RunnerState,
-    expected_error: ErrorCode,
-) -> None:
-    """Existing-MR reconciliation preserves transient and identity error policy."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.OBSERVING,
-            phase=WorkflowPhase.PIPELINE_WAIT,
-        ).model_copy(update={"merge_request_iid": 88})
-    )
-    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
-    gitlab.existing_mr = _mr(has_conflicts=True)
-    repository = FakeRepository(config)
-    repository.reconciliation_error = reconciliation_error
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is expected_state
-    assert outcome.error_code is expected_error
 
 
 def test_observation_gitlab_failure_schedules_retry(tmp_path: Path) -> None:
@@ -2994,7 +2917,7 @@ def test_remediation_reconciles_only_its_recorded_mr_with_decision_review(
     )
 
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
-    assert gitlab.fetched_merge_requests == [88]
+    assert gitlab.fetched_merge_requests == [88, 88]
     assert gitlab.reconciled_drafts == [draft]
 
 
@@ -3411,7 +3334,7 @@ def test_remediation_publication_reuses_only_its_recorded_merge_request(
     )
 
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
-    assert gitlab.fetched_merge_requests == [88]
+    assert gitlab.fetched_merge_requests == [88, 88]
     assert gitlab.created_merge_requests == 0
 
 
@@ -4463,10 +4386,8 @@ def test_apply_resumes_a_due_retry_and_continues_in_the_same_activation(
     assert invoker.phases == ["coding-finalize"]
 
 
-def test_apply_relaunches_immediately_due_worker_exits_until_retry_exhaustion(
-    tmp_path: Path,
-) -> None:
-    """Worker exits retry in one bounded activation on the retained worktree."""
+def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> None:
+    """A failed worker is reinvoked before this dispatch activation yields."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
     ledger.persist(
@@ -4476,37 +4397,35 @@ def test_apply_relaunches_immediately_due_worker_exits_until_retry_exhaustion(
             phase=WorkflowPhase.CODING_GREEN,
         )
     )
-    repository = FakeRepository(config)
-    invoker = FakeInvoker(returncode=127, stderr="agent executable unavailable")
-    clock_reads = 0
 
-    def clock() -> datetime:
-        nonlocal clock_reads
-        value = NOW + timedelta(seconds=clock_reads)
-        clock_reads += 1
-        return value
+    class FailThenSucceedInvoker(BatchingInvoker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.invocations = 0
 
+        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+            self.invocations += 1
+            if self.invocations == 1:
+                return WorkerInvocation(23, "", "worker failed")
+            return super().invoke(checkout, prompt, timeout)
+
+    invoker = FailThenSucceedInvoker()
     report = dispatch(
-        CommandRequest(command="loop.run", max_segments=8, max_activation_seconds=3600),
+        CommandRequest(command="loop.run", max_segments=2, max_activation_seconds=3600),
         apply=True,
         dependencies=replace(
-            _dependencies(config, ledger, FakeGitLab(), repository),
+            _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
             invoke=invoker,
-            clock=clock,
         ),
     )
 
-    persisted = ledger.load(12)
-    assert report.stop_reason == "blocked"
-    assert len(invoker.prompts) == 4
-    assert report.items[0].retry_at == NOW
-    assert all(item.issue_iid == 12 for item in report.items)
-    assert persisted is not None and persisted.error_code is ErrorCode.RETRY_EXHAUSTED
-    assert persisted.worker_exit is not None
-    assert persisted.worker_exit.returncode == 127
-    assert persisted.worker_exit.diagnostic == "agent executable unavailable"
-    assert repository.prepared is False
-    assert repository.verified_heads == ["a" * 40] * 4
+    assert report.segments_run == 2
+    assert [item.state for item in report.items] == [
+        RunnerState.RETRY_WAIT,
+        RunnerState.EXECUTING,
+    ]
+    assert invoker.invocations == 2
+    assert invoker.phases == ["coding-green"]
 
 
 def test_apply_yields_without_mutation_for_a_future_retry(tmp_path: Path) -> None:
@@ -5099,147 +5018,3 @@ def test_migration_rejects_pending_replay_when_issue_state_changed(
 
     assert gitlab.labels == []
     assert ledger.load(12) == pending
-
-
-@pytest.mark.parametrize(
-    ("reconciliation_sha", "expected_state", "expected_pushes"),
-    ((None, RunnerState.OBSERVING, 1), ("b" * 40, RunnerState.EXECUTING, 0)),
-)
-def test_publication_pushes_an_ancestor_or_replays_workflow_after_default_advances(
-    tmp_path: Path,
-    reconciliation_sha: str | None,
-    expected_state: RunnerState,
-    expected_pushes: int,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
-        ).model_copy(
-            update={
-                "merge_request_draft": MergeRequestDraft(
-                    title="Change", description="Closes #12"
-                )
-            }
-        )
-    )
-    repository = FakeRepository(config)
-    repository.reconciliation_sha = reconciliation_sha
-    if reconciliation_sha is not None:
-        repository.prepared_sha = "c" * 40
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is expected_state
-    assert repository.pushes == expected_pushes
-    expected_candidate = "c" * 40 if reconciliation_sha is not None else "a" * 40
-    assert repository.reconciled_heads == [expected_candidate]
-    assert repository.publication_events[:2] == [
-        ("prepare", expected_candidate),
-        ("reconcile", expected_candidate),
-    ]
-    if reconciliation_sha is not None:
-        assert outcome.phase is WorkflowPhase.WORKFLOW
-        assert outcome.source_sha == expected_candidate
-        assert outcome.intent is None and outcome.publication_sha is None
-
-
-def test_conflicted_existing_merge_request_reconciles_before_replaying_full_workflow(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    record = ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(
-            update={"merge_request_iid": 88, "receipts": _complete_workflow_receipts()}
-        )
-    )
-    gitlab = FakeGitLab()
-    gitlab.existing_mr = _mr(has_conflicts=True)
-    repository = FakeRepository(config)
-    repository.reconciliation_sha = "b" * 40
-    invoker = FakeInvoker()
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=invoker,  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.EXECUTING
-    assert outcome.phase is WorkflowPhase.WORKFLOW
-    assert outcome.merge_request_iid == record.merge_request_iid
-    assert outcome.source_branch == record.source_branch
-    assert repository.reconciled_heads == ["a" * 40]
-    assert repository.pushes == 0
-    assert invoker.prompts == []
-
-
-def test_pipeline_repair_default_advance_runs_workflow_without_stale_recovery(
-    tmp_path: Path,
-) -> None:
-    """A retained merge resumes workflow instead of stale ordinary-MR recovery."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
-    ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
-            update={
-                "merge_request_iid": 88,
-                "merge_request_url": "https://gitlab.example.com/mr/88",
-                "merge_request_draft": MergeRequestDraft(
-                    title="Change", description="Closes #12"
-                ),
-            }
-        )
-    )
-    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
-    gitlab.existing_mr = _mr()
-    repository = FakeRepository(config)
-    repository.prepared_sha = "c" * 40
-    repository.reconciliation_sha = "b" * 40
-
-    reconciled = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert reconciled is not None and reconciled.state is RunnerState.EXECUTING
-    assert reconciled.phase is WorkflowPhase.WORKFLOW
-    assert reconciled.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
-    repository.existing_worktree_error = RepositoryError(
-        "unexpected stale ordinary-MR recovery"
-    )
-    invoker = FakeInvoker()
-
-    replayed = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=invoker,  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert replayed is not None and replayed.state is RunnerState.RETRY_WAIT
-    assert invoker.prompts

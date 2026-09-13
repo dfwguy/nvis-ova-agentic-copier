@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -26,6 +27,7 @@ from .models import (
     GitLabProject,
     MergeRequestDraft,
     MergeRequestEvidence,
+    MergeRequestFeedback,
     PipelineEvidence,
     render_decision_review_notice,
 )
@@ -34,6 +36,10 @@ from .ports import CommandRunner
 
 class GitLabError(RuntimeError):
     """A GitLab boundary failed without exposing command output."""
+
+
+class GitLabIdentityError(GitLabError):
+    """The configured GitLab service identity changed unexpectedly."""
 
 
 PROJECT_FIELDS = (
@@ -91,7 +97,24 @@ def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
     closing = f"Closes #{issue_iid}"
     pattern = re.compile(rf"^\s*closes\s*#\s*{issue_iid}\s*$", re.IGNORECASE)
     retained = "\n".join(line for line in body.splitlines() if not pattern.match(line))
-    return f"{retained.rstrip()}\n\n{closing}"
+    notice = (
+        "<!-- agent-work-feedback-notice:v1 -->\n"
+        "Human MR comments and inline replies are read and acted on; "
+        "no-action comments are acknowledged."
+    )
+    retained = re.sub(
+        r"(?m)^<!-- agent-work-feedback-notice:v1 -->\n"
+        r"Human MR comments and inline replies are read and acted on; "
+        r"no-action comments are acknowledged\.\n?",
+        "",
+        retained,
+    )
+    retained = "\n".join(
+        line
+        for line in retained.splitlines()
+        if "agent-work-feedback-notice:v1" not in line
+    )
+    return f"{retained.rstrip()}\n\n{notice}\n\n{closing}"
 
 
 def _require_exact_metadata(
@@ -177,6 +200,153 @@ class GitLabGateway:
         if project.id != self._config.project_id:
             raise GitLabError("GitLab returned a different project")
         return project
+
+    def verify_authenticated_user(self) -> None:
+        """Prove the configured service identity before unattended work."""
+        user = self._mapping(self._call("user"), "authenticated user")
+        if user.get("username") != self._config.factory_username:
+            raise GitLabIdentityError(
+                "GitLab authenticated identity does not match factory identity"
+            )
+
+    def fetch_merge_request_feedback(
+        self, iid: int
+    ) -> tuple[MergeRequestFeedback, ...]:
+        """Fetch general and inline comments, fail-closed on duplicate IDs."""
+        notes: dict[int, MergeRequestFeedback] = {}
+        for source, endpoint in (
+            (
+                "general",
+                f"projects/{self._config.project_id}/merge_requests/{iid}/notes",
+            ),
+            (
+                "discussion",
+                f"projects/{self._config.project_id}/merge_requests/{iid}/discussions",
+            ),
+        ):
+            for page in range(1, _MAX_NOTE_PAGES + 1):
+                payload = self._items(
+                    self._call(endpoint, fields=("per_page=100", f"page={page}")),
+                    "merge request feedback",
+                )
+                if source == "discussion" and any(
+                    not isinstance(item.get("id"), str)
+                    or not cast(str, item["id"]).strip()
+                    for item in payload
+                ):
+                    raise GitLabError("GitLab returned invalid merge request feedback")
+                raw_notes = (
+                    ((item, None) for item in payload)
+                    if source == "general"
+                    else (
+                        (note, item.get("id"))
+                        for item in payload
+                        for note in self._items(item.get("notes"), "discussion notes")
+                    )
+                )
+                for raw, discussion_id in raw_notes:
+                    author = raw.get("author")
+                    try:
+                        entry = MergeRequestFeedback.model_validate(
+                            _selected(raw, NOTE_FIELDS)
+                            | {
+                                "source": source,
+                                "discussion_id": discussion_id,
+                                "author": cast(dict[str, object], author).get(
+                                    "username"
+                                )
+                                if isinstance(author, dict)
+                                else None,
+                            }
+                        )
+                    except ValidationError as error:
+                        raise GitLabError(
+                            "GitLab returned invalid merge request feedback"
+                        ) from error
+                    if entry.author is None:
+                        raise GitLabError(
+                            "GitLab returned invalid merge request feedback"
+                        )
+                    prior = notes.get(entry.id)
+                    if prior is not None and prior != entry:
+                        same_content = (
+                            prior.body == entry.body
+                            and prior.author == entry.author
+                            and prior.created_at == entry.created_at
+                            and prior.system == entry.system
+                        )
+                        if not (
+                            same_content
+                            and prior.source == "general"
+                            and source == "discussion"
+                        ):
+                            raise GitLabError(
+                                "GitLab returned conflicting merge request feedback"
+                            )
+                    notes[entry.id] = entry
+                if len(payload) < 100:
+                    break
+            else:
+                raise GitLabError(
+                    "GitLab returned too many merge request feedback pages"
+                )
+        return tuple(
+            sorted(notes.values(), key=lambda note: (note.created_at, note.id))
+        )
+
+    def comment_feedback_outcome(
+        self,
+        iid: int,
+        *,
+        issue_iid: int,
+        source: str,
+        note_id: int,
+        discussion_id: str | None,
+        selection_sha: str,
+        summary: str,
+    ) -> None:
+        """Post one idempotent concise acknowledgement on the exact MR."""
+        identity = json.dumps(
+            {
+                "project": self._config.project_id,
+                "issue": issue_iid,
+                "mr": iid,
+                "source": source,
+                "note": note_id,
+                "discussion": discussion_id,
+                "sha": selection_sha,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        marker = (
+            "<!-- agent-work-feedback-outcome:v2 key="
+            + hashlib.sha256(identity.encode()).hexdigest()
+            + " -->"
+        )
+        endpoint = f"projects/{self._config.project_id}/merge_requests/{iid}/notes"
+        for page in range(1, _MAX_NOTE_PAGES + 1):
+            notes = self._items(
+                self._call(endpoint, fields=("per_page=100", f"page={page}")),
+                "merge request note list",
+            )
+            if any(
+                marker in str(note.get("body", ""))
+                and isinstance(note.get("author"), dict)
+                and cast(dict[str, object], note["author"]).get("username")
+                == self._config.factory_username
+                for note in notes
+            ):
+                return
+            if len(notes) < 100:
+                break
+        else:
+            raise GitLabError("GitLab returned too many merge request note pages")
+        self._call(
+            endpoint,
+            method="POST",
+            fields=(f"body={marker}\n{summary[:2000]}",),
+        )
 
     def _issues(
         self, *, state: str, labels: str | None = None

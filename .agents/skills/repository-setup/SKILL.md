@@ -43,7 +43,7 @@ Before changing GitLab settings, verify that the current directory's
 credentials identify a GitLab user:
 
 ```bash
-direnv exec . glab api user | jq '{name, email, public_email, username}'
+direnv exec . /usr/bin/env bash -c 'exec glab api user' | jq '{name, email, public_email, username}'
 ```
 
 Require a successful response with a non-empty `username`. If the command

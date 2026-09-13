@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 
 import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview, render_reserved_marker
@@ -89,6 +91,31 @@ def test_upstream_config_rejects_unsafe_public_boundary_values(
     payload[field] = value
     with pytest.raises(ValueError):
         UpstreamGitLabConfig(**payload)
+
+
+@given(
+    st.lists(
+        st.from_regex(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", fullmatch=True),
+        min_size=1,
+        max_size=4,
+    )
+)
+def test_upstream_config_accepts_every_generated_bare_hostname(
+    labels: list[str],
+) -> None:
+    """A public hostname is accepted only as bare DNS labels."""
+    host = ".".join(labels)
+    assume(len(host) <= 253)
+
+    assert (
+        UpstreamGitLabConfig(
+            host=host,
+            project_id=77,
+            credential_file=Path("/dedicated/upstream-token"),
+            glab_path=Path("/opt/bin/glab"),
+        ).host
+        == host
+    )
 
 
 def test_reserved_marker_is_canonical_and_exact_open_match_reports_only_iid() -> None:
@@ -186,6 +213,11 @@ def test_reader_projects_owned_fields_and_normalizes_nullable_issue_descriptions
             '{"iid":2,"state":"opened","description":"MARKER"}]',
             "error",
             id="ambiguous-exact-matches",
+        ),
+        pytest.param(
+            '[{"iid":1,"state":"closed","description":"MARKER"}]',
+            "would-create",
+            id="closed-marker-does-not-match",
         ),
     ],
 )

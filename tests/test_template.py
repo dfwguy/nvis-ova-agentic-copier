@@ -1646,6 +1646,7 @@ def test_agent_loop_wrapper_stops_before_direnv_without_checkout_local_envrc(
 
     environment = os.environ | {
         "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_UV": str(commands / "uv"),
         "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
         "AGENT_WORK_DIRENV": str(commands / "direnv"),
@@ -1698,6 +1699,7 @@ def test_agent_loop_wrapper_rejects_invalid_service_target_identity(
 
     environment = os.environ | {
         "AGENT_WORK_CHECKOUT": str(checkout),
+        "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_UV": str(commands / "uv"),
         "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
         "GITLAB_HOST": gitlab_host,
@@ -1740,6 +1742,7 @@ def test_agent_loop_wrapper_stops_before_direnv_with_symlinked_envrc(
         env=os.environ
         | {
             "AGENT_WORK_CHECKOUT": str(checkout),
+            "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
             "AGENT_WORK_UV": str(commands / "uv"),
             "AGENT_WORK_AGENT_PATH": str(commands / "agent"),
             "AGENT_WORK_DIRENV": str(commands / "direnv"),
@@ -1825,6 +1828,8 @@ def test_service_setup_persists_public_identity_and_previews_wrapper_before_time
 
     assert "GITLAB_HOST=%q" in setup
     assert "GITLAB_PROJECT_ID=%q" in setup
+    assert "AGENT_WORK_FACTORY_USERNAME=%q" in setup
+    assert 'AGENT_WORK_FACTORY_USERNAME="$factory_username"' in setup
     assert "GITLAB_TOKEN" not in setup
     assert "env -i" in setup
     assert "agent-work-systemd-run.sh" in setup
@@ -2122,6 +2127,7 @@ def _wrapper_checkout_environment(
     environment = os.environ | {
         "AGENT_WORK_CHECKOUT": str(checkout),
         "AGENT_WORK_BASE_BRANCH": "agent/work-base",
+        "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_UV": str(commands / "uv"),
         "AGENT_WORK_AGENT": "codex",
         "AGENT_WORK_AGENT_PATH": str(commands / "agent"),

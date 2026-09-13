@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import html
+import re
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,7 @@ class AgentWorkConfig(BoundaryModel):
     default_branch: str = Field(default="main", min_length=1)
     base_branch: str = Field(pattern=r"^agent/[A-Za-z0-9][A-Za-z0-9._/-]*$")
     journal_tag: str = Field(default="agent-work", min_length=1)
+    factory_username: str = Field(default="factory-bot", min_length=1, max_length=255)
 
     @field_validator("host")
     @classmethod
@@ -61,6 +63,14 @@ class AgentWorkConfig(BoundaryModel):
         """Require one bare hostname."""
         if "://" in value or "/" in value:
             raise ValueError("host must be a bare hostname")
+        return value
+
+    @field_validator("factory_username")
+    @classmethod
+    def validate_factory_username(cls, value: str) -> str:
+        """Require a safe GitLab username, never a display name."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+            raise ValueError("factory username must be a safe GitLab username")
         return value
 
     @field_validator("checkout", "state_root", "git_path", "glab_path")
@@ -140,6 +150,98 @@ class MergeRequestEvidence(BoundaryModel):
     is_draft: bool = Field(
         default=False, validation_alias=AliasChoices("draft", "is_draft")
     )
+
+
+class MergeRequestFeedback(BoundaryModel):
+    """One validated, untrusted merge-request comment."""
+
+    id: int = Field(gt=0)
+    source: Literal["general", "discussion"]
+    discussion_id: str | None = Field(default=None, max_length=255)
+    body: str = ""
+    author: str | None = Field(default=None, max_length=255)
+    created_at: datetime
+    system: bool = False
+
+    @model_validator(mode="after")
+    def validate_discussion_identity(self) -> MergeRequestFeedback:
+        """Require a real discussion identity only for inline feedback."""
+        if self.source == "general" and self.discussion_id is not None:
+            raise ValueError("general feedback must not have a discussion identity")
+        if self.source == "discussion" and (
+            not self.discussion_id or not self.discussion_id.strip()
+        ):
+            raise ValueError("discussion feedback requires a discussion identity")
+        return self
+
+
+class MergeRequestFeedbackCursor(BoundaryModel):
+    """Monotonic IDs acknowledged for one exact MR source SHA."""
+
+    last_processed_general_note_id: int | None = Field(default=None, gt=0)
+    last_processed_discussion_note_id: int | None = Field(default=None, gt=0)
+    last_relevant_discussion_id: str | None = Field(default=None, max_length=255)
+    feedback_source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+    @model_validator(mode="after")
+    def validate_discussion_cursor(self) -> MergeRequestFeedbackCursor:
+        """Do not retain a discussion identity without its note cursor."""
+        if (
+            self.last_relevant_discussion_id is not None
+            and self.last_processed_discussion_note_id is None
+        ):
+            raise ValueError("discussion identity requires a discussion note cursor")
+        if self.last_relevant_discussion_id is not None and not (
+            self.last_relevant_discussion_id.strip()
+        ):
+            raise ValueError("discussion identity must be nonblank")
+        return self
+
+
+class PendingMergeRequestFeedback(BoundaryModel):
+    """One durably selected feedback item before its acknowledgement side effect."""
+
+    target_cursor: MergeRequestFeedbackCursor
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    publication_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    source: Literal["general", "discussion"]
+    note_id: int = Field(gt=0)
+    discussion_id: str | None = Field(default=None, max_length=255)
+    outcome: str | None = Field(default=None, max_length=2_000)
+    acknowledgement_ready: bool = False
+
+    @model_validator(mode="after")
+    def validate_selected_item(self) -> PendingMergeRequestFeedback:
+        """Bind a pending acknowledgement to precisely one feedback item."""
+        cursor = self.target_cursor
+        if self.source == "general":
+            if (
+                self.discussion_id is not None
+                or cursor.last_processed_general_note_id != self.note_id
+            ):
+                raise ValueError(
+                    "general pending feedback must select its general cursor"
+                )
+        elif (
+            not self.discussion_id
+            or not self.discussion_id.strip()
+            or cursor.last_processed_discussion_note_id != self.note_id
+            or cursor.last_relevant_discussion_id != self.discussion_id
+        ):
+            raise ValueError(
+                "discussion pending feedback must select its discussion cursor"
+            )
+        if self.outcome is not None and not self.outcome.strip():
+            raise ValueError("pending outcome must be nonempty")
+        if self.acknowledgement_ready and self.outcome is None:
+            raise ValueError("acknowledgement readiness requires an outcome")
+        if (
+            self.outcome is not None
+            and self.publication_sha is not None
+            and (cursor.feedback_source_sha != self.publication_sha)
+        ):
+            raise ValueError("published feedback cursor must use publication SHA")
+        return self
 
 
 class DecisionReviewSignal(BoundaryModel):
@@ -387,6 +489,8 @@ class LedgerRecord(BoundaryModel):
     source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     publication_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     merge_request_draft: MergeRequestDraft | None = None
+    feedback_cursor: MergeRequestFeedbackCursor | None = None
+    pending_feedback: PendingMergeRequestFeedback | None = None
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
     error_code: ErrorCode | None = None
