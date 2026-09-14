@@ -15,7 +15,10 @@ description: Configure one guarded, serial GitLab polling loop; not webhooks, qu
 # Set up agent loop
 
 Use this skill to configure one GitLab project for the recoverable `loop run` state machine.
-It neither installs a webhook nor implicitly authorizes unattended publication.
+It neither installs a webhook nor broadens authority beyond `AGENTS.md`.
+When `AGENTS.md` supplies standing authority for routine factory operations,
+that authority covers unattended publication and user-timer actions here
+without per-command confirmation.
 Its Developer-readable readiness path permits exactly 30 effective API access
 before checking repository safeguards.
 
@@ -112,7 +115,8 @@ before checking repository safeguards.
 3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, and user-level `systemd`, then run `uv run agent-work loop run --json` from the
    dedicated checkout as a preview smoke test. Do not use a separately installed
    bare `agent-work` executable, which can be stale. Install and enable the
-   documented project-named user-level timer only after explicit authorization.
+   documented project-named user-level timer only after the applicable
+   `AGENTS.md` standing authorization or separate explicit authorization.
    Record the selected agent name and absolute executable paths for both `uv`
    and the agent in its environment file; the runner invokes that recorded
    absolute agent path directly, rather than relying on the service manager PATH.
@@ -188,9 +192,10 @@ before checking repository safeguards.
    or nonnumeric access is `unknown`. Only exactly 30 is permitted. An
    `unknown` result, an access level less than 30, or 40 or greater must block
    `--apply`.
-5. An access level of exactly 30 is the Developer readiness fast path. Obtain
-   the one-time unattended-publication authorization and use the constrained
-   service identity. The encoded
+5. An access level of exactly 30 is the Developer readiness fast path. Use the
+   constrained service identity and the applicable `AGENTS.md` standing
+   authorization for unattended publication; do not request it again per
+   command. The encoded
    `repository/branches/$default_branch_uri` endpoint checked in step 1 is
    authoritative for the effective default branch and must return the exact
    default-branch name, strict Boolean `default` and `protected` values of
@@ -219,7 +224,7 @@ before checking repository safeguards.
    checks and relies on workflow, settings, and runtime never-approve/merge
    guardrails. Developers may approve merge requests, and project settings
    control pushes, merges, and self-approval. Git and `glab` credentials may
-   differ. Preserve the one-time authorization, constrained identity,
+   differ. Preserve the applicable authorization, constrained identity,
    dedicated checkout and origin checks, and preview; never approve or merge.
 8. Stop the user timer before changing the checkout, credentials, or GitLab
    labels: `systemctl --user disable --now <project-slug>-agent-work.timer`.
