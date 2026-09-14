@@ -31,6 +31,7 @@ from .domain import (
 )
 from .gitlab import GitLabError, GitLabIdentityError
 from .models import (
+    ConditionEvidence,
     GitLabIssue,
     LedgerRecord,
     MergeRequestDraft,
@@ -40,6 +41,7 @@ from .models import (
     PendingMergeRequestFeedback,
     SplitChildEvidence,
     TransitionIntentRecord,
+    WorkerResultEnvelope,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
 from .repository import PublicationError, RepositoryError, RepositoryTransientError
@@ -218,7 +220,7 @@ def _draft_handoff_is_valid(draft: MergeRequestDraft) -> bool:
 
 
 def _new_record(
-    issue: GitLabIssue, *, project_id: int, state_root: Path
+    issue: GitLabIssue, *, project_id: int, state_root: Path, main_branch: str
 ) -> LedgerRecord:
     try:
         classification = classify_work(issue, project_id=project_id)
@@ -243,6 +245,8 @@ def _new_record(
         phase=WorkflowPhase.WORKFLOW,
         work_kind=classification.kind,
         source_branch=branch,
+        issue_title=issue.title,
+        main_branch=main_branch,
         worktree=state_root / "worktrees" / str(issue.iid),
         merge_request_iid=classification.merge_request_iid,
         source_sha=classification.source_sha,
@@ -678,7 +682,12 @@ def select_record(
         return None, None
     issue = eligible[0]
     return (
-        _new_record(issue, project_id=project.id, state_root=ledger.state_root),
+        _new_record(
+            issue,
+            project_id=project.id,
+            state_root=ledger.state_root,
+            main_branch=repository.config.default_branch,
+        ),
         issue,
     )
 
@@ -746,7 +755,18 @@ def _record_retry(
     """Persist one bounded retry and optionally publish its exhaustion block."""
     outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
     if outcome.state is RunnerState.RETRY_WAIT:
-        outcome = outcome.model_copy(update={"error_code": error_code})
+        history = (
+            *record.condition_history,
+            ConditionEvidence(
+                occurred_at=now,
+                retry_count=outcome.retry_count,
+                code=error_code.value,
+                detail=outcome.summary,
+            ),
+        )[-64:]
+        outcome = outcome.model_copy(
+            update={"error_code": error_code, "condition_history": history}
+        )
     outcome = ledger.persist(outcome)
     if outcome.state is RunnerState.BLOCKED and allow_remote_exhaustion_side_effects:
         gitlab.transition_labels(record.issue_iid, label_for_state(outcome.state))
@@ -787,6 +807,8 @@ def _resume_due_retry(record: LedgerRecord, *, ledger: LedgerPort) -> LedgerReco
             record.prior_state or RunnerState.EXECUTING,
             phase=record.prior_phase or record.phase,
             retry_at=None,
+            error_code=None,
+            worker_exit=None,
         )
     )
 
@@ -1169,17 +1191,49 @@ def _prepare(
             next_action=blocked.next_action,
         )
         return blocked
+    updates: dict[str, object] = {
+        "worktree": worktree,
+        "source_sha": source_sha,
+        "intent": None,
+        "summary": "Durable worktree prepared.",
+        "next_action": "Run the recorded workflow phase.",
+    }
+    if newly_claimed and record.work_kind is WorkKind.ORDINARY:
+        # This is the first post-refresh worktree observation; do not use a
+        # potentially stale base-checkout SHA captured during discovery.
+        updates["main_sha"] = source_sha
     return ledger.persist(
         transition_record(
             record,
             RunnerState.EXECUTING,
-            worktree=worktree,
-            source_sha=source_sha,
-            intent=None,
-            summary="Durable worktree prepared.",
-            next_action="Run the recorded workflow phase.",
+            **updates,
         )
     )
+
+
+def _validate_workflow_audit(
+    record: LedgerRecord, result: WorkerResultEnvelope, *, repository: RepositoryPort
+) -> None:
+    """Corroborate the bounded final AI audit before it becomes durable evidence."""
+    if (
+        result.result_kind != "ready_to_publish"
+        or result.phase_status != "complete"
+        or result.completed_phase is not WorkflowPhase.WORKFLOW
+        or result.audit_summary is None
+    ):
+        return
+    audit = result.audit_summary
+    observed_paths = tuple(sorted(repository.changed_paths(record.worktree)))
+    if tuple(sorted(audit.changed_paths)) != observed_paths:
+        raise ValueError("workflow audit changed paths do not match durable worktree")
+    if audit.role_receipts != result.receipts:
+        raise ValueError("workflow audit receipts do not match worker receipts")
+    receipt_text = "\n".join(result.receipts)
+    evidence = (*audit.tests, *audit.reviewers, *audit.findings, *audit.corrections)
+    if any(item not in receipt_text for item in evidence):
+        raise ValueError(
+            "workflow audit evidence is not represented in worker receipts"
+        )
 
 
 def _execute(
@@ -1312,7 +1366,20 @@ def _execute(
                     retry_delay=timedelta(),
                 )
             try:
+                _validate_workflow_audit(record, result, repository=repository)
                 outcome = apply_worker_result(record, result, now=now).record
+            except RepositoryTransientError:
+                return _record_retry(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+                )
+            except RepositoryError as error:
+                return _block_publication_identity(
+                    record, ledger=ledger, gitlab=gitlab, summary=str(error)
+                )
             except ValueError:
                 return _record_retry(
                     record,

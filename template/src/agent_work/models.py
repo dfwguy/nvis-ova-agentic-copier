@@ -30,6 +30,7 @@ from pydantic import (
 from .domain import (
     ErrorCode,
     RunnerState,
+    StatusProjection,
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
@@ -467,10 +468,76 @@ class WorkerExitEvidence(BoundaryModel):
         return value
 
 
+class AuditCapacity(BoundaryModel):
+    """Bounded, coherent live-session capacity decision."""
+
+    required: int = Field(ge=1)
+    available: int = Field(ge=0)
+    shortfall: int = Field(ge=0)
+    decision: Literal["run"]
+
+    @model_validator(mode="after")
+    def validate_capacity(self) -> AuditCapacity:
+        """Require arithmetic and decision to agree with the evidence."""
+        if self.shortfall != max(0, self.required - self.available):
+            raise ValueError("capacity shortfall must match required and available")
+        if self.available < self.required:
+            raise ValueError("available capacity must meet required capacity")
+        if self.shortfall != 0 or self.decision != "run":
+            raise ValueError("capacity decision must match shortfall")
+        return self
+
+
+class AuditReceiptSummary(BoundaryModel):
+    """Compact, bounded evidence for a completed whole workflow."""
+
+    lane: Literal["coding", "content"]
+    capacity: AuditCapacity
+    role_receipts: tuple[str, ...] = Field(max_length=32)
+    changed_paths: tuple[str, ...] = Field(max_length=128)
+    tests: tuple[str, ...] = Field(max_length=64)
+    reviewers: tuple[str, ...] = Field(max_length=32)
+    findings: tuple[str, ...] = Field(max_length=64)
+    corrections: tuple[str, ...] = Field(max_length=64)
+
+    @field_validator(
+        "role_receipts",
+        "changed_paths",
+        "tests",
+        "reviewers",
+        "findings",
+        "corrections",
+    )
+    @classmethod
+    def validate_compact_entries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank or individually oversized durable audit entries."""
+        if any(not item.strip() or len(item.encode("utf-8")) > 4_096 for item in value):
+            raise ValueError("audit evidence entry exceeds 4096 UTF-8 bytes")
+        return value
+
+    @model_validator(mode="after")
+    def validate_aggregate_size(self) -> AuditReceiptSummary:
+        """Keep the entire durable audit compact, not only each entry."""
+        if len(self.model_dump_json(exclude_none=True).encode("utf-8")) > 32_768:
+            raise ValueError("audit evidence exceeds 32768 UTF-8 bytes")
+        if self.lane == "coding" and (not self.tests or not self.reviewers):
+            raise ValueError("coding audit requires test and reviewer evidence")
+        return self
+
+
+class ConditionEvidence(BoundaryModel):
+    """One bounded current or historical operational condition."""
+
+    occurred_at: datetime | None = None
+    retry_count: int = Field(default=0, ge=0)
+    code: str = Field(min_length=1, max_length=128)
+    detail: str = Field(min_length=1, max_length=2_048)
+
+
 class LedgerRecord(BoundaryModel):
     """Durable state for one issue."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     revision: int = Field(default=0, ge=0)
     project_id: int = Field(gt=0)
     issue_iid: int = Field(gt=0)
@@ -479,6 +546,9 @@ class LedgerRecord(BoundaryModel):
     workflow_lane: WorkflowLane = WorkflowLane.UNKNOWN
     work_kind: WorkKind
     source_branch: str = Field(min_length=1)
+    issue_title: str | None = Field(default=None, max_length=512)
+    main_branch: str | None = Field(default=None, max_length=255)
+    main_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     worktree: Path
     retry_count: int = Field(default=0, ge=0)
     retry_at: datetime | None = None
@@ -495,6 +565,11 @@ class LedgerRecord(BoundaryModel):
     intent: TransitionIntentRecord | None = None
     error_code: ErrorCode | None = None
     worker_exit: WorkerExitEvidence | None = None
+    activation_started_at: datetime | None = None
+    latest_meaningful_update_at: datetime | None = None
+    completed_at: datetime | None = None
+    audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = "unknown"
+    condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
     decomposition_plan: SplitPlan | None = None
     decomposition_progress: tuple[SplitChildEvidence, ...] = ()
     summary: str = ""
@@ -540,7 +615,7 @@ class LedgerRecord(BoundaryModel):
 class WorkerResultEnvelope(BoundaryModel):
     """Versioned, identity-bound worker segment result."""
 
-    protocol_version: Literal[1] = 1
+    protocol_version: Literal[2] = 2
     project_id: int = Field(gt=0)
     issue_iid: int = Field(gt=0)
     ledger_revision: int = Field(ge=0)
@@ -560,13 +635,16 @@ class WorkerResultEnvelope(BoundaryModel):
     error_code: ErrorCode | None = None
     redacted_summary: str = ""
     next_action: str = Field(min_length=1, max_length=2_000)
+    audit_summary: AuditReceiptSummary | None = None
 
     @model_validator(mode="after")
     def validate_split_context(self) -> WorkerResultEnvelope:
         """Keep split-required envelopes unambiguous and worker-only."""
         if self.result_kind == "split_required":
             if (
-                self.expected_phase is not WorkflowPhase.WORKFLOW
+                self.protocol_version != 2
+                or self.audit_summary is not None
+                or self.expected_phase is not WorkflowPhase.WORKFLOW
                 or self.completed_phase is not WorkflowPhase.WORKFLOW
                 or self.workflow_lane is not WorkflowLane.UNKNOWN
                 or self.phase_status != "complete"
@@ -578,6 +656,17 @@ class WorkerResultEnvelope(BoundaryModel):
                 raise ValueError("split_required envelope has invalid context")
         elif self.split_plan is not None:
             raise ValueError("split_plan is only valid for split_required")
+        is_completed_workflow = (
+            self.completed_phase is WorkflowPhase.WORKFLOW
+            and self.result_kind == "ready_to_publish"
+            and self.phase_status == "complete"
+        )
+        if is_completed_workflow and (
+            self.protocol_version != 2
+            or self.audit_summary is None
+            or self.audit_summary.lane != self.workflow_lane.value
+        ):
+            raise ValueError("completed workflow requires v2 matching audit_summary")
         return self
 
 
@@ -611,7 +700,9 @@ class MigrationPlan(BoundaryModel):
 class CommandItemReport(BoundaryModel):
     """Safe operational status for one issue."""
 
+    project_id: int | None = Field(default=None, gt=0)
     issue_iid: int = Field(gt=0)
+    projected_status: StatusProjection | None = None
     state: RunnerState
     phase: WorkflowPhase
     work_kind: WorkKind
@@ -620,11 +711,22 @@ class CommandItemReport(BoundaryModel):
     retry_at: datetime | None = None
     source_branch: str
     source_sha: str | None = None
+    main_branch: str | None = None
+    main_sha: str | None = None
+    publication_sha: str | None = None
     worktree: Path
     merge_request_iid: int | None = None
     merge_request_url: str | None = None
     error_code: ErrorCode | None = None
     worker_exit: WorkerExitEvidence | None = None
+    current_condition: ConditionEvidence | None = None
+    condition_history: tuple[ConditionEvidence, ...] = ()
+    audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = None
+    activation_started_at: datetime | None = None
+    latest_meaningful_update_at: datetime | None = None
+    completed_at: datetime | None = None
+    issue_title: str | None = None
+    corroboration: dict[str, str] = Field(default_factory=dict)
     summary: str = ""
     next_action: str = ""
 
@@ -632,7 +734,7 @@ class CommandItemReport(BoundaryModel):
 class CommandReport(BoundaryModel):
     """Common safe JSON envelope for every CLI action."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     command: str = Field(min_length=1)
     applied: bool
     outcome: str = Field(min_length=1)
@@ -641,3 +743,5 @@ class CommandReport(BoundaryModel):
     actions: tuple[MigrationAction, ...] = ()
     segments_run: int | None = Field(default=None, ge=0)
     stop_reason: str | None = None
+    total_items: int | None = Field(default=None, ge=0)
+    items_truncated: bool | None = None

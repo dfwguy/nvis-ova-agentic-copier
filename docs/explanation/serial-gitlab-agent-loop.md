@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-14
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -99,13 +99,20 @@ branch and merge-request evidence, receipts, transition intent, and a redacted
 next action. GitLab labels project a simple status while the ledger holds the
 transaction detail.
 
-After an interruption, the controller reconciles observable repository state
-and preserves the retained worktree. It restarts at the coarse workflow-session
-boundary and repeats validation or publication checks when necessary. It does
-not restore individual agents, their prompts, chain-of-thought, mailboxes, or
-unbounded internal output. An oversized issue is instead handed back as a
-structured split plan; the trusted controller creates any child issues only
-after validating that plan.
+After an interruption before one valid final workflow receipt, the controller
+reconciles observable repository state and preserves the retained worktree. It
+starts a fresh complete workflow session at the coarse boundary and repeats
+validation when necessary. It does not restore individual agents, their
+prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue
+is instead handed back as a structured split plan; the trusted controller
+creates any child issues only after validating that plan.
+
+The concise audit is durable only in the ledger; status is deliberately an
+operational projection over that record plus best-effort live evidence. This
+keeps a past retry or failure from being presented as the current condition and
+lets unavailable, stale, or conflicting observations remain honestly unknown
+instead of being mistaken for current truth. The exact fields, bounded output,
+and state mapping belong in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
 
 ## Publication separates observation from repair
 

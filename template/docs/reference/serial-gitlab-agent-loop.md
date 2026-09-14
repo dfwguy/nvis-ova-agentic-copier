@@ -32,7 +32,7 @@ related:
 agent-work loop run [--apply] [--max-segments COUNT]
                     [--max-activation-seconds SECONDS]
                     [--json] [--debug]
-agent-work loop status [--json] [--debug]
+agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
@@ -57,8 +57,12 @@ description, and closing reference.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
-not simulate a complete activation. `loop status` reports durable ledger
-records together with verified configured-project identity. `loop retry`
+not simulate a complete activation. `loop status` is read-only and reports
+durable ledger records together with verified configured-project identity and
+best-effort live corroboration. Without `--issue-iid`, it returns at most 100
+records in deterministic order and reports the total and whether the result was
+truncated. With `--issue-iid`, it performs an exact lookup for that item.
+`loop retry`
 previews one recorded blocked item; `--apply`
 resets its retry budget and moves it to resumable preparation after explicit
 human direction.
@@ -232,17 +236,26 @@ timeout, so it cannot truncate an otherwise unbounded sequence of individually
 bounded activations. The loop is serial per host and project, not multi-host
 coordination.
 
-## Ledger and worktrees
+## Ledger, worktrees, and audit
 
 State is below the XDG state directory, keyed by configured GitLab host and
 numeric project ID. Each `loop status` ledger item identifies its durable
-worktree path. Every active issue
-has one atomic, restrictive-permission ledger record and durable worktree. A
-record holds its schema and project identity; IID and work kind; state, coarse
-workflow phase,
-attempt, and retry deadline; branches and commits; MR and publication evidence;
-worker protocol, result, and receipts; redacted error and next action; and
-durable transition intent.
+worktree path. Every active issue has one atomic, restrictive-permission ledger
+record and durable worktree. Version 2 adds the bounded issue title;
+activation, latest-meaningful-event, and completion timestamps; main, source,
+publication, and merge-request identities; and bounded retry and failure
+history separated from the current actionable error. It also retains a typed,
+bounded final AI workflow summary: selected lane, capacity decision, nested
+roles, changed paths, tests and JUnit evidence, reviewers, and findings and
+corrections. The runner corroborates its canonical changed-path list against
+the durable worktree and requires the remaining summary entries to be present
+in the validated worker receipts; it does not independently verify AI claims.
+
+The ledger is the only durable concise audit record. It never stores prompts,
+chain-of-thought, credentials or environment values, issue bodies or comments,
+transcripts, or unbounded output. Old records remain readable; evidence missing
+from a legacy record is `unknown`, and a record receives current fields on its
+next persist rather than by inventing historical values.
 
 The application also writes its local lifecycle log to `agent-work.log` in
 that XDG project-state directory. This is application-owned evidence alongside,
@@ -254,6 +267,44 @@ dirty durable worktree remains for its next workflow attempt. Recovery stashes a
 inventoried only: the runner never applies or drops them. Ambiguous worktrees,
 branches, labels, or stashes become blocked for human review. A corrupt record
 is blocked where reportable, and failed only where it cannot be safely recorded.
+
+## Status projection
+
+`loop status` projects the durable record into an operational state; it does
+not create a second audit store. The raw ledger state and coarse phase remain
+visible alongside the projection.
+
+| Projected state | Durable condition |
+| --- | --- |
+| `selected` | Claimed and preparing before a source SHA exists. |
+| `running` | Any remaining active or retry state, including `retry-wait`. |
+| `awaiting-human-review` | Verified handoff is awaiting human review. |
+| `blocked` | Blocked or raw failed state. |
+| `complete` | Completed record. |
+
+For each item, human output provides one concise line answering whether work is
+running, what changed, the current failure or condition, and the next action.
+It includes the issue, projected and raw state, phase, identity facts, and
+worker-exit evidence when present. Detailed validation evidence (tests,
+reviewers, and audit receipts), timestamps, conditions, and corroboration are
+available in JSON.
+
+JSON output is a compact, versioned `CommandReport` version 2. Its status
+records contain the same identity, projection, current-versus-history, bounded
+audit, and observation information as the human view. A status report includes
+the total matching records and truncation metadata; only the unfiltered list is
+capped at 100 records. Consumers must treat a missing, stale, failed, or
+mismatched observation as that condition, not as current truth.
+
+Live corroboration is best effort and read-only. The current implementation
+uses injected GitLab, repository, and clock boundaries to inspect the issue and
+retained worktree; the project-wide process field is read once from the passive
+activation-owner marker. It is `active` only when the marker PID is verifiably
+alive, `stale` when it is verifiably dead, `missing` when no marker exists, and
+`unknown` for malformed or unverifiable legacy evidence. Status never acquires,
+creates, or writes a lock. Configured project identity verification remains mandatory. A failure to
+obtain one source does not abort the whole report: status reports `unknown`,
+`missing`, or `mismatch` for that source.
 
 ## Worker protocol and publication
 
@@ -277,6 +328,9 @@ expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
 `needs_human`, with the coarse completed state, receipts, diagnostic, and next
 action. The trusted runner validates it against the ledger, configured numeric
 project, Git evidence, and required workflow receipts before changing state.
+For coding work, the final audit names every mandatory role: Architect, Red,
+Diátaxis Writer, Green, all applicable reviews, the sequential
+`$license-checker`, and Finalizer; content work retains its separate role set.
 
 ### Intake sizing contract
 
@@ -309,8 +363,9 @@ marker for each child, recovers crash-created children by that marker, creates
 missing children in dependency order, posts one decomposition note, and closes
 the parent. Children whose prerequisites remain open are not eligible until
 those dependencies close. `LedgerRecord.schema_version` and
-`WorkerResultEnvelope.protocol_version` remain `1`; older records and envelopes
-remain valid.
+`WorkerResultEnvelope.protocol_version` are `2` for newly persisted records
+and every fresh worker envelope, including `split_required`. The reader accepts
+legacy v1 ledger records only; worker output is always v2.
 
 Immediately before each worker execution, the runner retrieves that issue's
 notes through its bounded GitLab retry path. It excludes system notes and both
@@ -350,7 +405,7 @@ observes that exact SHA.
 
 Reasonable bounded uncertainty does not itself block the workflow. A worker may
 return `ready_to_publish` with a `Draft:` merge-request title, `is_draft=true`,
-and complete `decision_review` metadata. The runner renders its canonical v1
+and complete `decision_review` metadata. The runner renders its canonical v2
 notice, records it durably, and reconciles retried, branch-found, and remediated
 MRs without downgrading an existing Draft. The notice records decisions and
 assumptions, alternatives, risks, exact reviewer checks, unresolved findings,
@@ -446,13 +501,15 @@ returns one redacted `CommandReport` object:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "loop.status",
   "applied": false,
   "outcome": "status",
   "project": {"host": "gitlab.example", "project_id": 123},
   "items": [],
-  "actions": []
+  "actions": [],
+  "total_items": 0,
+  "items_truncated": false
 }
 ```
 

@@ -669,7 +669,7 @@ def test_unseen_general_feedback_wakes_only_its_awaiting_issue_and_invokes_workf
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -696,7 +696,7 @@ def test_transient_feedback_poll_failure_retries_without_side_effects_then_resum
 ) -> None:
     """Feedback polling retries durably before polling normally again."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback_error = GitLabError("temporary feedback failure")
@@ -755,7 +755,7 @@ def test_unverified_feedback_wake_retries_locally_without_immediate_reentry(
             raise GitLabError("identity endpoint remains unavailable")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _awaiting_feedback_record(tmp_path)
     ledger.persist(record)
     gitlab = FailingIdentityGitLab()
@@ -850,7 +850,7 @@ def test_inline_reply_in_existing_discussion_wakes_and_multiple_feedback_is_chro
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (
@@ -903,7 +903,7 @@ def test_feedback_repair_worker_exit_retries_immediately_with_diagnostic_and_pen
 ) -> None:
     """A failed feedback repair retains its selected acknowledgement for retry."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -969,7 +969,7 @@ def test_system_factory_and_outcome_notes_do_not_wake(
     tmp_path: Path, note: MergeRequestFeedback
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (note,)
@@ -994,7 +994,7 @@ def test_noop_feedback_posts_once_advances_cursor_and_never_publishes(
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1032,7 +1032,7 @@ def test_noop_feedback_dirty_worktree_blocks_before_acknowledgement(
 ) -> None:
     """Keep a selected no-op comment pending until its worktree is clean."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1069,7 +1069,7 @@ def test_noop_feedback_retains_worker_receipts_before_acknowledgement(
 ) -> None:
     """The crash-safe acknowledgement record retains the completed workflow proof."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1105,7 +1105,7 @@ def test_identity_drift_after_pipeline_success_blocks_before_feedback_acknowledg
 ) -> None:
     """A changed service identity may not acknowledge completed feedback."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1119,11 +1119,13 @@ def test_identity_drift_after_pipeline_success_blocks_before_feedback_acknowledg
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/example.py",)
     publishing = run_segment(
         ledger=ledger,
         gitlab=gitlab,
         repository=repository,
-        invoke=SingleSessionInvoker(),
+        invoke=changed_feedback,
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
@@ -1167,7 +1169,7 @@ def test_noop_feedback_ack_failure_does_not_advance_cursor_and_replay_deduplicat
 ) -> None:
     """A failed acknowledgement retains pending work; idempotent retry posts once."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1246,7 +1248,7 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1254,6 +1256,8 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         title="Draft: retained", is_draft=True, description="Retained\n\nCloses #12"
     )
     repository = FakeRepository(config)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/example.py",)
 
     run_segment(
         ledger=ledger,
@@ -1267,7 +1271,7 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         ledger=ledger,
         gitlab=gitlab,
         repository=repository,
-        invoke=SingleSessionInvoker(),
+        invoke=changed_feedback,
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
@@ -1334,7 +1338,7 @@ def test_feedback_repair_is_not_acknowledged_before_repair_completion(
 ) -> None:
     """Conflict and rejected-pipeline repairs retain selected feedback for the worker."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     selected = _awaiting_feedback_record(tmp_path).model_copy(
         update={
             "state": RunnerState.REPAIR,
@@ -1385,7 +1389,7 @@ def test_global_identity_check_gitlab_error_retries_without_remote_mutations(
             raise GitLabError("temporary identity endpoint failure")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _serial_record(
         tmp_path, state=RunnerState.REPAIR, phase=WorkflowPhase.WORKFLOW
     )
@@ -1429,7 +1433,7 @@ def test_due_retry_normalizes_before_consecutive_global_identity_transport_failu
                 raise GitLabError("temporary identity endpoint failure")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     cursor = MergeRequestFeedbackCursor(
         last_processed_general_note_id=31,
         feedback_source_sha="a" * 40,
@@ -1556,7 +1560,7 @@ def test_exhausted_global_identity_transport_retry_blocks_locally_without_mutati
             raise GitLabError("identity endpoint remains unavailable")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     cursor = MergeRequestFeedbackCursor(
         last_processed_general_note_id=31,
         feedback_source_sha="a" * 40,
@@ -1628,7 +1632,7 @@ def test_exhausted_operation_local_identity_transport_retry_blocks_locally(
                 raise GitLabError("identity endpoint remains unavailable")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     cursor = MergeRequestFeedbackCursor(
         last_processed_general_note_id=31,
         feedback_source_sha="a" * 40,
@@ -1695,11 +1699,13 @@ def test_post_publish_mr_identity_drift_blocks_before_feedback_acknowledgement(
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
     repository = FakeRepository(config)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/example.py",)
 
     run_segment(
         ledger=ledger,
@@ -1713,7 +1719,7 @@ def test_post_publish_mr_identity_drift_blocks_before_feedback_acknowledgement(
         ledger=ledger,
         gitlab=gitlab,
         repository=repository,
-        invoke=SingleSessionInvoker(),
+        invoke=changed_feedback,
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
@@ -1762,7 +1768,7 @@ def test_feedback_resume_blocks_exact_identity_conflicts_without_adopting_foreig
     tmp_path: Path, mr: object
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (_feedback(31),)
@@ -1788,7 +1794,7 @@ def test_feedback_resume_blocks_exact_identity_conflicts_without_adopting_foreig
 
 def test_existing_active_record_precedes_awaiting_feedback(tmp_path: Path) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     waiting = _awaiting_feedback_record(tmp_path)
     active = _serial_record(
         tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
@@ -1814,7 +1820,7 @@ def test_two_awaiting_records_are_isolated_to_the_mr_with_unseen_feedback(
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     first = _awaiting_feedback_record(tmp_path)
     second = first.model_copy(
         update={
@@ -1834,14 +1840,21 @@ def test_two_awaiting_records_are_isolated_to_the_mr_with_unseen_feedback(
     )
 
     assert selected is not None and selected.issue_iid == 13
-    assert ledger.load(12) == first.model_copy(update={"revision": 1})
+    assert ledger.load(12) == first.model_copy(
+        update={
+            "schema_version": 2,
+            "revision": 1,
+            "activation_started_at": NOW,
+            "latest_meaningful_update_at": NOW,
+        }
+    )
 
 
 def test_processed_feedback_is_not_replayed_and_newer_feedback_after_new_sha_wakes(
     tmp_path: Path,
 ) -> None:
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _awaiting_feedback_record(tmp_path).model_copy(
         update={
             "feedback_cursor": {
@@ -1906,7 +1919,7 @@ def test_transient_feedback_worktree_sync_retries_without_acknowledgement_or_cur
             raise RepositoryTransientError("temporary feedback sync failure")
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _awaiting_feedback_record(tmp_path).model_copy(
         update={
             "feedback_cursor": {
@@ -1973,7 +1986,7 @@ def test_consecutive_transient_feedback_sync_retries_preserve_repair_recovery(
             self.successful_syncs += 1
 
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _awaiting_feedback_record(tmp_path).model_copy(
         update={
             "feedback_cursor": {
@@ -2070,7 +2083,7 @@ def test_identity_drift_blocks_preparation_and_decomposition_before_remote_mutat
 ) -> None:
     """Configured identity is verified before every reachable remote write segment."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _serial_record(
         tmp_path,
         state=(RunnerState.EXECUTING if state is RunnerState.DECOMPOSING else state),
@@ -2132,7 +2145,9 @@ def test_feedback_resume_blocks_absent_closing_relation_and_worktree_mismatch(
 ) -> None:
     config = _serial_config(tmp_path)
     for closes_issue, worktree_valid in ((False, True), (True, False)):
-        ledger = JsonLedger(tmp_path / f"state-{closes_issue}-{worktree_valid}")
+        ledger = JsonLedger(
+            tmp_path / f"state-{closes_issue}-{worktree_valid}", clock=lambda: NOW
+        )
         ledger.persist(_awaiting_feedback_record(tmp_path))
         gitlab = _FeedbackGitLab()
         gitlab.feedback = (_feedback(31),)
@@ -2169,7 +2184,7 @@ def test_feedback_wake_persists_only_the_earliest_unseen_item_without_skipping_l
 ) -> None:
     """One wake must durably select the first chronological human item only."""
     config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
     gitlab = _FeedbackGitLab()
     gitlab.feedback = (

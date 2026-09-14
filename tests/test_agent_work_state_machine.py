@@ -354,9 +354,11 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
             "expected_phase": workflow,
             "completed_phase": workflow,
             "workflow_lane": WorkflowLane.CODING,
+            "protocol_version": 2,
             "receipts": (
                 "$architect: approved",
                 "$tdd-red: red confirmed",
+                "$diataxis-writer: documentation reconciled",
                 "$tdd-green: green confirmed and findings repaired",
                 "$nonfunctional-review: approved",
                 "$tdd-judge: approved",
@@ -368,11 +370,55 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
                 "$cli-syntax-judge: not applicable — no CLI change",
                 "$filesystem-structure-judge: approved",
                 "$agent-policy-judge: not applicable — no agent policy change",
+                "$license-checker: approved",
                 "$tdd-finalizer: approved",
             ),
             "merge_request_draft": MergeRequestDraft(
                 title="Complete issue 12", description="Validated.\n\nCloses #12"
             ),
+            "audit_summary": {
+                "lane": "coding",
+                "capacity": {
+                    "required": 13,
+                    "available": 16,
+                    "shortfall": 0,
+                    "decision": "run",
+                },
+                "role_receipts": (
+                    "$architect: approved",
+                    "$tdd-red: red confirmed",
+                    "$diataxis-writer: documentation reconciled",
+                    "$tdd-green: green confirmed and findings repaired",
+                    "$nonfunctional-review: approved",
+                    "$tdd-judge: approved",
+                    "$diataxis-judge: approved",
+                    "$judge-quality: approved",
+                    "$judge-test: approved",
+                    "$judge-cicd: approved",
+                    "$tdd-document: approved",
+                    "$cli-syntax-judge: not applicable — no CLI change",
+                    "$filesystem-structure-judge: approved",
+                    "$agent-policy-judge: not applicable — no agent policy change",
+                    "$license-checker: approved",
+                    "$tdd-finalizer: approved",
+                ),
+                "changed_paths": ("src/agent_work/runtime.py",),
+                "tests": ("uv run tox",),
+                "reviewers": (
+                    "$nonfunctional-review: approved",
+                    "$tdd-judge: approved",
+                    "$diataxis-judge: approved",
+                    "$judge-quality: approved",
+                    "$judge-test: approved",
+                    "$judge-cicd: approved",
+                    "$tdd-document: approved",
+                    "$cli-syntax-judge: not applicable — no CLI change",
+                    "$filesystem-structure-judge: approved",
+                    "$agent-policy-judge: not applicable — no agent policy change",
+                ),
+                "findings": (),
+                "corrections": (),
+            },
         }
     )
 
@@ -380,6 +426,56 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
 
     assert outcome.record.state is RunnerState.PUBLISHING
     assert outcome.record.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert outcome.record.audit_evidence is not None
+    assert outcome.record.audit_evidence != "unknown"
+
+    assert isinstance(result.audit_summary, dict)
+    incomplete_reviewers = dict(result.audit_summary)
+    incomplete_reviewers["reviewers"] = incomplete_reviewers["reviewers"][:-1]
+    with pytest.raises(ValueError, match="workflow audit is not coherent"):
+        apply_worker_result(
+            record,
+            result.model_copy(update={"audit_summary": incomplete_reviewers}),
+            now=NOW,
+        )
+
+    forged_reviewers = dict(result.audit_summary)
+    forged_reviewers["reviewers"] = tuple(
+        "$judge-test:" if reviewer.startswith("$judge-test:") else reviewer
+        for reviewer in forged_reviewers["reviewers"]
+    )
+    with pytest.raises(ValueError, match="workflow audit is not coherent"):
+        apply_worker_result(
+            record,
+            result.model_copy(update={"audit_summary": forged_reviewers}),
+            now=NOW,
+        )
+
+
+def test_nonworkflow_audit_evidence_cannot_replace_final_audit() -> None:
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "protocol_version": 2,
+            "audit_summary": {
+                "lane": "coding",
+                "capacity": {
+                    "required": 13,
+                    "available": 16,
+                    "shortfall": 0,
+                    "decision": "run",
+                },
+                "role_receipts": (),
+                "changed_paths": (),
+                "tests": (),
+                "reviewers": (),
+                "findings": (),
+                "corrections": (),
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="audit summary"):
+        apply_worker_result(_record(), result, now=NOW)
 
 
 def test_ready_to_publish_clears_stale_publication_sha() -> None:
@@ -486,7 +582,7 @@ def test_split_required_workflow_result_persists_a_validated_decomposition_plan(
         }
     )
     payload = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": 0,
@@ -531,7 +627,7 @@ def test_split_required_workflow_result_persists_a_validated_decomposition_plan(
     )
     outcome = apply_worker_result(record, result, now=NOW)
 
-    assert result.protocol_version == 1
+    assert result.protocol_version == 2
     assert outcome.record.state is RunnerState.DECOMPOSING
     assert outcome.record.phase is WorkflowPhase.WORKFLOW
     assert outcome.record.decomposition_plan == result.split_plan
@@ -541,11 +637,7 @@ def test_split_required_workflow_result_persists_a_validated_decomposition_plan(
     assert outcome.record.summary == result.redacted_summary
     assert outcome.record.next_action == result.next_action
 
-    legacy_envelope = WorkerResultEnvelope.model_validate(
-        _result("ready_to_publish").model_dump(mode="json")
-    )
     legacy_record = LedgerRecord.model_validate(record.model_dump(mode="json"))
-    assert legacy_envelope.protocol_version == 1
     assert legacy_record.schema_version == 1
 
 
@@ -665,7 +757,7 @@ def test_split_required_protocol_rejects_malformed_or_non_topological_plans(
     split_plan: dict[str, object],
 ) -> None:
     payload = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": 0,
@@ -708,7 +800,7 @@ def test_split_protocol_rejects_contextual_ambiguity(
     overrides: dict[str, object],
 ) -> None:
     payload: dict[str, object] = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": 0,

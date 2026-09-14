@@ -24,7 +24,12 @@ from .domain import (
     WorkKind,
     next_workflow_phase,
 )
-from .models import LedgerRecord, WorkerResultEnvelope, WorkflowReceiptRecord
+from .models import (
+    AuditReceiptSummary,
+    LedgerRecord,
+    WorkerResultEnvelope,
+    WorkflowReceiptRecord,
+)
 
 ALLOWED_TRANSITIONS: Final = MappingProxyType(
     {
@@ -156,6 +161,7 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
         WorkflowLane.CODING: (
             "$architect",
             "$tdd-red",
+            "$diataxis-writer",
             "$tdd-green",
             "$nonfunctional-review",
             "$tdd-judge",
@@ -167,6 +173,7 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
             "$cli-syntax-judge",
             "$filesystem-structure-judge",
             "$agent-policy-judge",
+            "$license-checker",
             "$tdd-finalizer",
         ),
         WorkflowLane.CONTENT: (
@@ -297,7 +304,10 @@ def plan_retry(
             retry_at=now + retry_delay,
             error_code=None,
             summary="Transient failure; retry scheduled.",
-            next_action="Resume when the retry deadline is due.",
+            next_action=(
+                "Start a fresh whole workflow from observable state and repeat validation "
+                "when the retry deadline is due."
+            ),
         )
     )
 
@@ -306,6 +316,21 @@ def apply_worker_result(
     record: LedgerRecord, result: WorkerResultEnvelope, *, now: datetime
 ) -> PlannedOutcome:
     """Apply one validated worker result to a durable record."""
+    if (
+        result.protocol_version == 2
+        and result.audit_summary is not None
+        and (
+            result.completed_phase is not WorkflowPhase.WORKFLOW
+            or result.phase_status != "complete"
+            or (
+                record.phase is not WorkflowPhase.WORKFLOW
+                and result.workflow_lane is not record.workflow_lane
+            )
+        )
+    ):
+        raise ValueError(
+            "audit summary is only valid for a completed matching workflow"
+        )
     if result.result_kind == "retryable":
         return plan_retry(record, now=now, retry_delay=timedelta())
     if result.result_kind == "needs_human":
@@ -360,6 +385,38 @@ def apply_worker_result(
         raise ValueError(
             "worker result receipt is not coherent with the recorded phase"
         )
+    if record.phase is WorkflowPhase.WORKFLOW and result.audit_summary is not None:
+        audit = AuditReceiptSummary.model_validate(result.audit_summary)
+        reviewer_skills = {
+            "$nonfunctional-review",
+            "$tdd-judge",
+            "$diataxis-judge",
+            "$judge-quality",
+            "$judge-test",
+            "$judge-cicd",
+            "$tdd-document",
+            "$cli-syntax-judge",
+            "$filesystem-structure-judge",
+            "$agent-policy-judge",
+        }
+        audit_receipt_skills = tuple(
+            receipt.partition(":")[0] for receipt in audit.role_receipts
+        )
+        expected_reviewers = tuple(
+            receipt
+            for receipt in result.receipts
+            if receipt.partition(":")[0] in reviewer_skills
+        )
+        if (
+            audit.capacity.decision != "run"
+            or audit.capacity.shortfall != 0
+            or audit.role_receipts != result.receipts
+            or not audit_receipt_skills
+            or len(set(audit_receipt_skills)) != len(audit_receipt_skills)
+            or audit.reviewers != expected_reviewers
+            or (result.workflow_lane is WorkflowLane.CODING and not audit.tests)
+        ):
+            raise ValueError("workflow audit is not coherent with worker receipts")
     receipt = WorkflowReceiptRecord(
         phase=result.completed_phase,
         verdict=result.phase_status,
@@ -425,5 +482,11 @@ def apply_worker_result(
             summary=result.change_summary,
             next_action=result.next_action,
             error_code=None,
+            audit_evidence=(
+                result.audit_summary
+                if record.phase is WorkflowPhase.WORKFLOW
+                and result.phase_status == "complete"
+                else record.audit_evidence
+            ),
         )
     )

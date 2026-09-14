@@ -64,6 +64,16 @@ class WorkflowLane(StrEnum):
     CONTENT = "content"
 
 
+class StatusProjection(StrEnum):
+    """Finite public lifecycle values reported by the status command."""
+
+    SELECTED = "selected"
+    RUNNING = "running"
+    AWAITING_HUMAN_REVIEW = "awaiting-human-review"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+
+
 class WorkKind(StrEnum):
     """Trusted classifications for issue intake."""
 
