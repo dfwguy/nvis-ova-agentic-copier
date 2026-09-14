@@ -16,7 +16,8 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
@@ -45,6 +46,10 @@ class XdgProjectLock:
         self._path = path
         self._handle: IO[str] | None = None
 
+    @property
+    def _owner_marker(self) -> Path:
+        return self._path.with_name(f"{self._path.name}.owner")
+
     def __enter__(self) -> None:
         """Acquire the project lock without waiting."""
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -56,14 +61,61 @@ class XdgProjectLock:
             handle.close()
             raise LockBusy("another segment owns the project lock") from error
         self._handle = handle
+        owner_marker_created = False
+        try:
+            self._owner_marker.write_text(str(os.getpid()), encoding="ascii")
+            owner_marker_created = True
+            self._owner_marker.chmod(0o600)
+        except OSError:
+            try:
+                if owner_marker_created:
+                    self._owner_marker.unlink(missing_ok=True)
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+                    self._handle = None
+            raise
 
     def __exit__(self, *_args: object) -> bool:
         """Release the project lock."""
-        if self._handle is not None:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            self._handle.close()
-            self._handle = None
+        handle = self._handle
+        if handle is not None:
+            try:
+                self._owner_marker.unlink(missing_ok=True)
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+                    self._handle = None
         return False
+
+
+def observe_project_lock(
+    path: Path, *, process_alive: Callable[[int], bool | None]
+) -> str:
+    """Passively classify the activation owner marker without touching locks."""
+    try:
+        marker = path.with_name(f"{path.name}.owner")
+        raw = marker.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+    try:
+        pid = int(raw.strip())
+    except ValueError:
+        return "unknown"
+    if pid <= 0:
+        return "unknown"
+    alive = process_alive(pid)
+    if alive is True:
+        return "active"
+    if alive is False:
+        return "stale"
+    return "unknown"
 
 
 def project_state_path(
@@ -78,8 +130,9 @@ def project_state_path(
 class JsonLedger:
     """Persist immutable issue records with atomic replacement."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, clock: Callable[[], datetime]) -> None:
         self.state_root = root
+        self._clock = clock
 
     @property
     def records(self) -> Path:
@@ -94,7 +147,17 @@ class JsonLedger:
     def persist(self, record: LedgerRecord) -> LedgerRecord:
         """Atomically persist a record and increment its revision."""
         self._prepare(self.records)
-        updated = record.model_copy(update={"revision": record.revision + 1})
+        now = self._clock()
+        updated = record.model_copy(
+            update={
+                "schema_version": 2,
+                "revision": record.revision + 1,
+                "activation_started_at": record.activation_started_at or now,
+                "latest_meaningful_update_at": now,
+                "completed_at": record.completed_at
+                or (now if record.state.value == "complete" else None),
+            }
+        )
         target = self.records / f"{record.issue_iid}.json"
         descriptor, temporary_name = tempfile.mkstemp(
             dir=self.records, prefix=".record-", text=True

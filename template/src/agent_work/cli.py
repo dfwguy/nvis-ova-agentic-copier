@@ -26,6 +26,7 @@ from .models import CommandReport
 from .ports import CommandRunner
 from .repository import run_subprocess
 from .runtime import dispatch as default_dispatch
+from .status import project_status
 from .upstream_finding import ManifestError, UpstreamFindingPreview
 from .upstream_finding import preview_manifest as default_preview_manifest
 from .upstream_gitlab import (
@@ -116,7 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum seconds for one applied activation (default: %(default)s)",
     )
     status = loop_actions.add_parser("status", help="show durable loop state")
-    _common(status, apply=False)
+    _common(
+        status,
+        apply_help="accepted for command consistency; status remains read-only",
+    )
     status.add_argument("--issue-iid", type=_positive_integer)
     retry = loop_actions.add_parser("retry", help="preview or retry one blocked item")
     _common(retry)
@@ -166,24 +170,69 @@ def _stderr(message: str) -> None:
 def _render(report: CommandReport, *, as_json: bool) -> str:
     if as_json:
         return report.model_dump_json(exclude_none=True)
-    details = [report.outcome]
-    if report.stop_reason:
-        details.append(f"stop_reason={report.stop_reason}")
-    if report.items:
-        item = report.items[-1]
-        details.extend(
-            (f"issue=#{item.issue_iid}", f"state={item.state}", f"phase={item.phase}")
-        )
-        if item.next_action:
-            details.append(f"next_action={item.next_action}")
-        if item.worker_exit:
+    if report.command != "loop.status":
+        details = [report.outcome]
+        if report.stop_reason:
+            details.append(f"stop_reason={report.stop_reason}")
+        for item in report.items[-1:]:
             details.extend(
                 (
-                    f"returncode={item.worker_exit.returncode}",
-                    f"worker_diagnostic={item.worker_exit.diagnostic}",
+                    f"issue=#{item.issue_iid}",
+                    f"state={item.state}",
+                    f"phase={item.phase}",
                 )
             )
-    return " ".join(details)
+            if item.next_action:
+                details.append(f"next_action={item.next_action}")
+            if item.worker_exit:
+                details.extend(
+                    (
+                        f"returncode={item.worker_exit.returncode}",
+                        f"worker_diagnostic={item.worker_exit.diagnostic}",
+                    )
+                )
+        return " ".join(details)
+
+    def safe(value: object) -> str:
+        return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+
+    rendered: list[str] = []
+    for item in report.items:
+        item_details = [
+            f"issue=#{item.issue_iid}",
+            f"status={item.projected_status or project_status(state=item.state, phase=item.phase, source_sha=item.source_sha)}",
+            f"state={item.state}",
+            f"phase={item.phase}",
+            f"project={item.project_id}",
+            f"branch={safe(item.source_branch)}",
+            f"worktree={safe(item.worktree)}",
+            f"main={safe(item.main_branch)}@{safe(item.main_sha)}",
+            f"source={safe(item.source_sha)}",
+            f"publication={safe(item.publication_sha)}",
+            f"mr={safe(item.merge_request_iid)}:{safe(item.merge_request_url)}",
+            f"retry={item.attempt - 1}",
+        ]
+        if item.next_action:
+            item_details.append(f"next={safe(item.next_action)}")
+        if item.summary:
+            item_details.append(f"summary={safe(item.summary)}")
+        if item.current_condition:
+            item_details.append(
+                f"current={safe(item.current_condition.code)}:{safe(item.current_condition.detail)}"
+            )
+        if item.worker_exit:
+            item_details.extend(
+                (
+                    f"returncode={item.worker_exit.returncode}",
+                    f"worker_diagnostic={safe(item.worker_exit.diagnostic)}",
+                )
+            )
+        rendered.append(" ".join(item_details))
+    return (
+        "\n".join(f"{report.outcome} {line}" for line in rendered)
+        if rendered
+        else report.outcome
+    )
 
 
 def _render_finding_preview(preview: UpstreamFindingPreview, *, as_json: bool) -> str:

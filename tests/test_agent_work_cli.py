@@ -18,12 +18,56 @@ from typing import Any, cast
 
 import pytest
 
-from agent_work.cli import build_parser, main
+from agent_work.cli import _render, build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
 from agent_work.ledger import LockBusy
-from agent_work.models import CommandItemReport, CommandReport
+from agent_work.models import CommandItemReport, CommandReport, ConditionEvidence
 from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview
+
+
+def test_human_status_renders_one_concise_answer_line_for_each_item() -> None:
+    def item(iid: int, state: RunnerState, summary: str) -> CommandItemReport:
+        return CommandItemReport(
+            issue_iid=iid,
+            state=state,
+            phase=WorkflowPhase.CODING_GREEN,
+            work_kind=WorkKind.ORDINARY,
+            attempt=1,
+            retries_remaining=3,
+            source_branch=f"agent/issue-{iid}",
+            source_sha="a" * 40,
+            worktree=Path(f"/state/worktrees/{iid}"),
+            summary=summary,
+            current_condition=(
+                ConditionEvidence(code="failed_condition", detail="blocked\nunsafe")
+                if state is RunnerState.FAILED
+                else None
+            ),
+            next_action="Start a fresh whole workflow and repeat validation.",
+        )
+
+    rendered = _render(
+        CommandReport(
+            command="loop.status",
+            applied=False,
+            outcome="status",
+            items=(
+                item(12, RunnerState.EXECUTING, "changed=1 validated=passed"),
+                item(13, RunnerState.FAILED, "changed=0 validated=failed"),
+            ),
+        ),
+        as_json=False,
+    )
+
+    lines = rendered.splitlines()
+    assert len(lines) == 2
+    assert "issue=#12" in lines[0] and "running" in lines[0]
+    assert "changed=1" in lines[0] and "validated=passed" in lines[0]
+    assert "issue=#13" in lines[1] and "failed" in lines[1]
+    assert "changed=0" in lines[1] and "validated=failed" in lines[1]
+    assert "current=failed_condition:blocked unsafe" in lines[1]
+    assert all("next=" in line for line in lines)
 
 
 def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:

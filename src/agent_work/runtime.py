@@ -32,12 +32,13 @@ from .domain import (
     retries_remaining,
 )
 from .gitlab import GitLabGateway
-from .ledger import JsonLedger, XdgProjectLock
+from .ledger import JsonLedger, XdgProjectLock, observe_project_lock
 from .migration import build_migration_plan
 from .models import (
     AgentWorkConfig,
     CommandItemReport,
     CommandReport,
+    ConditionEvidence,
     LedgerRecord,
     MigrationAction,
     MigrationObservation,
@@ -51,15 +52,28 @@ from .ports import (
     ProjectLockFactory,
     RepositoryPort,
 )
-from .repository import GitRepository, discover_config, run_subprocess
+from .repository import (
+    GitRepository,
+    RepositoryError,
+    RepositoryTransientError,
+    discover_config,
+    run_subprocess,
+)
 from .serial import reconcile_closed_issues, run_segment
 from .state_machine import transition_record
+from .status import project_status
 from .worker import AgentInvoker
 
 
-def _item(record: LedgerRecord) -> CommandItemReport:
+def _item(
+    record: LedgerRecord, *, corroboration: dict[str, str] | None = None
+) -> CommandItemReport:
     return CommandItemReport(
+        project_id=record.project_id,
         issue_iid=record.issue_iid,
+        projected_status=project_status(
+            state=record.state, phase=record.phase, source_sha=record.source_sha
+        ),
         state=record.state,
         phase=record.phase,
         work_kind=record.work_kind,
@@ -68,14 +82,103 @@ def _item(record: LedgerRecord) -> CommandItemReport:
         retry_at=record.retry_at,
         source_branch=record.source_branch,
         source_sha=record.source_sha,
+        main_branch=record.main_branch,
+        main_sha=record.main_sha,
+        publication_sha=record.publication_sha,
         worktree=record.worktree,
         merge_request_iid=record.merge_request_iid,
         merge_request_url=record.merge_request_url,
         error_code=record.error_code,
         worker_exit=record.worker_exit,
+        audit_evidence=record.audit_evidence,
+        condition_history=record.condition_history,
+        current_condition=_current_condition(record),
+        activation_started_at=record.activation_started_at,
+        latest_meaningful_update_at=record.latest_meaningful_update_at,
+        completed_at=record.completed_at,
+        issue_title=record.issue_title,
+        corroboration=corroboration or {},
         summary=record.summary,
         next_action=record.next_action,
     )
+
+
+def _current_condition(record: LedgerRecord) -> ConditionEvidence | None:
+    """Expose a bounded current blocker even for legacy records without a code."""
+    if record.state not in {RunnerState.BLOCKED, RunnerState.FAILED}:
+        return None
+    code = (
+        record.error_code.value
+        if record.error_code is not None
+        else f"{record.state.value}_condition"
+    )
+    return ConditionEvidence(
+        code=code,
+        detail=record.summary[:2_048] or "Condition detail unavailable.",
+    )
+
+
+def _status_corroboration(
+    record: LedgerRecord,
+    *,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    clock: Callable[[], datetime],
+    process_probe: Callable[[], str],
+) -> dict[str, str]:
+    """Read bounded live evidence independently; status never mutates state."""
+    evidence = {
+        "observed_at": clock().isoformat(),
+        "gitlab": "unknown",
+        "worktree": "unknown",
+        "process": "unknown",
+    }
+    try:
+        issue = gitlab.fetch_issue(record.issue_iid)
+        evidence["issue_title"] = (
+            "unknown" if record.issue_title is None else "confirmed"
+        )
+        evidence["gitlab"] = (
+            "confirmed"
+            if (
+                issue.iid == record.issue_iid
+                and (record.issue_title is None or issue.title == record.issue_title)
+                and issue.state
+                == ("closed" if record.state is RunnerState.COMPLETE else "opened")
+            )
+            else "mismatch"
+        )
+        if record.issue_title is not None and issue.title != record.issue_title:
+            evidence["issue_title"] = "mismatch"
+    except (OSError, RuntimeError, ValueError):
+        pass
+    try:
+        exists = repository.worktree_exists(record.worktree)
+    except (OSError, RepositoryError):
+        exists = None
+    if exists is False:
+        evidence["worktree"] = "missing"
+    elif exists is True:
+        try:
+            evidence["worktree_head"] = repository.head(record.worktree)
+            repository.verify_worktree(
+                record.worktree, record.source_branch, record.source_sha or ""
+            )
+            changed_paths = repository.changed_paths(record.worktree)
+            evidence["worktree_dirty"] = str(bool(changed_paths)).lower()
+            evidence["worktree_changed_paths"] = ",".join(changed_paths[:128])
+            evidence["worktree"] = "confirmed"
+        except RepositoryTransientError:
+            pass
+        except RepositoryError:
+            evidence["worktree"] = "mismatch"
+        except (OSError, RuntimeError, ValueError):
+            pass
+    try:
+        evidence["process"] = process_probe()
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return evidence
 
 
 def _report(
@@ -115,6 +218,7 @@ class RuntimeDependencies:
     monotonic: Callable[[], float]
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
+    process_probe: Callable[[], str]
 
 
 def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
@@ -139,9 +243,27 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         current_directory=Path.cwd(), environment=os.environ, run_command=run_subprocess
     )
     logger = _build_local_logger(config, debug=debug)
+
+    def process_alive(pid: int) -> bool | None:
+        """Return liveness when this platform can verify the marker PID."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return None
+        return True
+
+    def probe_project_lock() -> str:
+        """Passively report the project-wide activation owner marker."""
+        return observe_project_lock(
+            config.state_root / "project.lock", process_alive=process_alive
+        )
+
+    now = lambda: datetime.now(UTC)
     return RuntimeDependencies(
         config=config,
-        ledger=JsonLedger(config.state_root),
+        ledger=JsonLedger(config.state_root, clock=now),
         gitlab=GitLabGateway(config, run_subprocess),
         repository=GitRepository(
             config,
@@ -151,10 +273,11 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         ),
         invoke=AgentInvoker(run_subprocess, environment=os.environ),
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
-        clock=lambda: datetime.now(UTC),
+        clock=now,
         monotonic=time.monotonic,
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
+        process_probe=probe_project_lock,
     )
 
 
@@ -201,9 +324,17 @@ def _is_matching_migration_record(
 ) -> bool:
     """Return whether a ledger record is safe to replay for the same plan."""
     intent = existing.intent
-    return existing.model_copy(update={"revision": 0, "intent": None}) == expected and (
-        intent is None or intent == expected_intent
+    comparable = existing.model_copy(
+        update={
+            "schema_version": 1,
+            "revision": 0,
+            "intent": None,
+            "activation_started_at": None,
+            "latest_meaningful_update_at": None,
+            "completed_at": None,
+        }
     )
+    return comparable == expected and (intent is None or intent == expected_intent)
 
 
 def _migration_intent(action: MigrationAction) -> TransitionIntentRecord:
@@ -245,11 +376,44 @@ def dispatch(
     identity = {"host": config.host, "project_id": project.id}
 
     if request.command == "loop.status":
-        records = ledger.list_records()
-        if request.issue_iid is not None:
-            records = tuple(r for r in records if r.issue_iid == request.issue_iid)
-        return _report(
-            request, applied=False, outcome="status", records=records, project=identity
+        records = (
+            (() if (record := ledger.load(request.issue_iid)) is None else (record,))
+            if request.issue_iid is not None
+            else ledger.list_records()
+        )
+        selected = tuple(records)
+        ordered = tuple(sorted(selected, key=lambda record: record.issue_iid))
+        shown = ordered if request.issue_iid is not None else ordered[:100]
+        try:
+            process = wired.process_probe()
+        except (OSError, RuntimeError, ValueError):
+            process = "unknown"
+        report = CommandReport(
+            schema_version=2,
+            command=request.command,
+            applied=False,
+            outcome="status",
+            project=identity,
+            items=tuple(
+                _item(
+                    record,
+                    corroboration=_status_corroboration(
+                        record,
+                        gitlab=gitlab,
+                        repository=repository,
+                        clock=wired.clock,
+                        process_probe=lambda: process,
+                    ),
+                )
+                for record in shown
+            ),
+        )
+        return report.model_copy(
+            update={
+                "schema_version": 2,
+                "total_items": len(selected),
+                "items_truncated": request.issue_iid is None and len(selected) > 100,
+            }
         )
 
     if request.command == "migration.preview":
@@ -404,6 +568,18 @@ def dispatch(
                         }
                     )
                 )
+            current = _current_condition(record)
+            history = record.condition_history
+            if current is not None:
+                history = (
+                    *history,
+                    current.model_copy(
+                        update={
+                            "occurred_at": wired.clock(),
+                            "retry_count": record.retry_count,
+                        }
+                    ),
+                )[-64:]
             resumed = ledger.persist(
                 transition_record(
                     record,
@@ -413,6 +589,7 @@ def dispatch(
                     retry_count=0,
                     retry_at=None,
                     error_code=None,
+                    condition_history=history,
                     summary="Human-directed retry requested.",
                     next_action=(
                         "Replay the retained publication intent."

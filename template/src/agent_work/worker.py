@@ -360,7 +360,7 @@ def build_worker_prompt(
             "workflow unchanged. If oversized or composed of separately deliverable "
             "capabilities, stop before Red or any worktree mutation, including before "
             "delegating a Documentation Writer. Return exactly one "
-            "protocol_version=1 envelope with result_kind=split_required, "
+            "protocol_version=2 envelope with result_kind=split_required, "
             "phase_status=complete, completed_phase=workflow, workflow_lane=unknown, and a "
             "structured split_plan containing 2..25 ordered slices. Each slice supplies ordinal, "
             "a stable ASCII slug key, title, description, and depends_on lower ordinals. "
@@ -414,7 +414,9 @@ def build_worker_prompt(
         "unchanged_project_owned_values. Use needs_human only for unsafe actions, missing "
         "authority or credentials, irreconcilable requirements, or exact unapproved "
         "project-owned values. "
-        "Return exactly one protocol_version=1 JSON object inside "
+        "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
+        "audit_summary with lane, capacity, receipts, changed paths, tests, reviewers, findings, and corrections. "
+        "Do not return exactly one protocol_version=1 JSON object; return exactly one protocol_version=2 JSON object inside "
         "<agent-work-result>...</agent-work-result>."
     )
 

@@ -41,7 +41,7 @@ def _issue_context(prompt: str) -> tuple[str, dict[str, object]]:
 
 def _envelope(**updates: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": 3,
@@ -69,8 +69,78 @@ def test_parse_worker_result_accepts_one_exact_versioned_envelope() -> None:
     result = parse_worker_result(output)
 
     assert result.issue_iid == 12
-    assert result.protocol_version == 1
+    assert result.protocol_version == 2
     assert result.result_kind == "ready_to_publish"
+
+
+def test_completed_v2_workflow_receipt_accepts_required_compact_audit_summary() -> None:
+    payload = _envelope(
+        protocol_version=2,
+        expected_phase=WorkflowPhase.WORKFLOW.value,
+        completed_phase=WorkflowPhase.WORKFLOW.value,
+        audit_summary={
+            "lane": "coding",
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "role_receipts": ["architect: accepted"],
+            "changed_paths": ["src/agent_work/runtime.py"],
+            "tests": ["uv run pytest"],
+            "reviewers": ["tdd-judge: approved"],
+            "findings": [],
+            "corrections": [],
+        },
+    )
+    output = "<agent-work-result>" + json.dumps(payload) + "</agent-work-result>"
+
+    result = parse_worker_result(output)
+
+    assert result.protocol_version == 2
+    assert result.audit_summary is not None
+
+
+def test_completed_v2_workflow_receipt_rejects_missing_audit_summary() -> None:
+    payload = _envelope(
+        protocol_version=2,
+        expected_phase=WorkflowPhase.WORKFLOW.value,
+        completed_phase=WorkflowPhase.WORKFLOW.value,
+    )
+
+    with pytest.raises(WorkerProtocolError):
+        parse_worker_result(
+            "<agent-work-result>" + json.dumps(payload) + "</agent-work-result>"
+        )
+
+
+def test_completed_v2_workflow_receipt_rejects_a_mismatched_audit_lane() -> None:
+    payload = _envelope(
+        protocol_version=2,
+        expected_phase=WorkflowPhase.WORKFLOW.value,
+        completed_phase=WorkflowPhase.WORKFLOW.value,
+        audit_summary={
+            "lane": "content",
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "role_receipts": [],
+            "changed_paths": [],
+            "tests": [],
+            "reviewers": [],
+            "findings": [],
+            "corrections": [],
+        },
+    )
+
+    with pytest.raises(WorkerProtocolError):
+        parse_worker_result(
+            "<agent-work-result>" + json.dumps(payload) + "</agent-work-result>"
+        )
 
 
 @pytest.mark.parametrize(
@@ -125,7 +195,7 @@ def test_worker_prompt_requires_publication_metadata_from_ordinary_finalizer() -
         "merge_request_draft with non-empty title and description fields."
     ) in prompt
     assert "Do not commit, push, approve, or merge" in prompt
-    assert "exactly one protocol_version=1 JSON object" in prompt
+    assert "exactly one protocol_version=2 JSON object" in prompt
 
 
 def test_worker_prompt_requires_draft_policy_handoff_metadata() -> None:

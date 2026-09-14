@@ -439,7 +439,7 @@ class ClosedInventoryGitLab(FakeGitLab):
 
 class ChangingSnapshotJsonLedger(JsonLedger):
     def __init__(self, root: Path, initial_records: tuple[LedgerRecord, ...]) -> None:
-        super().__init__(root)
+        super().__init__(root, clock=lambda: NOW)
         self.initial_records = initial_records
         self.first_read = True
 
@@ -454,7 +454,7 @@ class FailOnceLedger(JsonLedger):
     """Fail one injected record persistence without changing other durable records."""
 
     def __init__(self, root: Path, failing_iid: int) -> None:
-        super().__init__(root)
+        super().__init__(root, clock=lambda: NOW)
         self.failing_iid = failing_iid
         self.failures = 1
 
@@ -474,8 +474,10 @@ class FakeRepository:
         self.paths: tuple[str, ...] = ("src/example.py",)
         self.dirty = False
         self.worktree_present = True
+        self.worktree_exists_error: RepositoryError | None = None
         self.worktree_valid = True
         self.existing_worktree_error: RepositoryError | None = None
+        self.changed_paths_error: RepositoryError | None = None
         self.prepare_error: RepositoryError | None = None
         self.push_error: RepositoryError | None = None
         self.push_observer: Callable[[str], None] | None = None
@@ -491,6 +493,8 @@ class FakeRepository:
             (),
             (),
         )
+        self.changed_paths_calls = 0
+        self.has_changes_calls = 0
 
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
@@ -523,15 +527,21 @@ class FakeRepository:
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]:
         del worktree
+        self.changed_paths_calls += 1
+        if self.changed_paths_error is not None:
+            raise self.changed_paths_error
         return self.paths
 
     def has_changes(self, worktree: Path) -> bool:
         """Report the fake worktree's independently controlled cleanliness."""
         del worktree
+        self.has_changes_calls += 1
         return self.dirty
 
     def worktree_exists(self, worktree: Path) -> bool:
         del worktree
+        if self.worktree_exists_error is not None:
+            raise self.worktree_exists_error
         return self.worktree_present
 
     def verify_worktree(self, worktree: Path, branch: str, expected_head: str) -> None:
@@ -605,6 +615,7 @@ def _dependencies(
         monotonic=lambda: 0.0,
         logger=logging.getLogger(f"test-agent-work-{id(ledger)}"),
         read_plan=lambda path: path.read_bytes(),
+        process_probe=lambda: "missing",
     )
 
 
@@ -674,7 +685,7 @@ class BatchingInvoker:
         phase = str(record["phase"])
         self.phases.append(phase)
         payload: dict[str, object] = {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "project_id": record["project_id"],
             "issue_iid": record["issue_iid"],
             "ledger_revision": record["revision"],
@@ -697,6 +708,43 @@ class BatchingInvoker:
                 "title": "Complete issue 12",
                 "description": "Validated change.\n\nCloses #12",
             }
+        if phase == "workflow":
+            payload.update(
+                {
+                    "protocol_version": 2,
+                    "audit_summary": {
+                        "lane": self.lane,
+                        "capacity": {
+                            "required": 13,
+                            "available": 16,
+                            "shortfall": 0,
+                            "decision": "run",
+                        },
+                        "role_receipts": list(self.receipts[phase]),
+                        "changed_paths": [],
+                        "tests": ["uv run tox"],
+                        "reviewers": [
+                            receipt
+                            for receipt in self.receipts[phase]
+                            if receipt.partition(":")[0]
+                            in {
+                                "$nonfunctional-review",
+                                "$tdd-judge",
+                                "$diataxis-judge",
+                                "$judge-quality",
+                                "$judge-test",
+                                "$judge-cicd",
+                                "$tdd-document",
+                                "$cli-syntax-judge",
+                                "$filesystem-structure-judge",
+                                "$agent-policy-judge",
+                            }
+                        ],
+                        "findings": [],
+                        "corrections": [],
+                    },
+                }
+            )
         return WorkerInvocation(
             0,
             f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
@@ -710,6 +758,7 @@ class SingleSessionInvoker:
     def __init__(self, *, lane: str = "coding", needs_human: bool = False) -> None:
         self.lane = lane
         self.needs_human = needs_human
+        self.changed_paths: tuple[str, ...] = ()
         self.phases: list[str] = []
 
     def preflight(self) -> None:
@@ -720,6 +769,9 @@ class SingleSessionInvoker:
         raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
         record = ast.literal_eval(raw_record)
         phase = str(record["phase"])
+        audit_paths = self.changed_paths or (
+            ("src/example.py",) if record["pending_feedback"] is None else ()
+        )
         self.phases.append(phase)
         if phase == "post-publication":
             receipts = ("$pipeline-performance-judge: approved",)
@@ -733,7 +785,8 @@ class SingleSessionInvoker:
             receipts = (
                 "$architect: approved",
                 "$tdd-red: red confirmed",
-                "$tdd-green: green confirmed and findings repaired",
+                "$diataxis-writer: documentation reconciled",
+                "$tdd-green: green confirmed and findings repaired; uv run tox",
                 "$nonfunctional-review: approved",
                 "$tdd-judge: approved",
                 "$diataxis-judge: approved",
@@ -744,10 +797,11 @@ class SingleSessionInvoker:
                 "$cli-syntax-judge: not applicable — no CLI change",
                 "$filesystem-structure-judge: approved",
                 "$agent-policy-judge: not applicable — no agent policy change",
+                "$license-checker: approved",
                 "$tdd-finalizer: approved",
             )
         payload = {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "project_id": record["project_id"],
             "issue_iid": record["issue_iid"],
             "ledger_revision": record["revision"],
@@ -765,6 +819,38 @@ class SingleSessionInvoker:
                 "description": "Validated change.\n\nCloses #12",
             },
         }
+        if phase == "workflow":
+            payload["audit_summary"] = {
+                "lane": self.lane,
+                "capacity": {
+                    "required": 13,
+                    "available": 16,
+                    "shortfall": 0,
+                    "decision": "run",
+                },
+                "role_receipts": list(receipts),
+                "changed_paths": list(audit_paths),
+                "tests": ["uv run tox"] if self.lane == "coding" else [],
+                "reviewers": [
+                    receipt
+                    for receipt in receipts
+                    if receipt.partition(":")[0]
+                    in {
+                        "$nonfunctional-review",
+                        "$tdd-judge",
+                        "$diataxis-judge",
+                        "$judge-quality",
+                        "$judge-test",
+                        "$judge-cicd",
+                        "$tdd-document",
+                        "$cli-syntax-judge",
+                        "$filesystem-structure-judge",
+                        "$agent-policy-judge",
+                    }
+                ],
+                "findings": [],
+                "corrections": [],
+            }
         if self.needs_human:
             payload.update(
                 {
@@ -815,7 +901,7 @@ def test_new_eligible_issue_is_claimed_and_prepared_without_running_worker(
     tmp_path: Path, labels: tuple[str, ...]
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": labels}))
     repository = FakeRepository(config)
 
@@ -839,12 +925,12 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
     payload = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": record.revision,
@@ -880,13 +966,13 @@ def test_split_required_workflow_creates_children_in_order_then_closes_parent(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _record(
         tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
     )
     record = ledger.persist(record)
     payload = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": record.revision,
@@ -963,7 +1049,7 @@ def test_split_decomposition_recovers_a_created_child_and_retries_only_the_remai
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab()
     gitlab.child_creation_failures = 1
     ledger.persist(
@@ -1033,14 +1119,14 @@ def test_malformed_split_envelope_blocks_before_any_decomposition_mutation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(
             tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
         ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     malformed = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": record.revision,
@@ -1089,7 +1175,7 @@ def test_split_recovery_blocks_ambiguous_marker_evidence_without_mutation(
     tmp_path: Path, match_kind: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     fingerprint = hashlib.sha256(b"310967:12:first").hexdigest()
     marker = (
         "<!-- agent-work-split:v1 "
@@ -1151,7 +1237,7 @@ def test_split_creation_rejects_inexact_returned_child_before_parent_mutation(
     tmp_path: Path, override: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     plan = {
         "slices": [
             {
@@ -1216,7 +1302,7 @@ def test_execution_fetches_live_issue_notes_for_the_worker_prompt(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -1247,7 +1333,7 @@ def test_execution_fetches_live_issue_notes_for_the_worker_prompt(
 
 def test_issue_note_failure_retries_without_invoking_worker(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -1271,7 +1357,7 @@ def test_issue_note_failure_retries_without_invoking_worker(tmp_path: Path) -> N
 
 def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -1410,7 +1496,7 @@ def test_runtime_item_projects_worker_exit_evidence(tmp_path: Path) -> None:
         | {"worker_exit": {"returncode": -9, "diagnostic": "signal exit"}}
     )
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(record)
     report = dispatch(
         CommandRequest(command="loop.status"),
@@ -1422,12 +1508,41 @@ def test_runtime_item_projects_worker_exit_evidence(tmp_path: Path) -> None:
     assert report.items[0].worker_exit == record.worker_exit
 
 
+def test_worker_exit_retains_worktree_and_requires_fresh_whole_workflow_revalidation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    repository = FakeRepository(config)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(returncode=23),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.worktree == record.worktree
+    assert "fresh whole workflow" in outcome.next_action.lower()
+    assert "repeat validation" in outcome.next_action.lower()
+
+
 def test_successful_worker_progress_clears_prior_worker_exit_evidence(
     tmp_path: Path,
 ) -> None:
     """A validated worker success cannot retain stale failure evidence."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         LedgerRecord.model_validate(
             _record(
@@ -1437,7 +1552,7 @@ def test_successful_worker_progress_clears_prior_worker_exit_evidence(
         )
     )
     result = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": record.revision,
@@ -1472,7 +1587,7 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         (FakeInvoker(returncode=None), ErrorCode.WORKER_TIMEOUT),
         (
             FakeInvoker(
-                '<agent-work-result>{"protocol_version":1,"project_id":310967,'
+                '<agent-work-result>{"protocol_version":2,"project_id":310967,'
                 '"issue_iid":12,"ledger_revision":1,"expected_state":"executing",'
                 '"expected_phase":"coding-green","workflow_lane":"coding",'
                 '"result_kind":"retryable","phase_status":"rejected",'
@@ -1483,7 +1598,7 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
             ErrorCode.GITLAB_RETRYABLE,
         ),
     ):
-        ledger = JsonLedger(config.state_root / str(expected))
+        ledger = JsonLedger(config.state_root / str(expected), clock=lambda: NOW)
         ledger.persist(
             _record(
                 tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
@@ -1502,7 +1617,7 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
 
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.CODING_GREEN
@@ -1530,7 +1645,7 @@ def test_future_retry_wait_skips_recovery_inventory_and_preserves_retry_budget(
 ) -> None:
     """A not-yet-due recovery does not contact GitLab or consume a retry."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     waiting = ledger.persist(
         _record(
             tmp_path,
@@ -1566,7 +1681,7 @@ def test_malformed_remediation_is_recorded_as_an_actionable_block(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue(description="<!-- agent-mr-remediation -->"))
 
     outcome = run_segment(
@@ -1597,7 +1712,7 @@ finding: review
     gitlab.fetch_merge_request_error = GitLabError("temporary")
 
     outcome = run_segment(
-        ledger=JsonLedger(config.state_root),
+        ledger=JsonLedger(config.state_root, clock=lambda: NOW),
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
         invoke=FakeInvoker(),  # type: ignore[arg-type]
@@ -1616,7 +1731,7 @@ def test_terminal_exact_pipeline_starts_post_publication_worker(
     tmp_path: Path, status: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     publishing = _record(
         tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
     ).model_copy(
@@ -1690,7 +1805,7 @@ def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_asses
 ) -> None:
     """An exact previously-created MR is authoritative across stale states."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=state, phase=phase).model_copy(
             update={
@@ -1739,7 +1854,7 @@ def test_recovery_of_published_draft_starts_post_publication_without_downgrading
 ) -> None:
     """Recovery keeps durable decision-review Draft metadata on the existing MR."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     draft = _decision_draft()
     ledger.persist(
         _record(
@@ -1785,7 +1900,7 @@ def test_recovery_of_published_draft_blocks_reconciliation_identity_drift(
 ) -> None:
     """A Draft PUT response must retain pinned MR identity and source SHA."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     draft = _decision_draft()
     ledger.persist(
         _record(
@@ -1832,7 +1947,7 @@ def test_unpinned_selection_skips_terminal_stale_record_without_open_mr(
 ) -> None:
     """A stale terminal record without publication evidence cannot starve new work."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -1861,7 +1976,7 @@ def test_unpinned_selection_scans_every_terminal_record_for_a_later_published_mr
 ) -> None:
     """An earlier empty terminal inventory must not hide later published work."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     first = ledger.persist(
         _record(
             tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.READY_TO_PUBLISH
@@ -1959,7 +2074,7 @@ def test_recovery_inventory_error_is_retryable_or_remains_fail_closed(
 ) -> None:
     """Inventory transport errors cannot replay publication or escape a block."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=state, phase=WorkflowPhase.READY_TO_PUBLISH).model_copy(
             update={"error_code": error_code}
@@ -1988,7 +2103,7 @@ def test_recovery_inventory_error_from_retry_wait_resumes_prior_active_state(
 ) -> None:
     """Recovery retries from the prior state instead of a RETRY_WAIT self-edge."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2024,7 +2139,7 @@ def test_preparation_recovery_inventory_error_retries_from_preparing(
 ) -> None:
     """A preparation recovery inventory error retains its recoverable prior state."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2060,7 +2175,7 @@ def test_due_preparation_retry_resumes_preparing_before_worktree_mutation(
 ) -> None:
     """A due preparation retry returns to preparation through an allowed edge."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2131,7 +2246,7 @@ def test_recovery_transient_fetch_normalizes_active_waiting_and_blocked_states(
 ) -> None:
     """A transient published-work fetch observes the recovery state policy."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=state, phase=WorkflowPhase.READY_TO_PUBLISH).model_copy(
             update=updates
@@ -2172,7 +2287,7 @@ def test_recovery_blocks_ambiguous_or_inexact_open_mr_inventory_before_side_effe
 ) -> None:
     """Inventory ambiguity or identity drift must never replay publication."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2204,7 +2319,7 @@ def test_recovery_blocks_when_existing_mr_cannot_be_bound_to_durable_work(
 ) -> None:
     """A discovered MR is usable only after closing and local identity verification."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2254,7 +2369,7 @@ def test_preintent_publication_without_draft_recovers_to_lane_finalizer(
     tmp_path: Path, lane: WorkflowLane, finalizer: WorkflowPhase
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2293,7 +2408,7 @@ def test_recovery_blocks_mr_sha_mismatch_with_durable_publication_sha(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
@@ -2335,7 +2450,7 @@ def test_recovery_blocks_durable_mr_identifier_mismatch_before_side_effects(
 ) -> None:
     """Persisted MR identifiers are constraints, not evidence that may be replaced."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     mismatch = 99 if durable_field == "merge_request_iid" else "https://mr/99"
     ledger.persist(
         _record(
@@ -2371,7 +2486,7 @@ def test_recovery_gitlab_binding_errors_retry_active_and_preserve_blocks(
 ) -> None:
     """GitLab transport errors are retryable only while stale recovery is active."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=state, phase=WorkflowPhase.READY_TO_PUBLISH).model_copy(
             update={
@@ -2418,7 +2533,7 @@ def test_postpublication_handoff_revalidates_mr_after_worker_returns(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(
             tmp_path,
@@ -2427,7 +2542,7 @@ def test_postpublication_handoff_revalidates_mr_after_worker_returns(
         ).model_copy(update={"merge_request_iid": 88})
     )
     payload = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "project_id": 310967,
         "issue_iid": 12,
         "ledger_revision": record.revision,
@@ -2468,7 +2583,7 @@ def test_observation_revalidates_exact_merge_request_evidence(
     tmp_path: Path, merge_request: MergeRequestEvidence
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2494,7 +2609,7 @@ def test_observation_revalidates_exact_merge_request_evidence(
 
 def test_observation_routes_conflicts_to_durable_repair(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2522,7 +2637,7 @@ def test_observation_routes_conflicts_to_durable_repair(tmp_path: Path) -> None:
 
 def test_observation_gitlab_failure_schedules_retry(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2551,7 +2666,7 @@ def test_nonterminal_pipeline_status_waits_without_repair(
     tmp_path: Path, status: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(
             tmp_path,
@@ -2578,7 +2693,7 @@ def test_nonterminal_pipeline_status_waits_without_repair(
 
 def test_failed_pipeline_starts_post_publication_assessment(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2609,7 +2724,7 @@ def test_publication_transport_failure_schedules_a_recoverable_retry(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2654,7 +2769,7 @@ def test_permanent_git_publication_failure_blocks_without_consuming_retry_budget
     tmp_path: Path, error_code: ErrorCode
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     initial = ledger.persist(
         _record(
             tmp_path,
@@ -2703,7 +2818,7 @@ def test_permanent_git_publication_failure_blocks_without_consuming_retry_budget
 
 def test_fresh_publication_persists_sha_before_push(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
@@ -2739,7 +2854,7 @@ def test_replay_without_durable_publication_sha_blocks_without_git_mutation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
@@ -2777,7 +2892,7 @@ def test_replay_without_durable_publication_sha_blocks_without_git_mutation(
 
 def test_explicit_legacy_retry_binds_then_replays_exact_commit(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.READY_TO_PUBLISH
@@ -2831,7 +2946,7 @@ def test_publication_retry_exhaustion_projects_an_actionable_block(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -2867,7 +2982,7 @@ def test_publication_replays_intent_by_reusing_the_exact_existing_mr(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     pending = ledger.persist(
         _record(
             tmp_path,
@@ -2913,7 +3028,7 @@ def test_publication_reconciles_existing_mr_to_preserve_decision_review_draft(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     draft = _decision_draft()
     ledger.persist(
         _record(
@@ -2943,7 +3058,7 @@ def test_replayed_publication_reconciles_the_recorded_mr_with_decision_review(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     draft = _decision_draft()
     ledger.persist(
         _record(
@@ -2988,7 +3103,7 @@ def test_remediation_reconciles_only_its_recorded_mr_with_decision_review(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     draft = _decision_draft()
     ledger.persist(
         _record(
@@ -3024,7 +3139,7 @@ def test_existing_draft_is_not_downgraded_by_ordinary_publication_metadata(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ordinary = MergeRequestDraft(title="Normal change", description="Details")
     ledger.persist(
         _record(
@@ -3178,7 +3293,7 @@ def test_publication_rejects_inconsistent_replay_intent_before_mutation(
     tmp_path: Path, intent: TransitionIntentRecord
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3219,7 +3334,7 @@ def test_publication_rejects_intent_not_older_than_durable_record(
     tmp_path: Path, operation_revision: int
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     intent = TransitionIntentRecord(
         operation_id=f"12:publish:{operation_revision}",
         kind="publish_merge_request",
@@ -3267,7 +3382,7 @@ def test_delayed_publication_closing_evidence_schedules_retry(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3310,7 +3425,7 @@ def test_delayed_publication_closing_evidence_recovers_without_duplicate_mr(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3367,7 +3482,7 @@ def test_missing_publication_closing_evidence_exhaustion_blocks(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3404,7 +3519,7 @@ def test_remediation_publication_reuses_only_its_recorded_merge_request(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3452,7 +3567,7 @@ def test_publication_mismatch_is_an_actionable_block(
     tmp_path: Path, merge_request: MergeRequestEvidence
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3487,11 +3602,12 @@ def test_policy_canary_completes_workflow_and_runner_creates_merge_request(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     repository = FakeRepository(config)
     repository.paths = ("AGENTS.md",)
     gitlab = FakeGitLab(_issue(description="Update AGENTS.md safely."))
     invoker = SingleSessionInvoker(lane="content")
+    invoker.changed_paths = ("AGENTS.md",)
 
     prepared = run_segment(
         ledger=ledger,
@@ -3524,6 +3640,74 @@ def test_policy_canary_completes_workflow_and_runner_creates_merge_request(
     assert invoker.phases == ["workflow"]
     assert repository.pushes == 1
     assert gitlab.created_merge_requests == 1
+
+
+def test_workflow_audit_repository_failure_is_durably_retried(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = FakeRepository(config)
+    gitlab = FakeGitLab()
+    invoker = SingleSessionInvoker()
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    repository.changed_paths_error = RepositoryTransientError("git unavailable")
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.GIT_TRANSPORT_RETRYABLE
+    assert outcome.worktree == prepared.worktree
+    persisted = ledger.load(prepared.issue_iid)
+    assert persisted is not None and persisted.state is RunnerState.RETRY_WAIT
+    assert persisted.error_code is ErrorCode.GIT_TRANSPORT_RETRYABLE
+
+
+def test_workflow_audit_repository_failure_is_durably_blocked(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = FakeRepository(config)
+    gitlab = FakeGitLab()
+    invoker = SingleSessionInvoker()
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    repository.changed_paths_error = RepositoryError("git worktree unreadable")
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert outcome.worktree == prepared.worktree
+    persisted = ledger.load(prepared.issue_iid)
+    assert persisted is not None and persisted.state is RunnerState.BLOCKED
+    assert persisted.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
 
 
 @pytest.mark.parametrize(
@@ -3568,7 +3752,7 @@ def test_protected_policy_publication_with_invalid_receipts_fails_closed(
     tmp_path: Path, receipt: WorkflowReceiptRecord | None
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3647,7 +3831,7 @@ def test_protected_policy_publication_rejects_incoherent_receipt_or_draft(
     draft: MergeRequestDraft,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3736,7 +3920,7 @@ def test_protected_policy_publication_with_complete_evidence_publishes(
     draft: MergeRequestDraft,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3819,7 +4003,7 @@ def test_protected_policy_publication_uses_latest_workflow_receipt(
     expected_pushes: int,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -3856,7 +4040,7 @@ def test_protected_policy_publication_uses_latest_workflow_receipt(
 
 def test_closed_issue_is_reconciled_and_lifecycle_label_removed(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -3877,9 +4061,17 @@ def test_closed_terminal_record_is_reconciled_before_new_selection(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
-        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN)
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "issue_title": _issue().title,
+                "main_branch": "main",
+                "main_sha": "b" * 40,
+            }
+        )
     )
     gitlab = FakeGitLab(
         _issue(state="closed").model_copy(update={"labels": ("agent::blocked",)})
@@ -3903,7 +4095,7 @@ def test_apply_reconciles_closed_records_and_orphans_before_one_open_segment(
 ) -> None:
     """Closed housekeeping is outside the one-open-item segment allowance."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     for iid in (12, 14):
         ledger.persist(
             _record(
@@ -3951,7 +4143,7 @@ def test_apply_reconciles_closed_records_and_orphans_before_one_open_segment(
 def test_closed_housekeeping_does_not_consume_activation_budget(tmp_path: Path) -> None:
     """An open segment receives its whole budget after closed housekeeping."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     readings = iter((0.0, 60.0, 60.0))
 
     class TimedClosedInventoryGitLab(ClosedInventoryGitLab):
@@ -3987,7 +4179,7 @@ def test_closed_record_normalization_clears_transients_but_preserves_evidence(
     from agent_work.serial import reconcile_closed_issues
 
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     original = ledger.persist(
         _record(
             tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.CODING_GREEN
@@ -4042,7 +4234,7 @@ def test_closed_orphan_identity_failure_leaves_its_label_without_a_ledger_record
     from agent_work.serial import reconcile_closed_issues
 
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = ClosedInventoryGitLab(
         _issue(state="closed").model_copy(update={"labels": ("agent::blocked",)})
     )
@@ -4060,7 +4252,7 @@ def test_closed_record_with_another_project_is_not_reconciled(tmp_path: Path) ->
     from agent_work.serial import reconcile_closed_issues
 
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
@@ -4127,7 +4319,7 @@ def test_closed_label_failure_keeps_complete_record_for_idempotent_cleanup(
     from agent_work.serial import reconcile_closed_issues
 
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -4151,7 +4343,7 @@ def test_closed_label_failure_keeps_complete_record_for_idempotent_cleanup(
 
 def test_orphan_running_projection_becomes_a_documented_block(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
 
     outcome = run_segment(
@@ -4170,7 +4362,7 @@ def test_orphan_running_projection_becomes_a_documented_block(tmp_path: Path) ->
 
 def test_missing_active_worktree_becomes_a_documented_block(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -4196,7 +4388,7 @@ def test_resumed_worker_requires_the_recorded_branch_and_baseline(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -4224,7 +4416,7 @@ def test_multiple_lifecycle_projections_become_blocked(tmp_path: Path) -> None:
     )
 
     outcome = run_segment(
-        ledger=JsonLedger(config.state_root),
+        ledger=JsonLedger(config.state_root, clock=lambda: NOW),
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
         invoke=FakeInvoker(),  # type: ignore[arg-type]
@@ -4238,7 +4430,7 @@ def test_multiple_lifecycle_projections_become_blocked(tmp_path: Path) -> None:
 
 def test_terminal_ledger_issue_is_not_selected_as_fresh_work(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     completed = ledger.persist(
         _record(tmp_path, state=RunnerState.COMPLETE, phase=WorkflowPhase.DISCOVERY)
     )
@@ -4271,7 +4463,7 @@ def test_run_preview_reports_eligible_unprojected_work(tmp_path: Path) -> None:
         apply=False,
         dependencies=_dependencies(
             config,
-            JsonLedger(config.state_root),
+            JsonLedger(config.state_root, clock=lambda: NOW),
             FakeGitLab(_issue()),
             FakeRepository(config),
         ),
@@ -4284,7 +4476,7 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     gitlab.pipeline = PipelineEvidence(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
@@ -4316,7 +4508,7 @@ def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     repository = FakeRepository(config)
 
@@ -4360,7 +4552,7 @@ def test_apply_batches_the_complete_content_workflow_until_human_handoff(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     gitlab.pipeline = PipelineEvidence(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
@@ -4387,7 +4579,7 @@ def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     gitlab.pipeline = PipelineEvidence(
         id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
@@ -4419,7 +4611,7 @@ def test_apply_runs_workflow_then_post_publication_assessment_for_legacy_repair(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.REPAIR, phase=WorkflowPhase.WORKFLOW)
     )
@@ -4451,7 +4643,7 @@ def test_failed_pipeline_replaces_legacy_phase_with_post_publication(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4482,7 +4674,7 @@ def test_apply_segment_limit_yields_and_next_activation_recovers(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     gitlab.pipeline = PipelineEvidence(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
@@ -4520,7 +4712,7 @@ def test_apply_never_reconciles_another_issue_after_pinning_active_work(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     active = _record(
         tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
     )
@@ -4579,7 +4771,7 @@ def test_apply_never_reconciles_another_issue_after_pinning_active_work(
 
 def test_apply_stops_after_one_pending_pipeline_observation(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4616,7 +4808,7 @@ def test_apply_respects_activation_time_budget_between_segments(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     readings = iter((0.0, 0.0, 61.0))
     dependencies = replace(
@@ -4639,7 +4831,7 @@ def test_apply_gives_each_workflow_invocation_the_remaining_activation_budget(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4679,7 +4871,7 @@ def test_apply_returns_unresolved_workflow_feedback_without_relaunching(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
     invoker = SingleSessionInvoker(needs_human=True)
     dependencies = replace(
@@ -4703,7 +4895,7 @@ def test_apply_resumes_a_due_retry_and_continues_in_the_same_activation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4739,7 +4931,7 @@ def test_apply_resumes_a_due_retry_and_continues_in_the_same_activation(
 def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> None:
     """A failed worker is reinvoked before this dispatch activation yields."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4780,7 +4972,7 @@ def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> N
 
 def test_apply_yields_without_mutation_for_a_future_retry(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     waiting = ledger.persist(
         _record(
             tmp_path,
@@ -4844,7 +5036,7 @@ def test_complete_record_with_stale_label_only_removes_the_projection(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     complete = ledger.persist(
         _record(
             tmp_path, state=RunnerState.COMPLETE, phase=WorkflowPhase.POST_PUBLICATION
@@ -4867,7 +5059,7 @@ def test_complete_record_with_stale_label_only_removes_the_projection(
 
 def test_multiple_active_records_fail_closed(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
@@ -4891,9 +5083,17 @@ def test_runtime_status_and_run_preview_never_refresh_checkout(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
-        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN)
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "issue_title": _issue().title,
+                "main_branch": "main",
+                "main_sha": "b" * 40,
+            }
+        )
     )
     fake_gitlab = FakeGitLab(_issue().model_copy(update={"labels": ()}))
     repository = FakeRepository(config)
@@ -4906,14 +5106,83 @@ def test_runtime_status_and_run_preview_never_refresh_checkout(
         CommandRequest(command="loop.run"), apply=False, dependencies=dependencies
     )
     assert status.outcome == "status" and status.items[0].state is RunnerState.BLOCKED
+    item = status.items[0]
+    assert item.projected_status == "blocked"
+    assert item.source_sha == "a" * 40 and item.main_sha == "b" * 40
+    assert item.corroboration["gitlab"] == "confirmed"
+    assert item.corroboration["worktree"] == "confirmed"
+    assert item.corroboration["process"] == "missing"
+    assert repository.changed_paths_calls == 1
+    assert repository.has_changes_calls == 0
     assert preview.outcome == "idle"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RepositoryTransientError("git unavailable"), RepositoryError("git failed")],
+)
+def test_status_repository_observation_failure_remains_unknown(
+    tmp_path: Path, error: RepositoryError
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN)
+    )
+    repository = FakeRepository(config)
+    repository.worktree_exists_error = error
+
+    status = dispatch(
+        CommandRequest(command="loop.status"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, FakeGitLab(), repository),
+    )
+
+    assert status.items[0].corroboration["worktree"] == "unknown"
+
+
+def test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    for iid in range(101, 202):
+        ledger.persist(
+            _record(
+                tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+            ).model_copy(
+                update={"issue_iid": iid, "source_branch": f"agent/issue-{iid}"}
+            )
+        )
+    dependencies = _dependencies(config, ledger, FakeGitLab(), FakeRepository(config))
+    listing = dispatch(
+        CommandRequest(command="loop.status"), apply=False, dependencies=dependencies
+    )
+    assert listing.total_items == 101 and listing.items_truncated
+    assert len(listing.items) == 100
+    assert tuple(item.issue_iid for item in listing.items) == tuple(range(101, 201))
+
+    class ExactOnlyLedger(JsonLedger):
+        def list_records(self) -> tuple[LedgerRecord, ...]:
+            raise AssertionError("exact status lookup must not list records")
+
+    exact_ledger = ExactOnlyLedger(config.state_root, clock=lambda: NOW)
+    exact = dispatch(
+        CommandRequest(command="loop.status", issue_iid=201),
+        apply=False,
+        dependencies=_dependencies(
+            config, exact_ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+    assert exact.total_items == 1 and not exact.items_truncated
+    assert tuple(item.issue_iid for item in exact.items) == (201,)
 
 
 def test_observation_segment_does_not_refresh_the_unrelated_base_checkout(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(
             tmp_path,
@@ -4937,7 +5206,7 @@ def test_runtime_migration_preview_and_blocked_retry_are_explicit(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     failed_issue = _issue().model_copy(update={"labels": ("agent::failed",)})
     fake_gitlab = FakeGitLab(failed_issue)
     fake_repository = FakeRepository(config)
@@ -4982,7 +5251,7 @@ def test_retry_replays_retained_publication_intent_without_restarting_workflow(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     retained = ledger.persist(
         _record(
             tmp_path,
@@ -5041,7 +5310,7 @@ def test_migration_apply_rejects_tampered_reviewed_evidence_before_mutation(
     tmp_path: Path, mutation: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::failed",)}))
     repository = FakeRepository(config)
     repository.inventory_result = (("agent/issue-12",), (), ())
@@ -5073,7 +5342,7 @@ def test_migration_apply_rejects_stale_inventory_before_mutation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::failed",)}))
     repository = FakeRepository(config)
     repository.inventory_result = (("agent/issue-12",), (), ())
@@ -5102,7 +5371,7 @@ def test_migration_apply_never_overwrites_a_newer_ledger_record(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::failed",)}))
     repository = FakeRepository(config)
     repository.inventory_result = (("agent/issue-12",), (), ())
@@ -5131,7 +5400,7 @@ def test_migration_apply_never_overwrites_a_newer_ledger_record(
 
 def test_migration_preflights_every_ledger_before_any_mutation(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     issue_12 = _issue().model_copy(update={"labels": ("agent::failed",)})
     issue_13 = _issue(iid=13).model_copy(update={"labels": ("agent::failed",)})
 
@@ -5179,7 +5448,7 @@ def test_migration_replays_its_intent_after_partial_gitlab_failure(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     issue = _issue().model_copy(update={"labels": ("agent::failed",)})
     gitlab = FakeGitLab(issue)
     repository = FakeRepository(config)
@@ -5219,7 +5488,7 @@ def test_migration_replays_only_exact_pending_intent_after_projection_removed(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    seed_ledger = JsonLedger(config.state_root)
+    seed_ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     issue = _issue().model_copy(update={"labels": ("agent::failed",)})
     seed_gitlab = FakeGitLab(issue)
     repository = FakeRepository(config)
@@ -5256,7 +5525,7 @@ def test_migration_replays_only_exact_pending_intent_after_projection_removed(
     for name, intent in variants.items():
         case_root = tmp_path / name
         case_config = _config(case_root)
-        case_ledger = JsonLedger(case_config.state_root)
+        case_ledger = JsonLedger(case_config.state_root, clock=lambda: NOW)
         case_ledger.persist(
             pending.model_copy(
                 update={
@@ -5295,7 +5564,7 @@ def test_migration_replays_only_exact_pending_intent_after_projection_removed(
 
     conflicting_root = tmp_path / "conflicting"
     conflicting_config = _config(conflicting_root)
-    conflicting_ledger = JsonLedger(conflicting_config.state_root)
+    conflicting_ledger = JsonLedger(conflicting_config.state_root, clock=lambda: NOW)
     conflicting_ledger.persist(
         pending.model_copy(
             update={
@@ -5332,7 +5601,7 @@ def test_migration_rejects_pending_replay_when_issue_state_changed(
     tmp_path: Path, reviewed_state: str, changed_state: str
 ) -> None:
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     issue = _issue(state=reviewed_state).model_copy(
         update={"labels": ("agent::failed",)}
     )
