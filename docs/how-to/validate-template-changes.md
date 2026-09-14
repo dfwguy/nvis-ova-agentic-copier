@@ -5,7 +5,7 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-14
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -47,8 +47,15 @@ definition, whose image is
 pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
 `uv sync` bootstrap. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
-GitLab job. The two root pytest jobs retain separate Python 3.11 and 3.14.3
-JUnit and coverage reports.
+GitLab job. Each root pytest job runs two deterministic, concurrent test
+shards: the template and serial-runtime tests form one shard, while the other
+runs the remaining tests. GitLab receives JUnit output from both shards. After
+both finish, the job combines their coverage data and publishes the resulting
+Python 3.11 or 3.14.3 Cobertura coverage report; the existing coverage floor
+still applies to that combined result. When investigating a failed root pytest
+job, inspect the failed shard's JUnit report and the combined coverage report.
+Either shard failing, or a failure while combining or reporting coverage, fails
+the named pytest job.
 
 The generated template deliberately keeps its portable `validation (9 gates)`
 aggregate job. It performs the dependency bootstrap once, then reports its

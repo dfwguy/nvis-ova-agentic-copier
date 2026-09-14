@@ -227,6 +227,118 @@ def test_root_validation_consumes_the_published_image_without_bootstrap(
     assert 'PYTHONPATH="$CI_PROJECT_DIR/src"' in str(configuration[".pytest"])
 
 
+def test_root_pytest_template_runs_two_concurrent_complete_shards(
+    project_root: Path,
+) -> None:
+    """Each image-backed pytest job combines two non-overlapping shards once."""
+    configuration = yaml.safe_load(
+        (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
+    )
+    pytest_template = configuration[".pytest"]
+    script = "\n".join(pytest_template["script"])
+
+    assert script.count(" pytest \\") == 2
+    assert script.count("--cov-report=") == 2
+    assert "tests/test_agent_work_serial_runtime.py tests/test_template.py" in script
+    assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
+    assert "--ignore=tests/test_template.py" in script
+    assert 'COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-1"' in script
+    assert 'COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-2"' in script
+    assert '--junitxml="test-results-$TEST_ENVIRONMENT-shard-1.xml"' in script
+    assert '--junitxml="test-results-$TEST_ENVIRONMENT-shard-2.xml"' in script
+    assert "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-1" in script
+    assert "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-2" in script
+    assert "coverage combine" in script
+    assert "coverage report --fail-under=85" in script
+    assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
+    assert 'wait "$shard_1_pid"' in script
+    assert 'wait "$shard_2_pid"' in script
+    assert "--cov-fail-under=85" not in script
+    assert pytest_template["artifacts"]["reports"]["coverage_report"] == {
+        "coverage_format": "cobertura",
+        "path": "coverage-$TEST_ENVIRONMENT.xml",
+    }
+    assert pytest_template["artifacts"]["reports"]["junit"] == [
+        "test-results-$TEST_ENVIRONMENT-shard-1.xml",
+        "test-results-$TEST_ENVIRONMENT-shard-2.xml",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failing_command", "expected_status"),
+    (("", 0), ("pytest-1", 1), ("pytest-2", 1), ("coverage-report", 1)),
+)
+def test_root_pytest_job_waits_for_both_shards_before_reporting_result(
+    project_root: Path,
+    tmp_path: Path,
+    failing_command: str,
+    expected_status: int,
+) -> None:
+    """A shard failure still waits for its peer and fails the enclosing job."""
+    configuration = yaml.safe_load(
+        (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
+    )
+    script = "\n".join(configuration[".pytest"]["script"])
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "uv-invocations"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "$*" >> "$INVOCATIONS"\n'
+        'case "$*" in\n'
+        "  *pytest*)\n"
+        '    case "$*" in\n'
+        "      *'tests/test_agent_work_serial_runtime.py tests/test_template.py'*) shard=1 ;;\n"
+        "      *) shard=2 ;;\n"
+        "    esac\n"
+        '    [[ "$FAILING_COMMAND" == "pytest-$shard" ]] && exit 1 ;;\n'
+        "  *'coverage report'*)\n"
+        '    [[ "$FAILING_COMMAND" == "coverage-report" ]] && exit 1 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    fake_uv.chmod(0o755)
+    environment = os.environ | {
+        "CI_PROJECT_DIR": str(tmp_path),
+        "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
+        "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
+        "FAILING_COMMAND": failing_command,
+        "INVOCATIONS": str(invocations),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TEST_ENVIRONMENT": "py311",
+    }
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    pytest_invocations = [
+        invocation
+        for invocation in invocations.read_text().splitlines()
+        if "pytest" in invocation
+    ]
+    assert result.returncode == expected_status
+    assert len(pytest_invocations) == 2
+    assert any(
+        "test_agent_work_serial_runtime.py" in call for call in pytest_invocations
+    )
+    assert any(
+        "--ignore=tests/test_agent_work_serial_runtime.py" in call
+        for call in pytest_invocations
+    )
+    assert any("--ignore=tests/test_template.py" in call for call in pytest_invocations)
+    assert any(
+        "coverage combine" in call for call in invocations.read_text().splitlines()
+    )
+    assert any("coverage xml" in call for call in invocations.read_text().splitlines())
+
+
 def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
     project_root: Path,
 ) -> None:
