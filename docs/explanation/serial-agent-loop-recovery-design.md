@@ -181,9 +181,19 @@ positive, ceil-rounded time remaining from that budget. An exhausted budget is
 handled by the normal durable-worktree retry and recovery path. Retryable worker
 failures are immediately due and continue in that activation; the timer waits
 20 minutes after the complete activation, so that interval controls idle
-polling and genuine external waits rather than spacing internal handoffs. The systemd
-service has no sequence-wide timeout; each worker activation retains the work
-budget. The timer does not own workflow state or perform checkout cleanup.
+polling and genuine external waits rather than spacing internal handoffs. The
+systemd oneshot adds a 190-minute sequence-wide outer envelope: the approved
+180-minute worker budget plus a 10-minute safety margin for wrapper checkout,
+GitLab, publication, and reporting. This bounds an otherwise hung wrapper
+without shrinking the worker's 10,800-second budget. Non-worker housekeeping
+operations have 120-second deadlines, while the applied worker receives its
+remaining budget. When the outer envelope expires, systemd terminates the
+whole control group with a 30-second TERM-to-KILL grace period and preserves
+`Result=timeout` plus journal evidence. The trade-off is that a failed or hung
+activation is stopped predictably rather than allowed to delay completion-
+relative timer scheduling indefinitely; the durable ledger and retained
+worktree make normal retry and human diagnosis possible. The timer does not
+own workflow state or perform checkout cleanup.
 
 ## Durable ledger and worktrees
 

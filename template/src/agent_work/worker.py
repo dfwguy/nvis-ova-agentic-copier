@@ -20,7 +20,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from .domain import AGENT_OUTCOME_NOTE_MARKER
+from .domain import AGENT_OUTCOME_NOTE_MARKER, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
 from .models import GitLabIssueNote, WorkerExitEvidence, WorkerResultEnvelope
 from .ports import CommandRunner
 
@@ -539,7 +539,7 @@ class AgentInvoker:
         result = self._run_command(
             (executable, "exec", "--help"),
             stdin=None,
-            timeout_seconds=None,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
             environment=_worker_environment(self._environment),
         )
         if (
