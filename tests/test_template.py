@@ -3493,3 +3493,103 @@ def test_portable_markdown_mirrors_match_generated_output(
     for relative_path in sorted(copied_paths):
         template_content = (template_dir / relative_path).read_bytes()
         assert template_content == (generated_project / relative_path).read_bytes()
+
+
+def test_git_flow_publishes_and_verifies_literal_markdown_mr_descriptions(
+    project_root: Path, template_dir: Path
+) -> None:
+    """MR instructions preserve a literal Markdown body through GitLab read-back."""
+    skill_path = Path(".agents/skills/git-flow/SKILL.md")
+    root_contract = (project_root / skill_path).read_text()
+    template_contract = (template_dir / skill_path).read_text()
+
+    assert root_contract == template_contract
+    creation_contract = root_contract.split("3b. **MR exists", maxsplit=1)[0]
+    existing_contract = root_contract.split("3b. **MR exists", maxsplit=1)[1]
+    expected_description = """## Summary
+
+- Publish an exact `Markdown` description.
+
+## Test plan
+
+- `uv run tox`"""
+    expected_assignment = (
+        "mr_description=$(cat <<'MR_DESCRIPTION'\n"
+        f"{expected_description}\n"
+        "MR_DESCRIPTION\n"
+        ")"
+    )
+
+    # This equality protects the literal Markdown bytes, including the blank
+    # lines and inline code, rather than merely checking that Markdown exists.
+    assert expected_assignment in creation_contract
+    assert '-f description="$mr_description"' in creation_contract
+    creation_request = creation_contract.split("created_mr_json=", maxsplit=1)[1].split(
+        "mr_iid=", maxsplit=1
+    )[0]
+    assert "%0A" not in creation_request
+    assert not re.search(
+        r"(?i)(?:url|uri|percent)[_-]?encod|(?:quote|escape)(?:_plus)?\(",
+        creation_request,
+    )
+    assert re.search(
+        r"(?ms)created_mr_json=.*?mr_iid=.*?\.iid.*?"
+        r"read_back_mr_json=.*?projects/\$GITLAB_PROJECT_ID/merge_requests/\$mr_iid.*?"
+        r"if ! jq -e --arg iid \"\$mr_iid\" .*?"
+        r"--arg description \"\$mr_description\" .*?"
+        r"<<<\"\$read_back_mr_json\" >/dev/null; then.*?exit 1",
+        creation_contract,
+    )
+    expected_jq_arguments = {
+        "iid": "mr_iid",
+        "source_branch": "source_branch",
+        "target_branch": "target_branch",
+        "title": "title",
+        "description": "mr_description",
+    }
+    expected_jq_predicates = {
+        "source_branch": "source_branch",
+        "target_branch": "target_branch",
+        "title": "title",
+        "description": "description",
+    }
+    for field, variable in expected_jq_arguments.items():
+        assert f'--arg {field} "${variable}"' in creation_contract
+    for field, variable in expected_jq_arguments.items():
+        assert f"(.{field} | type)" in creation_contract
+    for field, variable in expected_jq_predicates.items():
+        assert f".{field} == ${variable}" in creation_contract
+    assert "(.iid | tostring) == $iid" in creation_contract
+    assert 'if (.iid | type) == "number" then .iid' in creation_contract
+    assert re.search(
+        r'(?ms)mr_iid=.*?\)" \|\| \{\s+printf.*?\s+exit 1\s+\}',
+        creation_contract,
+    )
+    assert re.search(
+        r"(?ms)selected_mr_json=.*?mr_iid=.*?\.iid.*?"
+        r"git push.*?"
+        r"read_back_mr_json=.*?projects/\$GITLAB_PROJECT_ID/merge_requests/\$mr_iid.*?"
+        r"if ! jq -e --arg iid \"\$mr_iid\" --argjson intended \"\$selected_mr_json\" .*?"
+        r"<<<\"\$read_back_mr_json\" >/dev/null; then.*?exit 1",
+        existing_contract,
+    )
+    assert "(.iid | tostring) == $iid" in existing_contract
+    for field in expected_jq_arguments:
+        assert f"(.{field} | type)" in existing_contract
+    assert ".source_branch == $intended.source_branch" in existing_contract
+    assert ".target_branch == $intended.target_branch" in existing_contract
+    assert ".title == $intended.title" in existing_contract
+    assert ".description == $intended.description" in existing_contract
+    assert (
+        'jq -cer \'if length == 1 and (.[0].iid | type == "number")'
+        in existing_contract
+    )
+    assert 'if (.iid | type) == "number" then .iid' in existing_contract
+    assert re.search(
+        r'(?ms)selected_mr_json=.*?\)" \|\| \{\s+printf.*?\s+exit 1\s+\}.*?'
+        r'mr_iid=.*?\)" \|\| \{\s+printf.*?\s+exit 1\s+\}.*?git push',
+        existing_contract,
+    )
+    assert existing_contract.index("selected_mr_json=") < existing_contract.index(
+        "git push"
+    )

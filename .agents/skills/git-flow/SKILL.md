@@ -254,15 +254,44 @@ the preflight. One user approval per remote-touching command.
    - `description`: Summary section (commit body, or 2–3 bullets of what shipped) + Test plan section (commands reviewers can run, e.g. `uv run tox`)
    - `target_branch`: `main` (or the default branch returned by the GitLab target check)
 
+   Construct the intended description once as a literal multiline shell value.
+   It must be passed directly as the `description` field: do not percent- or URI-encode the description or its newlines. GitLab's returned description is
+   the authoritative read-back and must match that intended value exactly.
+
    ```bash
+   source_branch="$(git rev-parse --abbrev-ref HEAD)"
+   target_branch="main"
+   title="$(git log -1 --format=%s)"
+mr_description=$(cat <<'MR_DESCRIPTION'
+## Summary
+
+- Publish an exact `Markdown` description.
+
+## Test plan
+
+- `uv run tox`
+MR_DESCRIPTION
+)
    git push --set-upstream origin HEAD
-   glab api --hostname "$GITLAB_HOST" -X POST "projects/$GITLAB_PROJECT_ID/merge_requests" \
-     -f source_branch="$(git rev-parse --abbrev-ref HEAD)" \
-     -f target_branch="main" \
-     -f title="<commit subject>" \
-     -f description="<built body>" \
+   created_mr_json="$(glab api --hostname "$GITLAB_HOST" -X POST "projects/$GITLAB_PROJECT_ID/merge_requests" \
+     -f "source_branch=$source_branch" \
+     -f "target_branch=$target_branch" \
+     -f "title=$title" \
+     -f description="$mr_description" \
      -f remove_source_branch=true \
-     -f squash=true
+     -f squash=true)"
+   mr_iid="$(jq -er 'if (.iid | type) == "number" then .iid else error("created MR IID must be a number") end' <<<"$created_mr_json")" || {
+     printf '%s\n' "Created MR did not return a numeric IID" >&2
+     exit 1
+   }
+   read_back_mr_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests/$mr_iid")"
+   if ! jq -e --arg iid "$mr_iid" --arg source_branch "$source_branch" \
+     --arg target_branch "$target_branch" --arg title "$title" --arg description "$mr_description" \
+     '(.iid | type) == "number" and (.source_branch | type) == "string" and (.target_branch | type) == "string" and (.title | type) == "string" and (.description | type) == "string" and (.iid | tostring) == $iid and .source_branch == $source_branch and .target_branch == $target_branch and .title == $title and .description == $description' \
+     <<<"$read_back_mr_json" >/dev/null; then
+     printf '%s\n' "MR read-back did not match the submitted IID, branches, title, or Markdown" >&2
+     exit 1
+   fi
    ```
    `remove_source_branch=true` deletes the feature branch when the MR merges;
    `squash=true` collapses the branch's commits into one on merge.
@@ -277,16 +306,38 @@ the preflight. One user approval per remote-touching command.
 
 3b. **MR exists — push, then preserve or update its draft handoff**:
    ```bash
+   source_branch="$(git rev-parse --abbrev-ref HEAD)"
+   selected_mr_json="$(glab api --hostname "$GITLAB_HOST" \
+     "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=$source_branch" \
+     | jq -cer 'if length == 1 and (.[0].iid | type == "number") then .[0] else error("expected exactly one open MR with a numeric IID") end')" || {
+     printf '%s\n' "Could not select exactly one open MR with a numeric IID" >&2
+     exit 1
+   }
+   mr_iid="$(jq -er 'if (.iid | type) == "number" then .iid else error("selected MR IID must be a number") end' <<<"$selected_mr_json")" || {
+     printf '%s\n' "Selected MR did not return a numeric IID" >&2
+     exit 1
+   }
    git push
+   read_back_mr_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests/$mr_iid")"
+   if ! jq -e --arg iid "$mr_iid" --argjson intended "$selected_mr_json" \
+     '(.iid | type) == "number" and (.source_branch | type) == "string" and (.target_branch | type) == "string" and (.title | type) == "string" and (.description | type) == "string" and (.iid | tostring) == $iid and .source_branch == $intended.source_branch and .target_branch == $intended.target_branch and .title == $intended.title and .description == $intended.description' \
+     <<<"$read_back_mr_json" >/dev/null; then
+     printf '%s\n' "MR read-back did not match the intended IID, branches, title, or Markdown" >&2
+     exit 1
+   fi
    ```
    GitLab updates the existing MR with the new commits. For normal approval,
-   preserve its existing title and description. For an accepted Finalizer
+   preserve its existing title and description by capturing the selected MR JSON
+   as the intended record before the push and comparing its exact fields to the
+   read-back. This preserves trailing newlines in the description. For an accepted Finalizer
    draft-safety verdict, first use the verified numeric-project MR identity,
    preserve required existing content and closing references, and update that
    same MR so its title begins `Draft:` and its description enumerates
    unresolved findings, evidence/cycle ledger, exact human decisions, tests,
    and unchanged project-owned values. Read the same MR back and verify its
-   identity, title, description, source branch, and target branch. If it cannot
+   identity, explicitly intended title, explicitly intended description, source branch, and target branch.
+   Capture those intended values before any separately authorized draft update
+   and compare them to the exact read-back. If it cannot
    be safely relabeled, described, or verified, return `needs_human`; never
    create a duplicate MR. A Draft: handoff is never approval to merge.
 
