@@ -323,6 +323,19 @@ the operator-managed service boundary. After first deployment, stop the timer,
 manually fast-forward once, preview/canary, then restart it; later applied
 activations self-refresh.
 
+The oneshot service provides a bounded outer envelope for that work:
+`TimeoutStartSec=190min`. It reserves the approved 10,800-second (180-minute)
+worker budget for the applied `agent-work` invocation and leaves a 10-minute
+safety margin for wrapper checkout, GitLab, publication, and reporting work.
+Non-worker Git, GitLab, `direnv`, and bootstrap calls have a finite 120-second
+housekeeping deadline; the applied worker instead receives and remains bound
+by the time remaining from its 10,800-second budget. On outer-envelope expiry,
+systemd sends TERM to the whole service control group, allows a 30-second
+TERM-to-KILL grace period, and then kills any survivors. It records
+`Result=timeout` and the relevant sanitized wrapper diagnostics in the unit
+journal. The durable ledger and retained issue worktree are not removed;
+normal retry and human diagnosis use that evidence.
+
 A workflow-owning worker returns a versioned, redacted envelope for its
 expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
 `needs_human`, with the coarse completed state, receipts, diagnostic, and next

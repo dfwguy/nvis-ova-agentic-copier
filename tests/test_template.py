@@ -913,6 +913,83 @@ def test_agent_loop_wrapper_requires_an_absolute_executable_direnv(
     assert not marker.exists()
 
 
+def test_agent_loop_wrapper_requires_an_absolute_timeout_executable(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """The wrapper fails safely before any worker work without its timeout seam."""
+    _, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    environment.pop("AGENT_WORK_TIMEOUT", None)
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 2
+    assert "AGENT_WORK_TIMEOUT must be an absolute executable path" in result.stderr
+    assert not marker.exists()
+
+
+def test_agent_loop_wrapper_bounds_housekeeping_without_capping_applied_worker(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """Only short control-plane work uses the injected TERM-to-KILL timeout."""
+    _, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    timeout_marker = tmp_path / "timeout-calls"
+    timeout = tmp_path / "commands" / "timeout"
+    _write_command(
+        timeout,
+        'printf "%s\\n" "$*" >> "$TIMEOUT_MARKER"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        "    --signal=TERM|--kill-after=30s) shift ;;\n"
+        "    120s) shift; break ;;\n"
+        "    *) exit 97 ;;\n"
+        "  esac\n"
+        "done\n"
+        'exec "$@"',
+    )
+    environment |= {
+        "AGENT_WORK_TIMEOUT": str(timeout),
+        "TIMEOUT_MARKER": str(timeout_marker),
+    }
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    timeout_calls = timeout_marker.read_text().splitlines()
+    assert any(
+        call.startswith(
+            f"--signal=TERM --kill-after=30s 120s {environment['AGENT_WORK_GIT']}"
+        )
+        for call in timeout_calls
+    )
+    assert any(
+        call.startswith(
+            f"--signal=TERM --kill-after=30s 120s {environment['AGENT_WORK_DIRENV']}"
+        )
+        for call in timeout_calls
+    )
+    assert any(environment["AGENT_WORK_GLAB"] in call for call in timeout_calls)
+    assert all(environment["AGENT_WORK_UV"] not in call for call in timeout_calls)
+    assert marker.read_text() == "one\nrun agent-work loop run --apply --json\n"
+
+
+@pytest.mark.parametrize("timeout_exit", (124, 137))
+def test_agent_loop_wrapper_stops_on_housekeeping_timeout_before_worker(
+    project_root: Path, tmp_path: Path, timeout_exit: int
+) -> None:
+    """A timeout exit is a bounded safe stop, never an attempted worker run."""
+    _, environment, marker, _ = _wrapper_checkout_environment(tmp_path)
+    timeout = tmp_path / "commands" / "timeout"
+    _write_command(timeout, f"exit {timeout_exit}")
+    environment["AGENT_WORK_TIMEOUT"] = str(timeout)
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 2
+    assert "housekeeping command timed out" in result.stderr
+    assert len(result.stderr) < 512
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("helper_succeeds", (True, False))
 def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
     project_root: Path, tmp_path: Path, *, helper_succeeds: bool
@@ -2122,6 +2199,7 @@ def _wrapper_checkout_environment(
         "AGENT_WORK_GIT": str(commands / "git"),
         "AGENT_WORK_JQ": shutil.which("jq"),
         "AGENT_WORK_FLOCK": shutil.which("flock"),
+        "AGENT_WORK_TIMEOUT": shutil.which("timeout"),
     }
     assert all(command_paths.values())
     environment = os.environ | {
@@ -3357,10 +3435,15 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
         in generated_service
     )
     assert "Unit=my_test_project-agent-work.service" in generated_timer
-    assert "TimeoutStartSec=infinity" in root_service
-    assert "TimeoutStartSec=infinity" in generated_service
-    assert "TimeoutStartSec=190min" not in root_service
-    assert "TimeoutStartSec=190min" not in generated_service
+    for service in (root_service, template_service, generated_service):
+        assert "TimeoutStartSec=190min" in service
+        assert "TimeoutStartSec=infinity" not in service
+        assert "KillMode=control-group" in service
+        assert "KillSignal=SIGTERM" in service
+        assert "TimeoutStopSec=30s" in service
+        assert "SendSIGKILL=yes" in service
+    assert "require_path AGENT_WORK_TIMEOUT" in wrapper
+    assert '"$AGENT_WORK_TIMEOUT" --signal=TERM --kill-after=30s 120s' in wrapper
     assert "OnUnitInactiveSec=20min" in generated_timer
     assert "RandomizedDelaySec=60s" in generated_timer
     assert "FixedRandomDelay=true" in generated_timer

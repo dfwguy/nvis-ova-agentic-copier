@@ -24,7 +24,11 @@ from pydantic import ValidationError
 from pytest_subprocess import FakeProcess
 
 from agent_work.cli import main
-from agent_work.domain import LIFECYCLE_LABELS, ErrorCode
+from agent_work.domain import (
+    DEFAULT_MAX_ACTIVATION_SECONDS,
+    LIFECYCLE_LABELS,
+    ErrorCode,
+)
 from agent_work.gitlab import GitLabError, GitLabGateway
 from agent_work.models import (
     AgentWorkConfig,
@@ -387,6 +391,35 @@ def test_discovery_and_git_repository_use_recorded_executables_and_environment(
     assert git_call[0][0] == str(git)
     assert "not-in-argv" not in " ".join(git_call[0])
     assert git_environments[-1]["GIT_CONFIG_VALUE_1"] == f"{glab} auth git-credential"
+    assert {kwargs.get("timeout_seconds") for _, kwargs in calls} == {120}
+
+
+def test_gitlab_gateway_uses_the_finite_housekeeping_command_deadline(
+    tmp_path: Path,
+) -> None:
+    """GitLab control-plane calls cannot outlive the housekeeping allowance."""
+    calls: list[dict[str, object]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command
+        calls.append(kwargs)
+        return CommandResult(
+            0,
+            json.dumps(
+                {
+                    "id": 310967,
+                    "path_with_namespace": "group/project",
+                    "default_branch": "main",
+                    "web_url": "https://gitlab.example.com/group/project",
+                    "http_url_to_repo": "https://gitlab.example.com/group/project.git",
+                }
+            ),
+            "",
+        )
+
+    GitLabGateway(_config(tmp_path), run_command).verify_project()
+
+    assert [call["timeout_seconds"] for call in calls] == [120]
 
 
 @pytest.mark.parametrize(
@@ -1653,8 +1686,9 @@ def test_run_subprocess_captures_output_and_wraps_timeouts(fp: FakeProcess) -> N
         raise subprocess.TimeoutExpired(("slow-command",), 1)
 
     fp.register(["slow-command"], callback=timeout)
-    with pytest.raises(RepositoryError, match="required command"):
+    with pytest.raises(RepositoryError, match="timed out") as failure:
         run_subprocess(("slow-command",), timeout_seconds=0.001)
+    assert "slow-command" not in str(failure.value)
 
 
 def test_repository_prepares_publishes_and_inventories(
@@ -1958,6 +1992,7 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         expected_environment,
         expected_environment,
     ]
+    assert [kwargs["timeout_seconds"] for _, kwargs in calls] == [120, 10]
     assert retained not in result.stdout + result.stderr
     assert all(value not in result.stdout + result.stderr for value in filtered)
     assert result.stdout == result.stderr
@@ -2023,7 +2058,7 @@ def test_codex_preflight_rejects_an_unsupported_exec(
             ("/codex", "exec", "--help"),
             {
                 "stdin": None,
-                "timeout_seconds": None,
+                "timeout_seconds": 120,
                 "environment": {
                     "AGENT_WORK_AGENT": "codex",
                     "AGENT_WORK_AGENT_PATH": "/codex",
@@ -2050,6 +2085,12 @@ def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
     invoker.preflight()
 
     assert calls[0][0] == ("/codex", "exec", "--help")
+    assert calls[0][1]["timeout_seconds"] == 120
+
+
+def test_default_activation_budget_remains_three_hours() -> None:
+    """The worker retains its independent 10,800-second activation budget."""
+    assert DEFAULT_MAX_ACTIVATION_SECONDS == 10_800
 
 
 def test_local_operational_log_keeps_info_and_debug_at_requested_verbosity(

@@ -5,7 +5,7 @@ summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-14
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -221,6 +221,7 @@ git_path="$(command -v git)"
 glab_path="$(command -v glab)"
 jq_path="$(command -v jq)"
 flock_path="$(command -v flock)"
+timeout_path="$(command -v timeout)"
 agent_name="${AGENT_WORK_AGENT:-codex}"
 agent_path="$(command -v "$agent_name")"
 gitlab_host="${GITLAB_HOST:-}"
@@ -234,17 +235,17 @@ if [[ -f "$PWD/.envrc" ]]; then
   direnv_path="$(command -v direnv || true)"
   [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
 fi
-[[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
+[[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$timeout_path" == /* && -x "$timeout_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
 case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 
 env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
-  AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
+  AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_TIMEOUT="$timeout_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
   AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
   AGENT_WORK_BASE_BRANCH=agent/work-base AGENT_WORK_FACTORY_USERNAME="$factory_username" GITLAB_HOST="$gitlab_host" \
   GITLAB_PROJECT_ID="$gitlab_project_id" \
@@ -276,10 +277,15 @@ becomes inactive. Within an activation, one worker owns the issue's complete
 workflow session; its Architect, Red, Green, and read-only judges hand context
 directly to one another. The runner recovers only the durable worktree and
 coarse `WORKFLOW` state, not a sidecar checkpoint for each internal role. The
-service has no sequence-wide timeout; each worker activation retains its own
-bounded work budget. Run only one timer host for a project. The service's
-environment and XDG state directory must be writable
-only by the operator.
+service has a 190-minute outer timeout: the approved 180-minute worker budget
+plus a 10-minute margin for wrapper checkout, GitLab, publication, and
+reporting work. Other wrapper housekeeping calls have a 120-second deadline,
+while the applied worker remains governed by its remaining 10,800-second
+budget. On expiry systemd terminates the whole control group, gives it 30
+seconds to exit, and records the timeout in the journal; the durable ledger
+and issue worktree remain for normal retry or human diagnosis. Run only one
+timer host for a project. The service's environment and XDG state directory
+must be writable only by the operator.
 If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
 user-manager socket; do not retry using a different credential, host, or
 environment. Systemd captures standard output and error under its
@@ -438,9 +444,24 @@ Inspect both evidence sources; neither replaces the other.
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
 journalctl --user -u "$unit_name.service" --since today
 systemctl --user status "$unit_name.timer" "$unit_name.service"
+systemctl --user show "$unit_name.service" \
+  --property=ActiveState --property=SubState --property=Result --property=TimeoutStartUSec \
+  --property=ExecMainStartTimestamp --property=ExecMainExitTimestamp
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
+
+For this `Type=oneshot` service, an in-progress activation normally reports
+`ActiveState=activating` and `SubState=start`. If its
+`ExecMainStartTimestamp` is less than 190 minutes old, it is still within its
+outer envelope; do not interrupt it merely because it is running. A completed
+outer timeout reports `Result=timeout` (or `Result=failed` when it ends with a
+different failure). `ActiveState=inactive` with `Result=success` means the
+activation completed. Use `systemctl status` and the unit journal to identify
+the bounded wrapper diagnostic, then use `agent-work loop status --json` to
+find the durable ledger state and redacted next action. Retained worktrees and
+ledger records are the recovery evidence; do not delete them to clear a
+timeout.
 
 To restart after a transient user-manager failure, let an active bounded
 activation finish when possible. Stopping it can interrupt a segment; the

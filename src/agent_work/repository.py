@@ -22,14 +22,19 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
-from .domain import ErrorCode
+from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS, ErrorCode
 from .ledger import project_state_path
 from .models import AgentWorkConfig
+from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 
 
 class RepositoryError(RuntimeError):
     """A repository operation could not be completed safely."""
+
+
+class CommandTimeoutError(RepositoryError):
+    """A bounded command exceeded its allowed execution time."""
 
 
 class RepositoryTransientError(RepositoryError):
@@ -197,7 +202,9 @@ def run_subprocess(
             env=None if environment is None else dict(environment),
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        raise CommandTimeoutError("a required command timed out") from error
+    except OSError as error:
         raise RepositoryError("a required command could not be completed") from error
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -205,7 +212,7 @@ def run_subprocess(
 def _confirmed(
     run_command: CommandRunner, command: tuple[str, ...], failure: str
 ) -> str:
-    result = run_command(command)
+    result = run_command(command, timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS)
     if result.returncode != 0:
         raise RepositoryError(failure)
     return result.stdout.strip()
@@ -332,10 +339,29 @@ class GitRepository:
         )
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
 
+    def _bounded_command(
+        self,
+        command: tuple[str, ...],
+        *,
+        stdin: str | None = None,
+        timeout_seconds: float | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> CommandResultProtocol:
+        """Run one Git command and preserve timeout retry semantics."""
+        try:
+            return self._run_command(
+                command,
+                stdin=stdin,
+                timeout_seconds=timeout_seconds,
+                environment=environment,
+            )
+        except CommandTimeoutError as error:
+            raise RepositoryTransientError("Git operation timed out") from error
+
     def _git(
         self, *arguments: str, cwd: Path | None = None, transient: bool = False
     ) -> str:
-        result = self._run_command(
+        result = self._bounded_command(
             (
                 str(self.config.git_path),
                 "-C",
@@ -343,6 +369,7 @@ class GitRepository:
                 *arguments,
             ),
             environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             if arguments and arguments[0] == "push":
@@ -363,7 +390,7 @@ class GitRepository:
 
     def _merge_head(self, worktree: Path) -> str | None:
         """Return the pending merge target, if this worktree is merging."""
-        result = self._run_command(
+        result = self._bounded_command(
             (
                 str(self.config.git_path),
                 "-C",
@@ -374,6 +401,7 @@ class GitRepository:
                 "MERGE_HEAD",
             ),
             environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode not in {0, 1}:
             raise RepositoryError("Git operation failed")
@@ -381,7 +409,7 @@ class GitRepository:
 
     def _is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
         """Return whether Git proves one commit is an ancestor of another."""
-        result = self._run_command(
+        result = self._bounded_command(
             (
                 str(self.config.git_path),
                 "-C",
@@ -392,6 +420,7 @@ class GitRepository:
                 descendant,
             ),
             environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode not in {0, 1}:
             raise RepositoryError("Git operation failed")
@@ -399,7 +428,7 @@ class GitRepository:
 
     def _merge_current_default(self, default_sha: str, worktree: Path) -> None:
         """Start a merge while retaining conflict state for workflow repair."""
-        result = self._run_command(
+        result = self._bounded_command(
             (
                 str(self.config.git_path),
                 "-C",
@@ -410,6 +439,7 @@ class GitRepository:
                 default_sha,
             ),
             environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode not in {0, 1}:
             raise RepositoryError("Git operation failed")
@@ -441,7 +471,7 @@ class GitRepository:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         remote_ref = f"refs/remotes/origin/{branch}"
         local_exists = bool(self._git("branch", "--list", branch))
-        remote = self._run_command(
+        remote = self._bounded_command(
             (
                 str(self.config.git_path),
                 "-C",
@@ -450,7 +480,8 @@ class GitRepository:
                 "--verify",
                 "--quiet",
                 remote_ref,
-            )
+            ),
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if (local_exists or remote.returncode == 0) and not allow_existing_branch:
             raise RepositoryError("branch ownership is ambiguous")

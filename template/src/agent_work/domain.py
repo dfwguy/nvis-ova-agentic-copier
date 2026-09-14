@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Final
 
 DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
+HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS: Final = 120
 
 
 class RunnerState(StrEnum):

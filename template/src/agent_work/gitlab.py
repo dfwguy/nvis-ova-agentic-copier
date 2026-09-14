@@ -19,7 +19,12 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from .domain import AGENT_OUTCOME_NOTE_MARKER, LIFECYCLE_LABELS, parse_split_marker
+from .domain import (
+    AGENT_OUTCOME_NOTE_MARKER,
+    HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+    LIFECYCLE_LABELS,
+    parse_split_marker,
+)
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
@@ -32,6 +37,7 @@ from .models import (
     render_decision_review_notice,
 )
 from .ports import CommandRunner
+from .repository import CommandTimeoutError
 
 
 class GitLabError(RuntimeError):
@@ -166,7 +172,12 @@ class GitLabGateway:
             endpoint,
             *(part for field in fields for part in ("-f", field)),
         )
-        result = self._run_command(command)
+        try:
+            result = self._run_command(
+                command, timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
+            )
+        except CommandTimeoutError as error:
+            raise GitLabError("GitLab API request timed out") from error
         if result.returncode != 0:
             raise GitLabError("GitLab API request failed")
         try:
