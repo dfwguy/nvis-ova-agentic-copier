@@ -108,7 +108,7 @@ unchanged.
    which verifies the design was understood across the draft and final
    implemented interface. Authorize
    additional focused Green correction cycles only while the cycle ledger shows
-   material progress; each Green invocation still has one consolidated repair.
+   material progress; Green does not use a fixed correction-count policy.
    A cycle records its identifier; input finding fingerprints and
    classifications; changed paths or scope; checks before and after or N/A;
    reviewers rerun and why; open, closed, and new findings; and a continuation
@@ -129,7 +129,8 @@ unchanged.
     evidence/cycle ledger, exact human decisions, tests, and unchanged
     project-owned values. A draft-safety verdict is never merge approval;
     unsafe/unvalidated diffs or ambiguous publication authority return
-    `needs_human`. The documentation-writer one-repair policy is unchanged.
+    `needs_human`. Documentation-writer correction follows the same
+    evidence-based convergence policy.
 
 ## Output Format
 

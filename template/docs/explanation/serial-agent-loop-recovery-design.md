@@ -99,9 +99,10 @@ stateDiagram-v2
     RetryWait --> Executing: immediately due worker retry or external retry becomes due
     Executing --> Publishing: worker result is ready_to_publish
     Publishing --> Observing: exact MR evidence verified
-    Observing --> Repair: pipeline or MR needs repair
+    Observing --> Repair: exact MR conflict needs repair
+    Observing --> Executing: terminal exact-SHA pipeline starts fresh assessment
     Repair --> Publishing: repair result is ready_to_publish
-    Observing --> AwaitingHuman: required receipts are ready
+    Executing --> AwaitingHuman: Pipeline Performance Judge receipt is complete
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
     Repair --> Blocked: automatic repair is unsafe
@@ -266,18 +267,18 @@ expansion, project-owned value changes, `needs_human`, or a finalizer rejection
 remain fail-closed before publication. The worker never commits, pushes, or
 creates a merge request.
 
-Architecture, Red/Green, documentation, review, finalization,
-post-publication observation, and repair remain required according to
+Architecture, Red/Green, documentation, review, finalization, and
+post-publication assessment remain required according to
 `AGENTS.md`. The Architect carries approved design concurrently to Red and the
 Diátaxis Writer, waits for both receipts, then gives Green the test evidence
 and documentation draft or no-doc rationale. Green reconciles documentation
 with implemented interfaces, owns subsequent modifications, concurrent
-read-only judge fan-out, repair, and feedback consolidation before the
+read-only judge fan-out, evidence-led correction cycles, and feedback consolidation before the
 Architect makes the final decision. The Diátaxis Judge compares the design,
 writer receipt, final docs, and final interface; its comparison verdict and
 the writer evidence remain required finalizer evidence. Publication no longer
-prevents later post-publication work because `observing` and `repair` are
-durable states.
+prevents later post-publication work because `observing`, `repair` for exact
+MR conflicts, and fresh `post-publication` assessment are durable states.
 
 ## Failure taxonomy and process exits
 
@@ -363,7 +364,8 @@ Migration is evidence-preserving:
 The implementation is maintained in reviewable slices: ledger and
 reconciliation; deterministic selection and classification; durable worktrees
 and versioned workflow sessions; idempotent publication and existing-MR
-remediation; post-publication observation and repair; then wrapper, timer,
+remediation; post-publication observation, exact-conflict repair, and fresh
+pipeline assessment; then wrapper, timer,
 status, and operational-documentation updates. Each slice follows the full
 coding workflow.
 

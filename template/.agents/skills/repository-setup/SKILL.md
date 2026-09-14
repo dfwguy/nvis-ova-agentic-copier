@@ -70,8 +70,8 @@ git status --porcelain
 git rev-parse --abbrev-ref HEAD
 git pull --ff-only
 git fetch origin --prune
-setup_branch="claude/setup-repo"
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=claude/setup-repo"
+setup_branch="clanker/setup-repo"
+glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=clanker/setup-repo"
 git show-ref --verify --quiet "refs/heads/$setup_branch"
 git show-ref --verify --quiet "refs/remotes/origin/$setup_branch"
 ```
@@ -203,7 +203,7 @@ Full file content (substitute the self-approval bullet above into the **Merge re
 
 ## Merge requests
 
-- Open an MR from a feature branch (e.g. `claude/<slug>` for AI-driven changes).
+- Open an MR from a feature branch (e.g. `clanker/<slug>` for AI-driven changes).
 - <self-approval bullet from above>
 - A Maintainer merges.
 
@@ -218,7 +218,7 @@ The settings-only path from step 2 skips this step. Otherwise, if
 `CONTRIBUTING.md` already exists on the setup branch, leave it alone because a
 human may have customized it.
 
-Validate the exact file, stage only it, and commit it on `claude/setup-repo`:
+Validate the exact file, stage only it, and commit it on `clanker/setup-repo`:
 
 ```bash
 git diff --check -- CONTRIBUTING.md
@@ -235,9 +235,9 @@ Push the branch, then look up or create its MR through the numeric project ID:
 
 ```bash
 git push --set-upstream origin HEAD
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=claude/setup-repo"
+glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=clanker/setup-repo"
 glab api --hostname "$GITLAB_HOST" -X POST "projects/$GITLAB_PROJECT_ID/merge_requests" \
-  -f source_branch="claude/setup-repo" \
+  -f source_branch="clanker/setup-repo" \
   -f target_branch="<default_branch>" \
   -f title="chore: configure repository protections" \
   -f description="Configures branch protection and merge-request approval policy."
@@ -267,7 +267,7 @@ Print a one-block summary:
 - **`CONTRIBUTING.md`**: `written` / `already present`
 
 For a published bootstrap change, include the MR URL, branch
-(`claude/setup-repo`), branch tip, and `awaiting_human`. For a settings-only
+(`clanker/setup-repo`), branch tip, and `awaiting_human`. For a settings-only
 verification or repair with no repository diff, explicitly report that no
 commit or MR was needed. End with: `Idempotent — re-run anytime to re-verify.`
 

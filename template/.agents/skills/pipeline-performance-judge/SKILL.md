@@ -2,7 +2,7 @@
 name: pipeline-performance-judge
 description: Own post-publication GitLab pipeline reconciliation, timing diagnosis, and loop-ready feedback.
 metadata:
-  model-tier: balanced
+  model-tier: fast
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -28,6 +28,6 @@ directory is the shared skill entry point for Codex, Pi, and Claude Code.
 
 ## Model selection
 
-Request the `balanced` capability tier defined in `AGENTS.md`. Each frontend
+Request the `fast` capability tier defined in `AGENTS.md`. Each frontend
 resolves that tier through its configured model mapping; do not hard-code a
 provider-specific model name in this skill.

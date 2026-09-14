@@ -554,10 +554,7 @@ class BatchingInvoker:
             "$agent-policy-judge: approved",
         ),
         "content-finalize": ("$documentation-finalizer: approved",),
-        "post-publication": (
-            "$pipeline-performance-judge: approved",
-            "$findings-triage: no findings",
-        ),
+        "post-publication": ("$pipeline-performance-judge: approved",),
     }
 
     def __init__(
@@ -631,7 +628,9 @@ class SingleSessionInvoker:
         record = ast.literal_eval(raw_record)
         phase = str(record["phase"])
         self.phases.append(phase)
-        if self.lane == "content":
+        if phase == "post-publication":
+            receipts = ("$pipeline-performance-judge: approved",)
+        elif self.lane == "content":
             receipts = (
                 "$architect: approved",
                 "$documentation-writer: complete",
@@ -664,7 +663,7 @@ class SingleSessionInvoker:
             "workflow_lane": self.lane,
             "result_kind": "ready_to_publish",
             "phase_status": "complete",
-            "completed_phase": "workflow",
+            "completed_phase": phase,
             "receipts": receipts,
             "change_summary": "Completed the nested workflow.",
             "next_action": "Publish for human review.",
@@ -1517,8 +1516,11 @@ finding: review
     assert outcome.error_code is ErrorCode.GITLAB_RETRYABLE
 
 
-def test_publishing_and_observation_are_separate_idempotent_segments(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "status", ["success", "failed", "canceled", "skipped", "manual"]
+)
+def test_terminal_exact_pipeline_starts_post_publication_worker(
+    tmp_path: Path, status: str
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
@@ -1545,7 +1547,7 @@ def test_publishing_and_observation_are_separate_idempotent_segments(
     assert observed.merge_request_iid == 88
 
     gitlab.pipeline = PipelineEvidence(
-        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+        id=4, status=status, sha="a" * 40, web_url="https://pipeline/4"
     )
     post = run_segment(
         ledger=ledger,
@@ -1555,7 +1557,9 @@ def test_publishing_and_observation_are_separate_idempotent_segments(
         timeout_seconds=10,
         now=NOW,
     )
-    assert post is not None and post.phase is WorkflowPhase.POST_PUBLICATION
+    assert post is not None
+    assert post.state is RunnerState.EXECUTING
+    assert post.phase is WorkflowPhase.POST_PUBLICATION
 
 
 @pytest.mark.parametrize(
@@ -1584,7 +1588,7 @@ def test_publishing_and_observation_are_separate_idempotent_segments(
         ),
     ],
 )
-def test_recovery_of_published_ordinary_work_skips_worker_and_new_publication(
+def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_assessment(
     tmp_path: Path,
     state: RunnerState,
     phase: WorkflowPhase,
@@ -1624,7 +1628,8 @@ def test_recovery_of_published_ordinary_work_skips_worker_and_new_publication(
         now=NOW,
     )
 
-    assert recovered is not None and recovered.state is RunnerState.AWAITING_HUMAN
+    assert recovered is not None and recovered.state is RunnerState.EXECUTING
+    assert recovered.phase is WorkflowPhase.POST_PUBLICATION
     assert recovered.source_sha == "b" * 40
     assert recovered.merge_request_iid == 88
     assert recovered.retry_count == 0
@@ -1636,7 +1641,7 @@ def test_recovery_of_published_ordinary_work_skips_worker_and_new_publication(
     assert gitlab.created_merge_requests == 0
 
 
-def test_recovery_of_published_draft_reconciles_without_downgrading_it(
+def test_recovery_of_published_draft_starts_post_publication_without_downgrading_it(
     tmp_path: Path,
 ) -> None:
     """Recovery keeps durable decision-review Draft metadata on the existing MR."""
@@ -1673,7 +1678,8 @@ def test_recovery_of_published_draft_reconciles_without_downgrading_it(
         now=NOW,
     )
 
-    assert recovered is not None and recovered.state is RunnerState.AWAITING_HUMAN
+    assert recovered is not None and recovered.state is RunnerState.EXECUTING
+    assert recovered.phase is WorkflowPhase.POST_PUBLICATION
     assert gitlab.reconciled_drafts == [draft]
     assert gitlab.existing_mr is not None and gitlab.existing_mr.is_draft
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
@@ -2338,7 +2344,7 @@ def test_postpublication_handoff_revalidates_mr_after_worker_returns(
         "result_kind": "ready_to_publish",
         "phase_status": "complete",
         "completed_phase": "post-publication",
-        "receipts": ["$pipeline-performance-judge", "$findings-triage"],
+        "receipts": ["$pipeline-performance-judge"],
         "change_summary": "Post-publication review complete.",
         "next_action": "Review the merge request.",
     }
@@ -2477,7 +2483,7 @@ def test_nonterminal_pipeline_status_waits_without_repair(
     assert outcome == record
 
 
-def test_failed_pipeline_routes_repair_to_coding_green(tmp_path: Path) -> None:
+def test_failed_pipeline_starts_post_publication_assessment(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root)
     ledger.persist(
@@ -2501,9 +2507,9 @@ def test_failed_pipeline_routes_repair_to_coding_green(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.REPAIR
-    assert outcome.phase is WorkflowPhase.CODING_GREEN
-    assert outcome.error_code is ErrorCode.PIPELINE_REJECTED
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.POST_PUBLICATION
+    assert outcome.error_code is None
 
 
 def test_publication_transport_failure_schedules_a_recoverable_retry(
@@ -3955,10 +3961,10 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
 
     assert report.outcome == "activation_complete"
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 4
-    assert len(report.items) == 4
+    assert report.segments_run == 5
+    assert len(report.items) == 5
     assert report.items[-1].state is RunnerState.AWAITING_HUMAN
-    assert invoker.phases == ["workflow"]
+    assert invoker.phases == ["workflow", "post-publication"]
     assert gitlab.created_merge_requests == 1
 
 
@@ -4029,11 +4035,11 @@ def test_apply_batches_the_complete_content_workflow_until_human_handoff(
     )
 
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 4
-    assert invoker.phases == ["workflow"]
+    assert report.segments_run == 5
+    assert invoker.phases == ["workflow", "post-publication"]
 
 
-def test_apply_defers_failed_workflow_pipeline_repair_to_the_next_activation(
+def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -4056,15 +4062,16 @@ def test_apply_defers_failed_workflow_pipeline_repair_to_the_next_activation(
     )
 
     persisted = ledger.load(12)
-    assert report.stop_reason == "repair"
-    assert report.segments_run == 4
-    assert invoker.phases == ["workflow"]
-    assert persisted is not None and persisted.state is RunnerState.REPAIR
-    assert persisted.phase is WorkflowPhase.WORKFLOW
-    assert persisted.error_code is ErrorCode.PIPELINE_REJECTED
+    assert report.stop_reason == "awaiting_human"
+    assert report.segments_run == 5
+    assert invoker.phases == ["workflow", "post-publication"]
+    assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
+    assert persisted.phase is WorkflowPhase.POST_PUBLICATION
+    assert persisted.error_code is None
+    assert invoker.phases == ["workflow", "post-publication"]
 
 
-def test_apply_runs_one_workflow_owner_when_resuming_pipeline_repair(
+def test_apply_runs_workflow_then_post_publication_assessment_for_legacy_repair(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -4090,14 +4097,13 @@ def test_apply_runs_one_workflow_owner_when_resuming_pipeline_repair(
     )
 
     persisted = ledger.load(12)
-    assert report.stop_reason == "repair"
-    assert report.segments_run == 3
-    assert invoker.phases == ["workflow"]
-    assert persisted is not None and persisted.state is RunnerState.REPAIR
-    assert persisted.phase is WorkflowPhase.WORKFLOW
+    assert report.stop_reason == "awaiting_human"
+    assert invoker.phases == ["workflow", "post-publication"]
+    assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
+    assert persisted.phase is WorkflowPhase.POST_PUBLICATION
 
 
-def test_failed_pipeline_keeps_legacy_phase_ledger_on_coding_green(
+def test_failed_pipeline_replaces_legacy_phase_with_post_publication(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -4123,9 +4129,9 @@ def test_failed_pipeline_keeps_legacy_phase_ledger_on_coding_green(
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.REPAIR
-    assert outcome.phase is WorkflowPhase.CODING_GREEN
-    assert outcome.error_code is ErrorCode.PIPELINE_REJECTED
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.POST_PUBLICATION
+    assert outcome.error_code is None
 
 
 def test_apply_segment_limit_yields_and_next_activation_recovers(
@@ -4161,8 +4167,8 @@ def test_apply_segment_limit_yields_and_next_activation_recovers(
     assert first.segments_run == 3
     assert first.items[-1].phase is WorkflowPhase.PIPELINE_WAIT
     assert resumed.stop_reason == "awaiting_human"
-    assert resumed.items[0].phase is WorkflowPhase.PIPELINE_WAIT
-    assert invoker.phases == ["workflow"]
+    assert resumed.items[0].phase is WorkflowPhase.POST_PUBLICATION
+    assert invoker.phases == ["workflow", "post-publication"]
     assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
 
 

@@ -47,10 +47,10 @@ Delegate one live `$architect`. For coding, Architect concurrently delegates
 `$tdd-green`; Red exclusively mutates `tests/`, the Diátaxis Writer exclusively
 mutates `docs/`, and Green alone mutates thereafter, reconciles the draft with
 the implemented interface, and fans out all applicable
-read-only judges concurrently, repairs their consolidated findings once, and
+read-only judges concurrently, repairs their consolidated findings while
+material progress exists, and
 returns to Architect for finalization. Architect may authorize further focused
-Green cycles while a recorded cycle ledger shows material progress; each Green
-invocation still makes one consolidated repair. The ledger records cycle ID,
+Green cycles while a recorded cycle ledger shows material progress. The ledger records cycle ID,
 input finding fingerprints/classifications, changed scope, checks before/after
 or N/A, rerun reviewers and reasons, finding disposition, and a continuation or
 termination reason. A fingerprint is reviewer/owner plus path/scope plus stable

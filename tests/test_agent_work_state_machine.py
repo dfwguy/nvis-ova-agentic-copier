@@ -884,8 +884,8 @@ def test_retry_planning_rejects_an_undeclared_transition() -> None:
         ),
         (
             WorkflowPhase.POST_PUBLICATION,
-            WorkflowPhase.CODING_GREEN,
-            ("$pipeline-performance-judge", "$findings-triage"),
+            WorkflowPhase.POST_PUBLICATION,
+            ("$pipeline-performance-judge",),
         ),
     ],
 )

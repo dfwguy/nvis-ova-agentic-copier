@@ -119,26 +119,134 @@ The workflow is deliberately human-gated. Agents can prepare and publish a
 merge request, but they do not approve or merge it. The serial GitLab loop
 keeps the same boundary when it processes an issue.
 
+## Workflow topology
+
+The diagrams show the normal clean-publication path and the separate stops
+that require human direction. A resident parent remains live while its child
+roles work. A fresh-context node is a deliberately new AI context, not a
+continuation of an interrupted agent.
+
 ```mermaid
 flowchart TD
-    branch[Feature branch] --> classify{Classify whole diff}
-    classify --> coding_architect[Architect: coding lane]
-    coding_architect --> tests[Test Writer: Red]
-    coding_architect --> diataxis[Diátaxis Writer]
-    tests --> implementer[Implementer: Green]
-    diataxis --> implementer
-    implementer --> judges[Concurrent read-only judges]
-    judges --> implementer
-    implementer --> coding_architect
-    coding_architect --> coding_finalizer[Finalizer]
-    coding_finalizer --> mr[Publish or update merge request]
-    classify --> policy_architect[Architect: conditional policy design or N/A]
-    policy_architect --> documentation_writer[Documentation Writer]
-    documentation_writer --> documentation_finalizer[Consolidated Documentation Finalizer]
-    documentation_finalizer --> documentation_writer
-    documentation_finalizer --> mr
-    mr --> human[Human approval and merge]
+    main["Main / $git-flow"] --> architect["Resident Architect"]
+    subgraph phase2["Phase 2: parallel preparation"]
+        red["$tdd-red"]
+        writer["$diataxis-writer"]
+    end
+    architect --> red
+    architect --> writer
+    red --> green["$tdd-green"]
+    writer --> green
+    subgraph phase4["Phase 4: initially applicable reviewers run in parallel"]
+        nonfunctional["$nonfunctional-review"]
+        judge["$tdd-judge"]
+        diataxis["$diataxis-judge"]
+        quality["$judge-quality"]
+        testjudge["$judge-test"]
+        cicd["$judge-cicd"]
+        readme["$tdd-document"]
+        cli["$cli-syntax-judge (conditional)"]
+        filesystem["$filesystem-structure-judge (conditional)"]
+        policy["$agent-policy-judge (conditional)"]
+    end
+    green --> nonfunctional
+    green --> judge
+    green --> diataxis
+    green --> quality
+    green --> testjudge
+    green --> cicd
+    green --> readme
+    green --> cli
+    green --> filesystem
+    green --> policy
+    nonfunctional --> reviews["All initially applicable reviews returned"]
+    judge --> reviews
+    diataxis --> reviews
+    quality --> reviews
+    testjudge --> reviews
+    cicd --> reviews
+    readme --> reviews
+    cli --> reviews
+    filesystem --> reviews
+    policy --> reviews
+    reviews --> phase4outcome{"Concrete, resolvable Phase-4 findings with material progress?"}
+    phase4outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
+    focusedgreen --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
+    selective --> phase4outcome
+    phase4outcome -- "no findings" --> license["$license-checker (sequential)"]
+    phase4outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
+    license --> licenseoutcome{"License clean or resolvable violation with material progress?"}
+    licenseoutcome -- "clean" --> finalizer["$tdd-finalizer"]
+    licenseoutcome -- "resolvable violation" --> focusedgreen
+    licenseoutcome -- "no progress or human-judgment blocker" --> humanstop
+    finalizer --> decision{"Architect accepts finalizer verdict?"}
+    decision -- "normal approval" --> publish["Main publication"]
+    decision -- "needs human" --> humanstop
+    publish --> mr["Merge request"]
+    mr --> pipeline["$pipeline-performance-judge"]
+    pipeline --> human["Human review, approval, and merge"]
 ```
+
+```mermaid
+flowchart TD
+    docmain["Main / $git-flow"] --> docarchitect["Resident Architect"]
+    docarchitect --> docwriter["$documentation-writer"]
+    docwriter --> docfinalizer["$documentation-finalizer"]
+    docfinalizer --> docprogress{"Resolvable finding and material progress?"}
+    docprogress -- "yes: evidence-led repair" --> docwriter
+    docprogress -- "no findings" --> docdecision{"Architect accepts finalizer approval?"}
+    docprogress -- "no progress, scope expansion, or human direction" --> dochuman["Architect: human direction; no automatic publication"]
+    docdecision -- "yes" --> docpublish["Main publication"]
+    docdecision -- "no" --> dochuman
+    docpublish --> docmr["Merge request"]
+    docmr --> docpipeline["$pipeline-performance-judge"]
+    docpipeline --> dochumanreview["Human review, approval, and merge"]
+```
+
+```mermaid
+flowchart TD
+    reconcile["Controller: reconcile, select, and prepare retained worktree"]
+    reconcile --> fresharchitect["Fresh AI context: Architect"]
+    fresharchitect --> fullworkflow["Applicable full workflow"]
+    fullworkflow --> controllerpublish["Controller publication"]
+    controllerpublish --> serialmr["Merge request"]
+    serialmr --> wait["Cheap wait for exact-SHA terminal state"]
+    wait --> freshpipeline["Fresh AI context: Pipeline Performance Judge"]
+    freshpipeline --> serialhuman["Human review, approval, and merge"]
+```
+
+```mermaid
+flowchart TD
+    judgeentry["Pipeline Performance Judge"] --> actionable{"Concrete repository-actionable problem?"}
+    actionable -- "yes" --> issue["Create or reuse one deduplicated problem issue"]
+    issue --> later["Later normal controller reconciliation, selection, and preparation"]
+    later --> freshworkflow["Fresh AI context: applicable full workflow"]
+    actionable -- "no: healthy evidence" --> quiet["Externally quiet"]
+```
+
+```mermaid
+flowchart TD
+    interruption["Interruption"] --> retain["Retain worktree and evidence"]
+    retain --> recovery["Controller reconciliation"]
+    recovery --> recoveryworkflow["Fresh AI context: applicable full workflow"]
+    oversized["Oversized intake"] --> split["Structured split plan"]
+    split --> children["Controller creates or recovers ordered child issues"]
+    children --> selection["Later selection of each child"]
+    selection --> childworkflow["Fresh AI context: applicable full workflow"]
+```
+
+The coding review fan-out is concurrent only for initially applicable Phase-4
+reviewers. Green consolidates and corrects their evidence-led findings before
+the sequential License Checker examines the final diff and complete Phase-4
+receipts. A license violation re-enters focused correction and affected
+reviewer reruns before License examines the resulting final diff again. A
+Draft publication, when an explicit draft-safety verdict permits it, remains a
+separate human handoff rather than an automatic consequence of a stop.
+
+The ordinary interactive branch convention is `clanker/<slug>`. The serial
+controller reserves `agent/issue-<iid>` for its issue worktrees. These names
+identify the two contexts; this explanation does not claim a separate runtime
+branch-enforcement mechanism.
 
 For non-trivial coding work, the manifest names every phase rather than rolling
 them up as “final judges.” Each manifest records phase applicability, ownership,
@@ -162,12 +270,23 @@ For coding work, Green makes required README and documentation edits before
 the read-only review fan-out; no second agent mutates the shared worktree. In
 the documentation and agent-policy lane, Architect delegates one Documentation
 Writer as the sole mutator, followed by one consolidated Documentation
-Finalizer. The writer may repair that complete finding set once. A repeated
-rejection or scope expansion returns to Architect for human direction.
+Finalizer. Evidence-based writer/finalizer repair and finalization cycles may
+continue while they make material progress; a repeated finding, unchanged
+evidence, or scope expansion returns to Architect for human direction. Neither
+lane has an arbitrary repair count.
+
+Phase-2 documentation is an approved-design draft, not a promise about code
+that has not yet been written. Before review, Green compares and reconciles it
+with the final code, configuration, and interfaces. The Diátaxis Judge then
+explicitly compares the Architect design, writer report, final documentation,
+and final implementation/configuration; the Finalizer requires that comparison
+receipt. Every declared root/template mirror must be byte-identical, and a
+changed Copier mirror must be smoke-rendered.
 
 ## Coding review convergence is bounded by evidence
 
-Green makes one consolidated correction during each invocation. A concrete
+Green makes evidence-led consolidated correction cycles while material progress
+exists. A concrete
 finding identifies its owner or domain, path or scope, evidence, requested
 outcome, and a correction that stays within the approved design and authority.
 By contrast, policy or authority ambiguity, conflicting valid requirements or
@@ -210,15 +329,22 @@ validates every required completion and every permitted not-applicable receipt
 before it allows publication. This preserves a complete record without running
 a judge against a change that cannot affect its contract or layout.
 
-## Publication returns promptly to the human boundary
+## Publication and post-publication evidence
 
-Publication ends the workflow session and returns the verified merge request
-to human review. The trusted serial runner may observe the exact pipeline as a
-bounded recovery concern, but it does not start another general-purpose agent
-phase for new work. Pipeline failure or conflict re-enters the coarse workflow
-with the preserved worktree and evidence. Agents never approve or merge, and
-they never change project-owned values or workflow policy merely to clear a
-gate without explicit human approval for that exact change.
+After every merge-request creation or update, a fresh Fast/low Pipeline
+Performance Judge observes that MR's exact source SHA. Healthy evidence causes
+no external mutation. A concrete, repository-actionable problem creates or
+reuses one deduplicated GitLab issue; the judge never directly changes the MR,
+code, pipeline, approval, or merge. Unverified evidence remains a reported
+limitation, not manufactured repository work.
+
+In the serial flow, the deterministic controller cheaply waits for the exact
+SHA to become terminal before the fresh judge starts. A resulting problem issue
+is selected later by normal reconciliation and begins a new full workflow
+context. This is intentionally not a promise of direct same-session repair.
+Agents never approve or merge, and they never change project-owned values or
+workflow policy merely to clear a gate without explicit human approval for that
+exact change.
 
 ## Merge requests are the shared record
 

@@ -15,7 +15,7 @@
 
 ## Merge requests
 
-- Open an MR from a feature branch (e.g. `claude/<slug>` for AI-driven changes).
+- Open an MR from a feature branch (e.g. `clanker/<slug>` for AI-driven changes).
 - At least one approval is required, and the MR author and committers cannot self-approve.
 - A Maintainer merges.
 
