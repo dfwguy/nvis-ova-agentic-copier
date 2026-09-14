@@ -697,6 +697,42 @@ def _verify_authenticated_user(gitlab: GitLabPort) -> None:
         raise IdentityVerificationTransportError(str(error)) from error
 
 
+def _completed_closed_record(record: LedgerRecord) -> LedgerRecord:
+    """Return the canonical terminal record for one remotely closed issue."""
+    updates: dict[str, object] = {
+        "retry_count": 0,
+        "retry_at": None,
+        "prior_state": None,
+        "prior_phase": None,
+        "intent": None,
+        "error_code": None,
+        "worker_exit": None,
+        "pending_feedback": None,
+        "summary": "Issue is closed; durable record reconciled.",
+        "next_action": "No action required.",
+    }
+    if record.state is RunnerState.COMPLETE:
+        return record.model_copy(update=updates)
+    return transition_record(record, RunnerState.COMPLETE, **updates)
+
+
+def reconcile_closed_issues(
+    ledger: LedgerPort, gitlab: GitLabPort, *, project_id: int
+) -> None:
+    """Persist closed records before clearing their lifecycle-label projections."""
+    inventory = gitlab.list_closed_projected()
+    for issue in sorted(inventory, key=lambda item: item.iid):
+        record = ledger.load(issue.iid)
+        if record is not None:
+            if record.project_id != project_id:
+                raise ValueError("ledger record project does not match")
+            completed = _completed_closed_record(record)
+            if completed != record:
+                ledger.persist(completed)
+        _verify_authenticated_user(gitlab)
+        gitlab.transition_labels(issue.iid, None)
+
+
 def _record_retry(
     record: LedgerRecord,
     *,

@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-14
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -318,8 +318,22 @@ safe next transition:
   cleaned or stashed during normal shutdown.
 - An orphan worktree, branch, label, or stash is inventoried and blocked for a
   human decision when ownership cannot be proved.
-- Closed issues are reconciled by removing stale queue projections after the
-  closure and associated MR evidence are verified.
+- At the beginning of an applied activation, closed lifecycle projections are
+  reconciled in one bounded IID-ordered inventory before any open work is
+  resumed or selected. A closed issue with a ledger is first durably normalized
+  to `COMPLETE`, clearing transient retry, intent, error, worker-exit, and
+  pending-feedback state; only then are its lifecycle labels removed through
+  the existing authenticated GitLab identity boundary. A closed issue without a
+  ledger loses only its stale lifecycle labels: reconciliation does not
+  manufacture a complete, blocked, journal, or worktree record. This
+  persist-before-label order makes a partial failure harmlessly resumable: a
+  ledger failure retains the label, while a recorded issue's label failure
+  retains the canonical `COMPLETE` record and its stale label for the next
+  activation. An orphan label-removal failure retains only its stale label.
+  Earlier IID-ordered successes remain valid. This closed-issue housekeeping
+  neither consumes the open-work budget nor invokes a worker or performs
+  repository, branch, worktree, push, or merge-request operations; open orphan
+  projections retain their existing blocked recovery path.
 - Retryable work uses at most three bounded automatic attempts. Exhaustion
   moves it to `agent::blocked`, not `agent::failed`.
 

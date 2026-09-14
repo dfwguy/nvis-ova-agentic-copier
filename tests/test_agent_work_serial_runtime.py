@@ -35,7 +35,7 @@ from agent_work.domain import (
     split_fingerprint,
 )
 from agent_work.gitlab import GitLabError
-from agent_work.ledger import JsonLedger
+from agent_work.ledger import JsonLedger, LedgerError
 from agent_work.models import (
     AgentWorkConfig,
     DecisionReviewSignal,
@@ -47,9 +47,12 @@ from agent_work.models import (
     MergeRequestDraft,
     MergeRequestEvidence,
     MergeRequestFeedback,
+    MergeRequestFeedbackCursor,
+    PendingMergeRequestFeedback,
     PipelineEvidence,
     SplitChildEvidence,
     TransitionIntentRecord,
+    WorkerExitEvidence,
     WorkflowReceiptRecord,
 )
 from agent_work.ports import CommandResult
@@ -226,6 +229,14 @@ class FakeGitLab:
             else ()
         )
 
+    def list_closed_projected(self) -> tuple[GitLabIssue, ...]:
+        return (
+            (self.issue,)
+            if self.issue.state == "closed"
+            and set(self.issue.labels).intersection(LIFECYCLE_LABELS)
+            else ()
+        )
+
     def fetch_issue(self, iid: int) -> GitLabIssue:
         del iid
         return self.issue
@@ -359,6 +370,73 @@ class FakeGitLab:
         return self.issue.model_copy(update={"state": "closed"})
 
 
+class ClosedInventoryGitLab(FakeGitLab):
+    """In-memory GitLab fake with independently injected closed inventory."""
+
+    def __init__(self, *issues: GitLabIssue) -> None:
+        super().__init__(issues[0] if issues else None)
+        self.issues = {issue.iid: issue for issue in issues}
+        self.transitions: list[tuple[int, str | None]] = []
+        self.closed_inventory_calls = 0
+        self.identity_error: GitLabError | None = None
+        self.label_failures_by_iid: dict[int, int] = {}
+
+    def verify_authenticated_user(self) -> None:
+        if self.identity_error is not None:
+            raise self.identity_error
+
+    def list_closed_projected(self) -> tuple[GitLabIssue, ...]:
+        self.closed_inventory_calls += 1
+        return tuple(
+            sorted(
+                (
+                    issue
+                    for issue in self.issues.values()
+                    if issue.state == "closed"
+                    and set(issue.labels).intersection(LIFECYCLE_LABELS)
+                ),
+                key=lambda issue: issue.iid,
+            )
+        )
+
+    def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        return tuple(
+            sorted(
+                (
+                    issue
+                    for issue in self.issues.values()
+                    if issue.state == "opened"
+                    and not set(issue.labels).intersection(LIFECYCLE_LABELS)
+                ),
+                key=lambda issue: issue.iid,
+            )
+        )
+
+    def list_projected(self) -> tuple[GitLabIssue, ...]:
+        return tuple(
+            issue
+            for issue in self.issues.values()
+            if set(issue.labels).intersection(LIFECYCLE_LABELS)
+        )
+
+    def fetch_issue(self, iid: int) -> GitLabIssue:
+        return self.issues[iid]
+
+    def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+        self.verify_authenticated_user()
+        if self.label_failures_by_iid.get(iid, 0):
+            self.label_failures_by_iid[iid] -= 1
+            raise GitLabError("temporary label failure")
+        issue = self.issues[iid]
+        retained = tuple(item for item in issue.labels if item not in LIFECYCLE_LABELS)
+        updated = issue.model_copy(
+            update={"labels": retained if label is None else (*retained, label)}
+        )
+        self.issues[iid] = updated
+        self.transitions.append((iid, label))
+        return updated
+
+
 class ChangingSnapshotJsonLedger(JsonLedger):
     def __init__(self, root: Path, initial_records: tuple[LedgerRecord, ...]) -> None:
         super().__init__(root)
@@ -370,6 +448,21 @@ class ChangingSnapshotJsonLedger(JsonLedger):
             self.first_read = False
             return self.initial_records
         return ()
+
+
+class FailOnceLedger(JsonLedger):
+    """Fail one injected record persistence without changing other durable records."""
+
+    def __init__(self, root: Path, failing_iid: int) -> None:
+        super().__init__(root)
+        self.failing_iid = failing_iid
+        self.failures = 1
+
+    def persist(self, record: LedgerRecord) -> LedgerRecord:
+        if record.issue_iid == self.failing_iid and self.failures:
+            self.failures -= 1
+            raise LedgerError("injected ledger failure")
+        return super().persist(record)
 
 
 class FakeRepository:
@@ -3803,6 +3896,257 @@ def test_closed_terminal_record_is_reconciled_before_new_selection(
 
     assert outcome is not None and outcome.state is RunnerState.COMPLETE
     assert gitlab.labels == [None]
+
+
+def test_apply_reconciles_closed_records_and_orphans_before_one_open_segment(
+    tmp_path: Path,
+) -> None:
+    """Closed housekeeping is outside the one-open-item segment allowance."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    for iid in (12, 14):
+        ledger.persist(
+            _record(
+                tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+            ).model_copy(
+                update={"issue_iid": iid, "source_branch": f"agent/issue-{iid}"}
+            )
+        )
+    gitlab = ClosedInventoryGitLab(
+        _issue(iid=14, state="closed").model_copy(
+            update={"labels": ("agent::running",)}
+        ),
+        _issue(iid=13, state="closed").model_copy(
+            update={"labels": ("agent::blocked",)}
+        ),
+        _issue(iid=12, state="closed").model_copy(
+            update={"labels": ("agent::running",)}
+        ),
+        _issue(iid=20),
+    )
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=3600),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.segments_run == 1
+    assert [item.issue_iid for item in report.items] == [20]
+    assert gitlab.transitions == [
+        (12, None),
+        (13, None),
+        (14, None),
+        (20, "agent::running"),
+    ]
+    record_12 = ledger.load(12)
+    record_14 = ledger.load(14)
+    assert record_12 is not None and record_12.state is RunnerState.COMPLETE
+    assert record_14 is not None and record_14.state is RunnerState.COMPLETE
+    assert ledger.load(13) is None
+    assert repository.prepared
+
+
+def test_closed_housekeeping_does_not_consume_activation_budget(tmp_path: Path) -> None:
+    """An open segment receives its whole budget after closed housekeeping."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    readings = iter((0.0, 60.0, 60.0))
+
+    class TimedClosedInventoryGitLab(ClosedInventoryGitLab):
+        def list_closed_projected(self) -> tuple[GitLabIssue, ...]:
+            next(readings)
+            return super().list_closed_projected()
+
+    gitlab = TimedClosedInventoryGitLab(
+        _issue(iid=12, state="closed").model_copy(
+            update={"labels": ("agent::running",)}
+        ),
+        _issue(iid=20),
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)),
+        monotonic=lambda: next(readings),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=10),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.segments_run == 1
+    assert [item.issue_iid for item in report.items] == [20]
+
+
+def test_closed_record_normalization_clears_transients_but_preserves_evidence(
+    tmp_path: Path,
+) -> None:
+    """Closed records retain MR and workflow proof while retry state is discarded."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    original = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "retry_count": 3,
+                "retry_at": NOW + timedelta(hours=1),
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.CODING_GREEN,
+                "merge_request_iid": 88,
+                "merge_request_url": "https://gitlab.example.com/mr/88",
+                "receipts": _complete_workflow_receipts(),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:1", kind="publish_merge_request"
+                ),
+                "error_code": ErrorCode.GITLAB_RETRYABLE,
+                "worker_exit": WorkerExitEvidence(returncode=9, diagnostic="retry"),
+                "pending_feedback": PendingMergeRequestFeedback(
+                    target_cursor=MergeRequestFeedbackCursor(
+                        last_processed_general_note_id=7, feedback_source_sha="a" * 40
+                    ),
+                    source_sha="a" * 40,
+                    source="general",
+                    note_id=7,
+                ),
+            }
+        )
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+
+    reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    completed = ledger.load(12)
+    assert completed is not None
+    assert completed.state is RunnerState.COMPLETE
+    assert completed.retry_count == 0 and completed.retry_at is None
+    assert completed.prior_state is None and completed.prior_phase is None
+    assert completed.intent is None and completed.error_code is None
+    assert completed.worker_exit is None and completed.pending_feedback is None
+    assert completed.merge_request_iid == original.merge_request_iid
+    assert completed.merge_request_url == original.merge_request_url
+    assert completed.receipts == original.receipts
+    assert gitlab.transitions == [(12, None)]
+
+
+def test_closed_orphan_identity_failure_leaves_its_label_without_a_ledger_record(
+    tmp_path: Path,
+) -> None:
+    """Identity is verified before an orphan label mutation creates no retry record."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.identity_error = GitLabError("identity transport unavailable")
+
+    with pytest.raises(GitLabError, match="identity transport"):
+        reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    assert ledger.load(12) is None
+    assert gitlab.transitions == []
+
+
+def test_closed_record_with_another_project_is_not_reconciled(tmp_path: Path) -> None:
+    """Closed housekeeping never clears an unrelated durable record projection."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(update={"project_id": config.project_id + 1})
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+
+    with pytest.raises(ValueError, match="ledger record project does not match"):
+        reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    assert gitlab.transitions == []
+
+
+def test_closed_housekeeping_persists_before_labels_and_retries_remaining_iids(
+    tmp_path: Path,
+) -> None:
+    """A failed durable write leaves its label as retry evidence after prior success."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = FailOnceLedger(config.state_root, failing_iid=13)
+    ledger.failures = 0
+    for iid in (12, 13):
+        ledger.persist(
+            _record(
+                tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN
+            ).model_copy(
+                update={"issue_iid": iid, "source_branch": f"agent/issue-{iid}"}
+            )
+        )
+    gitlab = ClosedInventoryGitLab(
+        *(
+            _issue(iid=iid, state="closed").model_copy(
+                update={"labels": ("agent::running",)}
+            )
+            for iid in (12, 13)
+        )
+    )
+    ledger.failures = 1
+
+    with pytest.raises(LedgerError, match="injected ledger failure"):
+        reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    assert gitlab.transitions == [(12, None)]
+    record_12 = ledger.load(12)
+    assert record_12 is not None and record_12.state is RunnerState.COMPLETE
+    record_13 = ledger.load(13)
+    assert record_13 is not None and record_13.state is RunnerState.EXECUTING
+    assert set(gitlab.fetch_issue(13).labels).intersection(LIFECYCLE_LABELS)
+
+    reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    assert gitlab.transitions == [(12, None), (13, None)]
+    record_13 = ledger.load(13)
+    assert record_13 is not None and record_13.state is RunnerState.COMPLETE
+
+
+def test_closed_label_failure_keeps_complete_record_for_idempotent_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A label transport failure is retried from the already durable completion."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.label_failures_by_iid[12] = 1
+
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    record_12 = ledger.load(12)
+    assert record_12 is not None and record_12.state is RunnerState.COMPLETE
+    assert set(gitlab.fetch_issue(12).labels).intersection(LIFECYCLE_LABELS)
+
+    reconcile_closed_issues(ledger, gitlab, project_id=config.project_id)
+
+    assert gitlab.transitions == [(12, None)]
+    assert not set(gitlab.fetch_issue(12).labels).intersection(LIFECYCLE_LABELS)
 
 
 def test_orphan_running_projection_becomes_a_documented_block(tmp_path: Path) -> None:

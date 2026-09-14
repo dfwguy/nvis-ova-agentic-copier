@@ -433,6 +433,19 @@ class GitLabGateway:
             if set(issue.labels).intersection(LIFECYCLE_LABELS)
         )
 
+    def list_closed_projected(self) -> tuple[GitLabIssue, ...]:
+        """Return closed lifecycle projections in deterministic IID order."""
+        return tuple(
+            sorted(
+                (
+                    issue
+                    for issue in self._issues(state="closed")
+                    if set(issue.labels).intersection(LIFECYCLE_LABELS)
+                ),
+                key=lambda issue: issue.iid,
+            )
+        )
+
     def fetch_issue(self, iid: int) -> GitLabIssue:
         """Fetch one issue by IID."""
         try:
