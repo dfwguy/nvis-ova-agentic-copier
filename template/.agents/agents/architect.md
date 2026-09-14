@@ -45,7 +45,7 @@ never use line count or another brittle numeric content threshold.
 
 If the issue is oversized or contains separately deliverable capabilities,
 stop before selecting a lane or delegating mutable work. Return exactly one
-protocol-version-1 `split_required` envelope for completed phase `workflow`, with
+protocol-version-2 `split_required` envelope for completed phase `workflow`, with
 lane `unknown` and a structured `split_plan` of 2..25 numbered, ordered,
 independently mergeable slice proposals with ASCII keys and lower-ordinal
 dependencies. This route needs no receipts, merge-request draft, or error code.
@@ -54,6 +54,13 @@ issues and closes the parent without human approval. Do not create or update
 issues, execute a proposed slice, or retry the parent
 automatically. A suitable issue continues through the current workflow
 unchanged.
+
+For an ordinary completed workflow, use `agent-work worker-result build` to
+derive the protocol-v2 identity, phase, and duplicate audit fields from the
+retained record. Supply only nonduplicated worker intent, exact
+`WORKFLOW_RECEIPTS` (or `$skill: not applicable — reason`), merge-request draft
+metadata when required, and bounded audit evidence; return its one delimited
+result envelope without altering it.
 
 ## Design Process
 

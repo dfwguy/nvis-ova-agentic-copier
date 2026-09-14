@@ -16,17 +16,41 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
-from .domain import AGENT_OUTCOME_NOTE_MARKER, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
-from .models import GitLabIssueNote, WorkerExitEvidence, WorkerResultEnvelope
+from .domain import (
+    AGENT_OUTCOME_NOTE_MARKER,
+    HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+    ErrorCode,
+    WorkflowLane,
+    WorkflowPhase,
+)
+from .models import (
+    AuditCapacity,
+    AuditReceiptSummary,
+    BoundaryModel,
+    GitLabIssueNote,
+    LedgerRecord,
+    MergeRequestDraft,
+    SplitPlan,
+    WorkerExitEvidence,
+    WorkerResultEnvelope,
+)
 from .ports import CommandRunner
+from .state_machine import WORKFLOW_RECEIPTS, WORKFLOW_REVIEWER_SKILLS
 
 
 class WorkerProtocolError(ValueError):
     """Worker output is missing, malformed, or belongs to another segment."""
+
+    def __init__(self, field: str, reason: str | None = None) -> None:
+        self.field = field if reason is not None else "result"
+        self.reason = reason if reason is not None else field
+        super().__init__(format_worker_result_diagnostic(self))
 
 
 _RESULT = re.compile(r"<agent-work-result>\s*(.*?)\s*</agent-work-result>", re.DOTALL)
@@ -37,12 +61,193 @@ _NOTE_MAX_BYTES = 4 * 1024
 _NOTE_MAX_COUNT = 50
 _WORKER_DIAGNOSTIC_MAX_BYTES = 2048
 _WORKER_DIAGNOSTIC_FALLBACK = "worker exited without diagnostic output"
+_WORKER_RESULT_VALIDATION_TIME = datetime(1970, 1, 1, tzinfo=UTC)
 _ANSI_SEQUENCE = re.compile(
     r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]"
     r"|\x1b\][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
     r"|\x1b[PX^_][^\x1b\x9c]*(?:\x1b\\|\x9c)"
     r"|\x1b[ -/][0-~]?|\x1b[0-9=><])"
 )
+
+
+class WorkerResultBuildAudit(BoundaryModel):
+    """Worker-supplied audit evidence excluding controller-derived fields."""
+
+    capacity: AuditCapacity
+    tests: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
+    corrections: tuple[str, ...] = ()
+
+
+class WorkerResultBuildInput(BoundaryModel):
+    """Strict, nonduplicated intent accepted by the read-only result builder."""
+
+    workflow_lane: WorkflowLane
+    result_kind: Literal[
+        "ready_to_publish", "retryable", "needs_human", "split_required"
+    ]
+    receipts: tuple[str, ...] = ()
+    change_summary: str = Field(min_length=1, max_length=20_000)
+    next_action: str = Field(min_length=1, max_length=2_000)
+    merge_request_draft: MergeRequestDraft | None = None
+    error_code: ErrorCode | None = None
+    redacted_summary: str = ""
+    split_plan: SplitPlan | None = None
+    audit_summary: WorkerResultBuildAudit | None = None
+
+
+def format_worker_result_diagnostic(error: WorkerProtocolError) -> str:
+    """Render only a stable bounded diagnostic, never untrusted error data."""
+    value = f"{error.field}: {error.reason}"
+    return _truncate_utf8(value, _WORKER_DIAGNOSTIC_MAX_BYTES)
+
+
+def _validation_error(error: ValidationError) -> WorkerProtocolError:
+    """Translate Pydantic locations into stable, non-reflective diagnostics."""
+    item = error.errors(include_url=False)[0]
+    location = item["loc"]
+    field = "protocol_version" if location == ("protocol_version",) else "input"
+    reason = "must equal 2" if field == "protocol_version" else "invalid value"
+    return WorkerProtocolError(field, reason)
+
+
+def parse_worker_result_build_input(value: str | bytes) -> WorkerResultBuildInput:
+    """Parse untrusted builder input into its strict boundary model."""
+    try:
+        return WorkerResultBuildInput.model_validate_json(value)
+    except ValidationError as error:
+        location = error.errors(include_url=False)[0]["loc"]
+        if location == ("protocol_version",):
+            raise WorkerProtocolError("protocol_version", "must be omitted") from None
+        raise WorkerProtocolError("input", "invalid value") from None
+
+
+def _derived_reviewers(
+    receipts: tuple[str, ...], lane: WorkflowLane
+) -> tuple[str, ...]:
+    """Select the authoritative reviewer receipt subset from full receipts."""
+    if lane is WorkflowLane.CONTENT:
+        return ()
+    return tuple(
+        receipt
+        for receipt in receipts
+        if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
+    )
+
+
+def _has_exact_receipt_format(receipt: str, skill: str) -> bool:
+    """Return whether one receipt uses the stable skill-prefixed form."""
+    prefix = f"{skill}:"
+    return receipt.startswith(prefix) and bool(receipt.removeprefix(prefix).strip())
+
+
+def validate_worker_result(
+    record: LedgerRecord,
+    result: WorkerResultEnvelope,
+    *,
+    changed_paths: tuple[str, ...],
+) -> None:
+    """Apply controller-authoritative audit and receipt coherence checks."""
+    if (
+        result.result_kind != "ready_to_publish"
+        or result.phase_status != "complete"
+        or result.completed_phase is not WorkflowPhase.WORKFLOW
+        or result.audit_summary is None
+    ):
+        return
+    audit = result.audit_summary
+    observed = tuple(sorted(changed_paths))
+    if tuple(sorted(audit.changed_paths)) != observed:
+        raise WorkerProtocolError(
+            "audit_summary.changed_paths", "does not match observed changed paths"
+        )
+    if audit.role_receipts != result.receipts:
+        raise WorkerProtocolError(
+            "audit_summary.role_receipts", "does not match worker receipts"
+        )
+    receipt_text = "\n".join(result.receipts)
+    evidence = (*audit.tests, *audit.reviewers, *audit.findings, *audit.corrections)
+    if any(item not in receipt_text for item in evidence):
+        raise WorkerProtocolError(
+            "audit_summary", "evidence is not represented in worker receipts"
+        )
+
+
+def build_worker_result(
+    record: LedgerRecord,
+    build_input: WorkerResultBuildInput,
+    *,
+    changed_paths: tuple[str, ...],
+) -> WorkerResultEnvelope:
+    """Construct and validate a v2 envelope while deriving trusted fields."""
+    is_workflow = record.phase is WorkflowPhase.WORKFLOW
+    audit = None
+    if build_input.audit_summary is not None:
+        audit_input = build_input.audit_summary
+        if build_input.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
+            raise WorkerProtocolError("workflow_lane", "must be coding or content")
+        lane = (
+            "coding" if build_input.workflow_lane is WorkflowLane.CODING else "content"
+        )
+        try:
+            audit = AuditReceiptSummary(
+                lane=lane,
+                capacity=audit_input.capacity,
+                role_receipts=build_input.receipts,
+                changed_paths=tuple(sorted(changed_paths)),
+                tests=audit_input.tests,
+                reviewers=_derived_reviewers(
+                    build_input.receipts, build_input.workflow_lane
+                ),
+                findings=audit_input.findings,
+                corrections=audit_input.corrections,
+            )
+        except ValidationError:
+            raise WorkerProtocolError(
+                "receipts", "required receipts are not coherent"
+            ) from None
+    try:
+        result = WorkerResultEnvelope(
+            project_id=record.project_id,
+            issue_iid=record.issue_iid,
+            ledger_revision=record.revision,
+            expected_state=record.state,
+            expected_phase=record.phase,
+            workflow_lane=build_input.workflow_lane,
+            result_kind=build_input.result_kind,
+            phase_status="complete" if is_workflow else "rejected",
+            completed_phase=record.phase,
+            receipts=build_input.receipts,
+            split_plan=build_input.split_plan,
+            change_summary=build_input.change_summary,
+            merge_request_draft=build_input.merge_request_draft,
+            error_code=build_input.error_code,
+            redacted_summary=build_input.redacted_summary,
+            next_action=build_input.next_action,
+            audit_summary=audit,
+        )
+    except ValidationError as error:
+        raise _validation_error(error) from None
+    validate_worker_result(record, result, changed_paths=changed_paths)
+    try:
+        # Reuse the controller's exact receipt/state coherence authority.
+        from .state_machine import apply_worker_result
+
+        if record.phase is WorkflowPhase.WORKFLOW:
+            required = WORKFLOW_RECEIPTS.get(build_input.workflow_lane, ())
+            if len(result.receipts) != len(required) or any(
+                not _has_exact_receipt_format(receipt, skill)
+                for receipt, skill in zip(result.receipts, required, strict=True)
+            ):
+                raise WorkerProtocolError(
+                    "receipts", "must use each exact required skill once"
+                )
+        apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
+    except ValueError as error:
+        raise WorkerProtocolError(
+            "receipts", "required receipts are not coherent"
+        ) from error
+    return result
 
 
 @dataclass(frozen=True)
@@ -64,18 +269,20 @@ def parse_worker_result(
     """Parse and optionally identity-check exactly one result envelope."""
     matches = _RESULT.findall(output)
     if len(matches) != 1:
-        raise WorkerProtocolError("worker must return exactly one result envelope")
+        raise WorkerProtocolError("result", "must contain exactly one result envelope")
     try:
         result = WorkerResultEnvelope.model_validate(json.loads(matches[0]))
     except (json.JSONDecodeError, ValidationError) as error:
-        raise WorkerProtocolError("worker result envelope is invalid") from error
+        if isinstance(error, ValidationError):
+            raise _validation_error(error) from None
+        raise WorkerProtocolError("result", "is not valid JSON") from None
     identity = (result.project_id, result.issue_iid, result.ledger_revision)
     expected = (expected_project_id, expected_issue_iid, expected_revision)
     if any(
         value is not None and value != actual
         for actual, value in zip(identity, expected, strict=True)
     ):
-        raise WorkerProtocolError("worker result identity does not match the segment")
+        raise WorkerProtocolError("identity", "does not match the segment")
     return result
 
 
@@ -416,6 +623,12 @@ def build_worker_prompt(
         "project-owned values. "
         "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
         "audit_summary with lane, capacity, receipts, changed paths, tests, reviewers, findings, and corrections. "
+        "Use `agent-work worker-result build --issue-iid "
+        f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
+        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. Its strict input must not include identity, "
+        "state, phase, audit lane, role_receipts, changed_paths, or reviewers; the helper derives them. "
+        "WORKFLOW_RECEIPTS is the exact required receipt set for the recorded lane. Each applicable "
+        "receipt must use its exact skill name; an inapplicable role must be `$skill: not applicable — reason`. "
         "Do not return exactly one protocol_version=1 JSON object; return exactly one protocol_version=2 JSON object inside "
         "<agent-work-result>...</agent-work-result>."
     )

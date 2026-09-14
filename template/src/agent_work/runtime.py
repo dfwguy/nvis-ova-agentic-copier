@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +46,7 @@ from .models import (
     TransitionIntentRecord,
 )
 from .ports import (
+    CommandRunner,
     GitLabPort,
     InvokerPort,
     LedgerPort,
@@ -221,6 +222,14 @@ class RuntimeDependencies:
     process_probe: Callable[[], str]
 
 
+@dataclass(frozen=True)
+class WorkerResultDependencies:
+    """Read-only boundaries required to build one worker result."""
+
+    load_record: Callable[[int], LedgerRecord | None]
+    changed_paths: Callable[[Path], tuple[str, ...]]
+
+
 def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
     """Configure one application-owned local operational log."""
     config.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -278,6 +287,33 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
         process_probe=probe_project_lock,
+    )
+
+
+def build_worker_result_dependencies(
+    *,
+    config: AgentWorkConfig | None = None,
+    current_directory: Path | None = None,
+    environment: Mapping[str, str] = os.environ,
+    run_command: CommandRunner = run_subprocess,
+) -> WorkerResultDependencies:
+    """Wire only read-only ledger and repository boundaries for result building."""
+    if config is None:
+        config = discover_config(
+            current_directory=current_directory or Path.cwd(),
+            environment=environment,
+            run_command=run_command,
+        )
+    ledger = JsonLedger(config.state_root, clock=lambda: datetime.now(UTC))
+    repository = GitRepository(
+        config,
+        run_command,
+        service_environment=environment,
+        diagnostic_sink=lambda _diagnostic: None,
+    )
+    return WorkerResultDependencies(
+        load_record=ledger.load_read_only,
+        changed_paths=repository.changed_paths,
     )
 
 

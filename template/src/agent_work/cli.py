@@ -22,7 +22,7 @@ from typing import Protocol
 
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .ledger import LockBusy
-from .models import CommandReport
+from .models import CommandReport, LedgerRecord
 from .ports import CommandRunner
 from .repository import run_subprocess
 from .runtime import dispatch as default_dispatch
@@ -33,6 +33,12 @@ from .upstream_gitlab import (
     UpstreamGitLabConfig,
     UpstreamGitLabError,
     UpstreamGitLabReader,
+)
+from .worker import (
+    WorkerProtocolError,
+    build_worker_result,
+    format_worker_result_diagnostic,
+    parse_worker_result_build_input,
 )
 
 
@@ -60,6 +66,18 @@ class _PreviewUpstream(Protocol):
     ) -> UpstreamFindingPreview: ...
 
 
+class _LoadRecord(Protocol):
+    """Typed read-only ledger boundary for result building."""
+
+    def __call__(self, issue_iid: int) -> LedgerRecord | None: ...
+
+
+class _ChangedPaths(Protocol):
+    """Typed read-only worktree observation boundary."""
+
+    def __call__(self, worktree: Path) -> tuple[str, ...]: ...
+
+
 def _positive_integer(value: str) -> int:
     try:
         number = int(value)
@@ -75,13 +93,12 @@ def _common(
     *,
     apply: bool = True,
     apply_help: str = "apply the operation",
+    debug_help: str = "show a traceback on failure",
 ) -> None:
     if apply:
         parser.add_argument("--apply", action="store_true", help=apply_help)
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
-    parser.add_argument(
-        "--debug", action="store_true", help="show a traceback on failure"
-    )
+    parser.add_argument("--debug", action="store_true", help=debug_help)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,6 +172,20 @@ def build_parser() -> argparse.ArgumentParser:
     _common(
         finding_preview,
         apply_help="accepted for command consistency; preview remains read-only",
+    )
+    worker_result = resources.add_parser(
+        "worker-result", help="build a read-only validated worker result"
+    )
+    worker_result_actions = worker_result.add_subparsers(dest="action", required=True)
+    worker_build = worker_result_actions.add_parser(
+        "build", help="derive and validate one protocol-v2 worker result"
+    )
+    worker_build.add_argument("--issue-iid", type=_positive_integer, required=True)
+    worker_build.add_argument("--input-file", type=Path, required=True)
+    _common(
+        worker_build,
+        apply_help="accepted for command consistency; worker-result build remains read-only",
+        debug_help="retain bounded diagnostics on failure",
     )
     return parser
 
@@ -292,11 +323,50 @@ def main(
     run_command: CommandRunner = run_subprocess,
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
+    load_record: _LoadRecord | None = None,
+    changed_paths: _ChangedPaths | None = None,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "worker-result" and parsed.action == "build":
+        try:
+            if load_record is None or changed_paths is None:
+                from .runtime import build_worker_result_dependencies
+
+                dependencies = build_worker_result_dependencies(
+                    environment=environment,
+                    run_command=run_command,
+                )
+                record_loader = load_record or dependencies.load_record
+                observe_paths = changed_paths or dependencies.changed_paths
+            else:
+                record_loader = load_record
+                observe_paths = changed_paths
+            record = record_loader(parsed.issue_iid)
+            if record is None:
+                raise WorkerProtocolError("issue_iid", "has no retained ledger record")
+            build_input = parse_worker_result_build_input(read_bytes(parsed.input_file))
+            result = build_worker_result(
+                record, build_input, changed_paths=observe_paths(record.worktree)
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            diagnostic = (
+                format_worker_result_diagnostic(error)
+                if isinstance(error, WorkerProtocolError)
+                else "worker_result: could not be read or validated"
+            )
+            write_stderr(diagnostic)
+            return 1
+        rendered_result = result.model_dump_json(exclude_none=True)
+        write_stdout(
+            rendered_result
+            if parsed.json
+            else f"<agent-work-result>{rendered_result}</agent-work-result>"
+        )
+        write_stderr("worker result validated; no changes were made")
+        return 0
     if parsed.resource == "upstream-finding" and parsed.action == "preview":
         try:
             preview = preview_manifest(parsed.manifest_file, read_bytes=read_bytes)

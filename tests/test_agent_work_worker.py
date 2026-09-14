@@ -73,6 +73,20 @@ def test_parse_worker_result_accepts_one_exact_versioned_envelope() -> None:
     assert result.result_kind == "ready_to_publish"
 
 
+def test_parse_worker_result_exposes_a_bounded_field_specific_protocol_reason() -> None:
+    output = (
+        "<agent-work-result>"
+        + json.dumps(_envelope(protocol_version=1))
+        + "</agent-work-result>"
+    )
+
+    with pytest.raises(WorkerProtocolError) as raised:
+        parse_worker_result(output)
+
+    assert str(raised.value) == "protocol_version: must equal 2"
+    assert len(str(raised.value).encode("utf-8")) <= 2048
+
+
 def test_completed_v2_workflow_receipt_accepts_required_compact_audit_summary() -> None:
     payload = _envelope(
         protocol_version=2,

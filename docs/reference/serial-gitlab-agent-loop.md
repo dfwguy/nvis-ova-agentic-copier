@@ -34,6 +34,7 @@ agent-work loop run [--apply] [--max-segments COUNT]
                     [--json] [--debug]
 agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
+agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -82,6 +83,83 @@ URLs. Invalid manifests and unreadable files
 exit `1` with sanitized diagnostics.
 `--apply` is accepted only for uniform command syntax and remains a harmless
 no-op for this read-only preview.
+
+`worker-result build` is a read-only worker helper. It reads one strict,
+structured JSON request and the retained ledger and worktree for the supplied
+issue, then derives the protocol-v2 identity, state, completed phase, and
+duplicated audit fields. It validates the result with the same authoritative
+controller and receipt-coherence rules used before a workflow transition. On
+success, standard output contains exactly one compact delimited result:
+
+```text
+<agent-work-result>{...}</agent-work-result>
+```
+
+Human status and sanitized failures go to standard error. Without `--json`,
+success emits the delimited worker envelope; `--json` emits the same compact
+protocol object without delimiters for direct JSON consumers and does not relax
+validation. `--debug` adds local sanitized diagnostics without credentials,
+environment values, worker prose, prompts, or transcripts. `--apply` is accepted for
+CLI consistency and is a no-op: this command never changes the ledger,
+worktree, GitLab, or publication state. Success exits `0`; validation or
+runtime failures exit `1`; argparse usage failures exit `2`.
+
+The input file is one strict JSON object containing only worker intent. It
+provides `workflow_lane`, `result_kind`, `receipts`, `change_summary`, and
+`next_action`; it can also provide `merge_request_draft`, `error_code`,
+`redacted_summary`, `split_plan`, and bounded `audit_summary` evidence
+(`capacity`, `tests`, `findings`, and `corrections`). Unknown fields are
+rejected. The controller derives protocol version, project and issue identity,
+ledger revision, expected state and phase, completed phase, audit lane, role
+receipts, changed paths, and the reviewer receipt list. In particular, do not
+put the derived `identity`, `state`, `phase`, audit `lane`,
+`role_receipts`, `changed_paths`, or `reviewers` fields in the input.
+
+For a completed ordinary workflow, use `coding` or `content` as the lane and
+provide the exact `WORKFLOW_RECEIPTS` set for that lane. The coding set is
+`$architect`, `$tdd-red`, `$diataxis-writer`, `$tdd-green`,
+`$nonfunctional-review`, `$tdd-judge`, `$diataxis-judge`, `$judge-quality`,
+`$judge-test`, `$judge-cicd`, `$tdd-document`, `$cli-syntax-judge`,
+`$filesystem-structure-judge`, `$agent-policy-judge`, `$license-checker`, and
+`$tdd-finalizer`; all 16 are required for a coding
+`ready_to_publish` result. The content set is `$architect`,
+`$documentation-writer`, and `$documentation-finalizer`; all three are
+required for a completed content `ready_to_publish` result. Every receipt starts with its exact skill name
+and may include full multiline nested-role evidence. A conditionally
+inapplicable role uses exactly
+`$skill: not applicable — reason`. Arbitrary, omitted, duplicated, or invented
+receipts cannot advance the workflow.
+
+`ready_to_publish` completes a coherent ordinary workflow and needs the exact
+receipts, a successful audit (including capacity, and tests for coding), and a
+merge-request draft when the retained work requires new publication metadata.
+That draft has nonempty `title` and `description`. A controversial but safe
+human handoff must be explicitly marked: its title begins `Draft:`, its draft
+flag agrees, and its decision review records decisions and assumptions,
+alternatives, risks, reviewer checks, unresolved findings and evidence, tests,
+the correction-cycle ledger, and unchanged project-owned values. Existing-MR
+remediation is the exception: it does not supply new publication metadata.
+
+The other result kinds preserve their distinct controller transitions:
+
+| Result kind | Use and required intent |
+| --- | --- |
+| `retryable` | A bounded transient outcome; include the applicable error code and redacted summary when available. The controller schedules ordinary retained-worktree recovery. |
+| `needs_human` | A blocker requiring human authority or a decision; provide the bounded redacted summary, next action, and applicable error code. |
+| `split_required` | An oversized fresh workflow; use `workflow_lane: unknown` and a `split_plan` of 2–25 ordered, independently mergeable slices. It needs no receipts, audit, merge-request draft, or error code. |
+
+Validation and runtime failures retain only a canonical field-specific
+diagnostic of at most 2,048 bytes and a stable reason code. Protocol version 1
+is rejected; fresh workers use version 2, including `split_required`. Failures
+never retain
+request values, worker prose, prompts, chain-of-thought, credentials,
+environment values, or unbounded exception output. Protocol failures for
+issues #40 and #78 remain retryable: their
+retained worktrees stay in place for ordinary recovery. This does not make a
+claim about the underlying cause of issue #80's retry exhaustion. Keep the
+helper's single output separate from surrounding human prose: return its
+delimited standard output unchanged to the controller, and put any explanatory
+status outside that envelope.
 
 ### Upstream-finding manifest v1
 
@@ -337,10 +415,11 @@ journal. The durable ledger and retained issue worktree are not removed;
 normal retry and human diagnosis use that evidence.
 
 A workflow-owning worker returns a versioned, redacted envelope for its
-expected ledger transition. Its result is `ready_to_publish`, `retryable`, or
-`needs_human`, with the coarse completed state, receipts, diagnostic, and next
-action. The trusted runner validates it against the ledger, configured numeric
-project, Git evidence, and required workflow receipts before changing state.
+expected ledger transition. Its result is `ready_to_publish`, `retryable`,
+`needs_human`, or `split_required`, with the coarse completed state, receipts,
+diagnostic, and next action. The trusted runner validates it against the
+ledger, configured numeric project, Git evidence, and required workflow
+receipts before changing state.
 For coding work, the final audit names every mandatory role: Architect, Red,
 Diátaxis Writer, Green, all applicable reviews, the sequential
 `$license-checker`, and Finalizer; content work retains its separate role set.
@@ -359,7 +438,7 @@ suitability.
 
 Suitable work continues through the existing coding or content workflow. An
 oversized issue, or one containing multiple separately deliverable
-capabilities, returns one protocol-version-1 envelope with these values:
+capabilities, returns one protocol-version-2 envelope with these values:
 
 | Field | Value |
 | --- | --- |

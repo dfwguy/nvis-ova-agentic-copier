@@ -184,23 +184,43 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
     }
 )
 
+WORKFLOW_REVIEWER_SKILLS: Final = frozenset(
+    {
+        "$nonfunctional-review",
+        "$tdd-judge",
+        "$diataxis-judge",
+        "$judge-quality",
+        "$judge-test",
+        "$judge-cicd",
+        "$tdd-document",
+        "$cli-syntax-judge",
+        "$filesystem-structure-judge",
+        "$agent-policy-judge",
+    }
+)
+
 
 def has_complete_workflow_receipt(
     record: LedgerRecord, *, requires_policy_review: bool = False
 ) -> bool:
     """Return whether durable workflow evidence exactly authorizes publication."""
     required = WORKFLOW_RECEIPTS.get(record.workflow_lane, ())
-    workflow_receipts = tuple(
-        receipt
-        for receipt in record.receipts
-        if receipt.phase is WorkflowPhase.WORKFLOW
-    )
-    if not workflow_receipts or workflow_receipts[-1].verdict != "complete":
-        return False
-    receipt_skills = tuple(
-        receipt.partition(":")[0]
-        for receipt in workflow_receipts[-1].detail.splitlines()
-    )
+    audit = record.audit_evidence
+    if isinstance(audit, AuditReceiptSummary):
+        # Protocol-v2 audit evidence retains receipt boundaries.  The legacy
+        # flattened detail field cannot distinguish a multiline continuation
+        # from another skill receipt, so it remains only a fallback below.
+        receipt_lines = audit.role_receipts
+    else:
+        workflow_receipts = tuple(
+            receipt
+            for receipt in record.receipts
+            if receipt.phase is WorkflowPhase.WORKFLOW
+        )
+        if not workflow_receipts or workflow_receipts[-1].verdict != "complete":
+            return False
+        receipt_lines = tuple(workflow_receipts[-1].detail.splitlines())
+    receipt_skills = tuple(receipt.partition(":")[0] for receipt in receipt_lines)
     complete = (
         len(receipt_skills) == len(required)
         and set(receipt_skills) == set(required)
@@ -214,7 +234,7 @@ def has_complete_workflow_receipt(
         return complete
     policy_receipt = next(
         receipt
-        for receipt in workflow_receipts[-1].detail.splitlines()
+        for receipt in receipt_lines
         if receipt.partition(":")[0] == "$agent-policy-judge"
     )
     return "not applicable" not in policy_receipt.casefold()
@@ -302,7 +322,7 @@ def plan_retry(
             prior_phase=record.phase,
             retry_count=record.retry_count + 1,
             retry_at=now + retry_delay,
-            error_code=None,
+            error_code=record.error_code,
             summary="Transient failure; retry scheduled.",
             next_action=(
                 "Start a fresh whole workflow from observable state and repeat validation "
@@ -387,25 +407,13 @@ def apply_worker_result(
         )
     if record.phase is WorkflowPhase.WORKFLOW and result.audit_summary is not None:
         audit = AuditReceiptSummary.model_validate(result.audit_summary)
-        reviewer_skills = {
-            "$nonfunctional-review",
-            "$tdd-judge",
-            "$diataxis-judge",
-            "$judge-quality",
-            "$judge-test",
-            "$judge-cicd",
-            "$tdd-document",
-            "$cli-syntax-judge",
-            "$filesystem-structure-judge",
-            "$agent-policy-judge",
-        }
         audit_receipt_skills = tuple(
             receipt.partition(":")[0] for receipt in audit.role_receipts
         )
         expected_reviewers = tuple(
             receipt
             for receipt in result.receipts
-            if receipt.partition(":")[0] in reviewer_skills
+            if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
         )
         if (
             audit.capacity.decision != "run"
