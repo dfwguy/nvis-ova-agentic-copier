@@ -41,7 +41,6 @@ from .models import (
     PendingMergeRequestFeedback,
     SplitChildEvidence,
     TransitionIntentRecord,
-    WorkerResultEnvelope,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
 from .repository import PublicationError, RepositoryError, RepositoryTransientError
@@ -51,7 +50,14 @@ from .state_machine import (
     plan_retry,
     transition_record,
 )
-from .worker import build_worker_prompt, parse_worker_result, worker_exit_evidence
+from .worker import (
+    WorkerProtocolError,
+    build_worker_prompt,
+    format_worker_result_diagnostic,
+    parse_worker_result,
+    validate_worker_result,
+    worker_exit_evidence,
+)
 
 
 class SegmentError(RuntimeError):
@@ -749,6 +755,7 @@ def _record_retry(
     gitlab: GitLabPort,
     now: datetime,
     error_code: ErrorCode,
+    detail: str | None = None,
     retry_delay: timedelta = timedelta(minutes=20),
     allow_remote_exhaustion_side_effects: bool = True,
 ) -> LedgerRecord:
@@ -761,7 +768,7 @@ def _record_retry(
                 occurred_at=now,
                 retry_count=outcome.retry_count,
                 code=error_code.value,
-                detail=outcome.summary,
+                detail=detail or outcome.summary,
             ),
         )[-64:]
         outcome = outcome.model_copy(
@@ -1211,31 +1218,6 @@ def _prepare(
     )
 
 
-def _validate_workflow_audit(
-    record: LedgerRecord, result: WorkerResultEnvelope, *, repository: RepositoryPort
-) -> None:
-    """Corroborate the bounded final AI audit before it becomes durable evidence."""
-    if (
-        result.result_kind != "ready_to_publish"
-        or result.phase_status != "complete"
-        or result.completed_phase is not WorkflowPhase.WORKFLOW
-        or result.audit_summary is None
-    ):
-        return
-    audit = result.audit_summary
-    observed_paths = tuple(sorted(repository.changed_paths(record.worktree)))
-    if tuple(sorted(audit.changed_paths)) != observed_paths:
-        raise ValueError("workflow audit changed paths do not match durable worktree")
-    if audit.role_receipts != result.receipts:
-        raise ValueError("workflow audit receipts do not match worker receipts")
-    receipt_text = "\n".join(result.receipts)
-    evidence = (*audit.tests, *audit.reviewers, *audit.findings, *audit.corrections)
-    if any(item not in receipt_text for item in evidence):
-        raise ValueError(
-            "workflow audit evidence is not represented in worker receipts"
-        )
-
-
 def _execute(
     record: LedgerRecord,
     issue: GitLabIssue,
@@ -1341,7 +1323,7 @@ def _execute(
                 expected_issue_iid=record.issue_iid,
                 expected_revision=record.revision,
             )
-        except ValueError:
+        except WorkerProtocolError as error:
             return _record_retry(
                 record,
                 ledger=ledger,
@@ -1349,6 +1331,7 @@ def _execute(
                 now=now,
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
+                detail=format_worker_result_diagnostic(error),
             )
         else:
             if (
@@ -1366,7 +1349,11 @@ def _execute(
                     retry_delay=timedelta(),
                 )
             try:
-                _validate_workflow_audit(record, result, repository=repository)
+                validate_worker_result(
+                    record,
+                    result,
+                    changed_paths=repository.changed_paths(record.worktree),
+                )
                 outcome = apply_worker_result(record, result, now=now).record
             except RepositoryTransientError:
                 return _record_retry(
@@ -1380,7 +1367,7 @@ def _execute(
                 return _block_publication_identity(
                     record, ledger=ledger, gitlab=gitlab, summary=str(error)
                 )
-            except ValueError:
+            except (ValueError, WorkerProtocolError) as error:
                 return _record_retry(
                     record,
                     ledger=ledger,
@@ -1388,6 +1375,11 @@ def _execute(
                     now=now,
                     error_code=ErrorCode.WORKER_RECEIPT_INVALID,
                     retry_delay=timedelta(),
+                    detail=(
+                        format_worker_result_diagnostic(error)
+                        if isinstance(error, WorkerProtocolError)
+                        else "receipts: required receipts are not coherent"
+                    ),
                 )
             else:
                 outcome = outcome.model_copy(update={"worker_exit": None})

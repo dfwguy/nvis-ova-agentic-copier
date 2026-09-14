@@ -189,6 +189,14 @@ class JsonLedger:
 
     def load(self, issue_iid: int) -> LedgerRecord | None:
         """Load one record, preserving corrupt bytes as recovery evidence."""
+        return self._load(issue_iid, preserve_corrupt=True)
+
+    def load_read_only(self, issue_iid: int) -> LedgerRecord | None:
+        """Load one record without creating recovery evidence on corruption."""
+        return self._load(issue_iid, preserve_corrupt=False)
+
+    def _load(self, issue_iid: int, *, preserve_corrupt: bool) -> LedgerRecord | None:
+        """Load one record and optionally preserve corrupt bytes for recovery."""
         target = self.records / f"{issue_iid}.json"
         if not target.exists():
             return None
@@ -196,7 +204,8 @@ class JsonLedger:
         try:
             return LedgerRecord.model_validate_json(raw)
         except (ValidationError, ValueError) as error:
-            self._preserve_corrupt(issue_iid, raw)
+            if preserve_corrupt:
+                self._preserve_corrupt(issue_iid, raw)
             raise LedgerCorrupt("ledger record is corrupt") from error
 
     def list_records(self) -> tuple[LedgerRecord, ...]:

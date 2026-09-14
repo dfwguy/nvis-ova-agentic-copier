@@ -1615,6 +1615,103 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         assert outcome is not None and outcome.error_code is expected
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_code", "expected_detail", "sensitive_value"),
+    [
+        (
+            "protocol",
+            ErrorCode.WORKER_PROTOCOL_INVALID,
+            "protocol_version: must equal 2",
+            "raw-worker-prose-secret",
+        ),
+        (
+            "receipt",
+            ErrorCode.WORKER_RECEIPT_INVALID,
+            "audit_summary.changed_paths: does not match observed changed paths",
+            "raw-worker-prose-secret",
+        ),
+    ],
+)
+def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
+    tmp_path: Path,
+    case: str,
+    expected_code: ErrorCode,
+    expected_detail: str,
+    sensitive_value: str,
+) -> None:
+    """Protocol and audit failures retain a safe actionable retry reason."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    receipts = tuple(
+        f"{skill}: approved; uv run pytest"
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+    payload: dict[str, object] = {
+        "protocol_version": 2,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": receipts,
+        "change_summary": "Completed worker workflow.",
+        "next_action": "Publish after validation.",
+        "merge_request_draft": {
+            "title": "Worker builder",
+            "description": "Ready for human review.",
+        },
+        "audit_summary": {
+            "lane": "coding",
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "role_receipts": receipts,
+            "changed_paths": ["src/example.py"],
+            "tests": ["uv run pytest"],
+            "reviewers": ["$tdd-judge: approved; uv run pytest"],
+            "findings": [],
+            "corrections": [],
+        },
+    }
+    if case == "protocol":
+        payload["protocol_version"] = 1
+        payload["change_summary"] = sensitive_value
+    else:
+        payload["audit_summary"] = {
+            **cast(dict[str, object], payload["audit_summary"]),
+            "changed_paths": [sensitive_value],
+        }
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.error_code is expected_code
+    persisted = ledger.load(12)
+    assert persisted is not None and persisted.condition_history
+    diagnostic = persisted.condition_history[-1].detail
+    assert diagnostic == expected_detail
+    assert len(diagnostic.encode("utf-8")) <= 2048
+    assert sensitive_value not in diagnostic
+
+
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
