@@ -52,7 +52,7 @@ from .ports import (
     RepositoryPort,
 )
 from .repository import GitRepository, discover_config, run_subprocess
-from .serial import run_segment
+from .serial import reconcile_closed_issues, run_segment
 from .state_machine import transition_record
 from .worker import AgentInvoker
 
@@ -461,12 +461,14 @@ def dispatch(
     wired.invoke.preflight()
     records: list[LedgerRecord] = []
     stop_reason = "idle"
-    started = wired.monotonic()
-
-    def remaining_activation_seconds() -> float:
-        return request.max_activation_seconds - (wired.monotonic() - started)
 
     with wired.lock():
+        reconcile_closed_issues(ledger, gitlab, project_id=project.id)
+        started = wired.monotonic()
+
+        def remaining_activation_seconds() -> float:
+            return request.max_activation_seconds - (wired.monotonic() - started)
+
         active = tuple(
             item for item in ledger.list_records() if item.state in ACTIVE_STATES
         )

@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-14
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -200,9 +200,24 @@ deduplicated issue, which later normal reconciliation may select for a new
 applicable workflow; unverified evidence produces no repository work.
 
 Each timer activation acquires the single-project lock and reconciles intent
-and observed evidence. It then advances only the selected or resumed issue.
-Recovery applies at the worktree and coarse workflow boundary, not at every
-internal agent handoff.
+and observed evidence. At the start of an applied activation, before it resumes
+or selects open work, it obtains one bounded deterministic IID-ordered inventory
+of closed issues carrying lifecycle labels. For each inventoried issue with an
+existing ledger, it durably normalizes the record to `COMPLETE` and clears
+transient retry, intent, error, worker-exit, and pending-feedback state before
+removing lifecycle labels through the existing authenticated GitLab identity
+boundary. For an issue without a ledger, it removes stale lifecycle labels
+without creating a ledger record, blocked or complete state, journal, or
+worktree. A ledger-write failure leaves the label in place; a recorded issue's
+label-removal failure leaves the canonical `COMPLETE` record and stale label
+for a later activation, while an orphan failure leaves only its stale label.
+Earlier IID successes remain reconciled. This closed-issue housekeeping does
+not consume `max_segments` or the open-work budget, invoke a worker, or perform
+repository, branch, worktree, push, or merge-request operations. Open orphan
+projections retain the ordinary blocked recovery path. After that inventory,
+the activation advances at most one selected or resumed open issue. Recovery
+applies at the worktree and coarse workflow boundary, not at every internal
+agent handoff.
 
 Each Python activation advances at most one issue and retains its 10,800-second
 active-work budget. The systemd wrapper continues only after `awaiting-human`,
@@ -444,7 +459,8 @@ returns one redacted `CommandReport` object:
 The common top-level fields are `schema_version`, `command`, `applied`,
 `outcome`, `project`, `items`, and `actions`. `project` contains the verified
 `host` and `project_id`. An applied `loop run` report additionally includes
-`segments_run`, the number of completed workflow attempts, and `stop_reason`,
+`segments_run`, the number of completed workflow attempts (closed-issue
+housekeeping is not a segment), and `stop_reason`,
 which identifies why the activation yielded; its `items[]` lists workflow
 results in chronological order. Per-issue values—including `issue_iid`, state,
 coarse workflow phase, attempt, retry timing, source branch, durable worktree, MR reference,

@@ -1369,6 +1369,38 @@ def test_gitlab_projected_inventory_reads_every_issue_page(tmp_path: Path) -> No
     assert issues[-1].iid == 101
 
 
+def test_gitlab_closed_projected_inventory_is_closed_only_sorted_and_paginated(
+    tmp_path: Path,
+) -> None:
+    """Closed housekeeping never expands the existing all-state projection scan."""
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        page = int(
+            next(part for part in command if part.startswith("page=")).removeprefix(
+                "page="
+            )
+        )
+        payload = (
+            [_issue_payload(iid, ["agent::running"]) for iid in range(100, 0, -1)]
+            if page == 1
+            else [
+                _issue_payload(102, ["unrelated"]),
+                _issue_payload(101, ["agent::blocked"]),
+            ]
+        )
+        return CommandResult(0, json.dumps(payload), "")
+
+    issues = GitLabGateway(config, fake).list_closed_projected()
+
+    assert [issue.iid for issue in issues] == [*range(1, 101), 101]
+    assert len(calls) == 2
+    assert all("state=closed" in command for command in calls)
+    assert all("per_page=100" in command for command in calls)
+
+
 def test_gitlab_open_mr_inventory_reads_every_page_before_reconciliation(
     tmp_path: Path,
 ) -> None:
