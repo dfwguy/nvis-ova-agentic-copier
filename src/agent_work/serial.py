@@ -382,7 +382,7 @@ def _acknowledge_feedback(
         return _block_publication_identity(
             record, ledger=ledger, gitlab=gitlab, summary=str(error)
         )
-    return ledger.persist(
+    acknowledged = ledger.persist(
         transition_record(
             record,
             RunnerState.AWAITING_HUMAN,
@@ -394,6 +394,53 @@ def _acknowledge_feedback(
             next_action="Await human review or further feedback.",
         )
     )
+    try:
+        _ensure_awaiting_handoff(acknowledged, gitlab=gitlab, repository=repository)
+        gitlab.transition_labels(
+            acknowledged.issue_iid, label_for_state(acknowledged.state)
+        )
+    except GitLabError:
+        return _record_retry(
+            acknowledged,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            acknowledged, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    return acknowledged
+
+
+def _ensure_awaiting_handoff(
+    record: LedgerRecord,
+    *,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    merge_request: MergeRequestEvidence | None = None,
+) -> bool:
+    """Verify the exact publication and ensure its factory-owned handoff note."""
+    if record.merge_request_iid is None or record.source_sha is None:
+        raise RepositoryError(
+            "Post-publication handoff lacks exact merge request evidence."
+        )
+    repository.verify_worktree(record.worktree, record.source_branch, record.source_sha)
+    merge_request = merge_request or gitlab.fetch_merge_request(
+        record.merge_request_iid
+    )
+    if not _mr_evidence_is_exact(
+        record,
+        merge_request,
+        gitlab=gitlab,
+        repository=repository,
+        source_sha=record.source_sha,
+    ):
+        raise RepositoryError("Post-publication merge request evidence is not exact.")
+    return gitlab.ensure_human_handoff(
+        issue_iid=record.issue_iid, merge_request=merge_request
+    )
 
 
 def _wake_for_feedback(
@@ -403,13 +450,14 @@ def _wake_for_feedback(
     gitlab: GitLabPort,
     repository: RepositoryPort,
     now: datetime,
+    merge_request: MergeRequestEvidence | None = None,
 ) -> LedgerRecord | None:
     """Atomically select unseen qualifying feedback for one exact open MR."""
     if record.merge_request_iid is None or record.source_sha is None:
         return None
     try:
         _verify_authenticated_user(gitlab)
-        mr = gitlab.fetch_merge_request(record.merge_request_iid)
+        mr = merge_request or gitlab.fetch_merge_request(record.merge_request_iid)
         cursor = record.feedback_cursor
         if cursor is not None and cursor.feedback_source_sha != record.source_sha:
             return _block_publication_identity(
@@ -633,17 +681,112 @@ def select_record(
         if not _due(record, now):
             return None, None
         return record, issues[record.issue_iid]
+    awaiting_merge_requests: dict[int, MergeRequestEvidence] = {}
+    for waiting in sorted(
+        (record for record in records if record.state is RunnerState.AWAITING_HUMAN),
+        key=lambda record: record.issue_iid,
+    ):
+        issue = issues[waiting.issue_iid]
+        try:
+            _verify_authenticated_user(gitlab)
+            if waiting.merge_request_iid is None or waiting.source_sha is None:
+                blocked = _block_publication_identity(
+                    waiting,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Post-publication handoff lacks exact merge request evidence.",
+                )
+                return blocked, issue.model_copy(
+                    update={
+                        "labels": tuple(
+                            label
+                            for label in issue.labels
+                            if label not in LIFECYCLE_LABELS
+                        )
+                        + (label_for_state(blocked.state),)
+                    }
+                )
+            merge_request = gitlab.fetch_merge_request(waiting.merge_request_iid)
+            awaiting_merge_requests[waiting.issue_iid] = merge_request
+            if merge_request.sha != waiting.source_sha:
+                continue
+            handoff_created = _ensure_awaiting_handoff(
+                waiting,
+                gitlab=gitlab,
+                repository=repository,
+                merge_request=merge_request,
+            )
+        except GitLabIdentityError as error:
+            _block_identity_drift(waiting, ledger=ledger, summary=str(error))
+            return None, None
+        except IdentityVerificationTransportError:
+            _record_identity_retry(waiting, ledger=ledger, gitlab=gitlab, now=now)
+            return None, None
+        except GitLabError:
+            _record_retry(
+                waiting,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GITLAB_RETRYABLE,
+            )
+            return None, None
+        except RepositoryError as error:
+            blocked = _block_publication_identity(
+                waiting, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
+            return blocked, issue.model_copy(
+                update={
+                    "labels": tuple(
+                        label for label in issue.labels if label not in LIFECYCLE_LABELS
+                    )
+                    + (label_for_state(blocked.state),)
+                }
+            )
+        expected = label_for_state(waiting.state)
+        label_repaired = set(issue.labels).intersection(LIFECYCLE_LABELS) != {expected}
+        if label_repaired:
+            gitlab.transition_labels(waiting.issue_iid, expected)
+        if handoff_created or label_repaired:
+            return None, None
     for waiting in sorted(
         (record for record in records if record.state is RunnerState.AWAITING_HUMAN),
         key=lambda record: record.issue_iid,
     ):
         woken = _wake_for_feedback(
-            waiting, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+            waiting,
+            ledger=ledger,
+            gitlab=gitlab,
+            repository=repository,
+            now=now,
+            merge_request=awaiting_merge_requests.get(waiting.issue_iid),
         )
         if woken is not None:
             if woken.state is RunnerState.RETRY_WAIT:
                 return None, None
             return woken, issues[woken.issue_iid]
+    for waiting in sorted(
+        (record for record in records if record.state is RunnerState.AWAITING_HUMAN),
+        key=lambda record: record.issue_iid,
+    ):
+        merge_request = awaiting_merge_requests.get(waiting.issue_iid)
+        if merge_request is None or merge_request.sha == waiting.source_sha:
+            continue
+        issue = issues[waiting.issue_iid]
+        blocked = _block_publication_identity(
+            waiting,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Post-publication merge request evidence is not exact.",
+        )
+        return blocked, issue.model_copy(
+            update={
+                "labels": tuple(
+                    label for label in issue.labels if label not in LIFECYCLE_LABELS
+                )
+                + (label_for_state(blocked.state),)
+            }
+        )
     for reconciliable in (
         record for record in records if _can_reconcile_published_ordinary_work(record)
     ):
@@ -1502,6 +1645,21 @@ def _execute(
         return _acknowledge_feedback(
             outcome, ledger=ledger, gitlab=gitlab, repository=repository, now=now
         )
+    if outcome.state is RunnerState.AWAITING_HUMAN:
+        try:
+            _ensure_awaiting_handoff(outcome, gitlab=gitlab, repository=repository)
+        except GitLabError:
+            return _record_retry(
+                outcome,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GITLAB_RETRYABLE,
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                outcome, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
     if outcome.state is RunnerState.DECOMPOSING:
         return _decompose(
             outcome, ledger=ledger, gitlab=gitlab, now=now, close_parent=False
@@ -2023,6 +2181,10 @@ def run_segment(
         )
         gitlab.transition_labels(issue.iid, None)
         return complete
+    if record.state is RunnerState.BLOCKED and set(issue.labels).intersection(
+        LIFECYCLE_LABELS
+    ) == {label_for_state(record.state)}:
+        return record
     if not _due(record, now):
         return None
     if (
@@ -2111,6 +2273,26 @@ def run_segment(
                 next_action=blocked.next_action,
             )
             return blocked
+    if record.state is RunnerState.AWAITING_HUMAN:
+        try:
+            _ensure_awaiting_handoff(record, gitlab=gitlab, repository=repository)
+        except GitLabError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GITLAB_RETRYABLE,
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
+        expected = label_for_state(record.state)
+        label_repaired = set(issue.labels).intersection(LIFECYCLE_LABELS) != {expected}
+        if label_repaired:
+            gitlab.transition_labels(issue.iid, expected)
+        return record
     expected_label = label_for_state(record.state)
     lifecycle = set(LIFECYCLE_LABELS)
     if record.revision > 0 and set(issue.labels).intersection(lifecycle) != (

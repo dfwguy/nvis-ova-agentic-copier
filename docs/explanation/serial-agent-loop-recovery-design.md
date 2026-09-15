@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-14
+last_reviewed: 2026-09-15
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -115,7 +115,7 @@ GitLab labels have deliberately coarse meanings:
 | Label | Meaning |
 | --- | --- |
 | `agent::running` | Work is active or automatically resumable. |
-| `agent::awaiting-human` | The exact MR and required receipts are ready for human review. |
+| `agent::awaiting-human` | The exact MR, named source commit, required receipts, and factory-authored actionable issue handoff are ready for human review. |
 | `agent::blocked` | A documented human action is necessary before work can continue. |
 | `agent::failed` | An exceptional unrecoverable condition prevented safe reconciliation or recording. |
 
@@ -236,6 +236,13 @@ The implementation must maintain these invariants:
   and reconciliation is safe after interruption at either side of that write.
 - Publication is idempotent and accepted only from exact GitLab and Git
   evidence.
+- Before projecting `agent::awaiting-human`, the runner writes one
+  factory-authored actionable issue handoff for the exact MR source commit. Its
+  deterministic project, issue, MR, and SHA marker plus verified factory author
+  make recovery noiseless: the same SHA reuses the note, while a changed SHA
+  requires a new handoff. The note tells a human to review that named commit and
+  either approve and merge it if acceptable or leave actionable general or
+  inline MR feedback. The runner never assigns a reviewer, approves, or merges.
 - The full repository workflow remains intact inside one workflow-owning
   session. Red and the Diátaxis Writer concurrently and exclusively mutate
   `tests/` and `docs/`, respectively; Green begins only after both receipts,
@@ -318,6 +325,12 @@ safe next transition:
 - A persisted transition intent is checked against GitLab and Git; an already
   completed external mutation is recorded, while an absent idempotent mutation
   may be retried.
+- An awaiting-human projection is reconciled against its exact MR source SHA
+  and its factory-authored issue handoff even when its label is already present.
+  A missing handoff is repaired before the label is projected. A transient
+  handoff-write failure keeps durable retry state and prevents a new
+  awaiting-human label; after interruption, an already-written verified note is
+  reused before the label is repaired.
 - A legacy ordinary `PUBLISHING` or `READY_TO_PUBLISH` record with
   `source_sha`, no `merge_request_draft`, and `intent=null` returns
   side-effect-free to its lane finalizer. Reconciliation never fabricates a

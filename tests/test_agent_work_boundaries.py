@@ -1517,6 +1517,73 @@ def test_gitlab_issue_notes_are_paginated_and_deterministically_ordered(
     assert all("per_page=100" in command for command in calls)
 
 
+def test_gitlab_human_handoff_is_paginated_factory_owned_and_sha_idempotent(
+    tmp_path: Path,
+) -> None:
+    """The human handoff is one factory-owned note for each exact MR SHA."""
+    commands: list[tuple[str, ...]] = []
+    notes: dict[int, list[dict[str, object]]] = {
+        1: [
+            _note_payload(note_id, body="<!-- unrelated -->")
+            for note_id in range(1, 101)
+        ],
+        2: [],
+    }
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        if "POST" in command:
+            return CommandResult(0, json.dumps({"id": 999}), "")
+        assert endpoint.endswith("/issues/12/notes")
+        page = int(
+            next(field for field in command if field.startswith("page=")).removeprefix(
+                "page="
+            )
+        )
+        return CommandResult(0, json.dumps(notes[page]), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+    mr = _mr_evidence()
+
+    gateway.ensure_human_handoff(issue_iid=12, merge_request=mr)
+
+    first_post = next(command for command in commands if "POST" in command)
+    first_body = next(
+        field.removeprefix("body=") for field in first_post if field.startswith("body=")
+    )
+    assert "<!-- agent-work-human-handoff:v1 key=" in first_body
+    assert mr.web_url in first_body
+    assert "approve and merge" in first_body
+    assert "actionable general or inline feedback" in first_body
+    assert "Only humans approve or merge" in first_body
+    assert [
+        field
+        for command in commands
+        if "POST" not in command
+        for field in command
+        if field.startswith("page=")
+    ] == ["page=1", "page=2"]
+
+    notes[1] = [_note_payload(101, body=first_body)]
+    commands.clear()
+    gateway.ensure_human_handoff(issue_iid=12, merge_request=mr)
+    assert sum("POST" in command for command in commands) == 1
+
+    notes[1] = [
+        _note_payload(102, body=first_body) | {"author": {"username": "factory-bot"}}
+    ]
+    commands.clear()
+    gateway.ensure_human_handoff(issue_iid=12, merge_request=mr)
+    assert not any("POST" in command for command in commands)
+
+    commands.clear()
+    gateway.ensure_human_handoff(
+        issue_iid=12, merge_request=mr.model_copy(update={"sha": "b" * 40})
+    )
+    assert sum("POST" in command for command in commands) == 1
+
+
 @pytest.mark.parametrize(
     "payload",
     [

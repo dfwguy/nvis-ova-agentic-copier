@@ -595,6 +595,7 @@ class _FeedbackGitLab(FakeGitLab):
         super().__init__(
             _issue().model_copy(update={"labels": ("agent::awaiting-human",)})
         )
+        self.handoff_keys.add((12, 88, "a" * 40))
         self.feedback: tuple[MergeRequestFeedback, ...] = ()
         self.feedback_by_mr: dict[int, tuple[MergeRequestFeedback, ...]] = {}
         self.feedback_outcomes: list[tuple[int, int, int, str]] = []

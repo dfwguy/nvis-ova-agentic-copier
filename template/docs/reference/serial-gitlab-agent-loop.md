@@ -254,7 +254,7 @@ defer it.
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
 | `agent::running` | preparing, executing, retry-wait, publishing, observing, or repair | Work is active or safely resumable. |
-| `agent::awaiting-human` | awaiting-human | Exact MR evidence and required receipts await human review. |
+| `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, required receipts, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
 
@@ -267,12 +267,34 @@ defer it.
 The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication
 enters `observing`, where the controller waits for the exact-SHA terminal state
-before a fresh Pipeline Performance Judge assesses it. A healthy result finishes
-at `awaiting-human`; a concrete repository-actionable problem is recorded as a
+before a fresh Pipeline Performance Judge assesses it. A healthy result writes
+the actionable handoff for the exact MR source commit and only then finishes at
+`awaiting-human`; a concrete repository-actionable problem is recorded as a
 deduplicated ordinary issue for later normal selection, not direct repair of the
 published MR. A human-blocked condition becomes `blocked`; after the
 recorded action is complete, an operator explicitly retries that IID. Human
 merge or closure ends an awaiting-human record.
+
+### Awaiting-human issue handoff
+
+Every durable `awaiting-human` projection has one factory-authored issue note
+for its exact merge request source commit. The note links to that merge request,
+names the commit, and asks a person to review that version. If it is acceptable,
+the person may approve and merge it; otherwise, the person leaves actionable
+general or inline merge-request feedback. Only a human may approve or merge.
+The runner does not auto-assign a reviewer because no trusted configured
+reviewer identity is part of this contract.
+
+The note is identified by a deterministic marker composed from the configured
+project, issue, merge request, and source SHA, and the runner accepts it only
+when its author is the configured factory identity. Reconciliation therefore
+does not duplicate a note for the same source SHA, but writes a new handoff when
+the verified source SHA changes. In an applied activation, a record already
+projected as `awaiting-human` is still repaired when that exact handoff is
+missing. A transient note-write failure leaves the record on durable retry and
+prevents a new `agent::awaiting-human` label. If a restart finds the note already
+written, it reuses that note and repairs the label; exact merge-request and
+worktree evidence remain required throughout.
 
 A newly selected issue attempts its complete applicable repository workflow in
 the same activation. A durable record resumes from its coarse `WORKFLOW`
