@@ -2553,11 +2553,8 @@ def _loads_configured_base_branch(script: str) -> bool:
 def test_manual_loop_run_examples_load_configured_base_branch(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
-    """Every manual loop activation runs with an explicit service base."""
+    """Manual loop activation guidance loads an explicit service base."""
     documents = (
-        project_root / "README.md",
-        template_dir / "README.md.jinja",
-        generated_project / "README.md",
         project_root / "docs/how-to/setup-serial-gitlab-agent-loop.md",
         template_dir / "docs/how-to/setup-serial-gitlab-agent-loop.md",
     )
@@ -2580,34 +2577,49 @@ def test_manual_loop_run_examples_load_configured_base_branch(
         ("rendered", ("uv run pytest",)),
     ),
 )
-def test_readmes_keep_only_starting_examples_and_one_safe_loop_preview(
+def test_readmes_keep_one_validation_fence_and_delegate_loop_setup_to_codex(
     document: str,
     validation_commands: tuple[str, ...],
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """Each README has its start command and one read-only loop preview."""
+    """Each README keeps validation executable and delegates loop management."""
     readmes = {
         "root": project_root / "README.md",
         "template": template_dir / "README.md.jinja",
         "rendered": generated_project / "README.md",
     }
-    bash_blocks = _bash_blocks(readmes[document].read_text())
-    loop_blocks = tuple(
-        block for block in bash_blocks if "uv run agent-work loop run" in block
+    content = readmes[document].read_text()
+    bash_blocks = _bash_blocks(content)
+    text_blocks = tuple(
+        re.findall(
+            r"^[ \t]*```text[ \t]*\n(?P<prompt>.*?)\n^[ \t]*```[ \t]*$",
+            content,
+            flags=re.DOTALL | re.MULTILINE,
+        )
     )
 
-    assert len(loop_blocks) == 1
-    preview = loop_blocks[0]
-    assert "export AGENT_WORK_BASE_BRANCH=agent/work-base" in preview
-    assert "export AGENT_WORK_FACTORY_USERNAME=" in preview
-    assert "uv run agent-work loop run --json" in preview
-    assert "--apply" not in preview
-
-    starting_blocks = tuple(block for block in bash_blocks if block != preview)
-    assert len(starting_blocks) == 1
-    assert all(command in starting_blocks[0] for command in validation_commands)
+    assert len(bash_blocks) == 1
+    assert all(command in bash_blocks[0] for command in validation_commands)
+    assert "uv run agent-work loop run" not in content
+    assert "AGENT_WORK_BASE_BRANCH" not in content
+    assert "AGENT_WORK_FACTORY_USERNAME" not in content
+    assert "ask codex" in content.casefold()
+    assert "recoverable serial gitlab agent loop" in content.casefold()
+    assert "(docs/how-to/setup-serial-gitlab-agent-loop.md)" in content
+    assert len(text_blocks) == 1
+    prompt = text_blocks[0].casefold()
+    for fragment in (
+        "follow",
+        "repository's instructions",
+        "loop setup guide",
+        "prerequisites",
+        "safeguards",
+        "human decisions",
+        "blockers",
+    ):
+        assert fragment in prompt
 
 
 def test_loop_reference_defines_required_base_before_claiming_work(
