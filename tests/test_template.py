@@ -325,7 +325,10 @@ def test_ci_jobs_publish_independent_reports(
     configuration = _ci_configuration(project_root)
     pytest_template = configuration[".pytest"]
     assert pytest_template["artifacts"]["reports"] == {
-        "junit": "test-results-$TEST_ENVIRONMENT.xml",
+        "junit": [
+            "test-results-$TEST_ENVIRONMENT-shard-1.xml",
+            "test-results-$TEST_ENVIRONMENT-shard-2.xml",
+        ],
         "coverage_report": {
             "coverage_format": "cobertura",
             "path": "coverage-$TEST_ENVIRONMENT.xml",
