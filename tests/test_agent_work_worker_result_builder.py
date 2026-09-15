@@ -161,6 +161,125 @@ def test_builder_preserves_a_complete_multiline_coding_receipt_audit(
     assert has_complete_workflow_receipt(transitioned)
 
 
+def test_builder_completes_successful_post_publication_assessment_for_human_handoff(
+    tmp_path: Path,
+) -> None:
+    """A healthy exact-source assessment records its receipt before handoff."""
+    record = _record(tmp_path).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
+    )
+    assessment = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "coding",
+            "result_kind": "ready_to_publish",
+            "receipts": ("$pipeline-performance-judge: exact source is healthy",),
+            "change_summary": "The exact-source pipeline is healthy.",
+            "next_action": "Await human review of the merge request.",
+        }
+    )
+
+    result = build_worker_result(record, assessment, changed_paths=())
+    transitioned = apply_worker_result(
+        record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
+    ).record
+
+    assert result.phase_status == "complete"
+    assert transitioned.state is RunnerState.AWAITING_HUMAN
+    assert transitioned.phase is WorkflowPhase.POST_PUBLICATION
+    assert transitioned.receipts[-1].verdict == "complete"
+    assert "exact source is healthy" in transitioned.receipts[-1].detail
+
+
+@pytest.mark.parametrize(
+    ("result_kind", "error_code", "expected_state", "preserves_error_code"),
+    [
+        ("needs_human", "pipeline_rejected", RunnerState.BLOCKED, True),
+        ("retryable", "pipeline_pending", RunnerState.RETRY_WAIT, False),
+    ],
+)
+def test_builder_keeps_actionable_post_publication_assessments_rejected(
+    tmp_path: Path,
+    result_kind: str,
+    error_code: str,
+    expected_state: RunnerState,
+    preserves_error_code: bool,
+) -> None:
+    """Actionable assessments retain their judge evidence instead of handoff."""
+    record = _record(tmp_path).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
+    )
+    assessment = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "coding",
+            "result_kind": result_kind,
+            "receipts": ("$pipeline-performance-judge: actionable evidence",),
+            "change_summary": "The exact-source pipeline needs follow-up.",
+            "next_action": "Resolve the recorded pipeline feedback.",
+            "error_code": error_code,
+        }
+    )
+
+    result = build_worker_result(record, assessment, changed_paths=())
+    transitioned = apply_worker_result(
+        record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
+    ).record
+
+    assert result.phase_status == "rejected"
+    assert result.receipts == assessment.receipts
+    assert transitioned.state is expected_state
+    if preserves_error_code:
+        assert transitioned.error_code is result.error_code
+
+
+@pytest.mark.parametrize(
+    "assessment",
+    [
+        {
+            "workflow_lane": "coding",
+            "result_kind": "ready_to_publish",
+            "receipts": ("$tdd-finalizer: unrelated receipt",),
+            "change_summary": "Malformed assessment.",
+            "next_action": "Do not hand off.",
+        },
+        {
+            "workflow_lane": "content",
+            "result_kind": "ready_to_publish",
+            "receipts": ("$pipeline-performance-judge: healthy",),
+            "change_summary": "Contradictory lane.",
+            "next_action": "Do not hand off.",
+        },
+    ],
+    ids=("malformed-receipt", "contradictory-lane"),
+)
+def test_builder_rejects_incoherent_successful_post_publication_assessments(
+    tmp_path: Path, assessment: dict[str, object]
+) -> None:
+    record = _record(tmp_path).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
+    )
+
+    with pytest.raises(WorkerProtocolError, match=r"receipts:.*coherent"):
+        build_worker_result(
+            record,
+            WorkerResultBuildInput.model_validate(assessment),
+            changed_paths=(),
+        )
+
+
+def test_builder_input_forbids_worker_control_of_derived_phase_status() -> None:
+    payload = {
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "receipts": ["$pipeline-performance-judge: healthy"],
+        "phase_status": "complete",
+        "change_summary": "Contradictory worker intent.",
+        "next_action": "Do not accept derived fields.",
+    }
+
+    with pytest.raises(WorkerProtocolError, match="input: invalid value"):
+        parse_worker_result_build_input(json.dumps(payload))
+
+
 @pytest.mark.parametrize(
     ("field", "untrusted_value"),
     [
