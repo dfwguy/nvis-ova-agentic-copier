@@ -510,6 +510,60 @@ class GitLabGateway:
             sorted(notes_by_id.values(), key=lambda note: (note.created_at, note.id))
         )
 
+    def ensure_human_handoff(
+        self, *, issue_iid: int, merge_request: MergeRequestEvidence
+    ) -> bool:
+        """Create one factory-authored actionable review handoff per exact SHA."""
+        identity = json.dumps(
+            {
+                "issue": issue_iid,
+                "mr": merge_request.iid,
+                "project": self._config.project_id,
+                "sha": merge_request.sha,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        marker = (
+            "<!-- agent-work-human-handoff:v1 key="
+            + hashlib.sha256(identity.encode()).hexdigest()
+            + " -->"
+        )
+        for page in range(1, _MAX_NOTE_PAGES + 1):
+            notes = self._items(
+                self._call(
+                    f"projects/{self._config.project_id}/issues/{issue_iid}/notes",
+                    fields=("per_page=100", f"page={page}"),
+                ),
+                "issue note list",
+            )
+            if any(
+                marker in str(note.get("body", ""))
+                and isinstance(note.get("author"), dict)
+                and cast(dict[str, object], note["author"]).get("username")
+                == self._config.factory_username
+                for note in notes
+            ):
+                return False
+            if len(notes) < 100:
+                break
+        else:
+            raise GitLabError("GitLab returned too many issue note pages")
+        body = (
+            f"{marker}\n"
+            f"Human review is ready for MR !{merge_request.iid}: {merge_request.web_url}\n"
+            f"Exact source commit: {merge_request.sha}\n\n"
+            "Please review this merge request. If it is acceptable, approve and merge it; "
+            "otherwise leave actionable general or inline feedback on that MR. "
+            "Only humans approve or merge."
+        )
+        self._call(
+            f"projects/{self._config.project_id}/issues/{issue_iid}/notes",
+            method="POST",
+            fields=(f"body={body}",),
+        )
+        return True
+
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
         """Project exactly one lifecycle label and verify the result."""
         removed_labels = tuple(

@@ -156,6 +156,10 @@ class FakeGitLab:
     def __init__(self, issue: GitLabIssue | None = None) -> None:
         self.issue = issue or _issue()
         self.labels: list[str | None] = []
+        self.events: list[str] = []
+        self.handoffs: list[tuple[int, int, str]] = []
+        self.handoff_keys: set[tuple[int, int, str]] = set()
+        self.handoff_failures = 0
         self.comments: list[str] = []
         self.pipeline: PipelineEvidence | None = None
         self.existing_mr: MergeRequestEvidence | None = None
@@ -254,7 +258,23 @@ class FakeGitLab:
             self.label_failures -= 1
             raise GitLabError("temporary label failure")
         self.labels.append(label)
+        self.events.append(f"label:{label}")
         return self.issue
+
+    def ensure_human_handoff(
+        self, *, issue_iid: int, merge_request: MergeRequestEvidence
+    ) -> bool:
+        """Record the injected durable human-review notification boundary."""
+        if self.handoff_failures:
+            self.handoff_failures -= 1
+            raise GitLabError("temporary handoff failure")
+        key = (issue_iid, merge_request.iid, merge_request.sha)
+        if key in self.handoff_keys:
+            return False
+        self.handoff_keys.add(key)
+        self.handoffs.append(key)
+        self.events.append(f"handoff:{merge_request.sha}")
+        return True
 
     def comment_outcome(
         self, iid: int, *, error_code: str, summary: str, next_action: str
@@ -2066,6 +2086,128 @@ def test_unpinned_selection_skips_terminal_stale_record_without_open_mr(
 
     assert selected is not None and selected.issue_iid == 13
     assert issue is not None and issue.iid == 13
+
+
+def test_unpinned_selection_skips_complete_awaiting_handoff(
+    tmp_path: Path,
+) -> None:
+    """A verified awaiting handoff cannot delay a fresh eligible issue."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    awaiting = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr().web_url,
+                "publication_sha": "a" * 40,
+            }
+        )
+    )
+
+    class MultiIssueGitLab(FakeGitLab):
+        def fetch_issue(self, iid: int) -> GitLabIssue:
+            return self.issue if iid == 12 else _issue(iid=iid)
+
+        def list_eligible(self) -> tuple[GitLabIssue, ...]:
+            return (_issue(iid=13),)
+
+    gitlab = MultiIssueGitLab(
+        _issue().model_copy(update={"labels": ("agent::awaiting-human",)})
+    )
+    gitlab.handoff_keys.add((12, 88, "a" * 40))
+
+    selected, issue = select_record(
+        ledger, gitlab, now=NOW, repository=FakeRepository(config)
+    )
+
+    assert selected is not None and selected.issue_iid == 13
+    assert issue is not None and issue.iid == 13
+    assert ledger.load(12) == awaiting
+    assert gitlab.handoffs == []
+    assert gitlab.events == []
+
+
+def test_malformed_awaiting_handoff_blocks_before_eligible_selection(
+    tmp_path: Path,
+) -> None:
+    """Missing exact publication evidence cannot leave an awaiting handoff live."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        )
+    )
+
+    class MultiIssueGitLab(FakeGitLab):
+        def list_eligible(self) -> tuple[GitLabIssue, ...]:
+            return (_issue(iid=13),)
+
+    gitlab = MultiIssueGitLab(
+        _issue().model_copy(update={"labels": ("agent::awaiting-human",)})
+    )
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.issue_iid == 12
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert gitlab.labels == ["agent::blocked"]
+    assert len(gitlab.comments) == 1
+
+
+def test_changed_awaiting_sha_blocks_before_eligible_selection(
+    tmp_path: Path,
+) -> None:
+    """Unreviewed external MR drift cannot leave an old handoff awaiting."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr().web_url,
+                "publication_sha": "a" * 40,
+            }
+        )
+    )
+
+    class MultiIssueGitLab(FakeGitLab):
+        def list_eligible(self) -> tuple[GitLabIssue, ...]:
+            return (_issue(iid=13),)
+
+    gitlab = MultiIssueGitLab(
+        _issue().model_copy(update={"labels": ("agent::awaiting-human",)})
+    )
+    gitlab.existing_mr = _mr(sha="b" * 40)
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.issue_iid == 12
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert gitlab.labels == ["agent::blocked"]
+    assert len(gitlab.comments) == 1
 
 
 def test_unpinned_selection_scans_every_terminal_record_for_a_later_published_mr(
@@ -4599,6 +4741,122 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
     assert report.items[-1].state is RunnerState.AWAITING_HUMAN
     assert invoker.phases == ["workflow", "post-publication"]
     assert gitlab.created_merge_requests == 1
+
+
+def test_awaiting_human_persists_handoff_before_projecting_awaiting_label(
+    tmp_path: Path,
+) -> None:
+    """A completed post-publication assessment cannot expose a bare label."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)),
+        invoke=SingleSessionInvoker(),
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.items[-1].state is RunnerState.AWAITING_HUMAN
+    assert gitlab.handoffs == [(12, 88, "a" * 40)]
+    handoff = f"handoff:{'a' * 40}"
+    awaiting_label = "label:agent::awaiting-human"
+    assert gitlab.events.count(awaiting_label) == 1
+    assert gitlab.events.index(handoff) < gitlab.events.index(awaiting_label)
+
+
+def test_handoff_failure_retries_without_projecting_awaiting_human_label(
+    tmp_path: Path,
+) -> None:
+    """A transient note failure leaves the awaiting label absent until recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab(_issue())
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.handoff_failures = 1
+    repository = FakeRepository(config)
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        invoke=SingleSessionInvoker(),
+    )
+
+    dispatch(
+        CommandRequest(
+            command="loop.run", max_segments=16, max_activation_seconds=3600
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    persisted = ledger.load(12)
+    assert persisted is not None
+    assert persisted.state is RunnerState.RETRY_WAIT
+    assert persisted.prior_state is RunnerState.AWAITING_HUMAN
+    assert "agent::awaiting-human" not in gitlab.labels
+    assert persisted.retry_at is not None
+
+    recovered = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=SingleSessionInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=persisted.retry_at,
+    )
+
+    assert recovered is not None and recovered.state is RunnerState.AWAITING_HUMAN
+    assert gitlab.handoffs == [(12, 88, "a" * 40)]
+    handoff = f"handoff:{'a' * 40}"
+    awaiting_label = "label:agent::awaiting-human"
+    assert gitlab.events.count(awaiting_label) == 1
+    assert gitlab.events.index(handoff) < gitlab.events.index(awaiting_label)
+
+
+def test_existing_awaiting_human_projection_recovers_missing_handoff_note(
+    tmp_path: Path,
+) -> None:
+    """A legacy awaiting label is repaired even when no feedback wakes the runner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr().web_url,
+                "publication_sha": "a" * 40,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::awaiting-human",)})
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is None
+    assert gitlab.handoffs == [(12, 88, "a" * 40)]
 
 
 def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(

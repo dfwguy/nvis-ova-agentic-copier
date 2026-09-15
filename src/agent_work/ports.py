@@ -86,6 +86,10 @@ class GitLabPort(Protocol):
 
     def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]: ...
 
+    def ensure_human_handoff(
+        self, *, issue_iid: int, merge_request: MergeRequestEvidence
+    ) -> bool: ...
+
     def transition_labels(self, iid: int, label: str | None) -> GitLabIssue: ...
 
     def comment_outcome(
