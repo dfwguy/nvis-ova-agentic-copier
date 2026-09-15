@@ -15,6 +15,13 @@ Key distinction: the `template/` directory is the **template output**, not the
 source being developed here. The serial runner itself is importable production
 code in `src/agent_work/`; the Copier contract tests live in `tests/`.
 
+## Factory objective and project context
+
+This repository's project-owned primary objective is to get and keep its
+self-improving factory running and to allow merge requests that improve that
+factory. This project context is owned here. `AGENTS.md` owns the portable
+standing authority, safeguards, and human approval and merge boundaries.
+
 ## Architecture
 
 ### Template Configuration (`copier.yaml`)
@@ -81,9 +88,11 @@ This repository is a Copier template, whose generated-project payload is under
 
 ## Template sync
 
-Mirror shared workflow changes in `template/`. The project notes are the one
-intentional difference: the template renders `.agents/project.md.jinja` with
-the generated project's name, description, and package path.
+Mirror portable shared policy changes in `template/`. Root
+`.agents/project.md` is the intentional contextual exception: it records this
+repository's project-owned context. The template source
+`template/.agents/project.md.jinja` renders a generated project's initial
+context with its name, description, and package path.
 
 ## Change-lane classification
 
@@ -96,11 +105,14 @@ non-trivial even when small.
 
 ## Documentation and agent-policy mirrors
 
-Shared workflow instructions, skills, roles, guidance, and documentation have
-byte-identical paths below the repository root and `template/`. The sole
-rendered exception is root `.agents/project.md` versus
-`template/.agents/project.md.jinja`. Smoke-render the Copier template after a
-template documentation or policy change.
+Portable shared policy, including `AGENTS.md`, instructions, skills, roles,
+guidance, and documentation, is template-owned and has byte-identical root and
+`template/` mirrors. Root `.agents/project.md` versus
+`template/.agents/project.md.jinja` is the intentional contextual/rendered
+exception. The rendered `.agents/project.md` becomes project-owned and Copier
+preserves it during updates through `_skip_if_exists`; it is not a portable
+policy mirror. Smoke-render the Copier template after a template documentation
+or policy change.
 
 ## Validation ownership
 

@@ -11,6 +11,15 @@
 
 **{{ project_name }}** — {{ description }}
 
+## Factory objective and project context
+
+The project-owned primary objective for **{{ project_name }}** is to get and
+keep its factory running so it improves **{{ project_name }}** through merge
+requests. This Jinja file is the template source for initial rendered project
+context. Once rendered, `.agents/project.md` is project-owned and preserved;
+`AGENTS.md` remains the owner of portable standing authority, safeguards, and
+human approval and merge boundaries.
+
 ## Architecture
 
 ### Packages (`src/{{ project_slug }}/` and `src/agent_work/`)
@@ -78,10 +87,13 @@ non-trivial even when small.
 
 ## Documentation and agent-policy mirrors
 
-Shared workflow instructions, skills, roles, guidance, and documentation have
-byte-identical paths below the template source and generated project. This
-rendered project context is the declared exception to root/template byte
-parity. Smoke-render Copier after a template documentation or policy change.
+Portable shared policy, including `AGENTS.md`, instructions, skills, roles,
+guidance, and documentation, is template-owned and has byte-identical template
+source and generated-project mirrors. This Jinja file supplies the initial
+rendered `.agents/project.md` context, which becomes project-owned and is the
+intentional exception to portable-policy mirror parity. Copier preserves that
+project context during updates through `_skip_if_exists`. Smoke-render Copier
+after a template documentation or policy change.
 
 ## Validation ownership
 
