@@ -31,19 +31,19 @@ project](docs/tutorials/create-your-first-project.md). The [template
 contract](docs/reference/template-contract.md) describes inputs, tasks, output,
 and updates.
 
-## Agent-loop preview
+## Set up the agent loop
 
-Preview the next safe action without changing the repository or GitLab:
+From this repository checkout, ask Codex to guide the setup and ongoing
+management of the recoverable serial GitLab agent loop:
 
-```bash
-export AGENT_WORK_BASE_BRANCH=agent/work-base
-export AGENT_WORK_FACTORY_USERNAME=your-service-account
-uv run agent-work loop run --json
+```text
+Set up and manage the recoverable serial GitLab agent loop for this repository.
+Follow this repository's instructions and the linked loop setup guide. Check
+the prerequisites and safeguards, and surface any human decisions or blockers.
 ```
 
-`AGENT_WORK_FACTORY_USERNAME` must match the authenticated GitLab service
-username. Use the [loop setup guide](docs/how-to/setup-serial-gitlab-agent-loop.md)
-for installation and operation.
+The [loop setup guide](docs/how-to/setup-serial-gitlab-agent-loop.md) is the
+detailed procedure and source of truth for installation and operation.
 
 ## Learn more
 
