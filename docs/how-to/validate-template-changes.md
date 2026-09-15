@@ -1,11 +1,11 @@
 ---
-title: Validate template changes
+title: How to validate template changes
 type: how-to
 summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-15
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -22,7 +22,7 @@ related:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# Validate template changes
+# How to validate template changes
 
 Use this when you have changed this
 Copier template and need to verify the change before opening a merge request.
@@ -47,8 +47,16 @@ definition, whose image is
 pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
 `uv sync` bootstrap. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
-GitLab job. The two root pytest jobs retain separate Python 3.11 and 3.14.3
-JUnit and coverage reports.
+GitLab job. Each root pytest job runs two deterministic concurrent shards and
+publishes a JUnit report for each shard. After both shards finish, the job
+combines their coverage data, measures only the maintained `src/agent_work`
+source tree, enforces the existing 85% floor, and publishes one combined
+Cobertura report for its Python version. A shard failure, or a failure while
+combining, checking, or reporting coverage, fails the named pytest job. When
+investigating a failed job, inspect both shard JUnits and, when generation
+succeeded, its combined coverage report; otherwise use the job log. The
+generated Copier payload is not part of that root coverage
+measurement.
 
 The generated template deliberately keeps its portable `validation (9 gates)`
 aggregate job. It performs the dependency bootstrap once, then reports its

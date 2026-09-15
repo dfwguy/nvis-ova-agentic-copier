@@ -1,11 +1,11 @@
 ---
-title: Refresh the CI dependency image
+title: How to refresh the CI dependency image
 type: how-to
 summary: Publish, pin, and verify the project-only CI image that root validation consumes.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-15
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -22,7 +22,7 @@ related:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# Refresh the CI dependency image
+# How to refresh the CI dependency image
 
 Use this procedure after changing `Dockerfile`, `pyproject.toml`, or `uv.lock`.
 They are all image-build inputs. The image is a project-only root-repository
@@ -72,10 +72,14 @@ locked project dependencies. They must not run `apt-get`, `uv python install`,
 `uv sync`, or another dependency-installation fallback.
 
 Run the consumer pipeline and inspect the nine named root jobs directly; do
-not look for a root synthetic aggregate validation job or JUnit gate suite. The
-two pytest jobs retain separate JUnit and coverage reports. Apply the project
-budget to the longest executed terminal job with a numeric duration: prefer at
-most 60 seconds and reject execution over 120 seconds. Report skipped,
+not look for a root synthetic aggregate validation job or JUnit gate suite. In
+each pytest job, inspect both shard JUnit reports and the one combined
+per-version Cobertura report when it was generated; otherwise inspect the job
+log. The combined report measures only maintained `src/agent_work` source. A
+failure in either shard or in coverage aggregation, floor enforcement, or
+report generation fails that named job. Apply the
+project budget to the longest executed terminal job with a numeric duration:
+prefer at most 60 seconds and reject execution over 120 seconds. Report skipped,
 canceled, or manual jobs, the overall pipeline span, and queue time separately;
 runner scheduling does not count against the execution budget. If the image
 needs another dependency, refresh and publish the image first, then repeat this

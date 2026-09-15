@@ -313,6 +313,139 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
         assert observed.read_text().strip() == expected_environment
 
 
+def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
+    project_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Each image environment keeps both shard reports and one rooted coverage file."""
+    configuration = yaml.safe_load(
+        (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
+    )
+    pytest_template = configuration[".pytest"]
+    script = "\n".join(pytest_template["script"])
+
+    assert pytest_template["artifacts"]["reports"]["junit"] == [
+        "test-results-$TEST_ENVIRONMENT-shard-1.xml",
+        "test-results-$TEST_ENVIRONMENT-shard-2.xml",
+    ]
+    assert "tests/test_agent_work_serial_runtime.py tests/test_template.py" in script
+    assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
+    assert "--ignore=tests/test_template.py" in script
+    assert "--cov=src/agent_work" in script
+    assert "coverage combine \\" in script
+    assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
+    assert '".coverage.$TEST_ENVIRONMENT-shard-2"' in script
+    assert "coverage report --fail-under=85" in script
+    assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
+    assert script.index("coverage report --fail-under=85") < script.index(
+        "coverage xml"
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "uv-invocations"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
+        '>> "$INVOCATIONS"\n'
+        "if [[ \"$*\" == *'--ignore=tests/test_template.py'* ]] && "
+        '[[ "${FAIL_SECOND_SHARD:-0}" = 1 ]]; then\n'
+        "    exit 7\n"
+        "fi\n"
+        "if [[ \"$*\" == *'coverage report --fail-under=85'* ]] && "
+        '[[ "${FAIL_COVERAGE_REPORT:-0}" = 1 ]]; then\n'
+        "    exit 9\n"
+        "fi\n"
+        "if [[ \"$*\" == *'coverage combine'* ]] && "
+        '[[ "${FAIL_COVERAGE_COMBINE:-0}" = 1 ]]; then\n'
+        "    exit 8\n"
+        "fi\n"
+    )
+    fake_uv.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CI_PROJECT_DIR": str(tmp_path),
+            "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
+            "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
+            "INVOCATIONS": str(invocations),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "TEST_ENVIRONMENT": "py311",
+        }
+    )
+
+    succeeded = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert succeeded.returncode == 0
+    calls = invocations.read_text().splitlines()
+    assert len(calls) == 5
+    assert {call.split("|", maxsplit=2)[1] for call in calls[:2]} == {
+        ".coverage.py311-shard-1",
+        ".coverage.py311-shard-2",
+    }
+    assert all(call.startswith(f"{tmp_path / 'src'}|") for call in calls[:2])
+    assert all("--cov=src/agent_work" in call for call in calls[:2])
+
+    failed_environment = environment | {"FAIL_SECOND_SHARD": "1"}
+    failed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=failed_environment,
+        text=True,
+    )
+
+    assert failed.returncode != 0
+    assert len(invocations.read_text().splitlines()) == 7
+
+    coverage_failed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment | {"FAIL_COVERAGE_REPORT": "1"},
+        text=True,
+    )
+
+    assert coverage_failed.returncode == 9
+    coverage_failure_calls = invocations.read_text().splitlines()[-5:]
+    report_index = next(
+        index
+        for index, call in enumerate(coverage_failure_calls)
+        if "coverage report --fail-under=85" in call
+    )
+    xml_index = next(
+        index
+        for index, call in enumerate(coverage_failure_calls)
+        if "coverage xml" in call
+    )
+    assert report_index < xml_index
+
+    combine_failed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment | {"FAIL_COVERAGE_COMBINE": "1"},
+        text=True,
+    )
+
+    assert combine_failed.returncode == 8
+    combine_failure_calls = invocations.read_text().splitlines()[-3:]
+    assert any("coverage combine" in call for call in combine_failure_calls)
+    assert all("coverage report" not in call for call in combine_failure_calls)
+    assert all("coverage xml" not in call for call in combine_failure_calls)
+
+
 def test_portable_template_keeps_its_independent_validation_bootstrap(
     project_root: Path,
 ) -> None:
