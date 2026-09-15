@@ -365,7 +365,12 @@ worktree path. Every active issue has one atomic, restrictive-permission ledger
 record and durable worktree. Version 2 adds the bounded issue title;
 activation, latest-meaningful-event, and completion timestamps; main, source,
 publication, and merge-request identities; and bounded retry and failure
-history separated from the current actionable error. It also retains a typed,
+history separated from the current actionable error. When the fixed automatic
+retry budget is exhausted, the current condition is `retry_exhausted`; the bounded
+condition history retains the latest sanitized underlying condition code and
+detail. Human and JSON status communicate that exhaustion together with the
+retained actionable cause, and the safe issue lifecycle outcome is
+`agent::blocked`. It also retains a typed,
 bounded final AI workflow summary: selected lane, capacity decision, nested
 roles, changed paths, tests and JUnit evidence, reviewers, and findings and
 corrections. The runner corroborates its canonical changed-path list against

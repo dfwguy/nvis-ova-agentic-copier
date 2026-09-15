@@ -904,18 +904,26 @@ def _record_retry(
 ) -> LedgerRecord:
     """Persist one bounded retry and optionally publish its exhaustion block."""
     outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
+    condition = ConditionEvidence(
+        occurred_at=now,
+        retry_count=outcome.retry_count,
+        code=error_code.value,
+        detail=detail or outcome.summary,
+    )
+    history = (
+        *record.condition_history,
+        condition,
+    )[-64:]
     if outcome.state is RunnerState.RETRY_WAIT:
-        history = (
-            *record.condition_history,
-            ConditionEvidence(
-                occurred_at=now,
-                retry_count=outcome.retry_count,
-                code=error_code.value,
-                detail=detail or outcome.summary,
-            ),
-        )[-64:]
         outcome = outcome.model_copy(
             update={"error_code": error_code, "condition_history": history}
+        )
+    else:
+        outcome = outcome.model_copy(
+            update={
+                "condition_history": history,
+                "summary": f"{outcome.summary} {condition.code}: {condition.detail}",
+            }
         )
     outcome = ledger.persist(outcome)
     if outcome.state is RunnerState.BLOCKED and allow_remote_exhaustion_side_effects:

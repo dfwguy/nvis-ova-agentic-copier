@@ -38,6 +38,7 @@ from agent_work.gitlab import GitLabError
 from agent_work.ledger import JsonLedger, LedgerError
 from agent_work.models import (
     AgentWorkConfig,
+    ConditionEvidence,
     DecisionReviewSignal,
     GitLabIssue,
     GitLabIssueNote,
@@ -161,6 +162,7 @@ class FakeGitLab:
         self.handoff_keys: set[tuple[int, int, str]] = set()
         self.handoff_failures = 0
         self.comments: list[str] = []
+        self.outcome_comments: list[tuple[str, str, str]] = []
         self.pipeline: PipelineEvidence | None = None
         self.existing_mr: MergeRequestEvidence | None = None
         self.open_branch_merge_requests: tuple[MergeRequestEvidence, ...] = ()
@@ -279,8 +281,9 @@ class FakeGitLab:
     def comment_outcome(
         self, iid: int, *, error_code: str, summary: str, next_action: str
     ) -> None:
-        del iid, error_code, next_action
+        del iid
         self.comments.append(summary)
+        self.outcome_comments.append((error_code, summary, next_action))
 
     def fetch_merge_request(self, iid: int) -> MergeRequestEvidence:
         self.fetched_merge_requests.append(iid)
@@ -1730,6 +1733,75 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
     assert diagnostic == expected_detail
     assert len(diagnostic.encode("utf-8")) <= 2048
     assert sensitive_value not in diagnostic
+
+
+def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
+    tmp_path: Path,
+) -> None:
+    """A budget-exhausted worker retry retains its safe actionable cause."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    history = tuple(
+        ConditionEvidence(code=f"prior_condition_{index}", detail=f"prior {index}")
+        for index in range(64)
+    )
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"retry_count": 3, "condition_history": history})
+    )
+
+    gitlab = FakeGitLab()
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1,'
+            '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    status = dispatch(
+        CommandRequest(command="loop.status", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.RETRY_EXHAUSTED
+    assert outcome.retry_count == 3 and outcome.retry_at is None
+    assert outcome.next_action == (
+        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
+    )
+    assert len(outcome.condition_history) == 64
+    assert outcome.condition_history[0].code == "prior_condition_1"
+    assert outcome.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
+    assert outcome.condition_history[-1].detail == "protocol_version: must equal 2"
+    assert status.items[0].current_condition is not None
+    assert status.items[0].current_condition.code == ErrorCode.RETRY_EXHAUSTED.value
+    assert (
+        "Automatic retry budget exhausted." in status.items[0].current_condition.detail
+    )
+    assert "worker_protocol_invalid" in status.items[0].current_condition.detail
+    assert "protocol_version: must equal 2" in status.items[0].current_condition.detail
+    assert status.items[0].condition_history[-1] == outcome.condition_history[-1]
+    assert len(gitlab.outcome_comments) == 1
+    comment_code, comment_summary, comment_action = gitlab.outcome_comments[0]
+    assert comment_code == "retry_exhausted"
+    assert comment_action == (
+        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
+    )
+    assert "Automatic retry budget exhausted." in comment_summary
+    assert "worker_protocol_invalid" in comment_summary
+    assert "protocol_version: must equal 2" in comment_summary
+    comment = f"{comment_code}\n{comment_summary}\n{comment_action}"
+    assert "worker_protocol_invalid" in comment
+    assert "protocol_version: must equal 2" in comment
+    assert "raw-worker-prose-secret" not in comment
 
 
 def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
