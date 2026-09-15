@@ -205,6 +205,10 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
         details = [report.outcome]
         if report.stop_reason:
             details.append(f"stop_reason={report.stop_reason}")
+        if report.summary:
+            details.append(f"summary={report.summary}")
+        if report.next_action:
+            details.append(f"next_action={report.next_action}")
         for item in report.items[-1:]:
             details.extend(
                 (

@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-14
+last_reviewed: 2026-09-15
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -44,17 +44,23 @@ For each activation, the controller performs these stages in order:
 2. **Reconcile** — compare the ledger with GitLab issues and merge requests,
    Git branches, and any retained worktree. Recoverable work always comes
    before new work.
-3. **Select** — select at most one eligible issue, or stop when no safe item is
-   available. Fresh selection is deterministic: exact high priority, then
-   normal, then exact low priority; creation time and IID break ties.
-4. **Prepare worktree** — create or recover that issue's retained worktree.
+3. **Observe pipeline safety** — before fresh selection, inspect the newest
+   default-branch pipeline and each open merge request's newest pipeline for
+   its current source SHA. Missing, malformed, or inaccessible evidence blocks;
+   a nonterminal pipeline yields; a terminal failure takes priority over
+   ordinary work.
+4. **Select** — after any safe resumable work and the pipeline gate, select at
+   most one eligible issue, or stop when no safe item is available. Fresh
+   selection is deterministic: exact high priority, then normal, then exact
+   low priority; creation time and IID break ties.
+5. **Prepare worktree** — create or recover that issue's retained worktree.
    Only after selection and preparation does the controller invoke AI.
-5. **Run the workflow session** — one bounded, workflow-owning AI session
+6. **Run the workflow session** — one bounded, workflow-owning AI session
    handles the issue.
-6. **Validate and publish** — validate the bounded result against the ledger,
+7. **Validate and publish** — validate the bounded result against the ledger,
    Git, required receipts, and configured project. When justified, publish or
    update the same branch and merge request, then verify the exact handoff.
-7. **Record and exit** — persist evidence and the next safe action, then exit
+8. **Record and exit** — persist evidence and the next safe action, then exit
    rather than taking another issue.
 
 The controller updates current `main` before publication through normal Git
@@ -62,6 +68,17 @@ reconciliation in the retained worktree. It does not discard work to refresh
 the base. Pipeline observation, a future external retry, no progress, a budget
 limit, or a human-facing state ends the activation; retryable worker failures
 can continue within it when time remains.
+
+The same gate protects manual applied runs and timer-driven next activations,
+so one entry path cannot start unrelated work while the other has detected a
+pipeline problem. A failed merge-request pipeline can resume bounded repair
+only through a retained owner with exact project, merge-request, branch,
+current-source-SHA, and worktree evidence. A failed default-branch pipeline or
+an ownerless failed merge request instead produces an actionable human block.
+This intentionally favors visible, attributable recovery over guessing which
+issue should repair shared or ambiguous pipeline evidence. The [reference
+contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate)
+defines the statuses and exact checks.
 
 ## The work stays inside one AI session
 

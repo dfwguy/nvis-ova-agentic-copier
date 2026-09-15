@@ -20,6 +20,7 @@ from .classification import ClassificationError, classify_work, is_protected_pol
 from .domain import (
     ACTIVE_STATES,
     LIFECYCLE_LABELS,
+    NONTERMINAL_PIPELINE_STATUSES,
     ErrorCode,
     RunnerState,
     WorkflowLane,
@@ -2084,14 +2085,7 @@ def _observe(
             gitlab=gitlab,
             summary="Observed merge request evidence is not exact.",
         )
-    if pipeline is None or pipeline.status in {
-        "created",
-        "waiting_for_resource",
-        "preparing",
-        "scheduled",
-        "pending",
-        "running",
-    }:
+    if pipeline is None or pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
         return record
     return ledger.persist(
         transition_record(

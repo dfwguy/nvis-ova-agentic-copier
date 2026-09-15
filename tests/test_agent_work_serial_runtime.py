@@ -63,7 +63,7 @@ from agent_work.repository import (
     RepositoryTransientError,
     classify_publication_failure,
 )
-from agent_work.runtime import RuntimeDependencies, dispatch
+from agent_work.runtime import RuntimeDependencies, dispatch, find_exact_pipeline_owner
 from agent_work.serial import SegmentError, run_segment, select_record
 from agent_work.state_machine import WORKFLOW_RECEIPTS
 from agent_work.worker import AgentInvoker, WorkerInvocation, WorkerProtocolError
@@ -164,6 +164,18 @@ class FakeGitLab:
         self.comments: list[str] = []
         self.outcome_comments: list[tuple[str, str, str]] = []
         self.pipeline: PipelineEvidence | None = None
+        self.default_branch_pipeline: PipelineEvidence | None = PipelineEvidence(
+            id=1,
+            status="success",
+            sha="d" * 40,
+            web_url="https://pipeline/main",
+        )
+        self.open_merge_request_inventory: tuple[MergeRequestEvidence, ...] = ()
+        self.pipeline_by_merge_request: dict[
+            tuple[int, str], PipelineEvidence | None
+        ] = {}
+        self.preselection_calls: list[str] = []
+        self.eligible_calls = 0
         self.existing_mr: MergeRequestEvidence | None = None
         self.open_branch_merge_requests: tuple[MergeRequestEvidence, ...] = ()
         self.open_branch_error: GitLabError | None = None
@@ -220,6 +232,8 @@ class FakeGitLab:
         del iid, issue_iid, source, note_id, discussion_id, selection_sha, summary
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]:
+        self.eligible_calls += 1
+        self.preselection_calls.append("list_eligible")
         return (
             (self.issue,)
             if self.issue.state == "opened"
@@ -355,10 +369,24 @@ class FakeGitLab:
         return self.closing_results.pop(0) if self.closing_results else True
 
     def latest_pipeline_for_sha(self, mr_iid: int, sha: str) -> PipelineEvidence | None:
-        del mr_iid, sha
         if self.pipeline_error is not None:
             raise self.pipeline_error
-        return self.pipeline
+        self.preselection_calls.append(f"pipeline_for_sha:{mr_iid}:{sha}")
+        return self.pipeline_by_merge_request.get((mr_iid, sha), self.pipeline)
+
+    def latest_pipeline_for_ref(self, ref: str) -> PipelineEvidence | None:
+        """Return the latest configured default-branch pipeline evidence."""
+        if self.pipeline_error is not None:
+            raise self.pipeline_error
+        self.preselection_calls.append(f"pipeline_for_ref:{ref}")
+        return self.default_branch_pipeline
+
+    def open_merge_requests(self) -> tuple[MergeRequestEvidence, ...]:
+        """Return configured open-MR inventory for pre-selection checks."""
+        if self.pipeline_error is not None:
+            raise self.pipeline_error
+        self.preselection_calls.append("open_merge_requests")
+        return self.open_merge_request_inventory
 
     def split_child_inventory(self) -> tuple[GitLabIssue, ...]:
         return (
@@ -5229,6 +5257,411 @@ def test_apply_stops_after_one_pending_pipeline_observation(tmp_path: Path) -> N
         RunnerState.OBSERVING,
     ]
     assert gitlab.created_merge_requests == 1
+
+
+@pytest.mark.parametrize("apply", (False, True))
+def test_loop_run_checks_clear_pipeline_inventory_before_ordinary_selection(
+    tmp_path: Path, *, apply: bool
+) -> None:
+    """Both preview and apply gate ordinary selection on clear pipeline evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status="success", sha="b" * 40, web_url="https://pipeline/main"
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=apply,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome in {"eligible", "activation_complete"}
+    assert gitlab.preselection_calls == [
+        "pipeline_for_ref:main",
+        "open_merge_requests",
+        "list_eligible",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome", "expected_stop_reason"),
+    (
+        ("failed", "pipeline_blocked", "pipeline_blocked"),
+        ("running", "pipeline_wait", "pipeline_wait"),
+    ),
+)
+def test_loop_run_default_branch_pipeline_prevents_fresh_selection(
+    tmp_path: Path,
+    status: str,
+    expected_outcome: str,
+    expected_stop_reason: str,
+) -> None:
+    """A failed or nonterminal default pipeline fails closed before issue lookup."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status=status, sha="b" * 40, web_url="https://pipeline/main"
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == expected_outcome
+    assert report.stop_reason == expected_stop_reason
+    assert report.items == ()
+    assert report.summary is not None
+    assert "https://pipeline/main" in report.summary
+    assert report.next_action
+    assert gitlab.eligible_calls == 0
+    assert gitlab.preselection_calls == ["pipeline_for_ref:main"]
+
+
+@pytest.mark.parametrize("apply", (False, True))
+def test_loop_run_missing_default_branch_pipeline_fails_closed(
+    tmp_path: Path, *, apply: bool
+) -> None:
+    """Missing default-branch evidence cannot authorize new issue selection."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = None
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=apply,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "pipeline_inventory_blocked"
+    assert report.stop_reason == "pipeline_inventory_blocked"
+    assert report.items == ()
+    assert report.summary
+    assert report.next_action
+    assert gitlab.eligible_calls == 0
+    assert gitlab.preselection_calls == ["pipeline_for_ref:main"]
+
+
+@pytest.mark.parametrize("apply", (False, True))
+def test_loop_run_missing_open_merge_request_pipeline_fails_closed(
+    tmp_path: Path, *, apply: bool
+) -> None:
+    """Every opened MR needs exact-current-SHA evidence before selection."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha="a" * 40)
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status="success", sha="b" * 40, web_url="https://pipeline/main"
+    )
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = None
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=apply,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "pipeline_inventory_blocked"
+    assert report.stop_reason == "pipeline_inventory_blocked"
+    assert report.items == ()
+    assert report.summary
+    assert report.next_action
+    assert gitlab.eligible_calls == 0
+    assert gitlab.preselection_calls == [
+        "pipeline_for_ref:main",
+        "open_merge_requests",
+        f"pipeline_for_sha:{merge_request.iid}:{merge_request.sha}",
+    ]
+
+
+def test_loop_run_uses_open_merge_request_iid_order_and_exact_current_sha(
+    tmp_path: Path,
+) -> None:
+    """Stale failed pipeline evidence cannot outrank each MR's current SHA."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status="success", sha="d" * 40, web_url="https://pipeline/main"
+    )
+    first = _mr(sha="a" * 40).model_copy(update={"iid": 12})
+    second = _mr(sha="b" * 40).model_copy(update={"iid": 88})
+    gitlab.open_merge_request_inventory = (second, first)
+    gitlab.pipeline_by_merge_request = {
+        (12, "a" * 40): PipelineEvidence(
+            id=2, status="success", sha="a" * 40, web_url="https://pipeline/2"
+        ),
+        (88, "b" * 40): PipelineEvidence(
+            id=3, status="success", sha="b" * 40, web_url="https://pipeline/3"
+        ),
+        (88, "c" * 40): PipelineEvidence(
+            id=4, status="failed", sha="c" * 40, web_url="https://pipeline/stale"
+        ),
+    }
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "eligible"
+    assert gitlab.preselection_calls == [
+        "pipeline_for_ref:main",
+        "open_merge_requests",
+        f"pipeline_for_sha:12:{'a' * 40}",
+        f"pipeline_for_sha:88:{'b' * 40}",
+        "list_eligible",
+    ]
+
+
+def test_loop_run_pipeline_inventory_error_fails_closed_before_fresh_selection(
+    tmp_path: Path,
+) -> None:
+    """Transport or validation failure cannot fall through to ordinary issue selection."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.pipeline_error = GitLabError("pipeline inventory unavailable")
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "pipeline_inventory_blocked"
+    assert report.items == ()
+    assert report.summary
+    assert report.next_action
+    assert gitlab.eligible_calls == 0
+    assert gitlab.preselection_calls == []
+
+
+def test_loop_run_failed_exact_merge_request_pipeline_resumes_safe_retained_owner(
+    tmp_path: Path,
+) -> None:
+    """An exact failed MR pipeline resumes its corroborated owner before fresh work."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha=retained.source_sha or "a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+    invoker = FakeInvoker()
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+        ),
+    )
+
+    assert report.stop_reason == "repair"
+    assert [item.issue_iid for item in report.items] == [retained.issue_iid]
+    assert gitlab.eligible_calls == 0
+    assert invoker.prompts == []
+
+
+@pytest.mark.parametrize("owner_kind", ("missing", "sha_mismatch"))
+def test_loop_run_failed_merge_request_pipeline_without_safe_owner_fails_closed(
+    tmp_path: Path, owner_kind: str
+) -> None:
+    """A failed MR pipeline never falls through to an unrelated fresh issue."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    if owner_kind == "sha_mismatch":
+        owner = _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(
+            update={
+                "source_sha": "b" * 40,
+                "merge_request_iid": 88,
+            }
+        )
+        ledger.persist(owner)
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha="a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+    invoker = FakeInvoker()
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+        ),
+    )
+
+    assert report.outcome == "pipeline_blocked"
+    assert report.stop_reason == "pipeline_blocked"
+    assert report.items == ()
+    assert report.summary is not None
+    assert "https://pipeline/4" in report.summary
+    assert report.next_action
+    assert gitlab.eligible_calls == 0
+    assert invoker.prompts == []
+
+
+def test_loop_run_with_multiple_pipeline_wait_owners_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Two active owners cannot bypass serial reconciliation for pipeline repair."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = _record(
+        tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+    ).model_copy(update={"merge_request_iid": 88})
+    second = first.model_copy(update={"issue_iid": 13})
+    ledger.persist(first)
+    ledger.persist(second)
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha=first.source_sha or "a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+
+    invoker = FakeInvoker()
+    with pytest.raises(SegmentError, match="multiple resumable"):
+        dispatch(
+            CommandRequest(command="loop.run"),
+            apply=True,
+            dependencies=replace(
+                _dependencies(config, ledger, gitlab, FakeRepository(config)),
+                invoke=invoker,
+            ),
+        )
+    for record in (first, second):
+        persisted = ledger.load(record.issue_iid)
+        assert persisted is not None
+        assert persisted.state is RunnerState.OBSERVING
+        assert persisted.phase is WorkflowPhase.PIPELINE_WAIT
+    assert invoker.prompts == []
+
+
+def test_loop_run_resumes_exact_owner_beside_inexact_historical_record(
+    tmp_path: Path,
+) -> None:
+    """One exact observing owner remains safe beside unrelated history."""
+    config = _config(tmp_path)
+    owner = _record(
+        tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+    ).model_copy(update={"merge_request_iid": 88})
+    historical = owner.model_copy(
+        update={
+            "issue_iid": 13,
+            "state": RunnerState.COMPLETE,
+            "phase": WorkflowPhase.DISCOVERY,
+        }
+    )
+    merge_request = _mr(sha=owner.source_sha or "a" * 40)
+
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(historical)
+    ledger.persist(owner)
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.stop_reason == "repair"
+    assert [item.issue_iid for item in report.items] == [owner.issue_iid]
+    assert report.items[0].state is RunnerState.REPAIR
+
+
+@pytest.mark.parametrize(
+    ("record_updates", "merge_request_updates", "repository_updates"),
+    (
+        ({"merge_request_iid": 99}, {}, {}),
+        ({"project_id": 999}, {}, {}),
+        ({"state": RunnerState.BLOCKED}, {}, {}),
+        ({"phase": WorkflowPhase.POST_PUBLICATION}, {}, {}),
+        ({"source_sha": "b" * 40}, {}, {}),
+        ({"source_branch": "agent/other"}, {}, {}),
+        ({}, {"source_project_id": 999}, {}),
+        ({}, {"target_project_id": 999}, {}),
+        ({}, {"target_branch": "other"}, {}),
+        ({}, {}, {"worktree_present": False}),
+        ({}, {}, {"worktree_valid": False}),
+    ),
+)
+def test_find_exact_pipeline_owner_rejects_each_ownership_mismatch(
+    tmp_path: Path,
+    record_updates: dict[str, object],
+    merge_request_updates: dict[str, object],
+    repository_updates: dict[str, object],
+) -> None:
+    """Every retained-owner predicate is required before repair can resume."""
+    config = _config(tmp_path)
+    owner = _record(
+        tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+    ).model_copy(update={"merge_request_iid": 88} | record_updates)
+    merge_request = _mr().model_copy(update=merge_request_updates)
+    repository = FakeRepository(config)
+    for attribute, value in repository_updates.items():
+        setattr(repository, attribute, value)
+
+    found = find_exact_pipeline_owner(
+        records=(owner,),
+        merge_request=merge_request,
+        project_id=config.project_id,
+        default_branch="main",
+        repository=repository,
+    )
+
+    assert found is None
 
 
 def test_apply_respects_activation_time_budget_between_segments(

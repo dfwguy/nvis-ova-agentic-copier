@@ -1339,7 +1339,16 @@ def test_agent_loop_wrapper_skips_open_dependent_work_after_terminal_handoff(
 
 @pytest.mark.parametrize(
     "stop_reason",
-    ("idle", "pipeline_wait", "retry_wait", "repair", "time_limit", "segment_limit"),
+    (
+        "idle",
+        "pipeline_wait",
+        "pipeline_blocked",
+        "pipeline_inventory_blocked",
+        "retry_wait",
+        "repair",
+        "time_limit",
+        "segment_limit",
+    ),
 )
 def test_agent_loop_wrapper_nonterminal_result_yields_without_eligibility_polling(
     project_root: Path, tmp_path: Path, stop_reason: str
@@ -1353,6 +1362,68 @@ def test_agent_loop_wrapper_nonterminal_result_yields_without_eligibility_pollin
     result = _run_wrapper(project_root, environment, "--apply")
 
     assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "outcome", ("pipeline_wait", "pipeline_blocked", "pipeline_inventory_blocked")
+)
+def test_agent_loop_wrapper_yields_when_terminal_handoff_preview_hits_pipeline_gate(
+    project_root: Path, tmp_path: Path, outcome: str
+) -> None:
+    """A pipeline-gated preview never starts an unrelated next activation."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (_applied_report("complete"), _preview_report(outcome)),
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "outcome"),
+    (
+        ("pipeline_wait", "idle"),
+        ("pipeline_wait", "pipeline_blocked"),
+        ("pipeline_wait", "pipeline_inventory_blocked"),
+        ("pipeline_blocked", "idle"),
+        ("pipeline_blocked", "pipeline_wait"),
+        ("pipeline_blocked", "pipeline_inventory_blocked"),
+        ("pipeline_inventory_blocked", "idle"),
+        ("pipeline_inventory_blocked", "activation_complete"),
+        ("pipeline_inventory_blocked", "pipeline_wait"),
+        ("pipeline_inventory_blocked", "pipeline_blocked"),
+    ),
+)
+def test_agent_loop_wrapper_rejects_mismatched_pipeline_gate_report(
+    project_root: Path, tmp_path: Path, stop_reason: str, outcome: str
+) -> None:
+    """Untrusted pipeline report combinations cannot enter the wrapper loop."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    invalid_report = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": outcome,
+            "stop_reason": stop_reason,
+        }
+    )
+    calls = _scripted_wrapper_worker(tmp_path, environment, (invalid_report,))
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 2
     assert calls.read_text().splitlines() == [
         "one|run agent-work loop run --apply --json"
     ]
@@ -2263,7 +2334,14 @@ def _applied_report(stop_reason: str) -> str:
             "schema_version": 1,
             "command": "loop.run",
             "applied": True,
-            "outcome": "idle" if stop_reason == "idle" else "activation_complete",
+            "outcome": (
+                "idle"
+                if stop_reason == "idle"
+                else stop_reason
+                if stop_reason
+                in {"pipeline_wait", "pipeline_blocked", "pipeline_inventory_blocked"}
+                else "activation_complete"
+            ),
             "stop_reason": stop_reason,
         }
     )

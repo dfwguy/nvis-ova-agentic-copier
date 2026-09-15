@@ -619,22 +619,20 @@ class GitLabGateway:
             None,
         )
 
-    def open_merge_requests_by_branch(
-        self, branch: str
+    def _open_merge_request_inventory(
+        self, *, branch: str | None = None
     ) -> tuple[MergeRequestEvidence, ...]:
-        """Return every validated opened merge request for one source branch."""
+        """Return bounded validated opened-MR inventory, optionally by source branch."""
         try:
             items: list[dict[str, object]] = []
             for page in range(1, _MAX_MERGE_REQUEST_PAGES + 1):
+                fields = ["state=opened", "per_page=100", f"page={page}"]
+                if branch is not None:
+                    fields.insert(1, f"source_branch={branch}")
                 page_items = self._items(
                     self._call(
                         f"projects/{self._config.project_id}/merge_requests",
-                        fields=(
-                            "state=opened",
-                            f"source_branch={branch}",
-                            "per_page=100",
-                            f"page={page}",
-                        ),
+                        fields=tuple(fields),
                     ),
                     "merge request list",
                 )
@@ -649,6 +647,12 @@ class GitLabGateway:
             )
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid merge request data") from error
+
+    def open_merge_requests_by_branch(
+        self, branch: str
+    ) -> tuple[MergeRequestEvidence, ...]:
+        """Return every validated opened merge request for one source branch."""
+        return self._open_merge_request_inventory(branch=branch)
 
     def create_merge_request(
         self,
@@ -775,6 +779,25 @@ class GitLabGateway:
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid pipeline data") from error
         return pipelines[0] if pipelines else None
+
+    def latest_pipeline_for_ref(self, ref: str) -> PipelineEvidence | None:
+        """Return the newest validated pipeline for one configured-project ref."""
+        payload = self._call(
+            f"projects/{self._config.project_id}/pipelines",
+            fields=(f"ref={ref}", "per_page=100"),
+        )
+        try:
+            pipelines = tuple(
+                PipelineEvidence.model_validate(_selected(item, PIPELINE_FIELDS))
+                for item in self._items(payload, "pipeline list")
+            )
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid pipeline data") from error
+        return pipelines[0] if pipelines else None
+
+    def open_merge_requests(self) -> tuple[MergeRequestEvidence, ...]:
+        """Return every opened merge request from bounded configured-project pages."""
+        return self._open_merge_request_inventory()
 
     def comment_outcome(
         self, iid: int, *, error_code: str, summary: str, next_action: str
