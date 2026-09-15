@@ -234,6 +234,16 @@ wrapper invokes `/usr/bin/env` with the captured service host and project ID so
 that `direnv` cannot replace the configured target. Setup runs the wrapper's
 preview under a scrubbed `env -i` environment before enabling the timer.
 
+Before it launches the worker process, the controller removes inherited
+parent-checkout `direnv` bookkeeping: `DIRENV_DIFF`, `DIRENV_DIR`,
+`DIRENV_FILE`, `DIRENV_IN_ENVRC`, and `DIRENV_WATCHES`. It preserves ordinary
+non-bookkeeping configuration such as `DIRENV_CONFIG`, the captured public
+GitLab identity, and the scoped `GITLAB_TOKEN` exception; it excludes other
+credential-shaped variables.
+Nested workflow commands may later run `direnv exec .` in a retained worktree
+that has no `.envrc`; without stale parent-checkout metadata, that command does
+not unload the permitted scoped token.
+
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction

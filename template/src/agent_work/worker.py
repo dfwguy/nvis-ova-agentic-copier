@@ -62,6 +62,13 @@ _NOTE_MAX_COUNT = 50
 _WORKER_DIAGNOSTIC_MAX_BYTES = 2048
 _WORKER_DIAGNOSTIC_FALLBACK = "worker exited without diagnostic output"
 _WORKER_RESULT_VALIDATION_TIME = datetime(1970, 1, 1, tzinfo=UTC)
+_INHERITED_DIRENV_BOOKKEEPING_NAMES = (
+    "DIRENV_DIFF",
+    "DIRENV_DIR",
+    "DIRENV_FILE",
+    "DIRENV_IN_ENVRC",
+    "DIRENV_WATCHES",
+)
 _ANSI_SEQUENCE = re.compile(
     r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]"
     r"|\x1b\][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
@@ -726,12 +733,17 @@ def _redact(output: str, environment: Mapping[str, str]) -> str:
 
 
 def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Remove credential-shaped variables from an untrusted worker process."""
+    """Remove credentials and stale direnv bookkeeping from a worker process."""
     return {
         name: value
         for name, value in environment.items()
-        if name == "GITLAB_TOKEN"
-        or not re.search(r"token|secret|password|key|credential", name, re.IGNORECASE)
+        if name not in _INHERITED_DIRENV_BOOKKEEPING_NAMES
+        and (
+            name == "GITLAB_TOKEN"
+            or not re.search(
+                r"token|secret|password|key|credential", name, re.IGNORECASE
+            )
+        )
     }
 
 
