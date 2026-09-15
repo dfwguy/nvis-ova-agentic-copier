@@ -2019,6 +2019,13 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         "secret-value",
         "credential-value",
     )
+    stale_direnv = {
+        "DIRENV_DIFF": "stale-diff",
+        "DIRENV_DIR": "stale-dir",
+        "DIRENV_FILE": "stale-file",
+        "DIRENV_IN_ENVRC": "1",
+        "DIRENV_WATCHES": "stale-watches",
+    }
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
         calls.append((command, kwargs))
@@ -2033,6 +2040,8 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         "AGENT_WORK_AGENT": "codex",
         "AGENT_WORK_AGENT_PATH": "/codex",
         "GITLAB_TOKEN": retained,
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "91",
         "GITLAB_TOKEN_PASS_PATH": filtered[0],
         "UNRELATED_API_TOKEN": filtered[1],
         "SSH_PRIVATE_KEY": filtered[2],
@@ -2040,6 +2049,8 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         "CLIENT_SECRET": filtered[4],
         "CREDENTIAL_FILE": filtered[5],
         "ORDINARY_SETTING": "retained-setting",
+        "DIRENV_CONFIG": "retained-direnv-setting",
+        **stale_direnv,
     }
     issue_worktree = tmp_path / "issue-worktree"
     issue_worktree.mkdir()
@@ -2053,7 +2064,10 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         "AGENT_WORK_AGENT": "codex",
         "AGENT_WORK_AGENT_PATH": "/codex",
         "GITLAB_TOKEN": retained,
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "91",
         "ORDINARY_SETTING": "retained-setting",
+        "DIRENV_CONFIG": "retained-direnv-setting",
     }
     assert [kwargs["environment"] for _, kwargs in calls] == [
         expected_environment,
