@@ -318,6 +318,33 @@ diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
 draft with the final interface, fans out applicable read-only judges, and
 returns consolidated feedback to Architect for the final decision.
 
+### Preselection pipeline gate
+
+Before selecting fresh work, both an applied user-directed `agent-work loop
+run` and the systemd wrapper's next-activation path inspect pipeline evidence
+for the configured numeric project. They inspect the newest pipeline for the
+default branch and the newest pipeline for every open merge request, binding
+each merge-request observation to that merge request's current source SHA.
+The controller does not infer merge-request status from a pipeline belonging to
+an older source commit.
+
+Existing active, safe resumable work remains the first priority. Only after it
+has been reconciled may the pipeline gate decide whether ordinary fresh-issue
+selection is safe. A successful pipeline clears the corresponding observation;
+`created`, `waiting_for_resource`, `preparing`, `scheduled`, `pending`, and
+`running` are observation waits and yield without selecting a fresh issue.
+Missing, malformed, inaccessible, identity, or validation pipeline evidence
+fails closed rather than allowing unrelated work to proceed.
+
+A corroborated failed pipeline takes precedence over
+ordinary issue selection. An exact failed merge-request pipeline may resume a
+bounded repair and revalidation only when a retained owner has exact configured
+project, merge-request, branch, source-SHA, and worktree evidence. A failed
+default-branch pipeline, or a failed merge-request pipeline without that safe
+exact owner, records an actionable human handoff or block instead. It does not
+claim an unrelated issue, invent a repair owner, or weaken the human-only
+approval and merge boundary.
+
 Post-publication pipeline assessment is a fresh context after terminal
 exact-SHA evidence. It does not edit the published MR or directly enter a
 repair session. A concrete repository-actionable finding creates or reuses a
@@ -347,14 +374,15 @@ agent handoff.
 Each Python activation advances at most one issue and retains its 10,800-second
 active-work budget. The systemd wrapper continues only after `awaiting-human`,
 `blocked`, `failed`, or `complete`: it validates that report, makes one fresh
-read-only eligibility check, and begins another activation only for `eligible`.
-Between issues it re-queries GitLab and fast-forwards the clean service base;
-this bounded housekeeping is outside the per-issue budget. An `idle`,
-`pipeline-wait`, `retry-wait`, `repair`, `time-limit`, or `segment-limit` result
-yields immediately. `OnUnitInactiveSec=20min` schedules both true empty-queue
-idle checks and yielded pipeline/retry checks. The service has no sequence-wide
-timeout, so it cannot truncate an otherwise unbounded sequence of individually
-bounded activations. The loop is serial per host and project, not multi-host
+read-only eligibility and preselection-pipeline check, and begins another
+activation only for `eligible`. Between issues it re-queries GitLab and
+fast-forwards the clean service base; this bounded housekeeping is outside the
+per-issue budget. An `idle`, `pipeline-wait`, `retry-wait`, `repair`,
+`time-limit`, or `segment-limit` result yields immediately.
+`OnUnitInactiveSec=20min` schedules both true empty-queue idle checks and
+yielded pipeline/retry checks. The service has no sequence-wide timeout, so it
+cannot truncate an otherwise unbounded sequence of individually bounded
+activations. The loop is serial per host and project, not multi-host
 coordination.
 
 ## Ledger, worktrees, and audit

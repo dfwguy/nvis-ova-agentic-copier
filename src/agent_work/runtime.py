@@ -23,6 +23,7 @@ from pathlib import Path
 from .domain import (
     ACTIVE_STATES,
     LIFECYCLE_LABELS,
+    NONTERMINAL_PIPELINE_STATUSES,
     CommandRequest,
     ErrorCode,
     RunnerState,
@@ -31,7 +32,7 @@ from .domain import (
     label_for_state,
     retries_remaining,
 )
-from .gitlab import GitLabGateway
+from .gitlab import GitLabError, GitLabGateway
 from .ledger import JsonLedger, XdgProjectLock, observe_project_lock
 from .migration import build_migration_plan
 from .models import (
@@ -40,6 +41,7 @@ from .models import (
     CommandReport,
     ConditionEvidence,
     LedgerRecord,
+    MergeRequestEvidence,
     MigrationAction,
     MigrationObservation,
     MigrationPlan,
@@ -192,6 +194,8 @@ def _report(
     project: dict[str, str | int] | None = None,
     segments_run: int | None = None,
     stop_reason: str | None = None,
+    summary: str | None = None,
+    next_action: str | None = None,
 ) -> CommandReport:
     return CommandReport(
         command=request.command,
@@ -202,6 +206,8 @@ def _report(
         actions=actions,
         segments_run=segments_run,
         stop_reason=stop_reason,
+        summary=summary,
+        next_action=next_action,
     )
 
 
@@ -228,6 +234,160 @@ class WorkerResultDependencies:
 
     load_record: Callable[[int], LedgerRecord | None]
     changed_paths: Callable[[Path], tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class _PipelineGateDecision:
+    """Read-only pre-selection pipeline decision for one loop activation."""
+
+    outcome: str | None = None
+    summary: str | None = None
+    next_action: str | None = None
+    repair_owner: LedgerRecord | None = None
+
+
+def _pipeline_handoff(
+    *, outcome: str, pipeline_url: str | None, detail: str, next_action: str
+) -> _PipelineGateDecision:
+    """Build bounded operator-facing evidence without exposing API payloads."""
+    link = f" Pipeline: {pipeline_url}." if pipeline_url else ""
+    return _PipelineGateDecision(
+        outcome=outcome,
+        summary=f"{detail}{link}",
+        next_action=next_action,
+    )
+
+
+def find_exact_pipeline_owner(
+    *,
+    records: tuple[LedgerRecord, ...],
+    merge_request: MergeRequestEvidence,
+    project_id: int,
+    default_branch: str,
+    repository: RepositoryPort,
+) -> LedgerRecord | None:
+    """Return the sole exact observation owner, or ``None`` on any ambiguity."""
+    candidates = tuple(
+        record
+        for record in records
+        if record.merge_request_iid == merge_request.iid
+        and record.project_id == project_id
+        and record.state is RunnerState.OBSERVING
+        and record.phase is WorkflowPhase.PIPELINE_WAIT
+        and record.source_sha == merge_request.sha
+        and record.source_branch == merge_request.source_branch
+    )
+    if len(candidates) != 1:
+        return None
+    record = candidates[0]
+    if (
+        merge_request.source_project_id != project_id
+        or merge_request.target_project_id != project_id
+        or merge_request.target_branch != default_branch
+    ):
+        return None
+    try:
+        if not repository.worktree_exists(record.worktree):
+            return None
+        repository.verify_worktree(
+            record.worktree, record.source_branch, record.source_sha or ""
+        )
+    except (OSError, RepositoryError, RuntimeError, ValueError):
+        return None
+    return record
+
+
+def _inspect_pipeline_gate(
+    *,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    records: tuple[LedgerRecord, ...],
+    project_id: int,
+    default_branch: str,
+) -> _PipelineGateDecision:
+    """Inspect default and current-MR pipelines before any fresh issue selection."""
+    try:
+        default_pipeline = gitlab.latest_pipeline_for_ref(default_branch)
+        if default_pipeline is None:
+            return _pipeline_handoff(
+                outcome="pipeline_inventory_blocked",
+                pipeline_url=None,
+                detail="The current default-branch pipeline could not be found.",
+                next_action="Validate default-branch pipeline evidence before selecting work.",
+            )
+        if default_pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
+            return _pipeline_handoff(
+                outcome="pipeline_wait",
+                pipeline_url=default_pipeline.web_url,
+                detail="The current default-branch pipeline is still running.",
+                next_action="Wait for the default-branch pipeline to reach a terminal state.",
+            )
+        if default_pipeline.status == "failed":
+            return _pipeline_handoff(
+                outcome="pipeline_blocked",
+                pipeline_url=default_pipeline.web_url,
+                detail="The current default-branch pipeline failed.",
+                next_action="Inspect and resolve the failed default-branch pipeline before selecting work.",
+            )
+        if default_pipeline.status != "success":
+            return _pipeline_handoff(
+                outcome="pipeline_inventory_blocked",
+                pipeline_url=default_pipeline.web_url,
+                detail="The current default-branch pipeline has an unrecognized terminal status.",
+                next_action="Verify the pipeline status before selecting work.",
+            )
+        for merge_request in sorted(
+            gitlab.open_merge_requests(), key=lambda item: item.iid
+        ):
+            pipeline = gitlab.latest_pipeline_for_sha(
+                merge_request.iid, merge_request.sha
+            )
+            if pipeline is None:
+                return _pipeline_handoff(
+                    outcome="pipeline_inventory_blocked",
+                    pipeline_url=None,
+                    detail="An open merge request has no current-source pipeline evidence.",
+                    next_action="Validate the current merge-request pipeline before selecting work.",
+                )
+            if pipeline.status == "success":
+                continue
+            if pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
+                return _pipeline_handoff(
+                    outcome="pipeline_wait",
+                    pipeline_url=pipeline.web_url,
+                    detail="An open merge request has a current-source pipeline still running.",
+                    next_action="Wait for the current merge-request pipeline to reach a terminal state.",
+                )
+            if pipeline.status == "failed":
+                owner = find_exact_pipeline_owner(
+                    records=records,
+                    merge_request=merge_request,
+                    project_id=project_id,
+                    default_branch=default_branch,
+                    repository=repository,
+                )
+                if owner is not None:
+                    return _PipelineGateDecision(repair_owner=owner)
+                return _pipeline_handoff(
+                    outcome="pipeline_blocked",
+                    pipeline_url=pipeline.web_url,
+                    detail="An open merge request failed for its current source SHA without one exact retained owner.",
+                    next_action="Inspect the pipeline and reconcile its exact retained owner before selecting work.",
+                )
+            return _pipeline_handoff(
+                outcome="pipeline_inventory_blocked",
+                pipeline_url=pipeline.web_url,
+                detail="An open merge request pipeline has an unrecognized terminal status.",
+                next_action="Verify the pipeline status before selecting work.",
+            )
+    except (GitLabError, OSError, RuntimeError, ValueError):
+        return _pipeline_handoff(
+            outcome="pipeline_inventory_blocked",
+            pipeline_url=None,
+            detail="Pipeline inventory could not be validated.",
+            next_action="Restore GitLab access and validate pipeline inventory before selecting work.",
+        )
+    return _PipelineGateDecision()
 
 
 def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
@@ -661,6 +821,33 @@ def dispatch(
                 records=active[:1],
                 project=identity,
             )
+        gate = _inspect_pipeline_gate(
+            gitlab=gitlab,
+            repository=repository,
+            records=records,
+            project_id=project.id,
+            default_branch=project.default_branch,
+        )
+        if gate.outcome is not None:
+            return _report(
+                request,
+                applied=False,
+                outcome=gate.outcome,
+                project=identity,
+                stop_reason=gate.outcome,
+                summary=gate.summary,
+                next_action=gate.next_action,
+            )
+        if gate.repair_owner is not None:
+            return _report(
+                request,
+                applied=False,
+                outcome="pipeline_blocked",
+                project=identity,
+                stop_reason="pipeline_blocked",
+                summary="An exact retained owner can resume failed-pipeline repair.",
+                next_action="Run the applied loop command to resume bounded repair.",
+            )
         record_iids = {record.issue_iid for record in records}
         eligible = tuple(
             issue for issue in gitlab.list_eligible() if issue.iid not in record_iids
@@ -685,6 +872,49 @@ def dispatch(
         active = tuple(
             item for item in ledger.list_records() if item.state in ACTIVE_STATES
         )
+        if not active or (
+            len(active) == 1
+            and active[0].state is RunnerState.OBSERVING
+            and active[0].phase is WorkflowPhase.PIPELINE_WAIT
+        ):
+            inventory = tuple(ledger.list_records())
+            gate = _inspect_pipeline_gate(
+                gitlab=gitlab,
+                repository=repository,
+                records=inventory,
+                project_id=project.id,
+                default_branch=project.default_branch,
+            )
+            if gate.outcome is not None:
+                return _report(
+                    request,
+                    applied=True,
+                    outcome=gate.outcome,
+                    project=identity,
+                    stop_reason=gate.outcome,
+                    summary=gate.summary,
+                    next_action=gate.next_action,
+                )
+            if gate.repair_owner is not None:
+                repaired = ledger.persist(
+                    transition_record(
+                        gate.repair_owner,
+                        RunnerState.REPAIR,
+                        phase=WorkflowPhase.WORKFLOW,
+                        error_code=ErrorCode.PIPELINE_REJECTED,
+                        summary="The exact current-source pipeline failed.",
+                        next_action="Run the bounded post-publication repair and revalidation segment.",
+                    )
+                )
+                return _report(
+                    request,
+                    applied=True,
+                    outcome="activation_complete",
+                    records=(repaired,),
+                    project=identity,
+                    segments_run=1,
+                    stop_reason="repair",
+                )
         prior_state = active[0].state if len(active) == 1 else None
         issue_iid = active[0].issue_iid if len(active) == 1 else None
         for _segment_number in range(request.max_segments):

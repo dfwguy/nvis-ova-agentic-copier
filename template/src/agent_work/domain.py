@@ -20,6 +20,9 @@ from typing import Final
 
 DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
 HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS: Final = 120
+NONTERMINAL_PIPELINE_STATUSES: Final = frozenset(
+    {"created", "waiting_for_resource", "preparing", "scheduled", "pending", "running"}
+)
 
 
 class RunnerState(StrEnum):

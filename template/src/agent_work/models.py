@@ -745,3 +745,5 @@ class CommandReport(BoundaryModel):
     stop_reason: str | None = None
     total_items: int | None = Field(default=None, ge=0)
     items_truncated: bool | None = None
+    summary: str | None = Field(default=None, max_length=2_048)
+    next_action: str | None = Field(default=None, max_length=2_048)

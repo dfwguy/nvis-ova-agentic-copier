@@ -262,7 +262,12 @@ validate_applied_report() {
        (.stop_reason == "blocked" and .outcome == "activation_complete") or
        (.stop_reason == "failed" and .outcome == "activation_complete") or
        (.stop_reason == "complete" and .outcome == "activation_complete") or
-       (.stop_reason == "pipeline_wait" and .outcome == "activation_complete") or
+       (.stop_reason == "pipeline_wait" and
+        (.outcome == "pipeline_wait" or .outcome == "activation_complete")) or
+       (.stop_reason == "pipeline_blocked" and
+        (.outcome == "pipeline_blocked" or .outcome == "activation_complete")) or
+       (.stop_reason == "pipeline_inventory_blocked" and
+        .outcome == "pipeline_inventory_blocked") or
        (.stop_reason == "retry_wait" and .outcome == "activation_complete") or
        (.stop_reason == "repair" and .outcome == "activation_complete") or
        (.stop_reason == "time_limit" and .outcome == "activation_complete") or
@@ -275,7 +280,9 @@ preview_outcome() {
   local report="$1"
   if ! housekeeping "$AGENT_WORK_JQ" -e -s '
     length == 1 and (.[0] | .schema_version == 1 and .command == "loop.run" and
-    .applied == false and (.outcome == "eligible" or .outcome == "idle"))
+    .applied == false and (.outcome == "eligible" or .outcome == "idle" or
+    .outcome == "pipeline_wait" or .outcome == "pipeline_blocked" or
+    .outcome == "pipeline_inventory_blocked"))
   ' <<<"$report" >/dev/null; then
     return 1
   fi
@@ -307,7 +314,7 @@ while :; do
     stop 'agent-work eligibility preview returned an invalid report'
   fi
   printf '%s\n' "$preview_report"
-  if [[ "$outcome" == idle ]]; then
+  if [[ "$outcome" != eligible ]]; then
     exit 0
   fi
   refresh_base

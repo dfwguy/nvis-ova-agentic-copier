@@ -136,22 +136,30 @@ handoff:
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
    the local ledger.
 3. Resume recoverable `agent::running` work before selecting new work.
-4. Filter fresh work to open, non-confidential issues with no lifecycle
+4. Before fresh selection, inspect the configured project's newest
+   default-branch pipeline and every open merge request's newest pipeline for
+   that merge request's exact current source SHA. Missing, malformed, or
+   inaccessible evidence blocks selection; a nonterminal observation yields.
+   A corroborated terminal failure is handled before ordinary work:
+   only an exact retained owner may resume bounded merge-request repair and
+   revalidation; default-branch or ownerless merge-request failures become
+   actionable human blocks.
+5. Filter fresh work to open, non-confidential issues with no lifecycle
    projection, ledger record, or open split prerequisite. Rank exact high,
    then normal (no recognized exact priority label), then exact low; within a
    rank compare absolute creation time and IID.
-5. Classify it before claiming it as ordinary issue work, existing-MR
+6. Classify it before claiming it as ordinary issue work, existing-MR
    remediation, merge-conflict repair, or protected policy work that requires
    the manual lane.
-6. Persist transition intent before the corresponding external mutation, then
+7. Persist transition intent before the corresponding external mutation, then
    record the observed result. Reconciliation completes or compensates any
    transition interrupted between those writes.
-7. Run one bounded workflow-owning worker in the issue's durable worktree.
-8. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
+8. Run one bounded workflow-owning worker in the issue's durable worktree.
+9. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
    `needs_human`.
-9. Publish idempotently and verify exact same-project MR, branch, target, tip,
+10. Publish idempotently and verify exact same-project MR, branch, target, tip,
    and closing-issue evidence.
-10. Record one safe, actionable outcome. Continue immediately with the same
+11. Record one safe, actionable outcome. Continue immediately with the same
     issue when progress is safe, or yield when the activation reaches idle,
     no progress or a future external wait, a terminal or human-facing
     state, or its workflow or wall-time bound.

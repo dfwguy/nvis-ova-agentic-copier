@@ -918,6 +918,84 @@ def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     )
 
 
+def test_gitlab_default_branch_pipeline_uses_numeric_project_and_exact_ref(
+    tmp_path: Path,
+) -> None:
+    """The default-branch gate reads newest pipeline evidence from its configured ref."""
+    api = ApiStub()
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    pipeline = gateway.latest_pipeline_for_ref("main")
+
+    assert pipeline is not None and pipeline.id == 3 and pipeline.status == "success"
+    pipeline_call = api.commands[-1]
+    assert pipeline_call[pipeline_call.index("-X") + 2] == "projects/310967/pipelines"
+    assert "ref=main" in pipeline_call
+    assert "per_page=100" in pipeline_call
+
+
+def test_gitlab_open_merge_requests_reads_bounded_pages_of_validated_inventory(
+    tmp_path: Path,
+) -> None:
+    """Pre-selection inventory reads every opened MR from bounded numeric-project pages."""
+
+    class PagedMergeRequestApi(ApiStub):
+        def __call__(
+            self, command: tuple[str, ...], **_kwargs: object
+        ) -> CommandResult:
+            endpoint = command[command.index("-X") + 2]
+            method = command[command.index("-X") + 1]
+            if endpoint == "projects/310967/merge_requests" and method == "GET":
+                self.commands.append(command)
+                page = int(
+                    next(
+                        part.removeprefix("page=")
+                        for part in command
+                        if part.startswith("page=")
+                    )
+                )
+                if page == 1:
+                    payload = [
+                        _mr_payload()
+                        | {
+                            "iid": iid,
+                            "web_url": f"https://pipeline.example/mr/{iid}",
+                            "source_branch": f"agent/issue-{iid}",
+                        }
+                        for iid in range(1, 101)
+                    ]
+                elif page == 2:
+                    payload = [
+                        _mr_payload()
+                        | {
+                            "iid": 101,
+                            "web_url": "https://pipeline.example/mr/101",
+                            "source_branch": "agent/issue-101",
+                        }
+                    ]
+                else:
+                    raise AssertionError(f"unexpected page {page}")
+                return CommandResult(0, json.dumps(payload), "")
+            return super().__call__(command, **_kwargs)
+
+    api = PagedMergeRequestApi()
+    merge_requests = GitLabGateway(_config(tmp_path), api).open_merge_requests()
+
+    assert [merge_request.iid for merge_request in merge_requests] == list(
+        range(1, 102)
+    )
+    calls = [
+        command
+        for command in api.commands
+        if command[command.index("-X") + 2] == "projects/310967/merge_requests"
+    ]
+    assert len(calls) == 2
+    assert all("state=opened" in call and "per_page=100" in call for call in calls)
+    assert {"page=1", "page=2"} == {
+        next(part for part in call if part.startswith("page=")) for call in calls
+    }
+
+
 def test_gitlab_gateway_creates_and_reconciles_a_decision_review_draft(
     tmp_path: Path,
 ) -> None:
@@ -2217,6 +2295,27 @@ def test_local_operational_log_records_command_outcomes_and_failures(
     contents = (_config(tmp_path).state_root / "agent-work.log").read_text()
     assert "outcome=status command=loop.status" in contents
     assert "failure=ledger unavailable" in contents
+
+
+def test_loop_run_text_output_exposes_top_level_pipeline_handoff(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A blocked pre-selection gate remains actionable without requiring JSON parsing."""
+
+    def blocked_report(*_args: object, **_kwargs: object) -> CommandReport:
+        return CommandReport(
+            command="loop.run",
+            applied=False,
+            outcome="pipeline_blocked",
+            summary="Pipeline https://pipeline/4 failed for the current source SHA.",
+            next_action="Inspect the pipeline and reconcile its exact retained owner.",
+        )
+
+    assert main(["loop", "run"], dispatch=blocked_report) == 0
+
+    output = capsys.readouterr().out
+    assert "https://pipeline/4" in output
+    assert "Inspect the pipeline" in output
 
 
 @pytest.mark.parametrize(
