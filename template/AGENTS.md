@@ -60,12 +60,8 @@ this section states the portable policy boundary.
 
 ## Factory objective and standing operational authority
 
-When the governed project is this `nvis-ova-agentic-copier` repository, the
-primary objective is to get and keep its self-improving factory running and to
-allow merge requests that improve that factory. When the governed project is a
-generated or other adopting project, the primary objective is to get and keep
-the factory running so it improves that governed project through merge
-requests.
+The governed project's primary factory objective is project-owned context
+defined in `.agents/project.md`.
 
 This policy supplies standing authorization for routine factory operations
 needed to meet that objective, including pushing feature branches, creating or
