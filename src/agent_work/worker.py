@@ -180,7 +180,10 @@ def build_worker_result(
     changed_paths: tuple[str, ...],
 ) -> WorkerResultEnvelope:
     """Construct and validate a v2 envelope while deriving trusted fields."""
-    is_workflow = record.phase is WorkflowPhase.WORKFLOW
+    is_complete = record.phase is WorkflowPhase.WORKFLOW or (
+        record.phase is WorkflowPhase.POST_PUBLICATION
+        and build_input.result_kind == "ready_to_publish"
+    )
     audit = None
     if build_input.audit_summary is not None:
         audit_input = build_input.audit_summary
@@ -215,7 +218,7 @@ def build_worker_result(
             expected_phase=record.phase,
             workflow_lane=build_input.workflow_lane,
             result_kind=build_input.result_kind,
-            phase_status="complete" if is_workflow else "rejected",
+            phase_status="complete" if is_complete else "rejected",
             completed_phase=record.phase,
             receipts=build_input.receipts,
             split_plan=build_input.split_plan,

@@ -5402,6 +5402,45 @@ def test_retry_replays_retained_publication_intent_without_restarting_workflow(
     assert gitlab.labels == ["agent::running"]
 
 
+def test_explicit_retry_of_blocked_issue_87_preserves_its_retained_worktree(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.BLOCKED,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "issue_iid": 87,
+                "source_branch": "agent/issue-87",
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "retry_count": 3,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=87).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    repository = FakeRepository(config)
+
+    replay = dispatch(
+        CommandRequest(command="loop.retry", issue_iid=87),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    resumed = replay.items[0]
+    persisted = ledger.load(87)
+    assert replay.outcome == "retry_scheduled"
+    assert resumed.issue_iid == 87
+    assert resumed.worktree == retained.worktree
+    assert persisted is not None and persisted.worktree == retained.worktree
+    assert repository.prepared is False
+
+
 @pytest.mark.parametrize("mutation", ["wrong-project", "tampered-action"])
 def test_migration_apply_rejects_tampered_reviewed_evidence_before_mutation(
     tmp_path: Path, mutation: str

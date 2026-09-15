@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-14
+last_reviewed: 2026-09-15
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -114,6 +114,17 @@ ledger revision, expected state and phase, completed phase, audit lane, role
 receipts, changed paths, and the reviewer receipt list. In particular, do not
 put the derived `identity`, `state`, `phase`, audit `lane`,
 `role_receipts`, `changed_paths`, or `reviewers` fields in the input.
+
+`phase_status` is controller-derived rather than worker input. Every recorded
+ordinary `workflow` result receives `complete`, including `split_required`.
+A `post-publication` result receives `complete` only when its result kind is
+`ready_to_publish`; failed, actionable, and other non-success results remain
+`rejected`. In particular, a successful post-publication assessment supplies
+the required complete `$pipeline-performance-judge` receipt. It then advances
+the verified exact-source handoff to `awaiting-human`; malformed, contradictory,
+failed, or
+actionable assessments retain their existing rejection and feedback handling
+instead of advancing that handoff.
 
 For a completed ordinary workflow, use `coding` or `content` as the lane and
 provide the exact `WORKFLOW_RECEIPTS` set for that lane. The coding set is
@@ -563,7 +574,8 @@ The initial workflow attempt plus at most three retry attempts are bounded.
 `retry-wait` records its deadline; exhaustion becomes `agent::blocked`, never
 `agent::failed`. A blocked item never becomes eligible through labels: after
 the recorded human action, `loop retry --issue-iid IID --apply` explicitly
-resumes it.
+resumes that IID from its retained worktree and durable record. It does not
+select a replacement issue or discard the retained recovery evidence.
 
 Worker exits, timeouts, malformed worker protocol, invalid receipts, and explicit
 `retryable` worker results are immediately due and continue in the same
