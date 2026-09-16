@@ -535,12 +535,35 @@ class GitRepository:
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]:
         """Return paths changed relative to the index, including untracked paths."""
-        return tuple(
-            path.removeprefix('"').removesuffix('"')
-            for line in self._git("status", "--porcelain", cwd=worktree).splitlines()
-            if len(line) > 3 and line[3:].strip()
-            for path in line[3:].strip().split(" -> ")
+        result = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "status",
+                "--porcelain=v1",
+                "-z",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
+        if result.returncode != 0:
+            raise RepositoryError("could not inspect changed paths")
+        entries = result.stdout.split("\0")
+        paths: list[str] = []
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+            if not entry:
+                continue
+            if len(entry) <= 3:
+                continue
+            paths.append(entry[3:])
+            if entry[:2] in {"R ", " R", "C ", " C"} and index < len(entries):
+                paths.append(entries[index])
+                index += 1
+        return tuple(paths)
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

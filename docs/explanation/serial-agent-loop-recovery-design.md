@@ -249,6 +249,11 @@ The implementation must maintain these invariants:
 
 - At most one local activation holds the project lock.
 - No new issue is claimed while resumable running work exists.
+
+Retry-wait records are queued rather than concurrent owners: ordinary selection
+first resumes the sole non-waiting active record, then considers only due
+retries in deterministic deadline/IID order. Two non-waiting active records
+remain a fail-closed ambiguity.
 - Project-level loop enablement authorizes unattended work. A new issue is
   eligible only when it is open, non-confidential, has none of
   `agent::running`, `agent::awaiting-human`, `agent::blocked`, or
@@ -402,6 +407,17 @@ pipeline evidence under the project lock before mutation. This separates human
 review of the next action from authorization to change evidence that may have
 moved since review. Conflicting active records, a competing owner, or changed
 evidence fail closed rather than allowing the loop to choose a substitute.
+
+The recovery inventory is a concise audit view, not a second recovery engine.
+Terminal evidence has a deliberate no-action precedence: a closed recordless
+split issue and a closed `COMPLETE` record remain settled even when later
+worktree, head, merge-request, or pipeline observations drift. This prevents
+old terminal artifacts from creating misleading work while keeping aggregate
+closed and no-action counts visible. A closed nonterminal record remains a
+human decision, and a targeted lookup retains the full exact evidence needed
+to make it. This view changes neither the one-IID, one-explicit-choice,
+evidence-bound resolution boundary nor the rule that only humans approve or
+merge.
 
 ## Security and authority boundaries
 

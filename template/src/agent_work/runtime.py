@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .domain import (
     ACTIVE_STATES,
+    IMMEDIATE_OWNER_STATES,
     LIFECYCLE_LABELS,
     NONTERMINAL_PIPELINE_STATUSES,
     CommandRequest,
@@ -39,6 +40,7 @@ from .gitlab import GitLabError, GitLabGateway
 from .human_recovery import (
     EvidenceDriftError,
     RecoveryCandidate,
+    RecoveryClassification,
     RecoveryObservation,
     ResolutionChoice,
     ResolutionRequest,
@@ -63,6 +65,7 @@ from .models import (
     OperationalPlan,
     PipelineEvidence,
     RecoveryCandidateReport,
+    RecoverySummary,
     TransitionIntentRecord,
 )
 from .ports import (
@@ -80,7 +83,7 @@ from .repository import (
     discover_config,
     run_subprocess,
 )
-from .serial import reconcile_closed_issues, run_segment
+from .serial import reconcile_closed_issues, resume_candidates, run_segment
 from .state_machine import transition_record
 from .status import project_status
 from .worker import AgentInvoker
@@ -702,7 +705,7 @@ def _operational_preview(
         conflicts = tuple(
             record
             for record in records
-            if record.issue_iid != target and record.state in ACTIVE_STATES
+            if record.issue_iid != target and record.state in IMMEDIATE_OWNER_STATES
         )
         if record is not None and (
             record is not None
@@ -1162,6 +1165,11 @@ def _recovery_candidate_report(
         "stale": observation.stale,
         "ambiguous": observation.ambiguous,
     }
+    open_dependencies = tuple(
+        str(iid) for iid, state in observation.split_dependencies if state == "opened"
+    )
+    active = _recovery_is_active(candidate)
+    human_action = _recovery_requires_human_action(candidate)
     recommendation = {
         "dependency_gated": "Keep this item gated until its trusted prerequisites close.",
         "safely_retryable": "Review and explicitly choose retry for this blocked record.",
@@ -1173,6 +1181,7 @@ def _recovery_candidate_report(
         "closure_candidate": "Review closure evidence and choose close only with a reason and link.",
         "superseded_duplicate": "Review replacement evidence before an explicit supersede decision.",
         "legitimately_waiting": "No recovery action is recommended while this evidence remains current.",
+        "closed_no_action": "No recovery action is required.",
     }[candidate.classification.value]
     return RecoveryCandidateReport(
         issue_iid=candidate.issue_iid,
@@ -1187,7 +1196,58 @@ def _recovery_candidate_report(
             if value not in {None, (), ""}
         },
         recommendation=recommendation,
+        active=active,
+        human_action_required=human_action,
+        blocked_cause=(
+            "pipeline evidence disagrees"
+            if observation.pipeline_status == "failed"
+            else "retained evidence requires review"
+            if observation.ambiguous or observation.stale
+            else None
+        ),
+        dependency_explanation=(
+            "Trusted prerequisite"
+            + ("s" if len(open_dependencies) != 1 else "")
+            + " #"
+            + ", #".join(open_dependencies)
+            + " remain open."
+            if open_dependencies
+            else None
+        ),
+        next_action=(
+            f"Review issue #{candidate.issue_iid} before selecting one resolution."
+            if human_action
+            else "Monitor the active retained work; do not recover it."
+            if active
+            else "Wait until the named trusted prerequisites close; retry is invalid before then."
+            if candidate.classification is RecoveryClassification.DEPENDENCY_GATED
+            else "No recovery action is required."
+            if candidate.classification is RecoveryClassification.CLOSED_NO_ACTION
+            else "Continue waiting while the retained evidence remains current."
+            if candidate.classification is RecoveryClassification.LEGITIMATELY_WAITING
+            else f"Review issue #{candidate.issue_iid} before selecting one resolution."
+        ),
     )
+
+
+def _recovery_is_active(candidate: RecoveryCandidate) -> bool:
+    """Return the single inventory definition of retained active work."""
+    observation = candidate.observation
+    return (
+        observation.issue_state != "closed"
+        and observation.record_state in ACTIVE_STATES
+        and not observation.stale
+    )
+
+
+def _recovery_requires_human_action(candidate: RecoveryCandidate) -> bool:
+    """Return whether this classification requires one reviewed choice."""
+    return candidate.classification in {
+        RecoveryClassification.SAFELY_RETRYABLE,
+        RecoveryClassification.SUPERSEDED_DUPLICATE,
+        RecoveryClassification.CLOSURE_CANDIDATE,
+        RecoveryClassification.NEEDS_HUMAN_DECISION,
+    }
 
 
 def _resume_blocked_retry(
@@ -1196,10 +1256,13 @@ def _resume_blocked_retry(
     wired: RuntimeDependencies,
     ledger: LedgerPort,
     gitlab: GitLabPort,
+    conflict_checked: bool = False,
 ) -> LedgerRecord:
     """Apply the one shared human-directed retry transition and projection."""
     if record.state is not RunnerState.BLOCKED:
         raise RuntimeError("only a recorded blocked issue can be retried")
+    if not conflict_checked:
+        _raise_for_immediate_owner_conflict(record, ledger=ledger)
     retained_publication = (
         record.intent is not None and record.intent.kind == "publish_merge_request"
     )
@@ -1251,6 +1314,27 @@ def _resume_blocked_retry(
     )
     gitlab.transition_labels(record.issue_iid, label_for_state(resumed.state))
     return resumed
+
+
+def _raise_for_immediate_owner_conflict(
+    record: LedgerRecord, *, ledger: LedgerPort
+) -> None:
+    """Reject a retry before it can change another record's one-owner boundary."""
+    conflicting_owner = next(
+        (
+            item
+            for item in ledger.list_records()
+            if item.issue_iid != record.issue_iid
+            and item.state in IMMEDIATE_OWNER_STATES
+        ),
+        None,
+    )
+    if conflicting_owner is not None:
+        raise RuntimeError(
+            "another immediate owner exists: issue "
+            f"{conflicting_owner.issue_iid}; run `agent-work loop recover "
+            f"--issue-iid {conflicting_owner.issue_iid}` before retrying"
+        )
 
 
 def _recovery_intent(
@@ -1380,6 +1464,21 @@ def dispatch(
                     for iid in sorted(candidate_iids)
                 )
             )
+            all_candidates = inventory.candidates
+            visible_candidates = tuple(
+                candidate
+                for candidate in all_candidates
+                if request.issue_iid is not None
+                or candidate.classification
+                is not RecoveryClassification.CLOSED_NO_ACTION
+            )
+            human_action_count = sum(
+                _recovery_requires_human_action(candidate)
+                for candidate in all_candidates
+            )
+            active_count = sum(
+                _recovery_is_active(candidate) for candidate in all_candidates
+            )
             items = tuple(
                 _item(
                     records_by_iid[candidate.issue_iid],
@@ -1400,17 +1499,32 @@ def dispatch(
                         ),
                     },
                 )
-                for candidate in inventory.candidates
+                for candidate in visible_candidates
                 if candidate.issue_iid in records_by_iid
             )
             return CommandReport(
+                schema_version=2,
                 command=request.command,
                 applied=False,
                 outcome="inventory",
                 project=identity,
                 items=items,
+                total_items=len(all_candidates),
+                items_truncated=len(visible_candidates) != len(all_candidates),
                 summary="Read-only retained recovery inventory.",
-                next_action="Review one explicit human recovery decision.",
+                next_action=(
+                    "Review one exact action-required issue."
+                    if human_action_count
+                    else "Monitor active retained work."
+                    if active_count
+                    else "Wait for trusted dependencies to close."
+                    if any(
+                        candidate.classification
+                        is RecoveryClassification.DEPENDENCY_GATED
+                        for candidate in all_candidates
+                    )
+                    else "No recovery action is required."
+                ),
                 operational_plan=OperationalPlan(
                     command=request.command,
                     action="inventory",
@@ -1434,9 +1548,32 @@ def dispatch(
                         "fresh_work_selection": False,
                     },
                 ),
+                recovery_summary=RecoverySummary(
+                    total=len(all_candidates),
+                    open=sum(
+                        candidate.observation.issue_state != "closed"
+                        for candidate in all_candidates
+                    ),
+                    closed=sum(
+                        candidate.observation.issue_state == "closed"
+                        for candidate in all_candidates
+                    ),
+                    active=active_count,
+                    blocked=sum(
+                        candidate.observation.record_state is RunnerState.BLOCKED
+                        for candidate in all_candidates
+                    ),
+                    dependency_gated=sum(
+                        candidate.classification
+                        is RecoveryClassification.DEPENDENCY_GATED
+                        for candidate in all_candidates
+                    ),
+                    human_action=human_action_count,
+                    no_action=len(all_candidates) - human_action_count,
+                ),
                 recovery_candidates=tuple(
                     _recovery_candidate_report(candidate, priority=position)
-                    for position, candidate in enumerate(inventory.candidates)
+                    for position, candidate in enumerate(visible_candidates)
                 ),
             )
         record = ledger.load(request.issue_iid or 0)
@@ -1571,13 +1708,18 @@ def dispatch(
             if choice is ResolutionChoice.RETRY:
                 if current_record is None:
                     raise RuntimeError("recovery record disappeared")
+                _raise_for_immediate_owner_conflict(current_record, ledger=ledger)
                 retained_publication = (
                     current_record.intent is not None
                     and current_record.intent.kind == "publish_merge_request"
                 )
                 if retained_publication:
                     updated = _resume_blocked_retry(
-                        current_record, wired=wired, ledger=ledger, gitlab=gitlab
+                        current_record,
+                        wired=wired,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        conflict_checked=True,
                     )
                     # The publication intent is deliberately retained for its
                     # existing replay path; recovery never overwrites it.
@@ -1611,7 +1753,11 @@ def dispatch(
                     )
                     updated = ledger.persist(
                         _resume_blocked_retry(
-                            pending, wired=wired, ledger=ledger, gitlab=gitlab
+                            pending,
+                            wired=wired,
+                            ledger=ledger,
+                            gitlab=gitlab,
+                            conflict_checked=True,
                         ).model_copy(update={"intent": None})
                     )
             elif choice in {ResolutionChoice.CLOSE, ResolutionChoice.SUPERSEDE}:
@@ -2114,6 +2260,7 @@ def dispatch(
             record = ledger.load(request.issue_iid)
             if record is None or record.state is not RunnerState.BLOCKED:
                 raise RuntimeError("only a recorded blocked issue can be retried")
+            _raise_for_immediate_owner_conflict(record, ledger=ledger)
             retained_publication = (
                 record.intent is not None
                 and record.intent.kind == "publish_merge_request"
@@ -2185,13 +2332,13 @@ def dispatch(
         raise RuntimeError("unsupported command")
     if not apply:
         records = ledger.list_records()
-        active = tuple(record for record in records if record.state in ACTIVE_STATES)
-        if active:
+        resumable = resume_candidates(records, now=wired.clock())
+        if resumable:
             return _report(
                 request,
                 applied=False,
                 outcome="resume_available",
-                records=active[:1],
+                records=resumable[:1],
                 project=identity,
             )
         gate = _inspect_pipeline_gate(
@@ -2306,10 +2453,12 @@ def dispatch(
         def remaining_activation_seconds() -> float:
             return request.max_activation_seconds - (wired.monotonic() - started)
 
-        active = tuple(
-            item for item in ledger.list_records() if item.state in ACTIVE_STATES
+        immediate_owners = tuple(
+            item
+            for item in ledger.list_records()
+            if item.state in IMMEDIATE_OWNER_STATES
         )
-        if gate.outcome == "pipeline_wait" and not active:
+        if gate.outcome == "pipeline_wait" and not immediate_owners:
             return _report(
                 request,
                 applied=True,
@@ -2319,8 +2468,10 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
-        prior_state = active[0].state if len(active) == 1 else None
-        issue_iid = active[0].issue_iid if len(active) == 1 else None
+        prior_state = immediate_owners[0].state if len(immediate_owners) == 1 else None
+        issue_iid = (
+            immediate_owners[0].issue_iid if len(immediate_owners) == 1 else None
+        )
         for _segment_number in range(request.max_segments):
             if remaining_activation_seconds() <= 0:
                 stop_reason = "time_limit"
@@ -2343,6 +2494,10 @@ def dispatch(
                     stop_reason = (
                         "retry_wait"
                         if segment_start_state is RunnerState.RETRY_WAIT
+                        or any(
+                            item.state is RunnerState.RETRY_WAIT
+                            for item in ledger.list_records()
+                        )
                         else "idle"
                     )
                 break

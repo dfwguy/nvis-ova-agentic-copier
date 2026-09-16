@@ -266,6 +266,11 @@ strictly content-only workflow.
 
 ## GitLab publication
 
+Before user-systemd commands in non-login/API shells, preserve and validate
+explicit bus variables or derive the exact effective-UID fallbacks only when
+absent, validate absolute runtime ownership/type and bus socket ownership/type,
+and fail closed if not corroborated.
+
 Before remote work, verify Git and GitLab API access independently, then use
 the configured numeric project ID for every API operation:
 

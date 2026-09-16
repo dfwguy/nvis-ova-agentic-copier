@@ -27,6 +27,10 @@ project lock, and evidence before effects. Stop on drift, missing evidence, or
 identity mismatch; point credential problems to `agent-work credential rotate`
 and issue #84. Record the bounded before/after receipt and stop.
 
+Re-inventory the exact handoff IID before asking for that immediate explicit
+choice. Return only its bounded receipt and never broaden the mutation
+authority to another IID, automatic retry, or bulk lifecycle action.
+
 Treat stale running evidence as an early human decision and use `agent-work
 loop recover`, never `retry`. Retry requires a retained blocked record with
 closed or absent trusted dependencies and preserves retained publication replay.

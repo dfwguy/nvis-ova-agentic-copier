@@ -13,10 +13,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from agent_work.cli import main
+from agent_work.credential_rotation import PathEvidence
 from agent_work.repository import CommandResult, RepositoryError
 from agent_work.service_environment import (
     ServiceEnvironmentDependencies,
@@ -96,6 +98,8 @@ def _dependencies(
     atomic_write=lambda _path, _content: None,
     environment: dict[str, str] | None = None,
 ) -> ServiceEnvironmentDependencies:
+    runtime = Path("/run/user/1000")
+    bus = runtime / "bus"
     return ServiceEnvironmentDependencies(
         read_bytes=lambda _path: content,
         atomic_write=atomic_write,
@@ -103,6 +107,10 @@ def _dependencies(
         resolve_executable=lambda name: f"/usr/bin/{name}",
         checkout=Path("/srv/agent-work"),
         environment=environment or {"PATH": "/usr/bin", "HOME": "/home/service"},
+        effective_uid=lambda: 1000,
+        inspect_path=lambda path: PathEvidence(
+            True, path == runtime, path == bus, 1000
+        ),
     )
 
 
@@ -210,6 +218,86 @@ def test_migration_current_install_is_deterministically_nonmutating() -> None:
     assert calls == []
 
 
+def test_migration_forwards_runtime_dependencies_and_uses_user_bus_fallback() -> None:
+    """Migration carries the injected user-bus validators into systemctl calls."""
+    uid = 123
+    runtime = Path(f"/run/user/{uid}")
+    bus = runtime / "bus"
+    calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+
+    def inspect(path: Path) -> PathEvidence:
+        return PathEvidence(True, path == runtime, path == bus, uid)
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append(
+            (command, cast(Mapping[str, str] | None, kwargs.get("environment")))
+        )
+        return _successful_command(command, **kwargs)
+
+    dependencies = ServiceEnvironmentDependencies(
+        read_bytes=lambda _path: _current_environment(),
+        atomic_write=lambda _path, _content: pytest.fail("current install rewrites"),
+        run_command=run,
+        resolve_executable=lambda name: f"/usr/bin/{name}",
+        checkout=Path("/srv/agent-work"),
+        environment={"HOME": "/home/service", "PATH": "/usr/bin"},
+        effective_uid=lambda: uid,
+        inspect_path=inspect,
+    )
+
+    report = migrate_service_environment(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    systemctl_environments = [
+        environment for command, environment in calls if command[0] == "systemctl"
+    ]
+    assert report.outcome == "verified"
+    assert all(
+        environment is not None
+        and environment["XDG_RUNTIME_DIR"] == "/run/user/123"
+        and environment["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/123/bus"
+        for environment in systemctl_environments
+    )
+
+
+def test_migration_invalid_bus_evidence_fails_before_systemctl_or_configuration_write() -> (
+    None
+):
+    """Invalid injected socket evidence leaves the installed file untouched."""
+    calls: list[tuple[str, ...]] = []
+    writes: list[bytes] = []
+
+    dependencies = ServiceEnvironmentDependencies(
+        read_bytes=lambda _path: _legacy_environment(),
+        atomic_write=lambda _path, content: writes.append(content),
+        run_command=lambda command, **_kwargs: (
+            calls.append(command),
+            CommandResult(0, "", ""),
+        )[1],
+        resolve_executable=lambda name: f"/usr/bin/{name}",
+        checkout=Path("/srv/agent-work"),
+        environment={"HOME": "/home/service", "PATH": "/usr/bin"},
+        effective_uid=lambda: 123,
+        inspect_path=lambda _path: PathEvidence(True, True, False, 123),
+    )
+
+    report = migrate_service_environment(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.outcome == "correction-needed"
+    assert calls == [] and writes == []
+    assert not report.timer_stopped and not report.service_stopped
+    assert "user bus" in report.next_action.lower()
+
+
 def test_migration_apply_current_install_stops_and_verifies_without_rewriting() -> None:
     commands: list[tuple[str, ...]] = []
     writes: list[bytes] = []
@@ -239,10 +327,14 @@ def test_migration_apply_current_install_stops_and_verifies_without_rewriting() 
         ("systemctl", "--user", "is-active", "agent-work.service"),
     ]
     validation_commands = [
-        command for command in commands if "agent-work-systemd-run.sh" in command[0]
+        command
+        for command in commands
+        if any("agent-work-systemd-run.sh" in argument for argument in command)
     ]
     assert validation_commands == [
         (
+            "/usr/bin/env",
+            "bash",
             "/srv/agent-work/scripts/agent-work-systemd-run.sh",
             "--validate-service-environment",
         )
@@ -309,7 +401,7 @@ def test_migration_stops_units_before_safeguards_and_restores_prior_bytes_after_
 
     def failed_preview(command: tuple[str, ...], **kwargs: object) -> CommandResult:
         commands.append(command)
-        if "agent-work-systemd-run.sh" in command[0]:
+        if any("agent-work-systemd-run.sh" in argument for argument in command):
             assert (
                 "loop" not in command
                 and "run" not in command
@@ -344,7 +436,7 @@ def test_migration_rolls_back_after_repository_error_from_preview() -> None:
     writes: list[bytes] = []
 
     def repository_failure(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        if "agent-work-systemd-run.sh" in command[0]:
+        if any("agent-work-systemd-run.sh" in argument for argument in command):
             raise RepositoryError("secret-preview-detail")
         return _successful_command(command, **kwargs)
 

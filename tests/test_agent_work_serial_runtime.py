@@ -1055,6 +1055,13 @@ def test_recovery_inventory_correlates_durable_evidence_without_claiming_or_muta
     assert report.operational_plan is not None
     assert report.operational_plan.evidence["default_pipeline_status"] == "success"
     assert report.operational_plan.evidence["fresh_work_selection"] is False
+    assert report.recovery_summary is not None
+    assert report.recovery_summary.active == 1
+    assert report.recovery_candidates[0].active is True
+    assert report.recovery_candidates[0].human_action_required is True
+    assert report.recovery_candidates[0].next_action == (
+        "Review issue #12 before selecting one resolution."
+    )
     assert gitlab.eligible_calls == 0
     assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
     assert repository.prepared is False and repository.pushes == 0
@@ -1084,6 +1091,93 @@ def test_recovery_inventory_reports_actual_stale_corroboration_and_loop_recover(
     assert candidate.corroboration["controller_status"] == '"missing"'
     assert candidate.corroboration["worktree_exists"] == "true"
     assert "loop recover" in candidate.recommendation
+
+
+def test_recovery_inventory_v2_summarizes_active_human_and_terminal_evidence(
+    tmp_path: Path,
+) -> None:
+    """Untargeted inventory is read-only and omits settled terminal detail."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    active = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    blocked = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(iid=12, state="opened").model_copy(
+            update={"labels": ("agent::running",)}
+        ),
+        _issue(iid=13, state="opened").model_copy(
+            update={"labels": ("agent::blocked",)}
+        ),
+        _issue(iid=14, state="closed").model_copy(
+            update={"labels": ("agent::running",)}
+        ),
+    )
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.schema_version == 2
+    assert report.recovery_summary is not None
+    assert report.recovery_summary.model_dump() == {
+        "total": 3,
+        "open": 2,
+        "closed": 1,
+        "active": 0,
+        "blocked": 1,
+        "dependency_gated": 0,
+        "human_action": 2,
+        "no_action": 1,
+    }
+    assert report.items_truncated is True
+    assert [candidate.issue_iid for candidate in report.recovery_candidates] == [12, 13]
+    assert [candidate.active for candidate in report.recovery_candidates] == [
+        False,
+        False,
+    ]
+    assert [
+        candidate.human_action_required for candidate in report.recovery_candidates
+    ] == [True, True]
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert ledger.load(12) == active and ledger.load(13) == blocked
+
+
+def test_recovery_inventory_targeted_terminal_item_keeps_exact_no_action_detail(
+    tmp_path: Path,
+) -> None:
+    """An exact-IID query does not hide its settled closed evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    terminal = _issue(iid=14, state="closed").model_copy(
+        update={"labels": ("agent::running",)}
+    )
+    gitlab = ClosedInventoryGitLab(terminal)
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=14),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.items_truncated is False
+    assert len(report.recovery_candidates) == 1
+    candidate = report.recovery_candidates[0]
+    assert candidate.issue_iid == 14
+    assert candidate.classification == "closed_no_action"
+    assert candidate.active is False and candidate.human_action_required is False
+    assert candidate.blocked_cause is None
+    assert candidate.next_action == "No recovery action is required."
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
 
 
 def test_recovery_resolve_preview_is_a_non_mutating_exact_plan(
@@ -2260,6 +2354,147 @@ def test_recover_normalizes_an_exact_clean_unpublished_preworker_claim_and_retai
     assert repository.prepared is False
 
 
+def test_reviewed_exact_retry_keeps_its_pinned_owner_ahead_of_queued_retry_wait(
+    tmp_path: Path,
+) -> None:
+    """A normalized exact recovery continues only its selected immediate owner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    interrupted = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 35,
+                "source_branch": "agent/issue-35",
+                "worktree": config.state_root / "worktrees" / "35",
+            }
+        )
+    )
+    queued = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "retry_at": NOW - timedelta(seconds=1),
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.WORKFLOW,
+            }
+        )
+    )
+    blocked = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 56, "source_branch": "agent/issue-56"})
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=35).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    normalize_preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=35),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    dispatch(
+        CommandRequest(
+            command="loop.recover", issue_iid=35, plan_file=tmp_path / "35-recover.json"
+        ),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, repository),
+            read_plan=lambda _path: _operational_plan_bytes(normalize_preview),
+        ),
+    )
+    normalized = ledger.load(35)
+    assert normalized is not None and normalized.state is RunnerState.BLOCKED
+
+    retry_request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=35,
+        choice="retry",
+        reason="The reviewed clean interruption can resume.",
+    )
+    retry_preview = dispatch(
+        retry_request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    dispatch(
+        replace(retry_request, plan_file=tmp_path / "35-retry.json"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, repository),
+            read_plan=lambda _path: _operational_plan_bytes(retry_preview),
+        ),
+    )
+    resumed = ledger.load(35)
+    assert resumed is not None and resumed.state is RunnerState.PREPARING
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=2, max_activation_seconds=3600),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, repository), invoke=FakeInvoker()
+        ),
+    )
+
+    assert report.segments_run == 2
+    assert [item.issue_iid for item in report.items] == [35, 35]
+    assert ledger.load(55) == queued and ledger.load(56) == blocked
+    assert ledger.load(35) != interrupted
+
+
+def test_reviewed_retry_rejects_before_changing_target_when_another_immediate_owner_exists(
+    tmp_path: Path,
+) -> None:
+    """A blocked retry cannot create a second immediate owner under review."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    target = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 35, "source_branch": "agent/issue-35"})
+    )
+    owner = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 54, "source_branch": "agent/issue-54"})
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=35).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    repository = FakeRepository(config)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=35,
+        choice="retry",
+        reason="The reviewed blocked record can resume.",
+    )
+    preview = dispatch(
+        request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    with pytest.raises(RuntimeError, match=r"loop recover.*54"):
+        dispatch(
+            replace(request, plan_file=tmp_path / "35-retry.json"),
+            apply=True,
+            dependencies=replace(
+                _dependencies(config, ledger, gitlab, repository),
+                read_plan=lambda _path: _operational_plan_bytes(preview),
+            ),
+        )
+
+    assert ledger.load(35) == target and ledger.load(54) == owner
+    assert gitlab.labels == []
+
+
 def test_ordinary_run_prioritizes_failed_pipeline_owner_before_an_active_claim_without_eligibility(
     tmp_path: Path,
 ) -> None:
@@ -2341,6 +2576,61 @@ def test_ordinary_run_resumes_retained_work_before_a_nonterminal_pipeline_wait(
     assert preview.items and preview.items[-1].issue_iid == retained.issue_iid
     assert applied.outcome == "activation_complete"
     assert applied.items and applied.items[-1].issue_iid == retained.issue_iid
+
+
+def test_run_preview_reports_immediate_owner_before_queued_retry_wait(
+    tmp_path: Path,
+) -> None:
+    """Preview reports the same immediate owner that apply mode would resume."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    queued = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"retry_at": NOW - timedelta(seconds=1)})
+    )
+    owner = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 55, "source_branch": "agent/issue-55"})
+    )
+
+    preview = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    assert preview.outcome == "resume_available"
+    assert preview.items and preview.items[0].issue_iid == owner.issue_iid
+    assert ledger.load(queued.issue_iid) == queued
+
+
+def test_run_preview_does_not_advertise_a_solely_future_retry_wait(
+    tmp_path: Path,
+) -> None:
+    """A queued retry is resumable in preview only after its deadline."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    waiting = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"retry_at": NOW + timedelta(seconds=1)})
+    )
+
+    preview = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    assert preview.outcome == "idle"
+    assert preview.items == ()
+    assert ledger.load(waiting.issue_iid) == waiting
 
 
 def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_the_conflict(
@@ -3349,6 +3639,44 @@ def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
     assert outcome is None
     assert not repository.prepared
     assert ledger.load(13) is None
+
+
+def test_suggest_close_precedes_future_retry_wait_without_inventory(
+    tmp_path: Path,
+) -> None:
+    """A local suggest-close record is actionable before an undued retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(update={"retry_at": NOW + timedelta(minutes=10)})
+    )
+    suggested = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "state": RunnerState.SUGGEST_CLOSE,
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "suggest_close_evidence": SuggestCloseEvidence(
+                    reason="already-satisfied",
+                    issue_iid=55,
+                    evidence=("https://example.test",),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue(iid=55))
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+    )
+    assert selected == suggested and issue is not None and issue.iid == 55
+    assert gitlab.fetch_issue_calls == [55]
 
 
 def test_future_retry_wait_skips_recovery_inventory_and_preserves_retry_budget(
@@ -8191,6 +8519,102 @@ def test_multiple_active_records_fail_closed(tmp_path: Path) -> None:
             timeout_seconds=10,
             now=NOW,
         )
+
+
+@pytest.mark.parametrize(
+    "retry_at", (NOW - timedelta(seconds=1), NOW + timedelta(seconds=1))
+)
+def test_selector_prioritizes_preparing_record_over_retry_wait(
+    tmp_path: Path, retry_at: datetime
+) -> None:
+    """An ordinary active record remains the sole activation while retries wait."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    preparing = ledger.persist(
+        _record(tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW)
+    )
+    waiting = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "retry_at": retry_at,
+            }
+        )
+    )
+    selected, _ = select_record(
+        ledger,
+        FakeGitLab(_issue()),  # type: ignore[arg-type]
+        now=NOW,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+    )
+    assert selected == preparing
+    assert ledger.load(waiting.issue_iid) == waiting
+
+
+def test_pinned_due_retry_wait_cannot_bypass_an_immediate_owner(tmp_path: Path) -> None:
+    """An exact queued retry cannot overtake a progressing retained owner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW)
+    )
+    waiting = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "retry_at": NOW - timedelta(seconds=1),
+            }
+        )
+    )
+
+    with pytest.raises(SegmentError, match="pinned issue"):
+        select_record(
+            ledger,
+            FakeGitLab(_issue()),  # type: ignore[arg-type]
+            now=NOW,
+            issue_iid=waiting.issue_iid,
+            repository=FakeRepository(config),  # type: ignore[arg-type]
+        )
+
+    assert ledger.load(waiting.issue_iid) == waiting
+
+
+def test_selector_orders_due_retry_wait_records_deterministically(
+    tmp_path: Path,
+) -> None:
+    """With no immediate work, the earliest due retry is the sole selection."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    later = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"retry_at": NOW - timedelta(seconds=1)})
+    )
+    earlier = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "retry_at": NOW - timedelta(seconds=2),
+            }
+        )
+    )
+    selected, _ = select_record(
+        ledger,
+        FakeGitLab(_issue()),  # type: ignore[arg-type]
+        now=NOW,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+    )
+    assert selected == earlier
+    assert ledger.load(later.issue_iid) == later
 
 
 def test_runtime_status_and_run_preview_never_refresh_checkout(

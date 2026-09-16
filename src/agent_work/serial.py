@@ -20,6 +20,7 @@ from .classification import ClassificationError, classify_work, is_protected_pol
 from .domain import (
     ACTIVE_STATES,
     DEFAULT_MAX_ACTIVATION_SECONDS,
+    IMMEDIATE_OWNER_STATES,
     LIFECYCLE_LABELS,
     NONTERMINAL_PIPELINE_STATUSES,
     ErrorCode,
@@ -686,6 +687,25 @@ def _synchronize_pending_feedback(
     return ledger.persist(record.model_copy(update={"source_sha": pending.source_sha}))
 
 
+def resume_candidates(
+    records: tuple[LedgerRecord, ...], *, now: datetime
+) -> tuple[LedgerRecord, ...]:
+    """Return immediate owners, or one deterministically due queued retry."""
+    immediate_owners = tuple(
+        record for record in records if record.state in IMMEDIATE_OWNER_STATES
+    )
+    return immediate_owners or tuple(
+        sorted(
+            (
+                record
+                for record in records
+                if record.state is RunnerState.RETRY_WAIT and _due(record, now)
+            ),
+            key=lambda record: (record.retry_at, record.issue_iid),
+        )[:1]
+    )
+
+
 def select_record(
     ledger: LedgerPort,
     gitlab: GitLabPort,
@@ -699,10 +719,12 @@ def select_record(
     records = ledger.list_records()
     if any(record.project_id != project.id for record in records):
         raise SegmentError("ledger record belongs to another project")
-    active = tuple(record for record in records if record.state in ACTIVE_STATES)
-    if len(active) > 1:
-        raise SegmentError("multiple resumable records require reconciliation")
+    immediate_owners = tuple(
+        record for record in records if record.state in IMMEDIATE_OWNER_STATES
+    )
     if issue_iid is not None:
+        if len(immediate_owners) > 1:
+            raise SegmentError("multiple resumable records require reconciliation")
         pinned = next(
             (record for record in records if record.issue_iid == issue_iid), None
         )
@@ -712,11 +734,31 @@ def select_record(
             return pinned, gitlab.fetch_issue(pinned.issue_iid)
         if pinned.state is RunnerState.SUGGEST_CLOSE:
             return pinned, gitlab.fetch_issue(pinned.issue_iid)
-        if pinned not in active:
+        if pinned.state not in ACTIVE_STATES:
+            raise SegmentError("pinned issue is not the active durable record")
+        if pinned.state is RunnerState.RETRY_WAIT and immediate_owners:
             raise SegmentError("pinned issue is not the active durable record")
         if not _due(pinned, now):
             return None, None
         return pinned, gitlab.fetch_issue(pinned.issue_iid)
+    suggested = next(
+        (record for record in records if record.state is RunnerState.SUGGEST_CLOSE),
+        None,
+    )
+    if suggested is not None:
+        return suggested, gitlab.fetch_issue(suggested.issue_iid)
+    if (
+        not immediate_owners
+        and any(
+            record.state is RunnerState.RETRY_WAIT and not _due(record, now)
+            for record in records
+        )
+        and not any(
+            record.state is RunnerState.RETRY_WAIT and _due(record, now)
+            for record in records
+        )
+    ):
+        return None, None
     issues = {
         record.issue_iid: gitlab.fetch_issue(record.issue_iid) for record in records
     }
@@ -726,8 +768,11 @@ def select_record(
             return record, issue
         if record.state is RunnerState.SUGGEST_CLOSE:
             return record, issue
-    if active:
-        record = active[0]
+    if len(immediate_owners) > 1:
+        raise SegmentError("multiple resumable records require reconciliation")
+    selected_active = resume_candidates(records, now=now)
+    if selected_active:
+        record = selected_active[0]
         if _can_reconcile_published_ordinary_work(record):
             return record, issues[record.issue_iid]
         if not _due(record, now):

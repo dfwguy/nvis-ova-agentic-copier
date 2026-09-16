@@ -24,6 +24,7 @@ from typing import Protocol
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
+    PathEvidence,
     RotationDependencies,
     atomic_write_environment,
 )
@@ -334,6 +335,24 @@ def _stderr(message: str) -> None:
     sys.stderr.write(f"{message}\n")
 
 
+def _sanitize_human_value(value: object) -> str:
+    """Render one bounded value on a single human-readable line."""
+    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+
+
+def _inspect_path(path: Path) -> PathEvidence:
+    """Read only the ownership and type evidence needed for a user bus."""
+    try:
+        status = path.stat()
+    except OSError:
+        return PathEvidence(False, False, False, None)
+    import stat
+
+    return PathEvidence(
+        True, stat.S_ISDIR(status.st_mode), stat.S_ISSOCK(status.st_mode), status.st_uid
+    )
+
+
 def _render(report: CommandReport, *, as_json: bool) -> str:
     if as_json:
         payload = report.model_dump(mode="json", exclude_none=True)
@@ -365,23 +384,36 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
                         f"worker_diagnostic={item.worker_exit.diagnostic}",
                     )
                 )
+        if report.recovery_summary:
+            details.append(
+                "recovery="
+                + ",".join(
+                    f"{name}={value}"
+                    for name, value in report.recovery_summary.model_dump().items()
+                )
+            )
         for candidate in report.recovery_candidates:
             details.extend(
                 (
                     f"issue=#{candidate.issue_iid}",
                     f"classification={candidate.classification}",
                     f"priority={candidate.priority}",
-                    f"recommendation={candidate.recommendation}",
+                    f"active={str(candidate.active).lower()}",
+                    f"human_action_required={str(candidate.human_action_required).lower()}",
+                    f"next_action={_sanitize_human_value(candidate.next_action)}",
                 )
             )
-            details.extend(
-                f"{key}={value}" for key, value in candidate.corroboration.items()
-            )
+            if candidate.blocked_cause:
+                details.append(
+                    f"blocked_cause={_sanitize_human_value(candidate.blocked_cause)}"
+                )
+            if candidate.dependency_explanation:
+                details.append(
+                    f"dependency_explanation={_sanitize_human_value(candidate.dependency_explanation)}"
+                )
         return " ".join(details)
 
-    def safe(value: object) -> str:
-        return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
-
+    safe = _sanitize_human_value
     rendered: list[str] = []
     for item in report.items:
         item_details = [
@@ -390,7 +422,7 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
             f"state={item.state}",
             f"phase={item.phase}",
             f"project={item.project_id}",
-            f"branch={safe(item.source_branch)}",
+            f"branch={_sanitize_human_value(item.source_branch)}",
             f"worktree={safe(item.worktree)}",
             f"main={safe(item.main_branch)}@{safe(item.main_sha)}",
             f"source={safe(item.source_sha)}",
@@ -538,6 +570,8 @@ def main(
                     resolve_executable=find_executable,
                     checkout=current_checkout(),
                     environment=environment,
+                    effective_uid=os.geteuid,
+                    inspect_path=_inspect_path,
                 ),
             )
         except (ServiceEnvironmentError, OSError, RuntimeError):
@@ -558,6 +592,8 @@ def main(
                     atomic_write=atomic_write,
                     run_command=run_command,
                     environment=environment,
+                    effective_uid=os.geteuid,
+                    inspect_path=_inspect_path,
                 ),
             )
         except (CredentialRotationError, OSError, RuntimeError):
