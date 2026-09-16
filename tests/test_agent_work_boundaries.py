@@ -1440,6 +1440,27 @@ def test_gitlab_split_mutations_reject_inexact_evidence(
             gateway.close_issue(12)
 
 
+def test_gitlab_reopen_is_one_atomic_state_and_lifecycle_projection_mutation(
+    tmp_path: Path,
+) -> None:
+    """Reopen clears every lifecycle label in the same verified issue PUT."""
+    commands: list[tuple[str, ...]] = []
+    reopened = _issue_payload(12)
+    reopened.update({"state": "opened", "labels": []})
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, json.dumps(reopened), "")
+
+    issue = GitLabGateway(_config(tmp_path), fake).reopen_issue(12)
+
+    assert issue.state == "opened"
+    puts = [command for command in commands if "PUT" in command]
+    assert len(puts) == 1
+    assert "state_event=reopen" in puts[0]
+    assert f"remove_labels={','.join(LIFECYCLE_LABELS)}" in puts[0]
+
+
 def test_gitlab_split_note_is_idempotent_for_exact_existing_body(
     tmp_path: Path,
 ) -> None:

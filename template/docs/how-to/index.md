@@ -18,7 +18,17 @@ practical work in a generated project or this template repository.
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
+### Project generation
+- [Create a project non-interactively](create-a-project-non-interactively.md) — Supply Copier answers from a script or CI job.
+- [Customize a generated project](customize-a-generated-project.md) — Tailor generated code and tooling without losing template compatibility.
+
+### Template maintenance
+- [Update a generated project](update-a-generated-project.md) — Bring template improvements into an existing generated project.
+- [How to refresh the CI dependency image](refresh-ci-image.md) — Publish, pin, and verify the project-only CI image that root validation consumes.
+- [How to validate template changes](validate-template-changes.md) — Run the checks required before proposing a template change.
+
 ### Agent workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Configure enough concurrent live-agent capacity for the workflow lane you need.
+- [How to resolve factory issue recovery](resolve-factory-issues.md) — Inspect recovery evidence and apply one reviewed resolution for a retained factory issue.
 - [How to set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Install, inspect, plan recovery, and enable one serial agent loop.
 <!-- END GENERATED -->

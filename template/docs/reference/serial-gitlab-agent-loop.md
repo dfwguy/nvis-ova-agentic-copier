@@ -9,6 +9,8 @@ last_reviewed: 2026-09-16
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
+  - path: ../how-to/resolve-factory-issues.md
+    why: Applies one reviewed lifecycle decision to retained issue evidence.
   - path: ../explanation/serial-gitlab-agent-loop.md
     why: Explains the architecture behind this contract.
   - path: ../explanation/serial-agent-loop-recovery-design.md
@@ -38,6 +40,13 @@ agent-work loop canary [--apply --plan-file PATH] [--json] [--debug]
 agent-work loop recover --issue-iid IID [--apply --plan-file PATH]
                         [--max-segments COUNT]
                         [--max-activation-seconds SECONDS] [--json] [--debug]
+agent-work recovery inventory [--issue-iid IID] [--json] [--apply]
+agent-work recovery resolve --issue-iid IID
+                            --choice {retry,close,reopen,relabel,supersede}
+                            --reason TEXT [--evidence-url URL ...]
+                            [--replacement-issue-iid IID]
+                            [--target-label LABEL] [--plan-file PATH]
+                            [--apply] [--json]
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
@@ -183,6 +192,41 @@ project and default branch, ledger revision, and the exact target, issue,
 repository, merge-request, and pipeline evidence needed by that action. They
 never contain secrets. Apply fails closed, with the safe next action, when the
 plan is stale, tampered, for another identity, or no longer matches evidence.
+
+### `recovery inventory` and `recovery resolve`
+
+`recovery inventory` is an operator-facing, read-only reconciliation view. It
+does not claim fresh work, change a lifecycle projection, create a worktree, or
+apply a decision; `--apply` is accepted for uniform command invocation but has
+no mutating effect. It corroborates lifecycle-projected GitLab issues with the
+local ledger, deterministic branch and retained worktree, merge request and
+exact-source pipeline, default-branch pipeline, configured project and
+credential identity, and controller, service, and project-lock evidence.
+
+The inventory classifies each retained item as legitimately waiting,
+dependency-gated, safely retryable, superseded or duplicate, a closure
+candidate, or requiring a specific human decision. It reports failed
+default-branch and open-merge-request pipelines first, then stale running
+items, safely retryable blocked items, dependency reconciliation,
+awaiting-human items, and finally fresh ordinary work. Fresh work is reported
+only; inventory never claims it. When trusted split prerequisites have cleared,
+the inventory recommends an explicit retry rather than starting a child item.
+
+`recovery resolve` creates an evidence-bound, reviewed per-issue plan by
+default. An applied resolution requires `--apply` and the exact `--plan-file`.
+It holds the project lock, rechecks the plan's evidence, rejects drift, and
+returns a redacted before-and-after receipt. A plan contains exactly one
+explicit choice for its target issue: `retry`, `close`, `reopen`, `relabel`, or
+`supersede`. `close` and `supersede` require a reason and an evidence link or
+replacement issue; `supersede` uses `--replacement-issue-iid`. `relabel` is
+limited to a canonical lifecycle label and uses `--target-label`.
+
+Neither command approves or merges, discards retained work, changes project
+policy, treats issue text as authority, or claims fresh work. Credential expiry
+or a configured-bot mismatch stops before mutation; use `agent-work credential
+rotate` and follow issue #84's credential-recovery handoff before making a new
+resolution plan. See [How to resolve factory issue recovery](../how-to/resolve-factory-issues.md)
+for the reviewed operator procedure and examples.
 
 `migration preview` inventories legacy evidence and proposes only safe,
 idempotent records and label changes. `migration apply` requires a reviewed

@@ -13,6 +13,8 @@ related:
     why: Defines the implemented command and state contract.
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Guides installation, recovery, and migration.
+  - path: ../how-to/resolve-factory-issues.md
+    why: Shows how a human reviews and applies a bounded recovery decision.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

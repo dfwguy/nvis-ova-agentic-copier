@@ -32,9 +32,20 @@ from .domain import (
     WorkflowPhase,
     WorkKind,
     label_for_state,
+    parse_split_marker,
     retries_remaining,
 )
 from .gitlab import GitLabError, GitLabGateway
+from .human_recovery import (
+    EvidenceDriftError,
+    RecoveryCandidate,
+    RecoveryObservation,
+    ResolutionChoice,
+    ResolutionRequest,
+    build_inventory,
+    build_resolution_plan,
+    verify_resolution_plan,
+)
 from .ledger import JsonLedger, XdgProjectLock, observe_project_lock
 from .migration import build_migration_plan
 from .models import (
@@ -42,6 +53,7 @@ from .models import (
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
+    GitLabIssue,
     GitLabProject,
     LedgerRecord,
     MergeRequestEvidence,
@@ -50,6 +62,7 @@ from .models import (
     MigrationPlan,
     OperationalPlan,
     PipelineEvidence,
+    RecoveryCandidateReport,
     TransitionIntentRecord,
 )
 from .ports import (
@@ -135,7 +148,7 @@ def _status_corroboration(
     process_probe: Callable[[], str],
 ) -> dict[str, str]:
     """Read bounded live evidence independently; status never mutates state."""
-    evidence = {
+    evidence: dict[str, str] = {
         "observed_at": clock().isoformat(),
         "gitlab": "unknown",
         "worktree": "unknown",
@@ -329,6 +342,213 @@ def _operational_evidence(
         target_iid=target_iid,
         evidence=evidence,
     )
+
+
+def _recovery_observation(
+    record: LedgerRecord | None,
+    *,
+    issue_iid: int,
+    gitlab: GitLabPort,
+    issue: GitLabIssue | None = None,
+    merge_requests: tuple[MergeRequestEvidence, ...] | None = None,
+    repository: RepositoryPort | None = None,
+    project: GitLabProject | None = None,
+    controller_status: str | None = None,
+    split_dependencies: tuple[tuple[int, str], ...] = (),
+) -> RecoveryObservation:
+    """Build bounded recovery evidence without reading untrusted issue prose."""
+    observed_issue = gitlab.fetch_issue(issue_iid) if issue is None else issue
+    pipeline_status = None
+    pipeline_sha = None
+    pipeline_id = None
+    merge_request_iid = None
+    merge_request_state = None
+    merge_request_sha = None
+    ambiguous = False
+    if record is not None:
+        branch_matches = tuple(
+            merge_request
+            for merge_request in (
+                gitlab.open_merge_requests()
+                if merge_requests is None
+                else merge_requests
+            )
+            if merge_request.source_branch == record.source_branch
+        )
+        expected_sha = record.publication_sha or record.source_sha
+        exact_matches = tuple(
+            merge_request
+            for merge_request in branch_matches
+            if (
+                (
+                    record.merge_request_iid is None
+                    or merge_request.iid == record.merge_request_iid
+                )
+                and (project is None or merge_request.source_project_id == project.id)
+                and (project is None or merge_request.target_project_id == project.id)
+                and (
+                    project is None
+                    or merge_request.target_branch == project.default_branch
+                )
+                and merge_request.state == "opened"
+                and merge_request.sha == expected_sha
+            )
+        )
+        if (branch_matches or record.merge_request_iid is not None) and len(
+            exact_matches
+        ) != 1:
+            ambiguous = True
+        elif len(exact_matches) == 1:
+            merge_request = exact_matches[0]
+            pipeline = gitlab.latest_pipeline_for_sha(
+                merge_request.iid, merge_request.sha
+            )
+            pipeline_id = None if pipeline is None else pipeline.id
+            pipeline_status = None if pipeline is None else pipeline.status
+            pipeline_sha = None if pipeline is None else pipeline.sha
+            merge_request_iid = merge_request.iid
+            merge_request_state = merge_request.state
+            merge_request_sha = merge_request.sha
+    exists = (
+        None
+        if record is None or repository is None
+        else repository.worktree_exists(record.worktree)
+    )
+    head = (
+        None
+        if not exists or record is None or repository is None
+        else repository.head(record.worktree)
+    )
+    paths = (
+        ()
+        if not exists or record is None or repository is None
+        else repository.changed_paths(record.worktree)
+    )
+    return RecoveryObservation(
+        issue_iid=issue_iid,
+        issue_state=observed_issue.state,
+        labels=observed_issue.labels,
+        record_state=None if record is None else record.state,
+        pipeline_status=pipeline_status,
+        split_dependencies=split_dependencies,
+        stale=record is not None
+        and record.state in {RunnerState.EXECUTING, RunnerState.OBSERVING}
+        and controller_status != "active"
+        and not (
+            record.state is RunnerState.OBSERVING
+            and pipeline_status in NONTERMINAL_PIPELINE_STATUSES
+        ),
+        ambiguous=ambiguous,
+        ledger_revision=None if record is None else record.revision,
+        source_branch=None if record is None else record.source_branch,
+        source_sha=None if record is None else record.source_sha,
+        worktree_exists=exists,
+        worktree_head=head,
+        worktree_dirty=None if exists is None else bool(paths),
+        worktree_changed_paths=paths,
+        merge_request_iid=merge_request_iid,
+        merge_request_state=merge_request_state,
+        merge_request_sha=merge_request_sha,
+        pipeline_id=pipeline_id,
+        pipeline_sha=pipeline_sha,
+        controller_status=controller_status,
+    )
+
+
+def _recovery_split_dependencies(
+    issue_iid: int, *, project: GitLabProject, gitlab: GitLabPort
+) -> tuple[tuple[int, str], ...]:
+    """Read validated split prerequisites for exactly one recovery target."""
+    child = next(
+        (
+            candidate
+            for candidate in gitlab.split_child_inventory()
+            if candidate.iid == issue_iid
+        ),
+        None,
+    )
+    if child is None:
+        return ()
+    marker = parse_split_marker(child.description, project.id)
+    if marker is None:
+        return ()
+    return tuple(
+        (dependency_iid, gitlab.fetch_issue(dependency_iid).state)
+        for dependency_iid in sorted(marker[2])
+    )
+
+
+def _recovery_plan(
+    request: CommandRequest,
+    *,
+    project: GitLabProject,
+    username: str,
+    record: LedgerRecord | None,
+    gitlab: GitLabPort,
+    repository: RepositoryPort | None = None,
+    controller_status: str | None = None,
+    issue: GitLabIssue | None = None,
+    merge_requests: tuple[MergeRequestEvidence, ...] | None = None,
+) -> tuple[OperationalPlan, RecoveryObservation]:
+    if request.issue_iid is None or request.choice is None or request.reason is None:
+        raise RuntimeError("recovery resolution request is incomplete")
+    try:
+        choice = ResolutionChoice(request.choice)
+        observation = _recovery_observation(
+            record,
+            issue_iid=request.issue_iid,
+            gitlab=gitlab,
+            repository=repository,
+            project=project,
+            controller_status=controller_status,
+            issue=issue,
+            merge_requests=merge_requests,
+            split_dependencies=_recovery_split_dependencies(
+                request.issue_iid, project=project, gitlab=gitlab
+            ),
+        )
+        resolution = build_resolution_plan(
+            ResolutionRequest(
+                request.issue_iid,
+                choice,
+                request.reason,
+                request.evidence_urls,
+                request.replacement_issue_iid,
+                request.target_label,
+            ),
+            observation,
+        )
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    evidence: dict[str, str | int | bool | None] = {
+        key: json.dumps(value, sort_keys=True, default=str)
+        if isinstance(value, tuple)
+        else value
+        if isinstance(value, (str, int, bool)) or value is None
+        else json.dumps(value, sort_keys=True, default=str)
+        for key, value in resolution.evidence
+    }
+    evidence.update(
+        {
+            "reason": resolution.reason,
+            "evidence_urls": ",".join(resolution.evidence_urls),
+            "replacement_issue_iid": resolution.replacement_issue_iid,
+            "target_label": resolution.target_label,
+            "resolution_digest": resolution.digest,
+        }
+    )
+    return OperationalPlan(
+        command=request.command,
+        action=choice.value,
+        project={
+            "host": project.host,
+            "project_id": project.id,
+            "default_branch": project.default_branch,
+        },
+        authenticated_username=username,
+        target_iid=request.issue_iid,
+        evidence=evidence,
+    ), observation
 
 
 def _normalization_is_exact(
@@ -900,6 +1120,183 @@ def _migration_issue_state_matches(action: MigrationAction, issue_state: str) ->
     return issue_state == expected_state
 
 
+def _recovery_identity(
+    gitlab: GitLabPort, config: AgentWorkConfig
+) -> tuple[GitLabProject, str]:
+    """Verify configured project and factory identity for recovery commands."""
+    try:
+        project = gitlab.verify_project()
+        username = gitlab.verify_authenticated_user()
+    except GitLabError as error:
+        raise RuntimeError(
+            "credential rotate is required; follow issue #84 before recovery"
+        ) from error
+    if not isinstance(username, str) or username != config.factory_username:
+        raise RuntimeError(
+            "credential rotate is required; follow issue #84 before recovery"
+        )
+    return project, username
+
+
+def _recovery_candidate_report(
+    candidate: RecoveryCandidate, *, priority: int
+) -> RecoveryCandidateReport:
+    """Render bounded, actual corroboration for one non-claiming candidate."""
+    observation = candidate.observation
+    evidence = {
+        "ledger_revision": observation.ledger_revision,
+        "source_branch": observation.source_branch,
+        "source_sha": observation.source_sha,
+        "worktree_exists": observation.worktree_exists,
+        "worktree_head": observation.worktree_head,
+        "worktree_dirty": observation.worktree_dirty,
+        "worktree_changed_paths": observation.worktree_changed_paths,
+        "merge_request_iid": observation.merge_request_iid,
+        "merge_request_state": observation.merge_request_state,
+        "merge_request_sha": observation.merge_request_sha,
+        "pipeline_id": observation.pipeline_id,
+        "pipeline_status": observation.pipeline_status,
+        "pipeline_sha": observation.pipeline_sha,
+        "split_dependencies": observation.split_dependencies,
+        "controller_status": observation.controller_status,
+        "stale": observation.stale,
+        "ambiguous": observation.ambiguous,
+    }
+    recommendation = {
+        "dependency_gated": "Keep this item gated until its trusted prerequisites close.",
+        "safely_retryable": "Review and explicitly choose retry for this blocked record.",
+        "needs_human_decision": (
+            "Use agent-work loop recover for this stale active record."
+            if observation.stale
+            else "Review the contradictory evidence before choosing a resolution."
+        ),
+        "closure_candidate": "Review closure evidence and choose close only with a reason and link.",
+        "superseded_duplicate": "Review replacement evidence before an explicit supersede decision.",
+        "legitimately_waiting": "No recovery action is recommended while this evidence remains current.",
+    }[candidate.classification.value]
+    return RecoveryCandidateReport(
+        issue_iid=candidate.issue_iid,
+        classification=candidate.classification.value,
+        issue_state=observation.issue_state,
+        labels=observation.labels,
+        record_state=observation.record_state,
+        priority=priority,
+        corroboration={
+            key: json.dumps(value, sort_keys=True, default=str)
+            for key, value in evidence.items()
+            if value not in {None, (), ""}
+        },
+        recommendation=recommendation,
+    )
+
+
+def _resume_blocked_retry(
+    record: LedgerRecord,
+    *,
+    wired: RuntimeDependencies,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+) -> LedgerRecord:
+    """Apply the one shared human-directed retry transition and projection."""
+    if record.state is not RunnerState.BLOCKED:
+        raise RuntimeError("only a recorded blocked issue can be retried")
+    retained_publication = (
+        record.intent is not None and record.intent.kind == "publish_merge_request"
+    )
+    if retained_publication and record.publication_sha is None:
+        if record.source_sha is None:
+            raise RuntimeError("retained publication has no baseline SHA")
+        publication_sha = wired.repository.bind_retained_commit(
+            record.worktree, record.source_branch, record.issue_iid, record.source_sha
+        )
+        if record.intent is None:
+            raise RuntimeError("retained publication has no exact intent")
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "publication_sha": publication_sha,
+                    "intent": record.intent.model_copy(
+                        update={
+                            "expected_evidence": record.intent.expected_evidence
+                            | {"publication_sha": publication_sha}
+                        }
+                    ),
+                }
+            )
+        )
+    current = _current_condition(record)
+    history = record.condition_history
+    if current is not None:
+        history = (
+            *history,
+            current.model_copy(
+                update={"occurred_at": wired.clock(), "retry_count": record.retry_count}
+            ),
+        )[-64:]
+    resumed = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.PUBLISHING if retained_publication else RunnerState.PREPARING,
+            retry_count=0,
+            retry_at=None,
+            error_code=None,
+            condition_history=history,
+            summary="Human-directed retry requested.",
+            next_action=(
+                "Replay the retained publication intent."
+                if retained_publication
+                else "Reconcile and resume preparation."
+            ),
+        )
+    )
+    gitlab.transition_labels(record.issue_iid, label_for_state(resumed.state))
+    return resumed
+
+
+def _recovery_intent(
+    plan: OperationalPlan, *, choice: ResolutionChoice, target: RunnerState | None
+) -> TransitionIntentRecord:
+    """Bind one replayable human recovery effect to its reviewed plan fingerprint."""
+    return TransitionIntentRecord(
+        operation_id=f"human-recovery:{choice.value}:{plan.target_iid}:{plan.fingerprint}",
+        kind=f"human_recovery_{choice.value}",
+        expected_evidence={
+            "plan_fingerprint": plan.fingerprint,
+            "target_state": None if target is None else target.value,
+            "target_label": plan.evidence.get("target_label"),
+        },
+    )
+
+
+def _matches_recovery_intent(
+    record: LedgerRecord | None, plan: OperationalPlan, choice: ResolutionChoice
+) -> bool:
+    """Accept only the exact retained intent for a reviewed replay."""
+    if record is None or record.intent is None:
+        return False
+    target_label = plan.evidence.get("target_label")
+    target_states = {
+        "agent::blocked": RunnerState.BLOCKED,
+        "agent::awaiting-human": RunnerState.AWAITING_HUMAN,
+        "agent::failed": RunnerState.FAILED,
+    }
+    target = (
+        target_states.get(target_label)
+        if isinstance(target_label, str)
+        else RunnerState.COMPLETE
+        if choice in {ResolutionChoice.CLOSE, ResolutionChoice.SUPERSEDE}
+        else RunnerState.PREPARING
+        if choice is ResolutionChoice.RETRY
+        else None
+    )
+    expected = _recovery_intent(plan, choice=choice, target=target)
+    return (
+        record.intent.operation_id == expected.operation_id
+        and record.intent.kind == expected.kind
+        and record.intent.expected_evidence == expected.expected_evidence
+    )
+
+
 def dispatch(
     request: CommandRequest,
     *,
@@ -918,8 +1315,417 @@ def dispatch(
         request.issue_iid,
         request.max_activation_seconds,
     )
-    project = gitlab.verify_project()
+    if request.command in {"recovery.inventory", "recovery.resolve"}:
+        project, recovery_username = _recovery_identity(gitlab, config)
+    else:
+        project = gitlab.verify_project()
     identity = {"host": config.host, "project_id": project.id}
+
+    if request.command in {"recovery.inventory", "recovery.resolve"}:
+        username = recovery_username
+        if request.command == "recovery.inventory":
+            records = (
+                ledger.list_records()
+                if request.issue_iid is None
+                else (ledger.load(request.issue_iid),)
+            )
+            retained = tuple(record for record in records if record is not None)
+            projected = gitlab.list_projected()
+            split_children = gitlab.split_child_inventory()
+            projected = (*projected, *split_children)
+            observed_issues = {issue.iid: issue for issue in projected}
+            observed_issues.update(
+                {
+                    record.issue_iid: gitlab.fetch_issue(record.issue_iid)
+                    for record in retained
+                }
+            )
+            dependency_ids: set[int] = set()
+            child_dependencies: dict[int, tuple[int, ...]] = {}
+            for child in split_children:
+                parsed_marker = parse_split_marker(child.description, project.id)
+                if parsed_marker is None:
+                    continue
+                child_dependencies[child.iid] = parsed_marker[2]
+                dependency_ids.update(parsed_marker[2])
+            for dependency_iid in dependency_ids:
+                observed_issues.setdefault(
+                    dependency_iid, gitlab.fetch_issue(dependency_iid)
+                )
+            merge_requests = gitlab.open_merge_requests()
+            controller = wired.process_probe()
+            default_pipeline = gitlab.latest_pipeline_for_ref(project.default_branch)
+            records_by_iid = {record.issue_iid: record for record in retained}
+            candidate_iids = (
+                set(observed_issues)
+                if request.issue_iid is None
+                else {request.issue_iid}
+            )
+            inventory = build_inventory(
+                tuple(
+                    _recovery_observation(
+                        records_by_iid.get(iid),
+                        issue_iid=iid,
+                        gitlab=gitlab,
+                        issue=observed_issues[iid],
+                        merge_requests=merge_requests,
+                        repository=repository,
+                        project=project,
+                        controller_status=controller,
+                        split_dependencies=tuple(
+                            (dependency_iid, observed_issues[dependency_iid].state)
+                            for dependency_iid in child_dependencies.get(iid, ())
+                        ),
+                    )
+                    for iid in sorted(candidate_iids)
+                )
+            )
+            items = tuple(
+                _item(
+                    records_by_iid[candidate.issue_iid],
+                    corroboration={
+                        "classification": candidate.classification.value,
+                        "issue_label": next(
+                            iter(observed_issues[candidate.issue_iid].labels), ""
+                        ),
+                        "controller": controller,
+                        "pipeline_sha": next(
+                            (
+                                mr.sha
+                                for mr in merge_requests
+                                if mr.source_branch
+                                == records_by_iid[candidate.issue_iid].source_branch
+                            ),
+                            "",
+                        ),
+                    },
+                )
+                for candidate in inventory.candidates
+                if candidate.issue_iid in records_by_iid
+            )
+            return CommandReport(
+                command=request.command,
+                applied=False,
+                outcome="inventory",
+                project=identity,
+                items=items,
+                summary="Read-only retained recovery inventory.",
+                next_action="Review one explicit human recovery decision.",
+                operational_plan=OperationalPlan(
+                    command=request.command,
+                    action="inventory",
+                    project={
+                        "host": config.host,
+                        "project_id": project.id,
+                        "default_branch": project.default_branch,
+                    },
+                    authenticated_username=username,
+                    evidence={
+                        "default_pipeline_id": None
+                        if default_pipeline is None
+                        else default_pipeline.id,
+                        "default_pipeline_status": None
+                        if default_pipeline is None
+                        else default_pipeline.status,
+                        "default_pipeline_sha": None
+                        if default_pipeline is None
+                        else default_pipeline.sha,
+                        "controller_status": controller,
+                        "fresh_work_selection": False,
+                    },
+                ),
+                recovery_candidates=tuple(
+                    _recovery_candidate_report(candidate, priority=position)
+                    for position, candidate in enumerate(inventory.candidates)
+                ),
+            )
+        record = ledger.load(request.issue_iid or 0)
+        choice = ResolutionChoice(request.choice or "")
+        if record is None and choice is not ResolutionChoice.REOPEN:
+            raise RuntimeError("recovery issue has no retained record")
+        snapshot_issue = gitlab.fetch_issue(request.issue_iid or 0)
+        snapshot_mrs = gitlab.open_merge_requests()
+        snapshot_controller = wired.process_probe()
+        reviewed: OperationalPlan | None = None
+        if apply:
+            if request.plan_file is None:
+                raise RuntimeError("recovery apply requires --plan-file")
+            try:
+                payload = json.loads(wired.read_plan(request.plan_file))
+                reviewed = OperationalPlan.model_validate(
+                    payload.get("operational_plan", payload)
+                )
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as error:
+                raise RuntimeError("recovery plan is invalid") from error
+        replaying = reviewed is not None and _matches_recovery_intent(
+            record, reviewed, choice
+        )
+        if replaying:
+            observation = _recovery_observation(
+                record,
+                issue_iid=request.issue_iid or 0,
+                gitlab=gitlab,
+                repository=repository,
+                project=project,
+                controller_status=snapshot_controller,
+                issue=snapshot_issue,
+                merge_requests=snapshot_mrs,
+                split_dependencies=_recovery_split_dependencies(
+                    request.issue_iid or 0, project=project, gitlab=gitlab
+                ),
+            )
+            plan = reviewed
+        else:
+            plan, observation = _recovery_plan(
+                request,
+                project=project,
+                username=username,
+                record=record,
+                gitlab=gitlab,
+                repository=repository,
+                controller_status=snapshot_controller,
+                issue=snapshot_issue,
+                merge_requests=snapshot_mrs,
+            )
+        if not apply:
+            return _report(
+                request,
+                applied=False,
+                outcome="planned",
+                records=() if record is None else (record,),
+                project=identity,
+                summary="Read-only reviewed recovery plan.",
+                next_action="Review the plan, then apply its exact plan file.",
+                operational_plan=plan,
+            )
+        if reviewed is None:
+            raise RuntimeError("recovery plan is invalid")
+        with wired.lock():
+            current_project, current_username = _recovery_identity(gitlab, config)
+            if (current_project, current_username) != (project, username):
+                raise RuntimeError(
+                    "credential or project evidence changed; create a new preview"
+                )
+            current_record = ledger.load(request.issue_iid or 0)
+            if current_record is None and choice is not ResolutionChoice.REOPEN:
+                raise RuntimeError("recovery record disappeared")
+            current_issue = gitlab.fetch_issue(request.issue_iid or 0)
+            current_mrs = gitlab.open_merge_requests()
+            # The lock owner becomes this process after acquisition; retain the
+            # pre-acquisition probe so the lock cannot make its own plan drift.
+            current_controller = snapshot_controller
+            replaying = _matches_recovery_intent(current_record, reviewed, choice)
+            if replaying:
+                current_observation = _recovery_observation(
+                    current_record,
+                    issue_iid=request.issue_iid or 0,
+                    gitlab=gitlab,
+                    repository=repository,
+                    project=project,
+                    controller_status=current_controller,
+                    issue=current_issue,
+                    merge_requests=current_mrs,
+                    split_dependencies=_recovery_split_dependencies(
+                        request.issue_iid or 0, project=project, gitlab=gitlab
+                    ),
+                )
+                current_plan = reviewed
+            else:
+                current_plan, current_observation = _recovery_plan(
+                    request,
+                    project=project,
+                    username=username,
+                    record=current_record,
+                    gitlab=gitlab,
+                    repository=repository,
+                    controller_status=current_controller,
+                    issue=current_issue,
+                    merge_requests=current_mrs,
+                )
+            if not replaying and current_plan != reviewed:
+                raise RuntimeError("recovery evidence changed; create a new preview")
+            if not replaying:
+                try:
+                    verify_resolution_plan(
+                        build_resolution_plan(
+                            ResolutionRequest(
+                                request.issue_iid or 0,
+                                ResolutionChoice(request.choice or ""),
+                                request.reason or "",
+                                request.evidence_urls,
+                                request.replacement_issue_iid,
+                                request.target_label,
+                            ),
+                            observation,
+                        ),
+                        current_observation,
+                    )
+                except EvidenceDriftError as error:
+                    raise RuntimeError(str(error)) from error
+            before_state = gitlab.fetch_issue(request.issue_iid or 0).state
+            if choice is ResolutionChoice.RETRY:
+                if current_record is None:
+                    raise RuntimeError("recovery record disappeared")
+                retained_publication = (
+                    current_record.intent is not None
+                    and current_record.intent.kind == "publish_merge_request"
+                )
+                if retained_publication:
+                    updated = _resume_blocked_retry(
+                        current_record, wired=wired, ledger=ledger, gitlab=gitlab
+                    )
+                    # The publication intent is deliberately retained for its
+                    # existing replay path; recovery never overwrites it.
+                    continue_recovery = False
+                else:
+                    continue_recovery = True
+                if (
+                    continue_recovery
+                    and replaying
+                    and current_record.state is RunnerState.PREPARING
+                ):
+                    gitlab.transition_labels(current_record.issue_iid, "agent::running")
+                    updated = ledger.persist(
+                        current_record.model_copy(update={"intent": None})
+                    )
+                elif continue_recovery:
+                    pending = (
+                        current_record
+                        if replaying
+                        else ledger.persist(
+                            current_record.model_copy(
+                                update={
+                                    "intent": _recovery_intent(
+                                        reviewed,
+                                        choice=choice,
+                                        target=RunnerState.PREPARING,
+                                    )
+                                }
+                            )
+                        )
+                    )
+                    updated = ledger.persist(
+                        _resume_blocked_retry(
+                            pending, wired=wired, ledger=ledger, gitlab=gitlab
+                        ).model_copy(update={"intent": None})
+                    )
+            elif choice in {ResolutionChoice.CLOSE, ResolutionChoice.SUPERSEDE}:
+                if current_record is None:
+                    raise RuntimeError("close requires a retained recovery record")
+                completed = (
+                    current_record.model_copy(update={"intent": None})
+                    if current_record.state is RunnerState.COMPLETE
+                    else transition_record(
+                        current_record,
+                        RunnerState.COMPLETE,
+                        error_code=None,
+                        summary="Explicit human recovery closure approved.",
+                        next_action="Closure evidence has been recorded.",
+                        intent=None,
+                    )
+                )
+                if not replaying:
+                    ledger.persist(
+                        current_record.model_copy(
+                            update={
+                                "intent": _recovery_intent(
+                                    reviewed,
+                                    choice=choice,
+                                    target=RunnerState.COMPLETE,
+                                )
+                            }
+                        )
+                    )
+                replacement = (
+                    ""
+                    if request.replacement_issue_iid is None
+                    else f" Replacement issue: #{request.replacement_issue_iid}."
+                )
+                if not replaying:
+                    gitlab.comment_outcome(
+                        request.issue_iid or 0,
+                        error_code="human_recovery",
+                        summary=(
+                            f"{request.reason}{replacement} "
+                            f"{' '.join(request.evidence_urls)}"
+                        ).strip(),
+                        next_action="Closure was explicitly reviewed.",
+                    )
+                gitlab.close_issue(request.issue_iid or 0)
+                gitlab.transition_labels(request.issue_iid or 0, None)
+                updated = ledger.persist(completed)
+            elif choice is ResolutionChoice.RELABEL:
+                if current_record is None:
+                    raise RuntimeError("relabel requires a retained recovery record")
+                target_states = {
+                    "agent::blocked": RunnerState.BLOCKED,
+                    "agent::awaiting-human": RunnerState.AWAITING_HUMAN,
+                    "agent::failed": RunnerState.FAILED,
+                }
+                reviewed_label = reviewed.evidence.get("target_label")
+                if not isinstance(reviewed_label, str):
+                    raise RuntimeError("reviewed relabel target is invalid")
+                target_state = target_states.get(reviewed_label)
+                if target_state is None:
+                    raise RuntimeError("reviewed relabel target is invalid")
+                transitioned = (
+                    current_record
+                    if target_state is None or target_state is current_record.state
+                    else transition_record(
+                        current_record,
+                        target_state,
+                        error_code=current_record.error_code,
+                        summary="Explicit human lifecycle relabel approved.",
+                        next_action="Follow the reviewed lifecycle decision.",
+                    )
+                )
+                if not replaying:
+                    ledger.persist(
+                        current_record.model_copy(
+                            update={
+                                "intent": _recovery_intent(
+                                    reviewed, choice=choice, target=target_state
+                                )
+                            }
+                        )
+                    )
+                gitlab.transition_labels(request.issue_iid or 0, reviewed_label)
+                updated = ledger.persist(
+                    transitioned.model_copy(update={"intent": None})
+                )
+            else:
+                gitlab.reopen_issue(request.issue_iid or 0)
+                updated = current_record
+            after_state = (
+                "closed"
+                if choice in {ResolutionChoice.CLOSE, ResolutionChoice.SUPERSEDE}
+                else gitlab.fetch_issue(request.issue_iid or 0).state
+            )
+            return CommandReport(
+                command=request.command,
+                applied=True,
+                outcome="applied",
+                project=identity,
+                items=(
+                    _item(
+                        updated,
+                        corroboration={
+                            "before_state": before_state,
+                            "after_state": after_state,
+                        },
+                    ),
+                )
+                if updated is not None
+                else (),
+                operational_plan=reviewed,
+                summary="Reviewed human recovery decision applied.",
+                next_action="Review the bounded before-and-after receipt.",
+            )
 
     if request.command in {"loop.canary", "loop.recover"}:
         username = gitlab.verify_authenticated_user()

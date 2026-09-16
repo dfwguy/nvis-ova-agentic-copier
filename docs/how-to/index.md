@@ -29,5 +29,6 @@ practical work in a generated project or this template repository.
 
 ### Agent workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Configure enough concurrent live-agent capacity for the workflow lane you need.
+- [How to resolve factory issue recovery](resolve-factory-issues.md) — Inspect recovery evidence and apply one reviewed resolution for a retained factory issue.
 - [How to set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Install, inspect, plan recovery, and enable one serial agent loop.
 <!-- END GENERATED -->

@@ -12,11 +12,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -126,9 +127,30 @@ def _common(
     parser.add_argument("--debug", action="store_true", help=debug_help)
 
 
+class _AgentWorkParser(argparse.ArgumentParser):
+    """Keep the conditional reviewed-plan requirement at the parse boundary."""
+
+    def parse_args(
+        self,
+        args: Iterable[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if parsed is None:
+            raise RuntimeError("argument parser returned no namespace")
+        if (
+            (getattr(parsed, "resource", None), getattr(parsed, "action", None))
+            == ("recovery", "resolve")
+            and parsed.apply
+            and parsed.plan_file is None
+        ):
+            self.error("--apply requires --plan-file")
+        return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
-    parser = argparse.ArgumentParser(prog="agent-work")
+    parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
     loop = resources.add_parser("loop", help="inspect or advance the serial loop")
     loop_actions = loop.add_subparsers(dest="action", required=True)
@@ -188,6 +210,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=16,
         help="maximum recovery segments per applied activation (default: %(default)s)",
     )
+
+    recovery = resources.add_parser(
+        "recovery", help="inventory and resolve retained factory issues"
+    )
+    recovery_actions = recovery.add_subparsers(dest="action", required=True)
+    inventory = recovery_actions.add_parser(
+        "inventory", help="read-only recovery evidence inventory"
+    )
+    _common(
+        inventory,
+        apply_help="accepted for command consistency; inventory remains read-only",
+    )
+    inventory.add_argument("--issue-iid", type=_positive_integer)
+    resolve = recovery_actions.add_parser(
+        "resolve", help="preview or apply one reviewed recovery decision"
+    )
+    _common(resolve, apply_help="apply only the exact reviewed resolution plan")
+    resolve.add_argument("--issue-iid", type=_positive_integer, required=True)
+    resolve.add_argument(
+        "--choice",
+        choices=("retry", "close", "reopen", "relabel", "supersede"),
+        required=True,
+    )
+    resolve.add_argument("--reason", required=True)
+    resolve.add_argument(
+        "--evidence-url", dest="evidence_urls", action="append", default=[]
+    )
+    resolve.add_argument("--replacement-issue-iid", type=_positive_integer)
+    resolve.add_argument("--target-label")
+    resolve.add_argument("--plan-file", type=Path)
     recover.add_argument(
         "--max-activation-seconds",
         type=_positive_integer,
@@ -284,7 +336,10 @@ def _stderr(message: str) -> None:
 
 def _render(report: CommandReport, *, as_json: bool) -> str:
     if as_json:
-        return report.model_dump_json(exclude_none=True)
+        payload = report.model_dump(mode="json", exclude_none=True)
+        if not payload.get("recovery_candidates"):
+            payload.pop("recovery_candidates", None)
+        return json.dumps(payload, default=str, separators=(",", ":"))
     if report.command != "loop.status":
         details = [report.outcome]
         if report.stop_reason:
@@ -310,6 +365,18 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
                         f"worker_diagnostic={item.worker_exit.diagnostic}",
                     )
                 )
+        for candidate in report.recovery_candidates:
+            details.extend(
+                (
+                    f"issue=#{candidate.issue_iid}",
+                    f"classification={candidate.classification}",
+                    f"priority={candidate.priority}",
+                    f"recommendation={candidate.recommendation}",
+                )
+            )
+            details.extend(
+                f"{key}={value}" for key, value in candidate.corroboration.items()
+            )
         return " ".join(details)
 
     def safe(value: object) -> str:
@@ -580,6 +647,11 @@ def main(
     request = CommandRequest(
         command=command,
         issue_iid=getattr(parsed, "issue_iid", None),
+        choice=getattr(parsed, "choice", None),
+        reason=getattr(parsed, "reason", None),
+        evidence_urls=tuple(getattr(parsed, "evidence_urls", [])),
+        replacement_issue_iid=getattr(parsed, "replacement_issue_iid", None),
+        target_label=getattr(parsed, "target_label", None),
         plan_file=getattr(parsed, "plan_file", None),
         max_segments=getattr(parsed, "max_segments", 16),
         max_activation_seconds=getattr(

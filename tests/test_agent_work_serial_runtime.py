@@ -36,6 +36,7 @@ from agent_work.domain import (
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
+    render_split_marker,
     split_fingerprint,
 )
 from agent_work.gitlab import GitLabError
@@ -164,6 +165,7 @@ def _decision_draft() -> MergeRequestDraft:
 class FakeGitLab:
     def __init__(self, issue: GitLabIssue | None = None) -> None:
         self.issue = issue or _issue()
+        self.issues: dict[int, GitLabIssue] = {}
         self.labels: list[str | None] = []
         self.events: list[str] = []
         self.handoffs: list[tuple[int, int, str]] = []
@@ -210,15 +212,26 @@ class FakeGitLab:
         self.created_children: list[tuple[str, str]] = []
         self.decomposition_notes: list[str] = []
         self.closed_issues: list[int] = []
+        self.reopened_issues: list[int] = []
         self.child_creation_failures = 0
         self.created_child_override: GitLabIssue | None = None
         self.authenticated_username = "factory-bot"
+        self.project_error: GitLabError | None = None
+        self.identity_error: GitLabError | None = None
+        self.project_verifications = 0
+        self.identity_verifications = 0
 
     def verify_project(self) -> GitLabProject:
+        self.project_verifications += 1
+        if self.project_error is not None:
+            raise self.project_error
         return _project()
 
     def verify_authenticated_user(self) -> str | None:
         """Provide the configured fake service identity."""
+        self.identity_verifications += 1
+        if self.identity_error is not None:
+            raise self.identity_error
         return self.authenticated_username
 
     def fetch_merge_request_feedback(
@@ -270,7 +283,7 @@ class FakeGitLab:
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         self.fetch_issue_calls.append(iid)
-        return self.issue
+        return self.issues.get(iid, self.issue)
 
     def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]:
         del iid
@@ -431,6 +444,11 @@ class FakeGitLab:
         self.closed_issues.append(iid)
         return self.issue.model_copy(update={"state": "closed"})
 
+    def reopen_issue(self, iid: int) -> GitLabIssue:
+        self.reopened_issues.append(iid)
+        self.issue = self.issue.model_copy(update={"state": "opened", "labels": ()})
+        return self.issue
+
 
 class ClosedInventoryGitLab(FakeGitLab):
     """In-memory GitLab fake with independently injected closed inventory."""
@@ -524,6 +542,21 @@ class FailOnceLedger(JsonLedger):
     def persist(self, record: LedgerRecord) -> LedgerRecord:
         if record.issue_iid == self.failing_iid and self.failures:
             self.failures -= 1
+            raise LedgerError("injected ledger failure")
+        return super().persist(record)
+
+
+class FailOnPersistLedger(JsonLedger):
+    """Inject one persistence failure at an exact post-setup call boundary."""
+
+    def __init__(self, root: Path, *, fail_on: int) -> None:
+        super().__init__(root, clock=lambda: NOW)
+        self.fail_on = fail_on
+        self.calls = 0
+
+    def persist(self, record: LedgerRecord) -> LedgerRecord:
+        self.calls += 1
+        if self.calls == self.fail_on:
             raise LedgerError("injected ledger failure")
         return super().persist(record)
 
@@ -976,6 +1009,750 @@ def _operational_plan_bytes(report: object) -> bytes:
     plan = payload["operational_plan"]
     assert plan["fingerprint"]
     return json.dumps(plan).encode()
+
+
+def test_recovery_inventory_correlates_durable_evidence_without_claiming_or_mutating(
+    tmp_path: Path,
+) -> None:
+    """Inventory is read-only and never falls through to ordinary selection."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        )
+    )
+    issue = _issue().model_copy(update={"labels": ("agent::running",)})
+    gitlab = FakeGitLab(issue)
+    merge_request = _mr(sha=record.source_sha or "a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=44,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/44",
+        )
+    )
+    repository = FakeRepository(config)
+    repository.inventory_result = ((record.source_branch,), (str(record.worktree),), ())
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        process_probe=lambda: "active",
+    )
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory"),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.applied is False
+    assert report.items[0].issue_iid == 12
+    assert report.items[0].corroboration["issue_label"] == "agent::running"
+    assert report.items[0].corroboration["pipeline_sha"] == merge_request.sha
+    assert report.items[0].corroboration["controller"] == "active"
+    assert report.operational_plan is not None
+    assert report.operational_plan.evidence["default_pipeline_status"] == "success"
+    assert report.operational_plan.evidence["fresh_work_selection"] is False
+    assert gitlab.eligible_calls == 0
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert repository.prepared is False and repository.pushes == 0
+    assert ledger.load(12) == record
+
+
+def test_recovery_inventory_reports_actual_stale_corroboration_and_loop_recover(
+    tmp_path: Path,
+) -> None:
+    """A stale active record is ordered for human recovery, never retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["controller_status"] == '"missing"'
+    assert candidate.corroboration["worktree_exists"] == "true"
+    assert "loop recover" in candidate.recommendation
+
+
+def test_recovery_resolve_preview_is_a_non_mutating_exact_plan(
+    tmp_path: Path,
+) -> None:
+    """A human can review a bounded resolution plan before any state changes."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+
+    report = dispatch(
+        CommandRequest(
+            command="recovery.resolve",
+            issue_iid=12,
+            choice="retry",
+            reason="The trusted split prerequisite is closed.",
+        ),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.applied is False
+    assert report.operational_plan is not None
+    assert report.operational_plan.target_iid == 12
+    assert report.operational_plan.action == "retry"
+    assert report.operational_plan.fingerprint
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert repository.prepared is False and repository.pushes == 0
+    assert ledger.load(12) == record
+
+
+def test_recovery_preview_binds_one_exact_merge_request_pipeline_and_dependencies(
+    tmp_path: Path,
+) -> None:
+    """Preview evidence includes the unique durable MR and trusted split prerequisite."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    gitlab.open_merge_request_inventory = (_mr(),)
+    gitlab.pipeline = PipelineEvidence(
+        id=7, status="failed", sha="a" * 40, web_url="https://pipeline/7"
+    )
+    gitlab.split_children["target"] = _issue(
+        description=render_split_marker(310967, 1, "target", (23,))
+    )
+    gitlab.issues[23] = _issue(iid=23, state="closed")
+
+    report = dispatch(
+        CommandRequest(
+            command="recovery.resolve",
+            issue_iid=12,
+            choice="retry",
+            reason="The trusted split prerequisite is closed.",
+        ),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.operational_plan is not None
+    evidence = report.operational_plan.evidence
+    assert evidence["merge_request_iid"] == 88
+    assert evidence["merge_request_sha"] == "a" * 40
+    assert evidence["pipeline_id"] == 7
+    assert evidence["pipeline_sha"] == "a" * 40
+    assert evidence["split_dependencies"] == '[[23, "closed"]]'
+
+
+def test_recovery_preview_marks_nonunique_merge_request_evidence_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """A branch match is trusted only when it has one exact durable owner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    gitlab.open_merge_request_inventory = (
+        _mr(),
+        _mr().model_copy(update={"iid": 89}),
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="recovery.resolve",
+            issue_iid=12,
+            choice="retry",
+            reason="The trusted split prerequisite is closed.",
+        ),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.evidence["ambiguous"] is True
+
+
+def test_recovery_resolve_rechecks_the_reviewed_plan_before_effects(
+    tmp_path: Path,
+) -> None:
+    """Evidence drift under the project lock aborts an applied recovery cleanly."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="The trusted split prerequisite is closed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "reviewed-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.issue = gitlab.issue.model_copy(update={"labels": ("agent::failed",)})
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert repository.prepared is False and repository.pushes == 0
+    assert ledger.load(12) == record
+
+
+def test_recovery_apply_does_not_drift_from_its_own_project_lock(
+    tmp_path: Path,
+) -> None:
+    """The controller probe captured before locking stays comparable under the lock."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    lock_active = False
+
+    class ActivatingLock:
+        def __enter__(self) -> None:
+            nonlocal lock_active
+            lock_active = True
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        lock=ActivatingLock,
+        process_probe=lambda: "active" if lock_active else "missing",
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="The reviewed blocked record can resume.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "lock-stable-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    assert report.applied and gitlab.labels == ["agent::running"]
+
+
+def test_recovery_close_records_reason_and_evidence_before_closing(
+    tmp_path: Path,
+) -> None:
+    """A closing action leaves an auditable reason/link receipt before closure."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.FAILED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::failed",)}))
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="close",
+        reason="The work is obsolete after the replacement was merged.",
+        evidence_urls=("https://gitlab.example.com/group/project/-/issues/99",),
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "close-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    assert report.applied is True
+    assert report.items[0].corroboration["before_state"] == "opened"
+    assert report.items[0].corroboration["after_state"] == "closed"
+    assert gitlab.comments
+    assert "obsolete" in gitlab.comments[0]
+    assert "issues/99" in gitlab.comments[0]
+    assert gitlab.closed_issues == [12]
+
+
+@pytest.mark.parametrize(
+    ("choice", "state", "target_label"),
+    [
+        ("retry", RunnerState.BLOCKED, None),
+        ("relabel", RunnerState.BLOCKED, "agent::awaiting-human"),
+        ("reopen", RunnerState.BLOCKED, None),
+        ("supersede", RunnerState.FAILED, None),
+    ],
+)
+def test_recovery_resolution_apply_executes_each_reviewed_choice(
+    tmp_path: Path, choice: str, state: RunnerState, target_label: str | None
+) -> None:
+    """Every exposed choice has one successful, plan-bound apply outcome."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    if choice != "reopen":
+        ledger.persist(_record(tmp_path, state=state, phase=WorkflowPhase.DISCOVERY))
+    issue_state = "closed" if choice == "reopen" else "opened"
+    gitlab = FakeGitLab(
+        _issue().model_copy(
+            update={"state": issue_state, "labels": ("agent::blocked",)}
+        )
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice=choice,
+        reason="A human reviewed this retained outcome.",
+        replacement_issue_iid=99 if choice == "supersede" else None,
+        target_label=target_label,
+    )
+    preview = dispatch(
+        request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    report = dispatch(
+        replace(request, plan_file=plan_file),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+    assert report.applied
+    if choice == "retry":
+        assert (record := ledger.load(12)) is not None
+        assert record.state is RunnerState.PREPARING
+        assert gitlab.labels[-1] == "agent::running"
+    elif choice == "relabel":
+        assert gitlab.labels[-1] == target_label
+        assert (record := ledger.load(12)) is not None
+        assert record.state is RunnerState.AWAITING_HUMAN
+    elif choice == "reopen":
+        assert gitlab.reopened_issues == [12]
+        assert gitlab.labels == [] and ledger.load(12) is None
+    else:
+        assert gitlab.closed_issues == [12] and "#99" in gitlab.comments[-1]
+        assert (record := ledger.load(12)) is not None
+        assert record.state is RunnerState.COMPLETE and record.intent is None
+
+
+def test_recovery_close_replays_after_final_ledger_failure_without_a_second_note(
+    tmp_path: Path,
+) -> None:
+    """An exact close intent resumes remote-complete work and clears only once."""
+    config = _config(tmp_path)
+    ledger = FailOnPersistLedger(config.state_root, fail_on=3)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="close",
+        reason="The reviewed evidence proves this retained item is obsolete.",
+        evidence_urls=("https://gitlab.example.com/evidence/12",),
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "close-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    with pytest.raises(LedgerError, match="injected ledger failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    pending = ledger.load(12)
+    assert pending is not None and pending.intent is not None
+    assert len(gitlab.comments) == 1 and gitlab.closed_issues == [12]
+    assert gitlab.labels == [None]
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    completed = ledger.load(12)
+    assert report.applied and completed is not None
+    assert completed.state is RunnerState.COMPLETE and completed.intent is None
+    assert len(gitlab.comments) == 1
+    assert gitlab.closed_issues == [12, 12] and gitlab.labels == [None, None]
+
+
+def test_recovery_retry_replays_after_label_before_final_intent_clear(
+    tmp_path: Path,
+) -> None:
+    """A retry replay clears its exact pending intent after the label already changed."""
+    config = _config(tmp_path)
+    ledger = FailOnPersistLedger(config.state_root, fail_on=4)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="The reviewed blocked record can resume.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "retry-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    with pytest.raises(LedgerError, match="injected ledger failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    pending = ledger.load(12)
+    assert pending is not None and pending.state is RunnerState.PREPARING
+    assert pending.intent is not None and gitlab.labels == ["agent::running"]
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(12)
+    assert report.applied and resumed is not None
+    assert resumed.state is RunnerState.PREPARING and resumed.intent is None
+    assert resumed.retry_count == 0 and resumed.retry_at is None
+
+
+def test_recovery_relabel_replays_after_remote_label_before_final_persist(
+    tmp_path: Path,
+) -> None:
+    """An exact relabel intent converges after its remote projection succeeded."""
+    config = _config(tmp_path)
+    ledger = FailOnPersistLedger(config.state_root, fail_on=3)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="relabel",
+        target_label="agent::awaiting-human",
+        reason="A human reviewed the lifecycle transition.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "relabel-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    with pytest.raises(LedgerError, match="injected ledger failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    pending = ledger.load(12)
+    assert pending is not None and pending.intent is not None
+    assert gitlab.labels == ["agent::awaiting-human"]
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    completed = ledger.load(12)
+    assert report.applied and completed is not None
+    assert completed.state is RunnerState.AWAITING_HUMAN and completed.intent is None
+    assert gitlab.labels == ["agent::awaiting-human", "agent::awaiting-human"]
+
+
+def test_recovery_relabel_apply_rejects_a_mutated_request_target_before_effects(
+    tmp_path: Path,
+) -> None:
+    """The reviewed relabel target cannot be replaced by a later request flag."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="relabel",
+        target_label="agent::awaiting-human",
+        reason="Reviewed target.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "relabel-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, target_label="agent::blocked", plan_file=plan_file),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert ledger.load(12) == record and gitlab.labels == []
+
+
+def test_recovery_apply_rejects_a_mismatched_retained_recovery_intent(
+    tmp_path: Path,
+) -> None:
+    """A stale recovery intent cannot authorize a different reviewed plan."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="The reviewed blocked record can resume.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "retry-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    retained = ledger.persist(
+        record.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id="human-recovery:close:12:stale",
+                    kind="human_recovery_close",
+                    expected_evidence={"plan_fingerprint": "stale"},
+                )
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(12) == retained
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+
+
+def test_recovery_relabel_replay_rejects_mismatched_intent_target_evidence(
+    tmp_path: Path,
+) -> None:
+    """A matching operation fingerprint still fails closed on target evidence drift."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="relabel",
+        target_label="agent::awaiting-human",
+        reason="Reviewed target.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    plan_file = tmp_path / "relabel-target-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    retained = ledger.persist(
+        record.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=(
+                        f"human-recovery:relabel:12:{preview.operational_plan.fingerprint}"
+                    ),
+                    kind="human_recovery_relabel",
+                    expected_evidence={
+                        "plan_fingerprint": preview.operational_plan.fingerprint,
+                        "target_label": "agent::failed",
+                        "target_state": "failed",
+                    },
+                )
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(12) == retained
+    assert gitlab.labels == [] and gitlab.comments == []
+
+
+def test_recovery_retry_preserves_a_retained_publication_intent(
+    tmp_path: Path,
+) -> None:
+    """Recovery retry delegates retained publication work to the shared retry path."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY
+        ).model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id="publish:12",
+                    kind="publish_merge_request",
+                    expected_evidence={},
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="Resume publication.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "publish-retry-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(12)
+    assert report.applied and resumed is not None
+    assert resumed.state is RunnerState.PUBLISHING and resumed.retry_count == 0
+    assert resumed.retry_at is None and resumed.intent is not None
+    assert resumed.intent.kind == "publish_merge_request"
+    assert resumed.intent.expected_evidence["publication_sha"] == repository.bound_sha
+    assert gitlab.labels == ["agent::running"] and record.publication_sha is None
+
+
+@pytest.mark.parametrize("username", [None, "unexpected-bot"])
+def test_recovery_credential_failures_point_to_rotation_without_effects(
+    tmp_path: Path, username: str | None
+) -> None:
+    """Expired or mismatched service credentials stop before any recovery mutation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    gitlab.authenticated_username = username or ""
+    repository = FakeRepository(config)
+
+    with pytest.raises(RuntimeError, match="credential rotate.*84"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=12,
+                choice="retry",
+                reason="The trusted split prerequisite is closed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert ledger.load(12) == record
+
+
+@pytest.mark.parametrize("error_attribute", ["project_error", "identity_error"])
+def test_recovery_gitlab_credential_errors_stop_before_preview_effects(
+    tmp_path: Path, error_attribute: str
+) -> None:
+    """Both authenticated recovery preflight boundaries route to credential rotation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    setattr(gitlab, error_attribute, GitLabError("expired credential"))
+
+    with pytest.raises(RuntimeError, match="credential rotate.*84"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=12,
+                choice="retry",
+                reason="The trusted split prerequisite is closed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+        )
+
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert ledger.load(12) == record
+
+
+@pytest.mark.parametrize("method_name", ["verify_project", "verify_authenticated_user"])
+def test_recovery_credential_errors_under_lock_have_no_effects(
+    tmp_path: Path, method_name: str
+) -> None:
+    """The lock-time identity recheck stops before any GitLab or ledger mutation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=12,
+        choice="retry",
+        reason="The trusted split prerequisite is closed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    plan_file = tmp_path / "reviewed-recovery-plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {"operational_plan": preview.operational_plan.model_dump(mode="json")}
+        )
+    )
+    original = getattr(gitlab, method_name)
+    calls = 0
+
+    def fail_under_lock() -> GitLabProject | str | None:
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise GitLabError("expired credential")
+        return original()
+
+    setattr(gitlab, method_name, fail_under_lock)
+    with pytest.raises(RuntimeError, match="credential rotate.*84"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert gitlab.labels == [] and gitlab.comments == [] and gitlab.closed_issues == []
+    assert ledger.load(12) == record
 
 
 def test_canary_prioritizes_a_failed_exact_pipeline_over_a_clean_active_claim_without_mutating(

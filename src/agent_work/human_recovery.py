@@ -1,0 +1,293 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+"""Pure classification and reviewed-plan rules for human recovery."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from enum import StrEnum
+
+from .domain import RunnerState
+from .state_machine import ALLOWED_TRANSITIONS
+
+
+class RecoveryClassification(StrEnum):
+    """Human-facing classification of retained recovery evidence."""
+
+    LEGITIMATELY_WAITING = "legitimately_waiting"
+    DEPENDENCY_GATED = "dependency_gated"
+    SAFELY_RETRYABLE = "safely_retryable"
+    SUPERSEDED_DUPLICATE = "superseded_duplicate"
+    CLOSURE_CANDIDATE = "closure_candidate"
+    NEEDS_HUMAN_DECISION = "needs_human_decision"
+
+
+class ResolutionChoice(StrEnum):
+    """One explicitly reviewed lifecycle operation."""
+
+    RETRY = "retry"
+    CLOSE = "close"
+    REOPEN = "reopen"
+    RELABEL = "relabel"
+    SUPERSEDE = "supersede"
+
+
+class EvidenceDriftError(ValueError):
+    """The evidence reviewed in a resolution plan is no longer current."""
+
+
+@dataclass(frozen=True)
+class RecoveryObservation:
+    """Immutable bounded evidence for one retained item."""
+
+    issue_iid: int
+    issue_state: str = "opened"
+    labels: tuple[str, ...] = ()
+    record_state: RunnerState | None = None
+    pipeline_status: str | None = None
+    split_dependencies: tuple[tuple[int, str], ...] = ()
+    stale: bool = False
+    ambiguous: bool = False
+    ledger_revision: int | None = None
+    source_branch: str | None = None
+    source_sha: str | None = None
+    worktree_exists: bool | None = None
+    worktree_head: str | None = None
+    worktree_dirty: bool | None = None
+    worktree_changed_paths: tuple[str, ...] = ()
+    merge_request_iid: int | None = None
+    merge_request_state: str | None = None
+    merge_request_sha: str | None = None
+    pipeline_id: int | None = None
+    pipeline_sha: str | None = None
+    controller_status: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryCandidate:
+    """One classified inventory candidate."""
+
+    issue_iid: int
+    classification: RecoveryClassification
+    observation: RecoveryObservation
+
+
+@dataclass(frozen=True)
+class RecoveryInventory:
+    """Ordered, non-claiming retained recovery inventory."""
+
+    candidates: tuple[RecoveryCandidate, ...]
+
+
+@dataclass(frozen=True)
+class ResolutionRequest:
+    """Explicit human input for one recovery resolution plan."""
+
+    issue_iid: int
+    choice: ResolutionChoice
+    reason: str
+    evidence_urls: tuple[str, ...] = ()
+    replacement_issue_iid: int | None = None
+    target_label: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolutionPlan:
+    """Stable, evidence-bound resolution preview."""
+
+    issue_iid: int
+    choice: ResolutionChoice
+    reason: str
+    evidence_urls: tuple[str, ...]
+    replacement_issue_iid: int | None
+    target_label: str | None
+    evidence: tuple[tuple[str, object], ...]
+    digest: str
+    applied: bool = False
+
+
+def _classification(observation: RecoveryObservation) -> RecoveryClassification:
+    if observation.ambiguous or observation.pipeline_status == "failed":
+        return RecoveryClassification.NEEDS_HUMAN_DECISION
+    if observation.stale:
+        return RecoveryClassification.NEEDS_HUMAN_DECISION
+    if observation.issue_state == "closed" and observation.record_state not in {
+        None,
+        RunnerState.COMPLETE,
+    }:
+        return RecoveryClassification.SUPERSEDED_DUPLICATE
+    if "agent::failed" in observation.labels:
+        return RecoveryClassification.CLOSURE_CANDIDATE
+    if observation.record_state is RunnerState.AWAITING_HUMAN:
+        return RecoveryClassification.NEEDS_HUMAN_DECISION
+    dependency_states = {state for _, state in observation.split_dependencies}
+    if "opened" in dependency_states:
+        return RecoveryClassification.DEPENDENCY_GATED
+    if observation.record_state is RunnerState.BLOCKED or (
+        observation.split_dependencies and dependency_states == {"closed"}
+    ):
+        return RecoveryClassification.SAFELY_RETRYABLE
+    return RecoveryClassification.LEGITIMATELY_WAITING
+
+
+def build_inventory(observations: tuple[RecoveryObservation, ...]) -> RecoveryInventory:
+    """Classify retained observations, excluding fresh ordinary work."""
+    candidates = tuple(
+        RecoveryCandidate(item.issue_iid, _classification(item), item)
+        for item in observations
+        if item.record_state is not None
+        or item.labels
+        or item.pipeline_status
+        or item.ambiguous
+        or item.split_dependencies
+    )
+
+    def order(item: RecoveryCandidate) -> tuple[int, int]:
+        observation = item.observation
+        if observation.pipeline_status == "failed":
+            return (0, item.issue_iid)
+        if observation.stale:
+            return (1, item.issue_iid)
+        if item.classification is RecoveryClassification.SAFELY_RETRYABLE:
+            return (2, item.issue_iid)
+        if item.classification is RecoveryClassification.DEPENDENCY_GATED:
+            return (3, item.issue_iid)
+        if observation.record_state is RunnerState.AWAITING_HUMAN:
+            return (4, item.issue_iid)
+        if item.classification is RecoveryClassification.NEEDS_HUMAN_DECISION:
+            return (5, item.issue_iid)
+        if item.classification is RecoveryClassification.CLOSURE_CANDIDATE:
+            return (6, item.issue_iid)
+        if item.classification is RecoveryClassification.SUPERSEDED_DUPLICATE:
+            return (7, item.issue_iid)
+        return (8, item.issue_iid)
+
+    return RecoveryInventory(tuple(sorted(candidates, key=order)))
+
+
+def _evidence(observation: RecoveryObservation) -> tuple[tuple[str, object], ...]:
+    return (
+        ("issue_iid", observation.issue_iid),
+        ("issue_state", observation.issue_state),
+        ("labels", observation.labels),
+        (
+            "record_state",
+            None
+            if observation.record_state is None
+            else observation.record_state.value,
+        ),
+        ("pipeline_status", observation.pipeline_status),
+        ("split_dependencies", observation.split_dependencies),
+        ("stale", observation.stale),
+        ("ambiguous", observation.ambiguous),
+        ("ledger_revision", observation.ledger_revision),
+        ("source_branch", observation.source_branch),
+        ("source_sha", observation.source_sha),
+        ("worktree_exists", observation.worktree_exists),
+        ("worktree_head", observation.worktree_head),
+        ("worktree_dirty", observation.worktree_dirty),
+        ("worktree_changed_paths", observation.worktree_changed_paths),
+        ("merge_request_iid", observation.merge_request_iid),
+        ("merge_request_state", observation.merge_request_state),
+        ("merge_request_sha", observation.merge_request_sha),
+        ("pipeline_id", observation.pipeline_id),
+        ("pipeline_sha", observation.pipeline_sha),
+        ("controller_status", observation.controller_status),
+    )
+
+
+def build_resolution_plan(
+    request: ResolutionRequest, observation: RecoveryObservation
+) -> ResolutionPlan:
+    """Create one deterministic, evidence-bound, non-applied resolution plan."""
+    if request.issue_iid != observation.issue_iid or not request.reason.strip():
+        raise ValueError("resolution requires the observed issue and a reason")
+    if request.choice in {ResolutionChoice.CLOSE, ResolutionChoice.SUPERSEDE} and not (
+        request.evidence_urls or request.replacement_issue_iid
+    ):
+        raise ValueError("close and supersede require linked evidence")
+    if (
+        request.choice is ResolutionChoice.SUPERSEDE
+        and request.replacement_issue_iid is None
+    ):
+        raise ValueError("supersede requires a replacement issue")
+    if request.choice is ResolutionChoice.RELABEL and request.target_label not in {
+        "agent::blocked",
+        "agent::awaiting-human",
+        "agent::failed",
+    }:
+        raise ValueError("relabel requires one supported lifecycle label")
+    if request.choice is ResolutionChoice.RELABEL:
+        target = {
+            "agent::blocked": RunnerState.BLOCKED,
+            "agent::awaiting-human": RunnerState.AWAITING_HUMAN,
+            "agent::failed": RunnerState.FAILED,
+        }[request.target_label or ""]
+        if observation.record_state is None or (
+            target is not observation.record_state
+            and target not in ALLOWED_TRANSITIONS[observation.record_state]
+        ):
+            raise ValueError("relabel target is not a declared durable transition")
+    if request.choice is ResolutionChoice.RETRY and (
+        observation.record_state is not RunnerState.BLOCKED
+        or any(state != "closed" for _, state in observation.split_dependencies)
+    ):
+        raise ValueError("retry requires a blocked retained record")
+    if request.choice is ResolutionChoice.REOPEN and (
+        observation.issue_state != "closed" or observation.record_state is not None
+    ):
+        raise ValueError("reopen requires a closed issue with no retained record")
+    evidence = _evidence(observation)
+    payload = {
+        "issue_iid": request.issue_iid,
+        "choice": request.choice.value,
+        "reason": request.reason,
+        "evidence_urls": request.evidence_urls,
+        "replacement_issue_iid": request.replacement_issue_iid,
+        "target_label": request.target_label,
+        "evidence": evidence,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
+    ).hexdigest()
+    return ResolutionPlan(
+        request.issue_iid,
+        request.choice,
+        request.reason,
+        request.evidence_urls,
+        request.replacement_issue_iid,
+        request.target_label,
+        evidence,
+        digest,
+    )
+
+
+def verify_resolution_plan(
+    plan: ResolutionPlan, observation: RecoveryObservation
+) -> None:
+    """Fail closed unless fresh observation exactly matches reviewed evidence."""
+    request = ResolutionRequest(
+        plan.issue_iid,
+        plan.choice,
+        plan.reason,
+        plan.evidence_urls,
+        plan.replacement_issue_iid,
+        plan.target_label,
+    )
+    try:
+        current = build_resolution_plan(request, observation)
+    except ValueError as error:
+        raise EvidenceDriftError(
+            "resolution evidence changed; create a new preview"
+        ) from error
+    if current.digest != plan.digest:
+        raise EvidenceDriftError("resolution evidence changed; create a new preview")
