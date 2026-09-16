@@ -788,6 +788,20 @@ class CommandReport(BoundaryModel):
     summary: str | None = Field(default=None, max_length=2_048)
     next_action: str | None = Field(default=None, max_length=2_048)
     operational_plan: OperationalPlan | None = None
+    recovery_candidates: tuple[RecoveryCandidateReport, ...] = ()
+
+
+class RecoveryCandidateReport(BoundaryModel):
+    """Bounded human recovery classification evidence."""
+
+    issue_iid: int = Field(gt=0)
+    classification: str
+    issue_state: str
+    labels: tuple[str, ...] = ()
+    record_state: RunnerState | None = None
+    priority: int = Field(ge=0)
+    corroboration: dict[str, str] = Field(default_factory=dict)
+    recommendation: str
 
 
 class OperationalPlan(BoundaryModel):

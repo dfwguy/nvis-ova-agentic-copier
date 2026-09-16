@@ -941,3 +941,28 @@ class GitLabGateway:
         if issue.iid != iid or issue.state != "closed":
             raise GitLabError("GitLab did not close split parent")
         return issue
+
+    def reopen_issue(self, iid: int) -> GitLabIssue:
+        """Reopen one reviewed issue and return exact resulting evidence."""
+        try:
+            payload = self._mapping(
+                self._call(
+                    f"projects/{self._config.project_id}/issues/{iid}",
+                    method="PUT",
+                    fields=(
+                        "state_event=reopen",
+                        f"remove_labels={','.join(LIFECYCLE_LABELS)}",
+                    ),
+                ),
+                "reopened issue",
+            )
+            issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid reopened issue") from error
+        if (
+            issue.iid != iid
+            or issue.state != "opened"
+            or set(issue.labels).intersection(LIFECYCLE_LABELS)
+        ):
+            raise GitLabError("GitLab did not reopen issue")
+        return issue

@@ -309,6 +309,11 @@ class CommandRequest:
 
     command: str
     issue_iid: int | None = None
+    choice: str | None = None
+    reason: str | None = None
+    evidence_urls: tuple[str, ...] = ()
+    replacement_issue_iid: int | None = None
+    target_label: str | None = None
     plan_file: Path | None = None
     max_segments: int = 16
     max_activation_seconds: int = DEFAULT_MAX_ACTIVATION_SECONDS

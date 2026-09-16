@@ -143,6 +143,8 @@ class GitLabPort(Protocol):
 
     def close_issue(self, iid: int) -> GitLabIssue: ...
 
+    def reopen_issue(self, iid: int) -> GitLabIssue: ...
+
 
 class LedgerPort(Protocol):
     """Durable record storage."""

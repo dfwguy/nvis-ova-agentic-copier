@@ -122,6 +122,17 @@ def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:
         ["loop", "retry", "--issue-iid", "12"],
         ["migration", "preview"],
         ["migration", "apply", "--plan-file", "plan.json"],
+        ["recovery", "inventory", "--issue-iid", "12", "--json", "--apply"],
+        [
+            "recovery",
+            "resolve",
+            "--issue-iid",
+            "12",
+            "--choice",
+            "retry",
+            "--reason",
+            "trusted prerequisite is closed",
+        ],
     ],
 )
 def test_parser_exposes_the_nested_resource_action_contract(
@@ -533,6 +544,27 @@ def test_invalid_cli_input_returns_two() -> None:
     parser = build_parser()
     with pytest.raises(SystemExit) as raised:
         parser.parse_args(["loop", "retry"])
+    assert raised.value.code == 2
+
+
+def test_recovery_resolve_apply_requires_the_exact_reviewed_plan_file() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(
+            [
+                "recovery",
+                "resolve",
+                "--issue-iid",
+                "12",
+                "--choice",
+                "retry",
+                "--reason",
+                "trusted prerequisite is closed",
+                "--apply",
+            ]
+        )
+
     assert raised.value.code == 2
 
 
