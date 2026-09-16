@@ -241,10 +241,10 @@ case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
 install -d -m 700 "$HOME/.config/$unit_name"
-printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+printf 'AGENT_WORK_ENV_VERSION=%q\nAGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' 1 "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 
-env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" AGENT_WORK_ENV_VERSION=1 \
   AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_TIMEOUT="$timeout_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
   AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
   AGENT_WORK_BASE_BRANCH=agent/work-base AGENT_WORK_FACTORY_USERNAME="$factory_username" GITLAB_HOST="$gitlab_host" \
@@ -256,6 +256,13 @@ This isolated preview validates the exact service wrapper and credential route
 without inheriting an interactive GitLab identity. It must succeed before
 enabling the timer. Enable linger for the operator so the user manager survives
 logout, then reload and enable the timer:
+
+Initial installation writes the factory-managed service-environment contract at
+version `1`. Its deterministic required keys include `AGENT_WORK_TIMEOUT`.
+Keep project-owned `AGENT_WORK_AGENT`, `AGENT_WORK_BASE_BRANCH`,
+`AGENT_WORK_FACTORY_USERNAME`, `GITLAB_HOST`, and `GITLAB_PROJECT_ID` under
+operator control. A later repository upgrade can detect an older, incomplete,
+contract; a missing file requires the supported setup procedure to recreate it.
 
 After this wrapper change first merges, stop the timer, manually fast-forward
 the dedicated checkout once, run this preview (and any canary), then restart
@@ -298,6 +305,51 @@ Stop the timer before changing its environment file. Re-run the environment
 file creation block above, then reload and enable the timer. Do not change
 credentials, worktrees, ledger files, branches, or stashes merely to make the
 service start.
+
+### Migrate a service environment after a repository upgrade
+
+Before enabling an upgraded timer, migrate its installed environment file. The
+bare command is a non-mutating, non-claiming validation and preview: it does
+not select an issue, create a ledger record, or run normal loop work. It
+compares the installed contract with the current version and required keys.
+
+Stop both units first, then review the dry-run result. Replace the paths and
+unit name with the installed values.
+
+```bash
+environment_file="$HOME/.config/$unit_name/agent-work.env"
+systemctl --user disable --now "$unit_name.timer"
+systemctl --user stop "$unit_name.service"
+systemctl --user is-active --quiet "$unit_name.timer" && exit 1
+systemctl --user is-active --quiet "$unit_name.service" && exit 1
+uv run agent-work service-environment migrate \
+  --environment-file "$environment_file" --unit-name "$unit_name" --dry-run --json
+```
+
+Review the redacted preview. If it reports a stale or missing factory-managed
+contract, apply the same reviewed operation. Migration validates the existing
+configured Developer identity, configured project, default-branch protection,
+and approval safeguards through the checkout's `direnv` and password-store
+credential route. It does not accept, print, or rebind a credential.
+
+```bash
+uv run agent-work service-environment migrate \
+  --environment-file "$environment_file" --unit-name "$unit_name" \
+  --apply --json
+```
+
+Applied migration regenerates only the factory-managed contract version,
+checkout, and tool-path fields; it preserves the five project-owned values
+listed above. It atomically replaces the mode-600 file and runs an isolated,
+non-claiming validation. Both units remain stopped for human review. If a
+pre-write check fails, the file is unchanged. If a later step fails, retain the
+stopped units and use the command's sanitized error to restore or inspect the
+byte-recoverable prior file; do not hand-edit the contract to bypass a failed
+check.
+
+After a successful migration, review the result, run the normal canary
+checkpoint, and explicitly re-enable the timer only after the canary is
+understood. Migration never enables or starts either unit.
 
 ### Rotate the directory-scoped GitLab credential
 

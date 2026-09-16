@@ -33,6 +33,14 @@ from .models import CommandReport, LedgerRecord
 from .ports import CommandRunner
 from .repository import run_subprocess
 from .runtime import dispatch as default_dispatch
+from .service_environment import (
+    ServiceEnvironmentDependencies,
+    ServiceEnvironmentError,
+    ServiceEnvironmentReport,
+)
+from .service_environment import (
+    migrate_service_environment as default_migrate_service_environment,
+)
 from .status import project_status
 from .upstream_finding import ManifestError, UpstreamFindingPreview
 from .upstream_finding import preview_manifest as default_preview_manifest
@@ -99,11 +107,21 @@ def _common(
     parser: argparse.ArgumentParser,
     *,
     apply: bool = True,
+    explicit_dry_run: bool = False,
     apply_help: str = "apply the operation",
     debug_help: str = "show a traceback on failure",
 ) -> None:
     if apply:
-        parser.add_argument("--apply", action="store_true", help=apply_help)
+        if explicit_dry_run:
+            action = parser.add_mutually_exclusive_group()
+            action.add_argument("--apply", action="store_true", help=apply_help)
+            action.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="validate without applying changes",
+            )
+        else:
+            parser.add_argument("--apply", action="store_true", help=apply_help)
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     parser.add_argument("--debug", action="store_true", help=debug_help)
 
@@ -189,6 +207,24 @@ def build_parser() -> argparse.ArgumentParser:
     _common(
         rotate,
         apply_help="stop, verify, and safely rebind the service identity",
+    )
+
+    service_environment = resources.add_parser(
+        "service-environment",
+        help="inspect or migrate an installed service environment",
+    )
+    service_environment_actions = service_environment.add_subparsers(
+        dest="action", required=True
+    )
+    migrate = service_environment_actions.add_parser(
+        "migrate", help="validate or upgrade one versioned service environment"
+    )
+    migrate.add_argument("--environment-file", type=Path, required=True)
+    migrate.add_argument("--unit-name", required=True)
+    _common(
+        migrate,
+        explicit_dry_run=True,
+        apply_help="stop, validate, and apply the service migration",
     )
 
     migration = resources.add_parser("migration", help="inventory legacy evidence")
@@ -351,6 +387,24 @@ def _render_rotation(report: CredentialRotationReport, *, as_json: bool) -> str:
     )
 
 
+def _render_service_environment(
+    report: ServiceEnvironmentReport, *, as_json: bool
+) -> str:
+    """Render only stable, non-secret service-environment migration results."""
+    if as_json:
+        return report.model_dump_json(exclude_none=True)
+    return " ".join(
+        (
+            f"outcome={report.outcome}",
+            f"config_updated={str(report.config_updated).lower()}",
+            f"rolled_back={str(report.rolled_back).lower()}",
+            f"timer_stopped={str(report.timer_stopped).lower()}",
+            f"service_stopped={str(report.service_stopped).lower()}",
+            f"next_action={report.next_action}",
+        )
+    )
+
+
 def _default_preview_upstream(
     preview: UpstreamFindingPreview,
     *,
@@ -391,15 +445,41 @@ def main(
     run_command: CommandRunner = run_subprocess,
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
+    current_checkout: Callable[[], Path] = Path.cwd,
     load_record: _LoadRecord | None = None,
     changed_paths: _ChangedPaths | None = None,
     rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
+    migrate_service_environment: Callable[
+        ..., ServiceEnvironmentReport
+    ] = default_migrate_service_environment,
     atomic_write: Callable[[Path, bytes], None] = atomic_write_environment,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "service-environment" and parsed.action == "migrate":
+        try:
+            report = migrate_service_environment(
+                environment_file=parsed.environment_file,
+                unit_name=parsed.unit_name,
+                apply=parsed.apply,
+                dependencies=ServiceEnvironmentDependencies(
+                    read_bytes=read_bytes,
+                    atomic_write=atomic_write,
+                    run_command=run_command,
+                    resolve_executable=find_executable,
+                    checkout=current_checkout(),
+                    environment=environment,
+                ),
+            )
+        except (ServiceEnvironmentError, OSError, RuntimeError):
+            if parsed.debug:
+                raise
+            write_stderr("service environment migration could not be completed")
+            return 1
+        write_stdout(_render_service_environment(report, as_json=parsed.json))
+        return 0 if report.outcome in {"current", "stale", "verified"} else 1
     if parsed.resource == "credential" and parsed.action == "rotate":
         try:
             report = rotate(

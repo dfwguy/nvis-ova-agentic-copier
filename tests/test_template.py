@@ -879,6 +879,81 @@ def test_agent_loop_wrapper_requires_apply_for_mutation(
 
 
 @pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+def test_service_environment_validation_mode_exits_before_loop_dispatch(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path
+) -> None:
+    """Validation mode proves readiness without running the controller."""
+    checkout, environment, marker, glab_marker = _wrapper_checkout_environment(tmp_path)
+    before_head = _test_git_output(checkout, "rev-parse", "HEAD")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(project_root / relative_wrapper),
+            "--validate-service-environment",
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert glab_marker.exists()
+    assert not marker.exists()
+    assert _test_git_output(checkout, "rev-parse", "HEAD") == before_head
+
+
+@pytest.mark.parametrize(
+    ("remove", "replace"),
+    ((True, None), (False, "2")),
+)
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+def test_service_environment_validation_rejects_missing_version_before_effects(
+    project_root: Path,
+    tmp_path: Path,
+    relative_wrapper: Path,
+    remove: bool,
+    replace: str | None,
+) -> None:
+    """A malformed installed contract cannot reach GitLab or the controller."""
+    _, environment, marker, glab_marker = _wrapper_checkout_environment(tmp_path)
+    if remove:
+        environment.pop("AGENT_WORK_ENV_VERSION")
+    else:
+        environment["AGENT_WORK_ENV_VERSION"] = replace or ""
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(project_root / relative_wrapper),
+            "--validate-service-environment",
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "AGENT_WORK_ENV_VERSION=1 is required" in result.stderr
+    assert not glab_marker.exists()
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
     ("configured_direnv", "expected_error"),
     (
         (None, "AGENT_WORK_DIRENV must be an absolute executable path"),
@@ -1793,6 +1868,7 @@ def test_agent_loop_wrapper_stops_before_direnv_without_checkout_local_envrc(
     _write_command(commands / "agent", "exit 0")
 
     environment = os.environ | {
+        "AGENT_WORK_ENV_VERSION": "1",
         "AGENT_WORK_CHECKOUT": str(checkout),
         "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_UV": str(commands / "uv"),
@@ -1846,6 +1922,7 @@ def test_agent_loop_wrapper_rejects_invalid_service_target_identity(
     _write_command(commands / "agent", "exit 0")
 
     environment = os.environ | {
+        "AGENT_WORK_ENV_VERSION": "1",
         "AGENT_WORK_CHECKOUT": str(checkout),
         "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
         "AGENT_WORK_UV": str(commands / "uv"),
@@ -1889,6 +1966,7 @@ def test_agent_loop_wrapper_stops_before_direnv_with_symlinked_envrc(
         capture_output=True,
         env=os.environ
         | {
+            "AGENT_WORK_ENV_VERSION": "1",
             "AGENT_WORK_CHECKOUT": str(checkout),
             "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
             "AGENT_WORK_UV": str(commands / "uv"),
@@ -2274,6 +2352,7 @@ def _wrapper_checkout_environment(
     }
     assert all(command_paths.values())
     environment = os.environ | {
+        "AGENT_WORK_ENV_VERSION": "1",
         "AGENT_WORK_CHECKOUT": str(checkout),
         "AGENT_WORK_BASE_BRANCH": "agent/work-base",
         "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
