@@ -28,7 +28,8 @@ related:
 
 The installed service may process consecutive terminally handed-off issues in
 one invocation. Each issue still has its own bounded activation; empty queues
-and pipeline or retry waits yield back to the 20-minute timer.
+and durable retry waits yield back to the 20-minute timer. An applied activation
+waits for nonterminal pipeline evidence in place.
 
 Use one dedicated checkout and one user timer for one GitLab project. The loop
 is authorized by enabling the project-level timer. It selects eligible open,
@@ -284,7 +285,9 @@ systemctl --user status "$unit_name.timer"
 ```
 
 The timer schedules the next bounded activation 20 minutes after the service
-becomes inactive. Within an activation, one worker owns the issue's complete
+becomes inactive, to check for newly arrived work only when the factory is
+genuinely idle with no eligible or resumable work. It is not the cadence for an
+active pipeline wait. Within an activation, one worker owns the issue's complete
 workflow session; its Architect, Red, Green, and read-only judges hand context
 directly to one another. The runner recovers only the durable worktree and
 coarse `WORKFLOW` state, not a sidecar checkpoint for each internal role. The
@@ -449,11 +452,15 @@ systemctl --user status "$unit_name.service"
 ```
 
 Use `--max-segments` or `--max-activation-seconds` to apply smaller operational
-bounds. The activation advances only one issue and
-stops when it is idle, waiting for external progress or a retry deadline,
-reaches a terminal or human-facing state, or exhausts a configured bound. Its
-JSON `items` list records workflow results chronologically; `segments_run` and
-`stop_reason` summarize the activation.
+bounds. The activation advances only one issue. With `--apply`, it polls
+nonterminal default-branch or exact current-MR pipeline evidence in the same
+activation after 5, 10, then 20 seconds, capped at 30 seconds, and resumes when
+the evidence becomes terminal. A future retry deadline, a human or safety
+block, missing, failed, or unrecognized evidence, an idle/no-eligible-or-
+resumable-work result, or an exhausted bound remains a handoff. Preview is
+read-only and immediate: it does not poll. The JSON `items` list records
+workflow results chronologically; `segments_run` and `stop_reason` summarize
+the activation.
 
 If the overall budget is exhausted, inspect the recorded retry or
 durable-worktree recovery outcome in the same way as any other timeout.

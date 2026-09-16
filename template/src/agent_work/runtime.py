@@ -771,6 +771,7 @@ class RuntimeDependencies:
     lock: ProjectLockFactory
     clock: Callable[[], datetime]
     monotonic: Callable[[], float]
+    sleep: Callable[[float], None]
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
     process_probe: Callable[[], str]
@@ -794,6 +795,24 @@ class _PipelineGateDecision:
     summary: str | None = None
     next_action: str | None = None
     repair_owner: LedgerRecord | None = None
+
+
+_PIPELINE_POLL_INITIAL_SECONDS = 5.0
+_PIPELINE_POLL_MAX_SECONDS = 30.0
+
+
+def _sleep_for_pipeline_poll(
+    *,
+    delay: float,
+    remaining_seconds: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> tuple[float, bool]:
+    """Sleep within the activation budget and return the next delay and viability."""
+    remaining = remaining_seconds()
+    if remaining <= 0:
+        return delay, False
+    sleep(min(delay, remaining))
+    return min(delay * 2, _PIPELINE_POLL_MAX_SECONDS), remaining_seconds() > 0
 
 
 def _pipeline_handoff(
@@ -1015,6 +1034,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
         clock=now,
         monotonic=time.monotonic,
+        sleep=time.sleep,
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
         process_probe=probe_project_lock,
@@ -2458,7 +2478,30 @@ def dispatch(
             for item in ledger.list_records()
             if item.state in IMMEDIATE_OWNER_STATES
         )
-        if gate.outcome == "pipeline_wait" and not immediate_owners:
+        poll_delay = _PIPELINE_POLL_INITIAL_SECONDS
+        while gate.outcome == "pipeline_wait" and not immediate_owners:
+            poll_delay, viable = _sleep_for_pipeline_poll(
+                delay=poll_delay,
+                remaining_seconds=remaining_activation_seconds,
+                sleep=wired.sleep,
+            )
+            if not viable:
+                return _report(
+                    request,
+                    applied=True,
+                    outcome="activation_complete",
+                    project=identity,
+                    stop_reason="time_limit",
+                )
+            inventory = tuple(ledger.list_records())
+            gate = _inspect_pipeline_gate(
+                gitlab=gitlab,
+                repository=repository,
+                records=inventory,
+                project_id=project.id,
+                default_branch=project.default_branch,
+            )
+        if gate.outcome is not None and not immediate_owners:
             return _report(
                 request,
                 applied=True,
@@ -2468,11 +2511,16 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
+
         prior_state = immediate_owners[0].state if len(immediate_owners) == 1 else None
+        prior_revision = (
+            immediate_owners[0].revision if len(immediate_owners) == 1 else None
+        )
         issue_iid = (
             immediate_owners[0].issue_iid if len(immediate_owners) == 1 else None
         )
-        for _segment_number in range(request.max_segments):
+        segments_run = 0
+        while segments_run < request.max_segments:
             if remaining_activation_seconds() <= 0:
                 stop_reason = "time_limit"
                 break
@@ -2507,6 +2555,9 @@ def dispatch(
                 raise RuntimeError("one activation cannot advance multiple issues")
             records.append(record)
             prior_state = record.state
+            if record.revision != prior_revision:
+                segments_run += 1
+            prior_revision = record.revision
             if record.state in {
                 RunnerState.BLOCKED,
                 RunnerState.FAILED,
@@ -2530,10 +2581,15 @@ def dispatch(
                 stop_reason = "repair"
                 break
             if record.state is RunnerState.OBSERVING:
-                if segment_start_state is RunnerState.PUBLISHING:
-                    continue
-                stop_reason = "pipeline_wait"
-                break
+                poll_delay, viable = _sleep_for_pipeline_poll(
+                    delay=poll_delay,
+                    remaining_seconds=remaining_activation_seconds,
+                    sleep=wired.sleep,
+                )
+                if not viable:
+                    stop_reason = "time_limit"
+                    break
+                continue
         else:
             stop_reason = "segment_limit"
     return _report(
@@ -2544,6 +2600,6 @@ def dispatch(
         else "activation_complete",
         records=tuple(records),
         project=identity,
-        segments_run=len(records),
+        segments_run=segments_run,
         stop_reason=stop_reason,
     )

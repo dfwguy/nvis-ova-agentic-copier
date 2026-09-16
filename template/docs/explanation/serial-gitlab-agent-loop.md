@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-16
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -46,8 +46,9 @@ For each activation, the controller performs these stages in order:
    before new work.
 3. **Observe pipeline safety** — before fresh selection, inspect the newest
    default-branch pipeline and each open merge request's newest pipeline for
-   its current source SHA. Missing, malformed, or inaccessible evidence blocks;
-   a nonterminal pipeline yields; a terminal failure takes priority over
+   its current source SHA. Missing, malformed, or inaccessible evidence blocks.
+   During an applied activation, nonterminal evidence is polled in place with a
+   short bounded exponential delay; a terminal failure takes priority over
    ordinary work.
 4. **Select** — after any safe resumable work and the pipeline gate, select at
    most one eligible issue, or stop when no safe item is available. Fresh
@@ -65,9 +66,11 @@ For each activation, the controller performs these stages in order:
 
 The controller updates current `main` before publication through normal Git
 reconciliation in the retained worktree. It does not discard work to refresh
-the base. Pipeline observation, a future external retry, no progress, a budget
-limit, or a human-facing state ends the activation; retryable worker failures
-can continue within it when time remains.
+the base. An applied activation keeps observing nonterminal default-branch or
+exact current-MR pipeline evidence and resumes when it becomes terminal. A
+future external retry, no progress, a budget limit, or a human-facing state
+ends the activation; retryable worker failures can continue within it when time
+remains.
 
 The same gate protects manual applied runs and timer-driven next activations,
 so one entry path cannot start unrelated work while the other has detected a

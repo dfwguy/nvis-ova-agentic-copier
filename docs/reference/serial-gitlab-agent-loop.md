@@ -167,7 +167,7 @@ wrapper file.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
-not simulate a complete activation. `loop status` is read-only and reports
+not simulate a complete activation or poll. `loop status` is read-only and reports
 durable ledger records together with verified configured-project identity and
 best-effort live corroboration. Without `--issue-iid`, it returns at most 100
 records in deterministic order and reports the total and whether the result was
@@ -609,18 +609,22 @@ applies at the worktree and coarse workflow boundary, not at every internal
 agent handoff.
 
 Each Python activation advances at most one issue and retains its 10,800-second
-active-work budget. The systemd wrapper continues only after `awaiting-human`,
-`blocked`, `failed`, or `complete`: it validates that report, makes one fresh
-read-only eligibility and preselection-pipeline check, and begins another
-activation only for `eligible`. Between issues it re-queries GitLab and
-fast-forwards the clean service base; this bounded housekeeping is outside the
-per-issue budget. An `idle`, `pipeline-wait`, `retry-wait`, `repair`,
-`time-limit`, or `segment-limit` result yields immediately.
-`OnUnitInactiveSec=20min` schedules both true empty-queue idle checks and
-yielded pipeline/retry checks. The service has no sequence-wide timeout, so it
-cannot truncate an otherwise unbounded sequence of individually bounded
-activations. The loop is serial per host and project, not multi-host
-coordination.
+active-work budget. An applied `loop run --apply` stays in that activation when
+default-branch or exact current-MR pipeline evidence is nonterminal. It polls
+the same evidence after 5, 10, then 20 seconds, capped at 30 seconds, and
+resumes the state machine promptly when the evidence becomes terminal. The
+systemd wrapper continues only after `awaiting-human`, `blocked`, `failed`, or
+`complete`: it validates that report, makes one fresh read-only eligibility and
+preselection-pipeline check, and begins another activation only for `eligible`.
+Between issues it re-queries GitLab and fast-forwards the clean service base;
+this bounded housekeeping is outside the per-issue budget. A future
+`retry-wait`, `repair`, `time-limit`, `segment-limit`, human or safety block,
+or missing, failed, or unrecognized evidence remains a handoff. `idle` means
+there is no eligible or resumable work. `OnUnitInactiveSec=20min` schedules a
+newly arrived-work check only after that genuine idle service exit; it is not
+the cadence for active pipeline polling. The activation deadline and the
+systemd outer timeout remain in force. The loop is serial per host and project,
+not multi-host coordination.
 
 ## Ledger, worktrees, and audit
 
@@ -899,16 +903,17 @@ newly created merge request; it never recreates its branch, commit, or merge
 request.
 
 If all three retries lack the closing relationship, the controller preserves
-the bound MR and yields in `Observing` at `PipelineWait`. It does not set a
-`retry_at` value or look up a pipeline; a later activation can observe again.
+the bound MR in `Observing` at `PipelineWait`. It does not set a `retry_at`
+value or look up a pipeline; the same applied activation continues to observe.
 Once the relationship appears, absent or nonterminal pipeline evidence for that
-exact SHA leaves the durable record in `Observing` at `PipelineWait`. Terminal
-failed evidence starts repair. Only a genuine GitLab transport or API failure
-uses the safe, bounded backoff; its durable check evidence is sanitized. An
-immutable identity mismatch blocks rather than using an eventual-consistency
-retry. The bounded post-create publication and closing reconciliation does not
-schedule a fixed 20-minute retry. Ordinary pipeline waits can still yield to
-the timer cadence.
+exact SHA leaves the durable record in `Observing` at `PipelineWait` and is
+polled in that activation. Terminal failed evidence starts repair. Only a
+genuine GitLab transport or API failure uses the safe, bounded backoff; its
+durable check evidence is sanitized. An immutable identity mismatch blocks
+rather than using an eventual-consistency retry. The bounded post-create
+publication and closing reconciliation does not schedule a fixed 20-minute
+retry. The activation deadline and outer timeout can still hand off an active
+observation.
 
 ## Retry, exits, and JSON
 

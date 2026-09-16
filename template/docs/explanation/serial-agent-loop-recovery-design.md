@@ -31,7 +31,8 @@ related:
 Each activation owns one bounded issue workflow. After a terminal handoff, the
 systemd wrapper validates the report, refreshes authoritative project and
 default-branch evidence for a newly eligible issue, and starts a separate
-activation. Waiting and budget outcomes yield to the timer instead.
+activation. An applied activation polls nonterminal pipeline evidence in place;
+only genuine idle and other durable handoffs yield to the timer.
 
 This document explains the recoverable architecture used by the serial agent
 loop. The [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
@@ -201,11 +202,17 @@ The default activation runs at most 16 workflow attempts within one 10,800-secon
 (three-hour) overall work budget. Each workflow-owning invocation receives the
 positive, ceil-rounded time remaining from that budget. An exhausted budget is
 handled by the normal durable-worktree retry and recovery path. Retryable worker
-failures are immediately due and continue in that activation; the timer waits
-20 minutes after the complete activation, so that interval controls idle
-polling and genuine external waits rather than spacing internal handoffs. The
-systemd oneshot adds a 190-minute sequence-wide outer envelope: the approved
-180-minute worker budget plus a 10-minute safety margin for wrapper checkout,
+failures are immediately due and continue in that activation. When default-branch
+or exact current-MR pipeline evidence is nonterminal, an applied activation
+rechecks it in place after a short bounded exponential delay: 5, 10, then 20
+seconds, capped at 30 seconds. It resumes promptly when the evidence becomes
+terminal. The 20-minute timer runs only after the service becomes inactive for
+genuine idle/no-eligible-or-resumable-work checks; it does not pace an active
+pipeline wait. Future retry deadlines, human or safety blocks, missing, failed,
+or unrecognized evidence, the activation deadline, and the systemd outer
+timeout remain durable handoffs. The systemd oneshot adds a 190-minute
+sequence-wide outer envelope: the approved 180-minute worker budget plus a
+10-minute safety margin for wrapper checkout,
 GitLab, publication, and reporting. This bounds an otherwise hung wrapper
 without shrinking the worker's 10,800-second budget. Non-worker housekeeping
 operations have 120-second deadlines, while the applied worker receives its
