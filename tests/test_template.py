@@ -2501,6 +2501,7 @@ esac""",
     (
         "src/agent_work/__init__.py",
         "src/agent_work/classification.py",
+        "src/agent_work/credential_rotation.py",
         "src/agent_work/domain.py",
         "src/agent_work/gitlab.py",
         "src/agent_work/ledger.py",

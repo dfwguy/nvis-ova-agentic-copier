@@ -151,18 +151,18 @@ before checking repository safeguards.
      direnv_path="$(command -v direnv || true)"
      [[ "$direnv_path" == /* && -x "$direnv_path" ]] || exit 1
    fi
-   git_path="$(command -v git)"; glab_path="$(command -v glab)"; jq_path="$(command -v jq)"; flock_path="$(command -v flock)"
-   [[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
+   git_path="$(command -v git)"; glab_path="$(command -v glab)"; jq_path="$(command -v jq)"; flock_path="$(command -v flock)"; timeout_path="$(command -v timeout)"
+   [[ "$git_path" == /* && -x "$git_path" && "$glab_path" == /* && -x "$glab_path" && "$jq_path" == /* && -x "$jq_path" && "$flock_path" == /* && -x "$flock_path" && "$timeout_path" == /* && -x "$timeout_path" && "$uv_path" == /* && -x "$uv_path" ]] || exit 1
    case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
    [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
    install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
    install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
    install -d -m 700 "$HOME/.config/$unit_name"
-   printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
+   printf 'AGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
    chmod 600 "$HOME/.config/$unit_name/agent-work.env"
 
    env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
-     AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
+     AGENT_WORK_CHECKOUT="$PWD" AGENT_WORK_GIT="$git_path" AGENT_WORK_GLAB="$glab_path" AGENT_WORK_JQ="$jq_path" AGENT_WORK_FLOCK="$flock_path" AGENT_WORK_TIMEOUT="$timeout_path" AGENT_WORK_UV="$uv_path" AGENT_WORK_AGENT="$agent_name" \
      AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
      AGENT_WORK_BASE_BRANCH=agent/work-base AGENT_WORK_FACTORY_USERNAME="$factory_username" GITLAB_HOST="$gitlab_host" \
      GITLAB_PROJECT_ID="$gitlab_project_id" \
@@ -244,3 +244,27 @@ Expected durable outcomes exit zero; exit one means state could not be safely
 recorded or reconciled, and exit two means invalid CLI usage. The lock is
 single-host and is not a distributed GitLab compare-and-set claim. Never
 approve or merge a resulting MR.
+
+## Credential rotation and repair
+
+Do not manually edit `AGENT_WORK_FACTORY_USERNAME` when the configured
+directory-scoped GitLab credential changes. Keep the service stopped and use
+the guarded command from the dedicated checkout instead:
+
+```bash
+uv run agent-work credential rotate \
+  --environment-file "$HOME/.config/$unit_name/agent-work.env" \
+  --unit-name "$unit_name" --json
+uv run agent-work credential rotate \
+  --environment-file "$HOME/.config/$unit_name/agent-work.env" \
+  --unit-name "$unit_name" --apply --json
+```
+
+The bare command validates only non-secret configuration and changes nothing.
+With `--apply`, it disables and stops the timer and service, proves both are
+inactive, verifies the directory-scoped credential through the configured
+checkout and numeric project route, and atomically updates only the username
+when it changed. It then runs the isolated wrapper preview. The command never
+accepts, writes, or renders a token; a failed post-write preview rolls back the
+exact prior environment bytes once. It leaves both units stopped for retained
+record review, canary, and explicit re-enable.

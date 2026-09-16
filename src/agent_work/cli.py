@@ -20,6 +20,13 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from .credential_rotation import (
+    CredentialRotationError,
+    CredentialRotationReport,
+    RotationDependencies,
+    atomic_write_environment,
+)
+from .credential_rotation import rotate_credential as default_rotate_credential
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .ledger import LockBusy
 from .models import CommandReport, LedgerRecord
@@ -142,6 +149,20 @@ def build_parser() -> argparse.ArgumentParser:
     retry = loop_actions.add_parser("retry", help="preview or retry one blocked item")
     _common(retry)
     retry.add_argument("--issue-iid", type=_positive_integer, required=True)
+
+    credential = resources.add_parser(
+        "credential", help="safely inspect or rebind a service credential identity"
+    )
+    credential_actions = credential.add_subparsers(dest="action", required=True)
+    rotate = credential_actions.add_parser(
+        "rotate", help="validate a rotated credential and rebind its service identity"
+    )
+    rotate.add_argument("--environment-file", type=Path, required=True)
+    rotate.add_argument("--unit-name", required=True)
+    _common(
+        rotate,
+        apply_help="stop, verify, and safely rebind the service identity",
+    )
 
     migration = resources.add_parser("migration", help="inventory legacy evidence")
     migration_actions = migration.add_subparsers(dest="action", required=True)
@@ -287,6 +308,22 @@ def _render_finding_preview(preview: UpstreamFindingPreview, *, as_json: bool) -
     return " ".join(details)
 
 
+def _render_rotation(report: CredentialRotationReport, *, as_json: bool) -> str:
+    """Render only the stable, non-secret credential-rotation result."""
+    if as_json:
+        return report.model_dump_json(exclude_none=True)
+    return " ".join(
+        (
+            f"outcome={report.outcome}",
+            f"config_updated={str(report.config_updated).lower()}",
+            f"rolled_back={str(report.rolled_back).lower()}",
+            f"timer_stopped={str(report.timer_stopped).lower()}",
+            f"service_stopped={str(report.service_stopped).lower()}",
+            f"next_action={report.next_action}",
+        )
+    )
+
+
 def _default_preview_upstream(
     preview: UpstreamFindingPreview,
     *,
@@ -329,11 +366,33 @@ def main(
     find_executable: Callable[[str], str | None] = shutil.which,
     load_record: _LoadRecord | None = None,
     changed_paths: _ChangedPaths | None = None,
+    rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
+    atomic_write: Callable[[Path, bytes], None] = atomic_write_environment,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "credential" and parsed.action == "rotate":
+        try:
+            report = rotate(
+                environment_file=parsed.environment_file,
+                unit_name=parsed.unit_name,
+                apply=parsed.apply,
+                dependencies=RotationDependencies(
+                    read_bytes=read_bytes,
+                    atomic_write=atomic_write,
+                    run_command=run_command,
+                    environment=environment,
+                ),
+            )
+        except (CredentialRotationError, OSError, RuntimeError):
+            if parsed.debug:
+                raise
+            write_stderr("credential rotation could not be completed")
+            return 1
+        write_stdout(_render_rotation(report, as_json=parsed.json))
+        return 0 if report.outcome in {"preview", "verified"} else 1
     if parsed.resource == "worker-result" and parsed.action == "build":
         try:
             if load_record is None or changed_paths is None:
