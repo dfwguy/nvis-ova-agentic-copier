@@ -11,13 +11,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 import yaml
+from hypothesis import given
+from hypothesis import strategies as st
+
+from tests.conftest import (
+    ci_shard_for_nodeid,
+    pytest_addoption,
+    pytest_collection_modifyitems,
+)
 
 _IMAGE_INPUTS = ("Dockerfile", "pyproject.toml", "uv.lock")
 _VALIDATION_JOBS = {
@@ -35,6 +46,63 @@ _PUBLISHED_VALIDATION_IMAGE = (
     "gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@"
     "sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521"
 )
+
+
+@dataclass(frozen=True)
+class _CollectedItem:
+    """Minimal collected pytest item for collection-hook contract tests."""
+
+    nodeid: str
+
+
+@dataclass
+class _DeselectionHook:
+    """Record items passed to the pytest deselection hook."""
+
+    deselected: list[_CollectedItem] = field(default_factory=list)
+
+    def pytest_deselected(self, *, items: list[_CollectedItem]) -> None:
+        """Record the items excluded by collection sharding."""
+        self.deselected.extend(items)
+
+
+@dataclass
+class _ShardConfig:
+    """Provide just the pytest configuration boundary used by the hook."""
+
+    shard_count: int | None
+    shard_index: int | None
+    hook: _DeselectionHook = field(default_factory=_DeselectionHook)
+
+    def getoption(self, option: str) -> int | None:
+        """Return the requested CI sharding option."""
+        return {
+            "ci_shard_count": self.shard_count,
+            "ci_shard_index": self.shard_index,
+        }[option]
+
+
+@dataclass
+class _OptionGroup:
+    """Record CI option registration at the pytest parser boundary."""
+
+    options: dict[str, dict[str, object]] = field(default_factory=dict)
+
+    def addoption(self, name: str, **kwargs: object) -> None:
+        """Record a registered option and its parser contract."""
+        self.options[name] = kwargs
+
+
+@dataclass
+class _Parser:
+    """Provide the parser boundary used to register CI options."""
+
+    group: _OptionGroup = field(default_factory=_OptionGroup)
+
+    def getgroup(self, name: str) -> _OptionGroup:
+        """Return the named option group."""
+        assert name == "ci sharding"
+        return self.group
 
 
 def test_validation_image_contains_the_locked_non_root_toolchain(
@@ -314,7 +382,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment separates costly groups and combines all coverage."""
+    """Each image environment partitions the complete suite into four shards."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
@@ -325,16 +393,25 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
         "test-results-$TEST_ENVIRONMENT-shard-1.xml",
         "test-results-$TEST_ENVIRONMENT-shard-2.xml",
         "test-results-$TEST_ENVIRONMENT-shard-3.xml",
+        "test-results-$TEST_ENVIRONMENT-shard-4.xml",
     ]
-    assert "tests/test_agent_work_serial_runtime.py" in script
-    assert "tests/test_template.py" in script
-    assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
-    assert "--ignore=tests/test_template.py" in script
+    for shard in range(1, 5):
+        assert (
+            f'run_shard ".coverage.$TEST_ENVIRONMENT-shard-{shard}" '
+            f'"test-results-$TEST_ENVIRONMENT-shard-{shard}.xml" '
+            f'".cache/pytest/$TEST_ENVIRONMENT/shard-{shard}" '
+            f"--ci-shard-count=4 --ci-shard-index={shard}"
+        ) in script
+        assert f'".coverage.$TEST_ENVIRONMENT-shard-{shard}"' in script
+        assert f'"test-results-$TEST_ENVIRONMENT-shard-{shard}.xml"' in script
+        assert f".cache/pytest/$TEST_ENVIRONMENT/shard-{shard}" in script
+        assert f'wait "$shard_{shard}_pid"' in script
     assert "--cov=src/agent_work" in script
     assert "coverage combine \\" in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-2"' in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-3"' in script
+    assert '".coverage.$TEST_ENVIRONMENT-shard-4"' in script
     assert "coverage report --fail-under=85" in script
     assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
     assert script.index("coverage report --fail-under=85") < script.index(
@@ -349,10 +426,9 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
         "#!/usr/bin/env bash\n"
         'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
         '>> "$INVOCATIONS"\n'
-        'case "$*" in\n'
-        "    *'--ignore=tests/test_agent_work_serial_runtime.py'*) shard=remaining ;;\n"
-        "    *'tests/test_agent_work_serial_runtime.py'*) shard=agent-work ;;\n"
-        "    *'tests/test_template.py'*) shard=template ;;\n"
+        'arguments="$*"\n'
+        'case "$arguments" in\n'
+        "    *--ci-shard-index=*) shard=${arguments##*--ci-shard-index=} ; shard=${shard%% *} ;;\n"
         "    *) shard=other ;;\n"
         "esac\n"
         'if [[ "${FAIL_SHARD:-}" = "$shard" ]]; then\n'
@@ -365,6 +441,10 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
         "if [[ \"$*\" == *'coverage combine'* ]] && "
         '[[ "${FAIL_COVERAGE_COMBINE:-0}" = 1 ]]; then\n'
         "    exit 8\n"
+        "fi\n"
+        "if [[ \"$*\" == *'coverage xml'* ]] && "
+        '[[ "${FAIL_COVERAGE_XML:-0}" = 1 ]]; then\n'
+        "    exit 10\n"
         "fi\n"
     )
     fake_uv.chmod(0o755)
@@ -391,36 +471,26 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
 
     assert succeeded.returncode == 0
     calls = invocations.read_text().splitlines()
-    assert len(calls) == 6
-    assert {call.split("|", maxsplit=2)[1] for call in calls[:3]} == {
+    assert len(calls) == 7
+    shard_calls = [call for call in calls if "--ci-shard-index=" in call]
+    assert {call.split("|", maxsplit=2)[1] for call in shard_calls} == {
         ".coverage.py311-shard-1",
         ".coverage.py311-shard-2",
         ".coverage.py311-shard-3",
+        ".coverage.py311-shard-4",
     }
-    shard_calls = calls[:3]
     assert all(call.startswith(f"{tmp_path / 'src'}|") for call in shard_calls)
     assert all("--cov=src/agent_work" in call for call in shard_calls)
-    serial_runtime_call = next(
-        call
-        for call in shard_calls
-        if "tests/test_agent_work_serial_runtime.py" in call
-        and "--ignore=tests/test_agent_work_serial_runtime.py" not in call
-    )
-    template_call = next(
-        call
-        for call in shard_calls
-        if "tests/test_template.py" in call
-        and "--ignore=tests/test_template.py" not in call
-    )
-    assert serial_runtime_call != template_call
-    remaining_call = next(
-        call
-        for call in shard_calls
-        if "--ignore=tests/test_agent_work_serial_runtime.py" in call
-    )
-    assert "--ignore=tests/test_template.py" in remaining_call
+    assert {
+        call.rsplit("--ci-shard-index=", maxsplit=1)[1] for call in shard_calls
+    } == {
+        "1",
+        "2",
+        "3",
+        "4",
+    }
 
-    for failed_shard in ("agent-work", "template", "remaining"):
+    for failed_shard in ("1", "2", "3", "4"):
         failure_start = len(invocations.read_text().splitlines())
         failed = subprocess.run(
             ["bash", "-c", script],
@@ -433,7 +503,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
 
         assert failed.returncode != 0
         failure_calls = invocations.read_text().splitlines()[failure_start:]
-        assert len(failure_calls) == 3
+        assert len(failure_calls) == 4
         assert all("coverage combine" not in call for call in failure_calls)
         assert all("coverage report" not in call for call in failure_calls)
         assert all("coverage xml" not in call for call in failure_calls)
@@ -448,7 +518,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     )
 
     assert coverage_failed.returncode == 9
-    coverage_failure_calls = invocations.read_text().splitlines()[-6:]
+    coverage_failure_calls = invocations.read_text().splitlines()[-7:]
     report_index = next(
         index
         for index, call in enumerate(coverage_failure_calls)
@@ -471,10 +541,21 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     )
 
     assert combine_failed.returncode == 8
-    combine_failure_calls = invocations.read_text().splitlines()[-4:]
+    combine_failure_calls = invocations.read_text().splitlines()[-5:]
     assert any("coverage combine" in call for call in combine_failure_calls)
     assert all("coverage report" not in call for call in combine_failure_calls)
     assert all("coverage xml" not in call for call in combine_failure_calls)
+
+    xml_failed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment | {"FAIL_COVERAGE_XML": "1"},
+        text=True,
+    )
+
+    assert xml_failed.returncode == 10
 
 
 def test_portable_template_keeps_its_independent_validation_bootstrap(
@@ -491,3 +572,110 @@ def test_portable_template_keeps_its_independent_validation_bootstrap(
     assert "UV_PROJECT_ENVIRONMENT=/opt/ci" not in template_ci
     assert "validation (9 gates)" in configuration
     assert not (_VALIDATION_JOBS & configuration.keys())
+
+
+@given(nodeid=st.text(), shard_count=st.integers(min_value=1, max_value=100))
+def test_ci_shard_mapping_uses_sha256_modulo(nodeid: str, shard_count: int) -> None:
+    """Each node ID maps to the specified one-based SHA-256 partition."""
+    expected = (
+        int.from_bytes(hashlib.sha256(nodeid.encode()).digest(), byteorder="big")
+        % shard_count
+        + 1
+    )
+
+    assert ci_shard_for_nodeid(nodeid, shard_count) == expected
+
+
+def test_ci_shard_options_are_registered_with_the_expected_parser_contract() -> None:
+    """CI sharding flags are available to every root pytest shard."""
+    parser = _Parser()
+
+    pytest_addoption(cast(pytest.Parser, parser))
+
+    assert parser.group.options == {
+        "--ci-shard-count": {
+            "type": int,
+            "default": None,
+            "help": "Number of deterministic CI collection shards.",
+        },
+        "--ci-shard-index": {
+            "type": int,
+            "default": None,
+            "help": "One-based deterministic CI collection shard index.",
+        },
+    }
+
+
+def test_ci_shard_collection_is_order_independent_disjoint_and_exhaustive() -> None:
+    """Shard collection partitions the same full node-ID set in every order."""
+    nodeids = [f"tests/test_example.py::test_{index}" for index in range(40)]
+
+    def selected_nodeids(shard_index: int, source: list[str]) -> set[str]:
+        config = _ShardConfig(shard_count=4, shard_index=shard_index)
+        items = [_CollectedItem(nodeid) for nodeid in source]
+
+        pytest_collection_modifyitems(
+            cast(pytest.Config, config), cast(list[pytest.Item], items)
+        )
+
+        assert set(config.hook.deselected).isdisjoint(items)
+        return {item.nodeid for item in items}
+
+    baseline = [selected_nodeids(index, nodeids) for index in range(1, 5)]
+    reordered = [
+        selected_nodeids(index, list(reversed(nodeids))) for index in range(1, 5)
+    ]
+
+    assert baseline == reordered
+    assert set().union(*baseline) == set(nodeids)
+    assert all(
+        left.isdisjoint(right)
+        for index, left in enumerate(baseline)
+        for right in baseline[index + 1 :]
+    )
+
+
+def test_ci_shard_collection_without_options_leaves_items_unchanged() -> None:
+    """Local collection remains unchanged unless both CI options are supplied."""
+    config = _ShardConfig(shard_count=None, shard_index=None)
+    items = [_CollectedItem("tests/test_example.py::test_example")]
+
+    pytest_collection_modifyitems(
+        cast(pytest.Config, config), cast(list[pytest.Item], items)
+    )
+
+    assert items == [_CollectedItem("tests/test_example.py::test_example")]
+    assert config.hook.deselected == []
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_message"),
+    (
+        (("--ci-shard-count=4",), "supplied together"),
+        (("--ci-shard-index=1",), "supplied together"),
+        (("--ci-shard-count=0", "--ci-shard-index=1"), "at least 1"),
+        (("--ci-shard-count=4", "--ci-shard-index=0"), "between 1 and 4"),
+        (("--ci-shard-count=4", "--ci-shard-index=5"), "between 1 and 4"),
+    ),
+)
+def test_ci_shard_collection_rejects_partial_or_invalid_options(
+    options: tuple[str, ...],
+    expected_message: str,
+) -> None:
+    """Invalid shard option combinations fail before modifying collection."""
+    option_values = {
+        option.split("=", maxsplit=1)[0]: int(option.split("=", maxsplit=1)[1])
+        for option in options
+    }
+    config = _ShardConfig(
+        shard_count=option_values.get("--ci-shard-count"),
+        shard_index=option_values.get("--ci-shard-index"),
+    )
+    items = [_CollectedItem("tests/test_example.py::test_example")]
+
+    with pytest.raises(pytest.UsageError, match=expected_message):
+        pytest_collection_modifyitems(
+            cast(pytest.Config, config), cast(list[pytest.Item], items)
+        )
+
+    assert items == [_CollectedItem("tests/test_example.py::test_example")]

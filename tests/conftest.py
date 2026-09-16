@@ -9,12 +9,64 @@
 # its affiliates is strictly prohibited.
 """Pytest configuration and fixtures for the copier template tests."""
 
+import hashlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register opt-in collection sharding for concurrent CI pytest runs."""
+    group = parser.getgroup("ci sharding")
+    group.addoption(
+        "--ci-shard-count",
+        type=int,
+        default=None,
+        help="Number of deterministic CI collection shards.",
+    )
+    group.addoption(
+        "--ci-shard-index",
+        type=int,
+        default=None,
+        help="One-based deterministic CI collection shard index.",
+    )
+
+
+def ci_shard_for_nodeid(nodeid: str, shard_count: int) -> int:
+    """Return the one-based stable CI shard for a pytest node ID."""
+    digest = hashlib.sha256(nodeid.encode()).digest()
+    return int.from_bytes(digest, byteorder="big") % shard_count + 1
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Deselect collected tests outside the requested deterministic CI shard."""
+    shard_count = config.getoption("ci_shard_count")
+    shard_index = config.getoption("ci_shard_index")
+    if shard_count is None and shard_index is None:
+        return
+    if shard_count is None or shard_index is None:
+        message = "--ci-shard-count and --ci-shard-index must be supplied together"
+        raise pytest.UsageError(message)
+    if shard_count < 1:
+        raise pytest.UsageError("--ci-shard-count must be at least 1")
+    if not 1 <= shard_index <= shard_count:
+        message = f"--ci-shard-index must be between 1 and {shard_count}"
+        raise pytest.UsageError(message)
+    selected = [
+        item
+        for item in items
+        if ci_shard_for_nodeid(item.nodeid, shard_count) == shard_index
+    ]
+    selected_nodeids = {item.nodeid for item in selected}
+    deselected = [item for item in items if item.nodeid not in selected_nodeids]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = selected
 
 
 @pytest.fixture(scope="session")

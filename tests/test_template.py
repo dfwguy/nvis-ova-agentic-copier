@@ -326,6 +326,7 @@ def test_ci_jobs_publish_independent_reports(
             "test-results-$TEST_ENVIRONMENT-shard-1.xml",
             "test-results-$TEST_ENVIRONMENT-shard-2.xml",
             "test-results-$TEST_ENVIRONMENT-shard-3.xml",
+            "test-results-$TEST_ENVIRONMENT-shard-4.xml",
         ],
         "coverage_report": {
             "coverage_format": "cobertura",

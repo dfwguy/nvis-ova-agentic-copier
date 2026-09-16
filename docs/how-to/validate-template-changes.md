@@ -47,19 +47,19 @@ definition, whose image is
 pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
 `uv sync` bootstrap. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
-GitLab job. Each root pytest job runs three deterministic concurrent shards: one for
-`tests/test_agent_work_serial_runtime.py`, one for `tests/test_template.py`,
-and one for the remaining suite while ignoring both dedicated files. It waits
-for every shard PID and publishes a JUnit report for each shard. After all
-shards finish, the job
-combines their coverage data, measures only the maintained `src/agent_work`
-source tree, enforces the existing 85% floor, and publishes one combined
-Cobertura report for its Python version. A failure in any shard, or a failure while
-combining, checking, or reporting coverage, fails the named pytest job. When
-investigating a failed job, inspect every shard JUnit and, when generation
-succeeded, its combined coverage report; otherwise use the job log. The
-generated Copier payload is not part of that root coverage
-measurement.
+GitLab job. Each root pytest job runs four deterministic concurrent shards.
+At collection time, a stable SHA-256 hash of each pytest node ID, modulo four,
+assigns every collected test to one complete, disjoint partition. Each shard
+keeps separate cache, coverage, and JUnit data. The job waits for every shard
+PID before it combines the four coverage files, measures only the maintained
+`src/agent_work` source tree, enforces the existing 85% floor, and publishes
+one combined Cobertura report for its Python version. A failure in any shard,
+or a failure while combining, checking, or reporting coverage, fails the named
+pytest job. When investigating a failed job, inspect every shard JUnit and,
+when generation succeeded, its combined coverage report; otherwise use the job
+log. The generated Copier payload is not part of that root coverage
+measurement. Local `tox` behavior is unchanged because collection sharding is
+only enabled in CI.
 
 The generated template deliberately keeps its portable `validation (9 gates)`
 aggregate job. It performs the dependency bootstrap once, then reports its

@@ -72,20 +72,23 @@ locked project dependencies. They must not run `apt-get`, `uv python install`,
 `uv sync`, or another dependency-installation fallback.
 
 Run the consumer pipeline and inspect the nine named root jobs directly; do
-not look for a root synthetic aggregate validation job or JUnit gate suite. Each
-pytest job runs three concurrent shards for the serial-runtime tests, template
-tests, and remaining tests that ignore those two dedicated files; it waits for
-every shard PID before coverage aggregation. Inspect every shard JUnit report and the one combined
+not look for a root synthetic aggregate validation job or JUnit gate suite.
+Each pytest job runs four deterministic concurrent shards. At collection time,
+a stable SHA-256 hash of each pytest node ID, modulo four, assigns every
+collected test to one complete, disjoint partition. Each shard keeps separate
+cache, coverage, and JUnit data, and the job waits for every shard PID before
+coverage aggregation. Inspect every shard JUnit report and the one combined
 per-version Cobertura report when it was generated; otherwise inspect the job
 log. The combined report measures only maintained `src/agent_work` source. A
-failure in any shard or in coverage aggregation, floor enforcement, or
-report generation fails that named job. Apply the
-project budget to the longest executed terminal job with a numeric duration:
-prefer at most 60 seconds and reject execution over 120 seconds. Report skipped,
-canceled, or manual jobs, the overall pipeline span, and queue time separately;
-runner scheduling does not count against the execution budget. If the image
-needs another dependency, refresh and publish the image first, then repeat this
-pin-update procedure; do not restore bootstrap work to root validation.
+failure in any shard or in coverage aggregation, floor enforcement, or report
+generation fails that named job. Apply the project budget to the longest
+executed terminal job with a numeric `duration`: prefer at most 60 seconds and
+reject execution over 120 seconds. Report skipped, canceled, or manual jobs,
+the overall pipeline span, and `queued_duration` separately; runner scheduling
+does not count against the execution budget. Check this timing only after the
+job reaches a terminal state. If the image needs another dependency, refresh
+and publish the image first, then repeat this pin-update procedure; do not
+restore bootstrap work to root validation.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership
