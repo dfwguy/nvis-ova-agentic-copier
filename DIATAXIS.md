@@ -14,6 +14,15 @@ prefer them over general documentation instincts. This file is the single
 source of truth for the Diátaxis process; documentation writers and judges
 must read it before editing or reviewing `docs/`.
 
+## Plain language
+
+Before writing or reviewing `docs/` prose, load `$simplifying-writing`. Write
+for the reader with direct, specific, concise language. Prefer common, concrete
+words; define unavoidable technical terms; and use active, direct voice where
+natural. Keep sentences and paragraphs short and focused. Remove filler and
+repetition, but do not omit facts, technical notation, prerequisites,
+constraints, warnings, commands, names, or links merely to make text shorter.
+
 ## Canonical layout
 
 ```text

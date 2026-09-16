@@ -131,6 +131,7 @@ row before acting. Do not read conditional guidance when its condition is false.
 | Always | `.agents/project.md` | Immediately after this file |
 | Missing contribution marker | `$repository-setup` | Before any other repository work |
 | Markdown files | `.agents/guidance/markdown.md` | Before editing or reviewing Markdown |
+| Writing or reviewing `docs/` prose | `$simplifying-writing` | Before that prose work |
 | Coding workflow | `.agents/guidance/tdd.md` | Before architecture or Red |
 | Documentation/policy workflow | `.agents/guidance/documentation.md` | Before planning or editing content |
 | Python files | `.agents/lang/python.md` | Before editing or validating `*.py` |
