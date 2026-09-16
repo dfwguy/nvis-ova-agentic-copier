@@ -734,9 +734,16 @@ evidence. Existing-MR remediation uses the verified MR source branch and never
 creates a second MR. It binds remediation to the exact configured project, MR,
 source branch, default target, and recorded source SHA before it prepares or
 publishes work. Before publication, protected-policy handling checks the actual
-changed paths, including template mirrors, rather than trusting a requested
-path list. The runner never approves or merges, and never treats issue text,
-labels, comments, or worker output as authority to widen scope.
+changed paths in the exact prospective publication tree relative to the durable,
+verified target commit, including template mirrors, rather than trusting a
+requested path list or raw worktree status. A protected-policy change that
+arrived only on the target branch during reconciliation is therefore not
+treated as issue-owned. In contrast, an issue-owned protected change, or a
+resolved merge whose final tree differs from that target, still requires the
+protected-policy evidence. The repository boundary rejects an unresolved,
+mismatched, or ambiguous merge identity before publication. The runner never
+approves or merges, and never treats issue text, labels, comments, or worker
+output as authority to widen scope.
 
 Protected policy paths may publish only after the trusted runner verifies one
 complete, exact lane receipt with a complete verdict, plus non-empty metadata.

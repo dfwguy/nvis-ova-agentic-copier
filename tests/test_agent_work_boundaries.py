@@ -2411,6 +2411,80 @@ def test_repository_reconciliation_rejects_dirty_worktree_without_pending_merge(
         )
 
 
+def test_repository_publication_changed_paths_compares_the_prospective_tree_to_target(
+    tmp_path: Path,
+) -> None:
+    """Policy evidence is based on the tree that would be published, not status."""
+    config = _config(tmp_path)
+    target = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("rev-parse", "-q", "--verify", f"{target}^{{commit}}"):
+            return CommandResult(0, f"{target}\n", "")
+        if arguments == ("merge-base", "--is-ancestor", target, "HEAD"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("ls-files", "--unmerged"):
+            return CommandResult(0, "", "")
+        if arguments == ("diff", "--name-only", "--no-renames", target):
+            return CommandResult(0, "src/owned.py\ntemplate/AGENTS.md\n", "")
+        if arguments == ("ls-files", "--others", "--exclude-standard"):
+            return CommandResult(0, "new.txt\n", "")
+        return CommandResult(0, "", "")
+
+    paths = GitRepository(config, fake).publication_changed_paths(
+        tmp_path / "worktree", target
+    )
+
+    assert paths == ("new.txt", "src/owned.py", "template/AGENTS.md")
+    assert any(
+        call[3:] == ("diff", "--name-only", "--no-renames", target) for call in calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_verifies", "target_is_ancestor", "merge_head", "unmerged", "message"),
+    (
+        (False, True, None, False, "target"),
+        (True, False, None, False, "ancestor"),
+        (True, True, "c" * 40, False, "pending merge"),
+        (True, True, "b" * 40, True, "unresolved"),
+    ),
+)
+def test_repository_publication_changed_paths_rejects_ambiguous_tree_evidence(
+    tmp_path: Path,
+    target_verifies: bool,
+    target_is_ancestor: bool,
+    merge_head: str | None,
+    unmerged: bool,
+    message: str,
+) -> None:
+    """A target mismatch, non-ancestor, or unresolved merge cannot publish policy evidence."""
+    config = _config(tmp_path)
+    target = "b" * 40
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("rev-parse", "-q", "--verify", f"{target}^{{commit}}"):
+            return CommandResult(0 if target_verifies else 1, f"{target}\n", "")
+        if arguments == ("merge-base", "--is-ancestor", target, "HEAD"):
+            return CommandResult(0 if target_is_ancestor else 1, "", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(0 if merge_head else 1, f"{merge_head or ''}\n", "")
+        if arguments == ("ls-files", "--unmerged"):
+            return CommandResult(0, "conflict\n" if unmerged else "", "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError, match=message):
+        GitRepository(config, fake).publication_changed_paths(
+            tmp_path / "worktree", target
+        )
+
+
 @pytest.mark.parametrize(
     ("unmerged", "porcelain", "parents", "raises"),
     (

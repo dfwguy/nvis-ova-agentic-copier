@@ -546,6 +546,7 @@ class FakeRepository:
         self.verified_heads: list[str] = []
         self.synced_heads: list[tuple[str, str]] = []
         self.current_head = "a" * 40
+        self.reconciliation_sha: str | None = None
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
         ] = (
@@ -554,6 +555,9 @@ class FakeRepository:
             (),
         )
         self.changed_paths_calls = 0
+        self.publication_changed_paths_calls = 0
+        self.publication_targets: list[str] = []
+        self.publication_paths: tuple[str, ...] | None = None
         self.has_changes_calls = 0
 
     def refresh_base(self) -> None:
@@ -592,6 +596,17 @@ class FakeRepository:
             raise self.changed_paths_error
         return self.paths
 
+    def publication_changed_paths(
+        self, worktree: Path, target_sha: str
+    ) -> tuple[str, ...]:
+        """Model the net prospective publication tree relative to its target."""
+        del worktree
+        self.publication_changed_paths_calls += 1
+        self.publication_targets.append(target_sha)
+        if self.changed_paths_error is not None:
+            raise self.changed_paths_error
+        return self.paths if self.publication_paths is None else self.publication_paths
+
     def has_changes(self, worktree: Path) -> bool:
         """Report the fake worktree's independently controlled cleanliness."""
         del worktree
@@ -624,7 +639,7 @@ class FakeRepository:
     ) -> str | None:
         """Model a current-default reconciliation when requested by a test."""
         del worktree, branch, expected_head
-        return None
+        return self.reconciliation_sha
 
     def prepare_commit(
         self,
@@ -4929,6 +4944,126 @@ def test_protected_policy_publication_with_complete_evidence_publishes(
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
     assert repository.pushes == 1
     assert gitlab.created_merge_requests == 1
+
+
+def test_publication_ignores_target_only_policy_changes_in_prospective_tree(
+    tmp_path: Path,
+) -> None:
+    """A policy change already supplied by main must not require a policy receipt."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    receipt = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="\n".join(
+            f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-judge' else 'approved'}"
+            for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+        ),
+    )
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": WorkflowLane.CODING,
+                "main_sha": "b" * 40,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Code update", description="Validated code update."
+                ),
+                "receipts": (receipt,),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("AGENTS.md",)
+    repository.publication_paths = ("src/owned.py",)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert repository.publication_changed_paths_calls == 1
+    assert repository.publication_targets == ["b" * 40]
+    assert repository.changed_paths_calls == 0
+    assert repository.pushes == 1
+
+
+def test_reconciliation_persists_default_target_for_interrupted_merge_recovery(
+    tmp_path: Path,
+) -> None:
+    """The next workflow replay retains the exact default commit being merged."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    receipt = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="\n".join(
+            f"{skill}: approved" for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+        ),
+    )
+    initial = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": WorkflowLane.CONTENT,
+                "main_sha": "c" * 40,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Content update", description="Validated content update."
+                ),
+                "receipts": (receipt,),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.reconciliation_sha = "b" * 40
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.WORKFLOW
+    assert outcome.main_sha == "b" * 40
+    assert outcome.source_sha == initial.source_sha
+
+    repository.reconciliation_sha = None
+    ledger.persist(
+        outcome.model_copy(
+            update={
+                "state": RunnerState.PUBLISHING,
+                "phase": WorkflowPhase.READY_TO_PUBLISH,
+            }
+        )
+    )
+    replayed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert replayed is not None and replayed.state is RunnerState.OBSERVING
+    assert repository.publication_targets == ["c" * 40, "b" * 40]
 
 
 @pytest.mark.parametrize(

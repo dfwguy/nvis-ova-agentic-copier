@@ -1747,10 +1747,25 @@ def _publish(
             summary="Durable publication intent is not exact.",
         )
     if not replaying:
+        target_sha = record.main_sha or baseline_sha
+        try:
+            prospective_paths = repository.publication_changed_paths(
+                record.worktree, target_sha
+            )
+        except RepositoryTransientError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
         protected = tuple(
-            path
-            for path in repository.changed_paths(record.worktree)
-            if is_protected_policy_path(path)
+            path for path in prospective_paths if is_protected_policy_path(path)
         )
         if protected and (
             not has_complete_workflow_receipt(record, requires_policy_review=True)
@@ -1838,6 +1853,7 @@ def _publish(
                         else record.work_kind
                     ),
                     source_sha=publication_sha,
+                    main_sha=reconciliation_sha,
                     intent=None,
                     publication_sha=None,
                     summary="Current default branch requires reconciliation before publication.",

@@ -542,6 +542,41 @@ class GitRepository:
             for path in line[3:].strip().split(" -> ")
         )
 
+    def publication_changed_paths(
+        self, worktree: Path, target_sha: str
+    ) -> tuple[str, ...]:
+        """Return the prospective published tree's paths relative to its target."""
+        target = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "rev-parse",
+                "-q",
+                "--verify",
+                f"{target_sha}^{{commit}}",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if target.returncode != 0 or target.stdout.strip() != target_sha:
+            raise RepositoryError("publication target is not an exact commit")
+        merge_head = self._merge_head(worktree)
+        if merge_head is not None:
+            if merge_head != target_sha:
+                raise RepositoryError("pending merge does not match publication target")
+        elif not self._is_ancestor(target_sha, "HEAD", worktree):
+            raise RepositoryError("publication target is not an ancestor of HEAD")
+        if self._git("ls-files", "--unmerged", cwd=worktree):
+            raise RepositoryError("publication tree has unresolved paths")
+        changed = self._git(
+            "diff", "--name-only", "--no-renames", target_sha, cwd=worktree
+        ).splitlines()
+        untracked = self._git(
+            "ls-files", "--others", "--exclude-standard", cwd=worktree
+        ).splitlines()
+        return tuple(sorted(set(changed) | set(untracked)))
+
     def worktree_exists(self, worktree: Path) -> bool:
         """Return whether the durable worktree directory still exists."""
         return worktree.is_dir()
