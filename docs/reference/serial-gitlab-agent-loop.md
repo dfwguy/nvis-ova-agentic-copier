@@ -34,6 +34,10 @@ agent-work loop run [--apply] [--max-segments COUNT]
                     [--json] [--debug]
 agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
+agent-work loop canary [--apply --plan-file PATH] [--json] [--debug]
+agent-work loop recover --issue-iid IID [--apply --plan-file PATH]
+                        [--max-segments COUNT]
+                        [--max-activation-seconds SECONDS] [--json] [--debug]
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
 agent-work migration preview [--json] [--debug]
@@ -112,6 +116,32 @@ truncated. With `--issue-iid`, it performs an exact lookup for that item.
 previews one recorded blocked item; `--apply`
 resets its retry budget and moves it to resumable preparation after explicit
 human direction.
+
+`loop canary` is an operational checkpoint, not an issue run. Bare invocation
+creates a redacted, immutable plan that verifies public service and project
+identity, durable recovery evidence, and current pipeline evidence, then names
+the expected checkpoint and next action. It never selects an eligible issue,
+claims work, changes a lifecycle label, creates a ledger record or worktree,
+or invokes a worker. After review, `loop canary --apply --plan-file PATH`
+rechecks the plan's exact evidence while holding the project lock before it
+performs its bounded checkpoint action. A changed identity or evidence requires
+a new preview.
+
+`loop recover --issue-iid IID` is a targeted counterpart for one retained
+item. Bare invocation creates a redacted recovery plan without mutation.
+Apply requires both `--apply` and the reviewed `--plan-file`; it rechecks the
+configured project, default branch, authenticated username, ledger revision
+and state, lifecycle label, deterministic branch, retained-worktree HEAD and
+cleanliness, merge-request project/source/target/source-SHA identity, and the
+current exact-SHA pipeline before changing anything. It cannot advance another
+IID. `--max-segments` and `--max-activation-seconds` retain the bounded
+activation controls from `loop run`.
+
+Plans bind the command and action to public service identity, configured
+project and default branch, ledger revision, and the exact target, issue,
+repository, merge-request, and pipeline evidence needed by that action. They
+never contain secrets. Apply fails closed, with the safe next action, when the
+plan is stale, tampered, for another identity, or no longer matches evidence.
 
 `migration preview` inventories legacy evidence and proposes only safe,
 idempotent records and label changes. `migration apply` requires a reviewed
@@ -396,6 +426,17 @@ repair session. A concrete repository-actionable finding creates or reuses a
 deduplicated issue, which later normal reconciliation may select for a new
 applicable workflow; unverified evidence produces no repository work.
 
+The ordinary loop, canary checkpoint, and targeted recovery use the same
+recovery order: corroborated failed default-branch or open-MR pipelines come
+first. A failed MR pipeline can enter repair only for its exact retained owner;
+otherwise, and for a failed default-branch pipeline, the result is an
+actionable human block. Next comes the sole active resumable retained record,
+then an explicitly targeted blocked retry. A nonterminal pipeline is a wait
+before any fresh work. Only ordinary `loop run` may then select a fresh issue.
+Two active retained records, a competing owner, or a higher-priority owner is
+an identity conflict: the command fails closed and reports the exact safe next
+action.
+
 Each timer activation acquires the single-project lock and reconciles intent
 and observed evidence. At the start of an applied activation, before it resumes
 or selects open work, it obtains one bounded deterministic IID-ordered inventory
@@ -466,6 +507,14 @@ dirty durable worktree remains for its next workflow attempt. Recovery stashes a
 inventoried only: the runner never applies or drops them. Ambiguous worktrees,
 branches, labels, or stashes become blocked for human review. A corrupt record
 is blocked where reportable, and failed only where it cannot be safely recorded.
+
+A clean, unpublished interruption before worker invocation has a narrow
+normalization path. It is eligible only when the open issue and lifecycle label,
+deterministic branch and worktree, and recorded baseline all agree; the
+worktree is clean at that baseline; and there is no MR, publication, draft,
+intent, feedback, receipt, or decomposition evidence. The runner retains every
+artifact, converts the record to `blocked`, and gives actionable retry guidance.
+It never deletes a ledger, branch, or worktree.
 
 ## Status projection
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -40,11 +41,14 @@ from .models import (
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
+    GitLabProject,
     LedgerRecord,
     MergeRequestEvidence,
     MigrationAction,
     MigrationObservation,
     MigrationPlan,
+    OperationalPlan,
+    PipelineEvidence,
     TransitionIntentRecord,
 )
 from .ports import (
@@ -196,6 +200,7 @@ def _report(
     stop_reason: str | None = None,
     summary: str | None = None,
     next_action: str | None = None,
+    operational_plan: OperationalPlan | None = None,
 ) -> CommandReport:
     return CommandReport(
         command=request.command,
@@ -208,6 +213,272 @@ def _report(
         stop_reason=stop_reason,
         summary=summary,
         next_action=next_action,
+        operational_plan=operational_plan,
+    )
+
+
+def _operational_evidence(
+    *,
+    config: AgentWorkConfig,
+    project: GitLabProject,
+    identity: str,
+    records: tuple[LedgerRecord, ...],
+    target_iid: int | None,
+    action: str,
+    command: str,
+    max_segments: int,
+    max_activation_seconds: int,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+) -> OperationalPlan:
+    """Build compact public evidence for a reviewed non-claiming operation."""
+    selected = next(
+        (record for record in records if record.issue_iid == target_iid), None
+    )
+    evidence: dict[str, str | int | bool | None] = {
+        "record_iids": ",".join(str(record.issue_iid) for record in records),
+        "max_segments": max_segments,
+        "max_activation_seconds": max_activation_seconds,
+        "target_present": selected is not None,
+        "record_revision": None if selected is None else selected.revision,
+        "record_state": None if selected is None else selected.state.value,
+        "record_phase": None if selected is None else selected.phase.value,
+        "source_branch": None if selected is None else selected.source_branch,
+        "source_sha": None if selected is None else selected.source_sha,
+        "merge_request_iid": None if selected is None else selected.merge_request_iid,
+        "publication_sha": None if selected is None else selected.publication_sha,
+        "has_draft": None
+        if selected is None
+        else selected.merge_request_draft is not None,
+        "has_feedback": None
+        if selected is None
+        else selected.pending_feedback is not None,
+        "has_cursor": None
+        if selected is None
+        else selected.feedback_cursor is not None,
+        "has_receipts": None if selected is None else bool(selected.receipts),
+        "has_decomposition": None
+        if selected is None
+        else selected.decomposition_plan is not None
+        or bool(selected.decomposition_progress),
+        "record_fingerprint": None
+        if selected is None
+        else hashlib.sha256(selected.model_dump_json().encode()).hexdigest(),
+    }
+    if selected is not None:
+        try:
+            issue = gitlab.fetch_issue(selected.issue_iid)
+            evidence["issue_state"] = issue.state
+            evidence["lifecycle_labels"] = ",".join(
+                sorted(set(issue.labels).intersection(LIFECYCLE_LABELS))
+            )
+            exists = repository.worktree_exists(selected.worktree)
+            evidence["worktree_exists"] = exists
+            if exists:
+                evidence["worktree_head"] = repository.head(selected.worktree)
+                evidence["worktree_clean"] = not repository.has_changes(
+                    selected.worktree
+                ) and not repository.changed_paths(selected.worktree)
+                try:
+                    repository.verify_worktree(
+                        selected.worktree,
+                        selected.source_branch,
+                        selected.source_sha or "",
+                    )
+                    evidence["worktree_binding"] = "exact"
+                except (OSError, RepositoryError, RuntimeError, ValueError):
+                    evidence["worktree_binding"] = "mismatch"
+            branch_mrs = gitlab.open_merge_requests_by_branch(selected.source_branch)
+            evidence["open_branch_mr_iids"] = ",".join(str(mr.iid) for mr in branch_mrs)
+            evidence["mr_presence"] = (
+                "recorded" if selected.merge_request_iid is not None else "absent"
+            )
+            if selected.merge_request_iid is not None:
+                mr = gitlab.fetch_merge_request(selected.merge_request_iid)
+                pipeline = gitlab.latest_pipeline_for_sha(mr.iid, mr.sha)
+                evidence["mr_state"] = mr.state
+                evidence["mr_iid"] = mr.iid
+                evidence["mr_sha"] = mr.sha
+                evidence["mr_source_branch"] = mr.source_branch
+                evidence["mr_target_branch"] = mr.target_branch
+                evidence["mr_source_project"] = mr.source_project_id
+                evidence["mr_target_project"] = mr.target_project_id
+                evidence["mr_has_conflicts"] = mr.has_conflicts
+                evidence["mr_closes_issue"] = gitlab.mr_closes_issue(
+                    mr.iid, selected.issue_iid
+                )
+                evidence["pipeline_id"] = None if pipeline is None else pipeline.id
+                evidence["pipeline_status"] = (
+                    None if pipeline is None else pipeline.status
+                )
+                evidence["pipeline_sha"] = None if pipeline is None else pipeline.sha
+        except (GitLabError, OSError, RepositoryError, RuntimeError, ValueError):
+            evidence["operational_observation"] = "unavailable"
+    return OperationalPlan(
+        command=command,
+        action=action,
+        project={
+            "host": config.host,
+            "project_id": project.id,
+            "default_branch": project.default_branch,
+        },
+        authenticated_username=identity,
+        target_iid=target_iid,
+        evidence=evidence,
+    )
+
+
+def _normalization_is_exact(
+    record: LedgerRecord, *, gitlab: GitLabPort, repository: RepositoryPort
+) -> bool:
+    """Prove the narrowly safe interrupted pre-worker claim predicate."""
+    if (
+        record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+    ):
+        return False
+    try:
+        issue = gitlab.fetch_issue(record.issue_iid)
+        return (
+            issue.state == "opened"
+            and set(issue.labels).intersection(LIFECYCLE_LABELS) == {"agent::running"}
+            and record.source_branch == f"agent/issue-{record.issue_iid}"
+            and record.work_kind is WorkKind.ORDINARY
+            and repository.worktree_exists(record.worktree)
+            and repository.head(record.worktree) == record.source_sha
+            and not repository.has_changes(record.worktree)
+            and not repository.changed_paths(record.worktree)
+            and not gitlab.open_merge_requests_by_branch(record.source_branch)
+            and record.merge_request_iid is None
+            and record.publication_sha is None
+            and record.merge_request_draft is None
+            and record.feedback_cursor is None
+            and record.pending_feedback is None
+            and not record.receipts
+            and record.decomposition_plan is None
+            and not record.decomposition_progress
+            and record.intent is None
+            and repository.verify_worktree(
+                record.worktree, record.source_branch, record.source_sha or ""
+            )
+            is None
+        )
+    except (GitLabError, OSError, RepositoryError, RuntimeError, ValueError):
+        return False
+
+
+def _operational_preview(
+    request: CommandRequest,
+    *,
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    username: str,
+) -> CommandReport:
+    """Choose one harmless canary/recovery checkpoint without selecting work."""
+    records = tuple(wired.ledger.list_records())
+    gate = _inspect_pipeline_gate(
+        gitlab=wired.gitlab,
+        repository=wired.repository,
+        records=records,
+        project_id=project.id,
+        default_branch=project.default_branch,
+    )
+    target = request.issue_iid
+    action = "checkpoint"
+    next_action = "Review the operational checkpoint; no issue was claimed."
+    outcome = "checkpoint"
+    if request.command == "loop.canary":
+        if gate.repair_owner is not None:
+            target = gate.repair_owner.issue_iid
+            next_action = (
+                f"Recover retained issue {target} for the failed exact pipeline."
+            )
+        elif gate.outcome is not None:
+            action = gate.outcome
+            next_action = gate.next_action or next_action
+    else:
+        if target is None:
+            raise RuntimeError("recover requires an issue IID")
+        if gate.outcome is not None and gate.outcome != "pipeline_wait":
+            action = gate.outcome
+            next_action = gate.next_action or next_action
+            plan = _operational_evidence(
+                config=wired.config,
+                project=project,
+                identity=username,
+                records=records,
+                target_iid=target,
+                action=action,
+                command=request.command,
+                max_segments=request.max_segments,
+                max_activation_seconds=request.max_activation_seconds,
+                gitlab=wired.gitlab,
+                repository=wired.repository,
+            )
+            return _report(
+                request,
+                applied=False,
+                outcome=outcome,
+                project={"host": wired.config.host, "project_id": project.id},
+                summary="Read-only operational plan.",
+                next_action=next_action,
+                operational_plan=plan,
+            )
+        record = wired.ledger.load(target)
+        if record is None:
+            action = "target_missing"
+            next_action = (
+                f"Retained issue {target} does not exist; do not recover another item."
+            )
+        conflicts = tuple(
+            record
+            for record in records
+            if record.issue_iid != target and record.state in ACTIVE_STATES
+        )
+        if record is not None and (
+            record is not None
+            and record.state is RunnerState.EXECUTING
+            and record.phase is WorkflowPhase.WORKFLOW
+        ):
+            action = (
+                "normalize_interrupted_claim"
+                if _normalization_is_exact(
+                    record, gitlab=wired.gitlab, repository=wired.repository
+                )
+                else "normalization_unverified"
+            )
+            next_action = (
+                f"Apply the reviewed normalization for retained issue {target}."
+            )
+        elif record is not None and conflicts:
+            conflict = min(conflicts, key=lambda record: record.issue_iid)
+            next_action = f"Recover retained issue {conflict.issue_iid} before advancing issue {target}."
+        elif record is not None:
+            action = "run_segment"
+            next_action = (
+                f"Apply the reviewed repair checkpoint for retained issue {target}."
+            )
+    plan = _operational_evidence(
+        config=wired.config,
+        project=project,
+        identity=username,
+        records=records,
+        target_iid=target,
+        action=action,
+        command=request.command,
+        max_segments=request.max_segments,
+        max_activation_seconds=request.max_activation_seconds,
+        gitlab=wired.gitlab,
+        repository=wired.repository,
+    )
+    return _report(
+        request,
+        applied=False,
+        outcome=outcome,
+        project={"host": wired.config.host, "project_id": project.id},
+        summary="Read-only operational plan.",
+        next_action=next_action,
+        operational_plan=plan,
     )
 
 
@@ -329,13 +600,17 @@ def _inspect_pipeline_gate(
                 detail="The current default-branch pipeline failed.",
                 next_action="Inspect and resolve the failed default-branch pipeline before selecting work.",
             )
-        if default_pipeline.status != "success":
+        if (
+            default_pipeline.status not in NONTERMINAL_PIPELINE_STATUSES
+            and default_pipeline.status != "success"
+        ):
             return _pipeline_handoff(
                 outcome="pipeline_inventory_blocked",
                 pipeline_url=default_pipeline.web_url,
                 detail="The current default-branch pipeline has an unrecognized terminal status.",
                 next_action="Verify the pipeline status before selecting work.",
             )
+        inspected: list[tuple[MergeRequestEvidence, PipelineEvidence]] = []
         for merge_request in sorted(
             gitlab.open_merge_requests(), key=lambda item: item.iid
         ):
@@ -349,8 +624,26 @@ def _inspect_pipeline_gate(
                     detail="An open merge request has no current-source pipeline evidence.",
                     next_action="Validate the current merge-request pipeline before selecting work.",
                 )
-            if pipeline.status == "success":
+            inspected.append((merge_request, pipeline))
+        for merge_request, pipeline in inspected:
+            if pipeline.status != "failed":
                 continue
+            owner = find_exact_pipeline_owner(
+                records=records,
+                merge_request=merge_request,
+                project_id=project_id,
+                default_branch=default_branch,
+                repository=repository,
+            )
+            if owner is not None:
+                return _PipelineGateDecision(repair_owner=owner)
+            return _pipeline_handoff(
+                outcome="pipeline_blocked",
+                pipeline_url=pipeline.web_url,
+                detail="An open merge request failed for its current source SHA without one exact retained owner.",
+                next_action="Inspect the pipeline and reconcile its exact retained owner before selecting work.",
+            )
+        for _merge_request, pipeline in inspected:
             if pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
                 return _pipeline_handoff(
                     outcome="pipeline_wait",
@@ -358,28 +651,13 @@ def _inspect_pipeline_gate(
                     detail="An open merge request has a current-source pipeline still running.",
                     next_action="Wait for the current merge-request pipeline to reach a terminal state.",
                 )
-            if pipeline.status == "failed":
-                owner = find_exact_pipeline_owner(
-                    records=records,
-                    merge_request=merge_request,
-                    project_id=project_id,
-                    default_branch=default_branch,
-                    repository=repository,
-                )
-                if owner is not None:
-                    return _PipelineGateDecision(repair_owner=owner)
+            if pipeline.status != "success":
                 return _pipeline_handoff(
-                    outcome="pipeline_blocked",
+                    outcome="pipeline_inventory_blocked",
                     pipeline_url=pipeline.web_url,
-                    detail="An open merge request failed for its current source SHA without one exact retained owner.",
-                    next_action="Inspect the pipeline and reconcile its exact retained owner before selecting work.",
+                    detail="An open merge request pipeline has an unrecognized terminal status.",
+                    next_action="Verify the pipeline status before selecting work.",
                 )
-            return _pipeline_handoff(
-                outcome="pipeline_inventory_blocked",
-                pipeline_url=pipeline.web_url,
-                detail="An open merge request pipeline has an unrecognized terminal status.",
-                next_action="Verify the pipeline status before selecting work.",
-            )
     except (GitLabError, OSError, RuntimeError, ValueError):
         return _pipeline_handoff(
             outcome="pipeline_inventory_blocked",
@@ -570,6 +848,134 @@ def dispatch(
     )
     project = gitlab.verify_project()
     identity = {"host": config.host, "project_id": project.id}
+
+    if request.command in {"loop.canary", "loop.recover"}:
+        username = gitlab.verify_authenticated_user()
+        if not isinstance(username, str) or not username:
+            raise RuntimeError("authenticated identity evidence is unavailable")
+        if not apply:
+            return _operational_preview(
+                request, wired=wired, project=project, username=username
+            )
+        if request.plan_file is None:
+            raise RuntimeError("operational apply requires --plan-file")
+        try:
+            payload = json.loads(wired.read_plan(request.plan_file))
+            if isinstance(payload, dict) and "operational_plan" in payload:
+                payload = payload["operational_plan"]
+            reviewed = OperationalPlan.model_validate(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("operational plan is invalid") from error
+        with wired.lock():
+            current_project = gitlab.verify_project()
+            if current_project != project:
+                raise RuntimeError(
+                    "configured project evidence changed; create a new preview"
+                )
+            current_username = gitlab.verify_authenticated_user()
+            if not isinstance(current_username, str) or not current_username:
+                raise RuntimeError("authenticated identity evidence is unavailable")
+            current = _operational_preview(
+                request, wired=wired, project=current_project, username=current_username
+            )
+            if current.operational_plan != reviewed:
+                raise RuntimeError(
+                    "operational plan evidence changed; create a new preview"
+                )
+            if reviewed.action == "checkpoint":
+                return current.model_copy(update={"applied": True})
+            if reviewed.action == "target_missing":
+                raise RuntimeError("operational recovery target is absent")
+            if reviewed.action in {
+                "pipeline_blocked",
+                "pipeline_wait",
+                "pipeline_inventory_blocked",
+            }:
+                raise RuntimeError("operational checkpoint cannot advance")
+            target = reviewed.target_iid
+            if target is None:
+                raise RuntimeError("operational plan target is missing")
+            record = ledger.load(target)
+            if record is None:
+                raise RuntimeError("operational plan record disappeared")
+            if reviewed.action == "normalize_interrupted_claim":
+                if not _normalization_is_exact(
+                    record, gitlab=gitlab, repository=repository
+                ):
+                    raise RuntimeError("normalization evidence changed")
+                repository.verify_worktree(
+                    record.worktree, record.source_branch, record.source_sha or ""
+                )
+                blocked = ledger.persist(
+                    transition_record(
+                        record,
+                        RunnerState.BLOCKED,
+                        error_code=ErrorCode.STATE_RECONCILIATION_FAILED,
+                        summary="Interrupted pre-worker claim retained for exact recovery.",
+                        next_action=f"Review and explicitly recover retained issue {target}.",
+                    )
+                )
+                gitlab.transition_labels(target, label_for_state(blocked.state))
+                return _report(
+                    request,
+                    applied=True,
+                    outcome="normalized",
+                    records=(blocked,),
+                    project=identity,
+                    operational_plan=reviewed,
+                )
+            if reviewed.action == "run_segment":
+                wired.invoke.preflight()
+                if record.state is RunnerState.BLOCKED:
+                    record = ledger.persist(
+                        transition_record(
+                            record,
+                            RunnerState.PREPARING,
+                            error_code=None,
+                            summary="Explicit exact-IID recovery resumed.",
+                            next_action="Reconcile and resume preparation.",
+                        )
+                    )
+                    gitlab.transition_labels(target, label_for_state(record.state))
+                started = wired.monotonic()
+                results: list[LedgerRecord] = []
+                for _segment_number in range(request.max_segments):
+                    remaining = request.max_activation_seconds - (
+                        wired.monotonic() - started
+                    )
+                    if remaining <= 0:
+                        break
+                    result = run_segment(
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        repository=repository,
+                        invoke=wired.invoke,
+                        timeout_seconds=request.max_activation_seconds,
+                        now=wired.clock(),
+                        issue_iid=target,
+                        remaining_seconds=lambda: (
+                            request.max_activation_seconds
+                            - (wired.monotonic() - started)
+                        ),
+                    )
+                    if result is None:
+                        break
+                    results.append(result)
+                    if result.state not in ACTIVE_STATES:
+                        break
+                    if result.state is RunnerState.OBSERVING:
+                        break
+                return _report(
+                    request,
+                    applied=True,
+                    outcome="activation_complete",
+                    records=tuple(results),
+                    project=identity,
+                    operational_plan=reviewed,
+                )
+            if reviewed.action == "normalization_unverified":
+                raise RuntimeError("normalization evidence cannot be proven")
+            raise RuntimeError("operational plan action is unsupported")
 
     if request.command == "loop.status":
         records = (
@@ -866,55 +1272,61 @@ def dispatch(
         reconcile_closed_issues(ledger, gitlab, project_id=project.id)
         started = wired.monotonic()
 
+        inventory = tuple(ledger.list_records())
+        gate = _inspect_pipeline_gate(
+            gitlab=gitlab,
+            repository=repository,
+            records=inventory,
+            project_id=project.id,
+            default_branch=project.default_branch,
+        )
+        if gate.outcome is not None and gate.outcome != "pipeline_wait":
+            return _report(
+                request,
+                applied=True,
+                outcome=gate.outcome,
+                project=identity,
+                stop_reason=gate.outcome,
+                summary=gate.summary,
+                next_action=gate.next_action,
+            )
+        if gate.repair_owner is not None:
+            repaired = ledger.persist(
+                transition_record(
+                    gate.repair_owner,
+                    RunnerState.REPAIR,
+                    phase=WorkflowPhase.WORKFLOW,
+                    error_code=ErrorCode.PIPELINE_REJECTED,
+                    summary="The exact current-source pipeline failed.",
+                    next_action="Run the bounded post-publication repair and revalidation segment.",
+                )
+            )
+            return _report(
+                request,
+                applied=True,
+                outcome="activation_complete",
+                records=(repaired,),
+                project=identity,
+                segments_run=1,
+                stop_reason="repair",
+            )
+
         def remaining_activation_seconds() -> float:
             return request.max_activation_seconds - (wired.monotonic() - started)
 
         active = tuple(
             item for item in ledger.list_records() if item.state in ACTIVE_STATES
         )
-        if not active or (
-            len(active) == 1
-            and active[0].state is RunnerState.OBSERVING
-            and active[0].phase is WorkflowPhase.PIPELINE_WAIT
-        ):
-            inventory = tuple(ledger.list_records())
-            gate = _inspect_pipeline_gate(
-                gitlab=gitlab,
-                repository=repository,
-                records=inventory,
-                project_id=project.id,
-                default_branch=project.default_branch,
+        if gate.outcome == "pipeline_wait" and not active:
+            return _report(
+                request,
+                applied=True,
+                outcome=gate.outcome,
+                project=identity,
+                stop_reason=gate.outcome,
+                summary=gate.summary,
+                next_action=gate.next_action,
             )
-            if gate.outcome is not None:
-                return _report(
-                    request,
-                    applied=True,
-                    outcome=gate.outcome,
-                    project=identity,
-                    stop_reason=gate.outcome,
-                    summary=gate.summary,
-                    next_action=gate.next_action,
-                )
-            if gate.repair_owner is not None:
-                repaired = ledger.persist(
-                    transition_record(
-                        gate.repair_owner,
-                        RunnerState.REPAIR,
-                        phase=WorkflowPhase.WORKFLOW,
-                        error_code=ErrorCode.PIPELINE_REJECTED,
-                        summary="The exact current-source pipeline failed.",
-                        next_action="Run the bounded post-publication repair and revalidation segment.",
-                    )
-                )
-                return _report(
-                    request,
-                    applied=True,
-                    outcome="activation_complete",
-                    records=(repaired,),
-                    project=identity,
-                    segments_run=1,
-                    stop_reason="repair",
-                )
         prior_state = active[0].state if len(active) == 1 else None
         issue_iid = active[0].issue_iid if len(active) == 1 else None
         for _segment_number in range(request.max_segments):

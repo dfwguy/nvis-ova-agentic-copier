@@ -78,6 +78,12 @@ per-command confirmation. It does not expand this default-read-only skill
 beyond its stated boundaries or authorize issue filing unless that authority
 specifically covers it.
 
+When recovery evidence needs an operator checkpoint, recommend the read-only
+`agent-work loop canary --json` plan first, followed only by its reviewed exact
+`--apply --plan-file` invocation. Recommend `loop recover --issue-iid IID`
+only for that exact retained item. Never recommend ordinary `loop run` as a
+canary or as a substitute for targeted recovery.
+
 Use this fixed, concise result shape: **status**, **evidence**, **next action**,
 and **human wait/action** when applicable. State uncertainty in the evidence
 field. This skill has no mailbox persistence and does not implement a

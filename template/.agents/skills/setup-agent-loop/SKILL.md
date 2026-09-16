@@ -112,8 +112,8 @@ before checking repository safeguards.
    Durable state, the single-project lock, and one worktree per active issue
    live below the XDG state directory, outside the checkout. Stashes are
    emergency evidence only and are never the normal persistence mechanism.
-3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, and user-level `systemd`, then run `uv run agent-work loop run --json` from the
-   dedicated checkout as a preview smoke test. Do not use a separately installed
+3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, and user-level `systemd`, then run `uv run agent-work loop canary --json` from the
+   dedicated checkout as a non-claiming preview smoke test. Do not use a separately installed
    bare `agent-work` executable, which can be stale. Install and enable the
    documented project-named user-level timer only after the applicable
    `AGENTS.md` standing authorization or separate explicit authorization.
@@ -179,7 +179,8 @@ before checking repository safeguards.
    `loginctl show-user "$USER" --property=Linger`.
 
    After this wrapper first merges, stop the timer, manually fast-forward the
-   dedicated checkout, run the isolated preview and a canary, then restart the
+   dedicated checkout, run the isolated preview, review and apply an exact
+   `loop canary --plan-file` checkpoint, then restart the
    timer. Later applied activations verify the configured GitLab project and
    refresh the default branch before Python starts. Local executable/rewrite
    Git configuration and target filter attributes are rejected, hooks are
@@ -230,7 +231,10 @@ before checking repository safeguards.
    labels: `systemctl --user disable --now <project-slug>-agent-work.timer`.
    Inventory legacy labels, branches, worktrees, and stashes with
    `uv run agent-work migration preview --json`; apply only the exact reviewed
-   plan, then validate one canary before re-enabling the timer.
+   plan, then create, review, and apply one exact non-claiming canary plan
+   before re-enabling the timer. For retained work, use a separate exact-IID
+   `loop recover --issue-iid IID --apply --plan-file PATH` plan; do not use
+   ordinary `loop run` as a recovery canary.
 
 Enabling the guarded loop authorizes it to resume active or automatically
 resumable work before selecting fresh open, non-confidential issues without a
