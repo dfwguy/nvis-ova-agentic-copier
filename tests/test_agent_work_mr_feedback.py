@@ -610,10 +610,11 @@ class _FeedbackGitLab(FakeGitLab):
             raise self.feedback_error
         return self.feedback_by_mr.get(iid, self.feedback)
 
-    def verify_authenticated_user(self) -> None:
+    def verify_authenticated_user(self) -> str | None:
         self.identity_checks += 1
         if self.identity_error_on_check == self.identity_checks:
             raise GitLabIdentityError("GitLab authenticated identity changed")
+        return self.authenticated_username
 
     def comment_feedback_outcome(
         self,

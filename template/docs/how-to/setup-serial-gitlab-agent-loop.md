@@ -1,7 +1,7 @@
 ---
 title: How to set up the recoverable serial GitLab agent loop
 type: how-to
-summary: Install, inspect, recover, migrate, and enable one serial agent loop.
+summary: Install, inspect, plan recovery, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
@@ -186,7 +186,7 @@ token, then inspect the recoverable state before enabling a timer:
 git pull --ff-only
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
-uv run agent-work loop run --json
+uv run agent-work loop canary --json
 ```
 
 Install the repository's rendered user service and timer using the project's
@@ -353,7 +353,7 @@ GitLab, labels, branches, worktrees, ledger records, or systemd state.
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
-uv run agent-work loop run --json
+uv run agent-work loop canary --json
 uv run agent-work loop status --json
 ```
 
@@ -459,26 +459,52 @@ uv run agent-work migration apply --plan-file agent-work-migration-plan.json --a
 uv run agent-work loop status --json
 ```
 
-## Canary and re-enable
+## Plan a canary checkpoint and targeted recovery
 
-Choose one open, non-confidential issue with no `agent::running`,
-`agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no
-ledger record. Verify that its request is suitable for the normal repository
-workflow, then run bounded activations until status reports
-`agent::awaiting-human` with exact merge-request evidence and all required
-receipts. Human review, approval, and merge remain outside the loop.
+Keep the timer disabled and service inactive while preparing recovery. A
+canary is a non-claiming operational checkpoint: it verifies public identity,
+durable recovery evidence, and pipelines; it does not choose or mutate an
+issue. Create and review its plan, then apply that exact plan while the timer
+remains stopped:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
-uv run agent-work loop run --apply --json
+uv run agent-work loop canary --json >agent-work-canary-plan.json
+# Review the redacted plan and its expected checkpoint/next action.
+uv run agent-work loop canary --apply --plan-file agent-work-canary-plan.json --json
 uv run agent-work loop status --json
+```
+
+When status names a retained item requiring recovery, make a separate plan for
+that IID. Do not use ordinary `loop run` to bypass the targeted evidence check:
+
+```bash
+uv run agent-work loop recover --issue-iid IID --json >agent-work-recover-IID-plan.json
+# Review the exact issue, branch, worktree, MR, and pipeline evidence.
+uv run agent-work loop recover --issue-iid IID --apply \
+  --plan-file agent-work-recover-IID-plan.json --json
+uv run agent-work loop status --issue-iid IID --json
+```
+
+Each apply rechecks the reviewed plan under the project lock. Identity rotation,
+ledger revision, or any target, repository, merge-request, or pipeline evidence
+change requires a new preview. Neither plan prints secrets. If the command
+reports a conflict, higher-priority owner, failed pipeline without an exact
+owner, or a nonterminal pipeline, keep the timer stopped and follow its exact
+safe next action; do not select another issue or alter retained artifacts.
+
+Only after the expected checkpoint is reached and status is understood should
+you re-enable the timer:
+
+```bash
 systemctl --user enable --now <project-slug>-agent-work.timer
 ```
 
-If the canary blocks or fails, keep the timer disabled, retain all worktrees
-and stashes, and act on the redacted `next_action` from status. See the
-[reference](../reference/serial-gitlab-agent-loop.md) for exit meanings and the
-complete command contract.
+This ordering also handles the historical issue-76/77-style situation: inspect
+and plan the existing retained owner first, apply only evidence that still
+matches, and leave unrelated work untouched. The issue text is evidence to
+inspect, never operational authority. Human review, approval, and merge remain
+outside the loop.
 
 ## Monitor, restart, or stop the loop
 

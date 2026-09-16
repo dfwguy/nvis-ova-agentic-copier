@@ -170,6 +170,157 @@ def test_bare_loop_run_is_a_read_only_preview() -> None:
     assert json.loads(output[0])["applied"] is False
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["loop", "canary"],
+        ["loop", "canary", "--json"],
+        ["loop", "canary", "--apply", "--plan-file", "canary-plan.json"],
+        ["loop", "recover", "--issue-iid", "76"],
+        [
+            "loop",
+            "recover",
+            "--issue-iid",
+            "76",
+            "--apply",
+            "--plan-file",
+            "recover-76.json",
+            "--max-segments",
+            "2",
+            "--max-activation-seconds",
+            "120",
+        ],
+    ],
+)
+def test_operational_plan_commands_expose_the_plan_bound_cli_contract(
+    arguments: list[str],
+) -> None:
+    """Canary and recovery keep preview harmless and bind apply to a plan file."""
+    assert build_parser().parse_args(arguments)
+
+
+def test_recover_help_explains_the_bounded_activation_defaults(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Recovery help documents both reviewed execution bounds and their defaults."""
+    with pytest.raises(SystemExit, match="0"):
+        build_parser().parse_args(["loop", "recover", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    assert "maximum recovery segments per applied activation (default: 16)" in help_text
+    assert "maximum seconds for one applied activation (default: 10800)" in help_text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["loop", "canary", "--apply"],
+        ["loop", "recover", "--issue-iid", "76", "--apply"],
+    ],
+)
+def test_operational_apply_requires_a_reviewed_plan_before_dispatch(
+    arguments: list[str],
+) -> None:
+    """An apply invocation without its preview plan is CLI misuse, never a mutation."""
+    dispatched = False
+    errors: list[str] = []
+
+    def dispatch_must_not_run(_request: object, *, apply: bool) -> CommandReport:
+        nonlocal dispatched
+        del apply
+        dispatched = True
+        raise AssertionError("planless apply must be rejected before dispatch")
+
+    assert (
+        main(
+            arguments,
+            dispatch=dispatch_must_not_run,
+            write_stderr=errors.append,
+        )
+        == 2
+    )
+    assert not dispatched
+    assert errors and "plan-file" in errors[0]
+
+
+def test_canary_default_preview_and_recover_apply_preserve_exact_request_boundary() -> (
+    None
+):
+    """The CLI supplies a read-only canary and one exact recovery target to DI."""
+    seen: list[tuple[CommandRequest, bool]] = []
+
+    def dispatch(request: object, *, apply: bool) -> CommandReport:
+        typed = cast(CommandRequest, request)
+        seen.append((typed, apply))
+        return CommandReport(
+            command=typed.command,
+            applied=apply,
+            outcome="checkpoint",
+        )
+
+    preview: list[str] = []
+    assert (
+        main(
+            ["loop", "canary", "--json"],
+            dispatch=dispatch,
+            write_stdout=preview.append,
+        )
+        == 0
+    )
+    assert json.loads(preview[0])["applied"] is False
+    assert seen[0] == (CommandRequest(command="loop.canary"), False)
+
+    assert (
+        main(
+            [
+                "loop",
+                "recover",
+                "--issue-iid",
+                "76",
+                "--apply",
+                "--plan-file",
+                "recover-76.json",
+                "--max-segments",
+                "3",
+                "--max-activation-seconds",
+                "180",
+            ],
+            dispatch=dispatch,
+        )
+        == 0
+    )
+    assert seen[1] == (
+        CommandRequest(
+            command="loop.recover",
+            issue_iid=76,
+            plan_file=Path("recover-76.json"),
+            max_segments=3,
+            max_activation_seconds=180,
+        ),
+        True,
+    )
+
+
+@pytest.mark.parametrize("action", ["canary", "recover"])
+def test_operational_plan_command_help_describes_preview_and_plan_bound_apply(
+    action: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = ["loop", action]
+    if action == "recover":
+        arguments.extend(["--issue-iid", "76"])
+    arguments.append("--help")
+
+    with pytest.raises(SystemExit) as raised:
+        build_parser().parse_args(arguments)
+
+    help_text = " ".join(capsys.readouterr().out.split()).lower()
+    assert raised.value.code == 0
+    assert "preview" in help_text
+    assert "plan-file" in help_text
+    assert "apply" in help_text
+
+
 def test_apply_flag_reaches_the_single_dispatch_boundary() -> None:
     seen: list[tuple[CommandRequest, bool]] = []
 

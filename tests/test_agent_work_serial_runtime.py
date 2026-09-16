@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agent_work.domain import (
     LIFECYCLE_LABELS,
@@ -38,6 +40,7 @@ from agent_work.gitlab import GitLabError
 from agent_work.ledger import JsonLedger, LedgerError
 from agent_work.models import (
     AgentWorkConfig,
+    CommandReport,
     ConditionEvidence,
     DecisionReviewSignal,
     GitLabIssue,
@@ -49,9 +52,12 @@ from agent_work.models import (
     MergeRequestEvidence,
     MergeRequestFeedback,
     MergeRequestFeedbackCursor,
+    OperationalPlan,
     PendingMergeRequestFeedback,
     PipelineEvidence,
     SplitChildEvidence,
+    SplitPlan,
+    SplitSliceProposal,
     TransitionIntentRecord,
     WorkerExitEvidence,
     WorkflowReceiptRecord,
@@ -203,12 +209,14 @@ class FakeGitLab:
         self.closed_issues: list[int] = []
         self.child_creation_failures = 0
         self.created_child_override: GitLabIssue | None = None
+        self.authenticated_username = "factory-bot"
 
     def verify_project(self) -> GitLabProject:
         return _project()
 
-    def verify_authenticated_user(self) -> None:
+    def verify_authenticated_user(self) -> str | None:
         """Provide the configured fake service identity."""
+        return self.authenticated_username
 
     def fetch_merge_request_feedback(
         self, iid: int
@@ -432,9 +440,10 @@ class ClosedInventoryGitLab(FakeGitLab):
         self.identity_error: GitLabError | None = None
         self.label_failures_by_iid: dict[int, int] = {}
 
-    def verify_authenticated_user(self) -> None:
+    def verify_authenticated_user(self) -> str:
         if self.identity_error is not None:
             raise self.identity_error
+        return self.authenticated_username
 
     def list_closed_projected(self) -> tuple[GitLabIssue, ...]:
         self.closed_inventory_calls += 1
@@ -932,6 +941,636 @@ def _record(
         worktree=tmp_path / "state" / "worktrees" / "12",
         source_sha="a" * 40,
     )
+
+
+def _operational_plan_bytes(report: object) -> bytes:
+    """Extract the reviewed immutable plan from one serialized preview report."""
+    payload = json.loads(cast(CommandReport, report).model_dump_json())
+    plan = payload["operational_plan"]
+    assert plan["fingerprint"]
+    return json.dumps(plan).encode()
+
+
+def test_canary_prioritizes_a_failed_exact_pipeline_over_a_clean_active_claim_without_mutating(
+    tmp_path: Path,
+) -> None:
+    """Incident ordering is visible in a harmless canary before recovery acts."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    failed_owner = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(
+            update={
+                "issue_iid": 76,
+                "source_branch": "agent/issue-76",
+                "merge_request_iid": 88,
+            }
+        )
+    )
+    clean_claim = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.WORKFLOW,
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (_mr(source_branch="agent/issue-76"),)
+    gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
+        id=76,
+        status="failed",
+        sha="a" * 40,
+        web_url="https://pipeline/76",
+    )
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="loop.canary"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.applied is False
+    assert "76" in (report.next_action or "")
+    assert ledger.load(76) == failed_owner
+    assert ledger.load(77) == clean_claim
+    assert gitlab.labels == []
+    assert gitlab.eligible_calls == 0
+    assert repository.prepared is False
+
+
+def test_targeted_recover_refuses_to_advance_a_failed_pipeline_owner_while_another_claim_is_active(
+    tmp_path: Path,
+) -> None:
+    """Recovery names the conflicting retained IID and does not touch either record."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    owner = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"issue_iid": 76, "source_branch": "agent/issue-76"})
+    )
+    conflict = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.WORKFLOW,
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=76),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.applied is False
+    assert "77" in (report.next_action or "")
+    assert ledger.load(76) == owner
+    assert ledger.load(77) == conflict
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+def test_canary_apply_requires_the_exact_serialized_preview_plan_before_any_mutation(
+    tmp_path: Path,
+) -> None:
+    """A tampered reviewed plan fails closed before a canary can touch durable state."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    reviewed = json.loads(_operational_plan_bytes(preview))
+    reviewed["fingerprint"] = "0" * 64
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: json.dumps(reviewed).encode(),
+    )
+
+    with pytest.raises(RuntimeError, match="plan"):
+        dispatch(
+            CommandRequest(command="loop.canary", plan_file=tmp_path / "plan.json"),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert ledger.list_records() == ()
+    assert gitlab.labels == []
+    assert gitlab.eligible_calls == 0
+    assert repository.prepared is False
+
+
+def test_credential_identity_rotation_between_preview_and_apply_invalidates_plan_without_effects(
+    tmp_path: Path,
+) -> None:
+    """The public authenticated username is evidence, not an apply-time assumption."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    preview = dispatch(
+        CommandRequest(command="loop.canary"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    gitlab.authenticated_username = "rotated-factory-bot"
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(preview),
+    )
+
+    with pytest.raises(RuntimeError, match="identity|evidence|plan"):
+        dispatch(
+            CommandRequest(command="loop.canary", plan_file=tmp_path / "plan.json"),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert ledger.list_records() == ()
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "closed_issue",
+        "wrong_label",
+        "noncanonical_branch",
+        "nonordinary_work",
+        "missing_worktree",
+        "invalid_binding",
+        "dirty",
+        "wrong_head",
+        "open_mr",
+        "published",
+        "draft",
+        "feedback",
+        "receipts",
+        "decomposition",
+        "intent",
+    ],
+)
+def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
+    tmp_path: Path, mismatch: str
+) -> None:
+    """Each strict normalization predicate preserves the interrupted claim on mismatch."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.WORKFLOW,
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=77).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    if mismatch == "closed_issue":
+        gitlab.issue = gitlab.issue.model_copy(update={"state": "closed"})
+    elif mismatch == "wrong_label":
+        gitlab.issue = gitlab.issue.model_copy(update={"labels": ()})
+    elif mismatch == "noncanonical_branch":
+        record = ledger.persist(record.model_copy(update={"source_branch": "topic/77"}))
+    elif mismatch == "nonordinary_work":
+        record = ledger.persist(
+            record.model_copy(update={"work_kind": WorkKind.EXISTING_MR_REMEDIATION})
+        )
+    elif mismatch == "missing_worktree":
+        repository.worktree_present = False
+    elif mismatch == "invalid_binding":
+        repository.worktree_valid = False
+    elif mismatch == "dirty":
+        repository.dirty = True
+    elif mismatch == "wrong_head":
+        repository.current_head = "b" * 40
+    elif mismatch == "open_mr":
+        gitlab.open_branch_merge_requests = (_mr(source_branch="agent/issue-77"),)
+    elif mismatch == "published":
+        record = ledger.persist(record.model_copy(update={"publication_sha": "b" * 40}))
+    elif mismatch == "draft":
+        record = ledger.persist(
+            record.model_copy(update={"merge_request_draft": _decision_draft()})
+        )
+    elif mismatch == "feedback":
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "pending_feedback": PendingMergeRequestFeedback(
+                        target_cursor=MergeRequestFeedbackCursor(
+                            last_processed_general_note_id=1,
+                            feedback_source_sha="a" * 40,
+                        ),
+                        source_sha="a" * 40,
+                        source="general",
+                        note_id=1,
+                    )
+                }
+            )
+        )
+    elif mismatch == "receipts":
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "receipts": (
+                        WorkflowReceiptRecord(
+                            phase=WorkflowPhase.WORKFLOW,
+                            verdict="approve",
+                            detail="receipt",
+                        ),
+                    )
+                }
+            )
+        )
+    elif mismatch == "decomposition":
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "decomposition_plan": SplitPlan(
+                        slices=(
+                            SplitSliceProposal(
+                                ordinal=1, key="one", title="One", description="One"
+                            ),
+                            SplitSliceProposal(
+                                ordinal=2, key="two", title="Two", description="Two"
+                            ),
+                        )
+                    )
+                }
+            )
+        )
+    else:
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "intent": TransitionIntentRecord(operation_id="one", kind="one")
+                }
+            )
+        )
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=77),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(preview),
+    )
+
+    with pytest.raises(RuntimeError, match="evidence|plan|normaliz"):
+        dispatch(
+            CommandRequest(
+                command="loop.recover", issue_iid=77, plan_file=tmp_path / "77.json"
+            ),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert ledger.load(77) == record
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+@given(st.text(min_size=1, max_size=24).filter(lambda value: value != "original"))
+def test_operational_plan_fingerprint_rejects_arbitrary_canonical_evidence_mutation(
+    mutation: str,
+) -> None:
+    """A serialized operational plan is stable but rejects changed bound evidence."""
+    plan = OperationalPlan(
+        command="loop.canary",
+        action="checkpoint",
+        project={
+            "host": "gitlab.example.com",
+            "project_id": 310967,
+            "default_branch": "main",
+        },
+        authenticated_username="factory-bot",
+        evidence={"marker": "original"},
+    )
+    stable = OperationalPlan.model_validate_json(plan.model_dump_json())
+
+    assert stable == plan
+    with pytest.raises(ValueError, match="fingerprint"):
+        OperationalPlan.model_validate(
+            plan.model_dump() | {"evidence": {"marker": mutation}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "valid"),
+    [("original", True), ("changed", False), (" ", False), ("0", False)],
+)
+def test_operational_plan_fingerprint_explicit_evidence_edges(
+    mutation: str, *, valid: bool
+) -> None:
+    """The unchanged value is valid; representative canonical changes are not."""
+    plan = OperationalPlan(
+        command="loop.canary",
+        action="checkpoint",
+        project={
+            "host": "gitlab.example.com",
+            "project_id": 310967,
+            "default_branch": "main",
+        },
+        authenticated_username="factory-bot",
+        evidence={"marker": "original"},
+    )
+    payload = plan.model_dump() | {"evidence": {"marker": mutation}}
+
+    if valid:
+        assert OperationalPlan.model_validate(payload) == plan
+    else:
+        with pytest.raises(ValueError, match="fingerprint"):
+            OperationalPlan.model_validate(payload)
+
+
+def test_canary_apply_rejects_stale_ledger_evidence_without_effects(
+    tmp_path: Path,
+) -> None:
+    """Apply regenerates the plan after a live retained-record change."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    ledger.persist(record.model_copy(update={"summary": "changed after preview"}))
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(preview),
+    )
+
+    with pytest.raises(RuntimeError, match="evidence|plan"):
+        dispatch(
+            CommandRequest(
+                command="loop.recover", issue_iid=12, plan_file=tmp_path / "canary.json"
+            ),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+def test_recover_normalizes_an_exact_clean_unpublished_preworker_claim_and_retains_it(
+    tmp_path: Path,
+) -> None:
+    """A verified interruption becomes a blocked retained record without worker activity."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.WORKFLOW,
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=77).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=77),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(preview),
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.recover", issue_iid=77, plan_file=tmp_path / "77.json"
+        ),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    retained = ledger.load(77)
+    assert report.applied is True
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert (
+        retained.worktree == record.worktree
+        and retained.source_branch == record.source_branch
+    )
+    assert gitlab.labels == ["agent::blocked"]
+    assert repository.prepared is False
+
+
+def test_ordinary_run_prioritizes_failed_pipeline_owner_before_an_active_claim_without_eligibility(
+    tmp_path: Path,
+) -> None:
+    """The ordinary controller shares canary/recovery pipeline ordering."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "issue_iid": 76,
+                "source_branch": "agent/issue-76",
+                "merge_request_iid": 88,
+            }
+        )
+    )
+    claim = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (_mr(source_branch="agent/issue-76"),)
+    gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
+        id=76, status="failed", sha="a" * 40, web_url="https://pipeline/76"
+    )
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.items and report.items[-1].issue_iid == 76
+    assert ledger.load(77) == claim
+    assert gitlab.eligible_calls == 0
+
+
+def test_ordinary_run_resumes_retained_work_before_a_nonterminal_pipeline_wait(
+    tmp_path: Path,
+) -> None:
+    """Preview and apply both retain recovery priority over a pipeline wait."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=76, status="running", sha="d" * 40, web_url="https://pipeline/main"
+    )
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+
+    preview = dispatch(
+        CommandRequest(command="loop.run"), apply=False, dependencies=dependencies
+    )
+    applied = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert preview.outcome == "resume_available"
+    assert preview.items and preview.items[-1].issue_iid == retained.issue_iid
+    assert applied.outcome == "activation_complete"
+    assert applied.items and applied.items[-1].issue_iid == retained.issue_iid
+
+
+def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_the_conflict(
+    tmp_path: Path,
+) -> None:
+    """The #76/#77 incident sequence cannot advance the non-target retained claim."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    owner = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "issue_iid": 76,
+                "source_branch": "agent/issue-76",
+                "merge_request_iid": 88,
+            }
+        )
+    )
+    claim = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 77,
+                "source_branch": "agent/issue-77",
+                "worktree": config.state_root / "worktrees" / "77",
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=77).model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.open_merge_request_inventory = (_mr(source_branch="agent/issue-76"),)
+    gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
+        id=76, status="failed", sha="a" * 40, web_url="https://pipeline/76"
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    conflict = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=76),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert "77" in (conflict.next_action or "")
+    claim_preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=77),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    normalize_dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(claim_preview),
+    )
+    dispatch(
+        CommandRequest(
+            command="loop.recover", issue_iid=77, plan_file=tmp_path / "77.json"
+        ),
+        apply=True,
+        dependencies=normalize_dependencies,
+    )
+    owner_preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=76),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    repair_dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        read_plan=lambda _path: _operational_plan_bytes(owner_preview),
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.recover", issue_iid=76, plan_file=tmp_path / "76.json"
+        ),
+        apply=True,
+        dependencies=repair_dependencies,
+    )
+
+    assert report.items and report.items[-1].issue_iid == 76
+    retained_claim = ledger.load(77)
+    assert retained_claim is not None and retained_claim.state is RunnerState.BLOCKED
+    assert ledger.load(76) != owner
+    assert retained_claim.source_branch == claim.source_branch
 
 
 def _complete_workflow_receipts() -> tuple[WorkflowReceiptRecord, ...]:
@@ -5003,6 +5642,259 @@ def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
     assert not repository.prepared
 
 
+def test_applied_run_preflight_failure_leaves_every_worker_effect_unreached(
+    tmp_path: Path,
+) -> None:
+    """The injected capability gate runs before durable or worker boundaries."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab(_issue())
+    repository = FakeRepository(config)
+    lock_entries: list[str] = []
+
+    class GuardedLock:
+        def __enter__(self) -> None:
+            lock_entries.append("entered")
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    class RaisingPreflightInvoker:
+        def preflight(self) -> None:
+            raise WorkerProtocolError("worker capability unavailable")
+
+        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+            del checkout, prompt, timeout
+            raise AssertionError("worker invocation must follow a successful preflight")
+
+    with pytest.raises(WorkerProtocolError, match="capability unavailable"):
+        dispatch(
+            CommandRequest(command="loop.run"),
+            apply=True,
+            dependencies=replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=RaisingPreflightInvoker(),  # type: ignore[arg-type]
+                lock=GuardedLock,
+            ),
+        )
+
+    assert lock_entries == []
+    assert ledger.list_records() == ()
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+def test_applied_run_caps_injected_workflow_invocations_at_max_segments(
+    tmp_path: Path,
+) -> None:
+    """A still-active record cannot cause more segment invocations than requested."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    invoker = BatchingInvoker()
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=3600),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+            invoke=invoker,
+        ),
+    )
+
+    assert report.segments_run == 1
+    assert report.stop_reason == "segment_limit"
+    assert invoker.phases == ["coding-green"]
+
+
+def test_applied_run_skips_every_segment_when_activation_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    """An elapsed deadline is checked before a retained record can invoke a worker."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    invoker = BatchingInvoker()
+    readings = iter((0.0, 1.0))
+    repository = FakeRepository(config)
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=4, max_activation_seconds=1),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, FakeGitLab(), repository),
+            invoke=invoker,
+            monotonic=lambda: next(readings),
+        ),
+    )
+
+    assert report.segments_run == 0
+    assert report.stop_reason == "time_limit"
+    assert invoker.phases == []
+    assert ledger.load(retained.issue_iid) == retained
+    assert repository.prepared is False
+
+
+def test_recover_pipeline_wait_allows_exact_target_but_failed_or_missing_evidence_blocks(
+    tmp_path: Path,
+) -> None:
+    """Only a pending pipeline yields to exact recovery; unsafe evidence still blocks it."""
+    config = _config(tmp_path)
+    target = _record(
+        tmp_path,
+        state=RunnerState.EXECUTING,
+        phase=WorkflowPhase.CODING_GREEN,
+    )
+
+    def apply_action(pipeline: PipelineEvidence | None) -> tuple[str, list[str]]:
+        ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+        ledger.persist(target)
+        gitlab = FakeGitLab()
+        merge_request = _mr(source_branch="agent/other", sha="b" * 40)
+        gitlab.open_merge_request_inventory = (merge_request,)
+        gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+            pipeline
+        )
+        request = CommandRequest(
+            command="loop.recover",
+            issue_iid=target.issue_iid,
+            max_segments=1,
+        )
+        preview = dispatch(
+            request,
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+        )
+        assert preview.operational_plan is not None
+        invoker = BatchingInvoker()
+        dependencies = replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+            read_plan=lambda _path: _operational_plan_bytes(preview),
+        )
+        if preview.operational_plan.action == "run_segment":
+            report = dispatch(
+                replace(request, plan_file=tmp_path / "plan.json"),
+                apply=True,
+                dependencies=dependencies,
+            )
+            assert len(report.items) == 1
+        else:
+            with pytest.raises(RuntimeError, match="cannot advance"):
+                dispatch(
+                    replace(request, plan_file=tmp_path / "plan.json"),
+                    apply=True,
+                    dependencies=dependencies,
+                )
+        return preview.operational_plan.action, invoker.phases
+
+    assert apply_action(
+        PipelineEvidence(
+            id=4, status="running", sha="b" * 40, web_url="https://pipeline/4"
+        )
+    ) == ("run_segment", ["coding-green"])
+    assert apply_action(
+        PipelineEvidence(
+            id=5, status="failed", sha="b" * 40, web_url="https://pipeline/5"
+        )
+    ) == ("pipeline_blocked", [])
+    assert apply_action(None) == ("pipeline_inventory_blocked", [])
+
+
+def test_recover_uses_a_live_activation_deadline_for_the_worker_budget(
+    tmp_path: Path,
+) -> None:
+    """Recovery evaluates its injected deadline at execution, not before reconciliation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    target = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    gitlab = FakeGitLab()
+    preview_request = CommandRequest(
+        command="loop.recover",
+        issue_iid=target.issue_iid,
+        max_segments=1,
+        max_activation_seconds=100,
+    )
+    preview = dispatch(
+        preview_request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+    invoker = BatchingInvoker()
+    readings = iter((0.0, 0.0, 25.0))
+
+    dispatch(
+        replace(preview_request, plan_file=tmp_path / "plan.json"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+            monotonic=lambda: next(readings),
+            read_plan=lambda _path: _operational_plan_bytes(preview),
+        ),
+    )
+
+    assert invoker.timeouts == [75]
+
+
+def test_recover_yields_after_one_unchanged_pipeline_wait_observation(
+    tmp_path: Path,
+) -> None:
+    """A stable observing record waits for the next activation instead of spinning."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    target = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab()
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="running", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    request = CommandRequest(
+        command="loop.recover", issue_iid=target.issue_iid, max_segments=4
+    )
+    preview = dispatch(
+        request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    report = dispatch(
+        replace(request, plan_file=tmp_path / "plan.json"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            read_plan=lambda _path: _operational_plan_bytes(preview),
+        ),
+    )
+
+    assert len(report.items) == 1
+    assert report.items[0].state is RunnerState.OBSERVING
+    assert report.items[0].phase is WorkflowPhase.PIPELINE_WAIT
+
+
 def test_apply_batches_the_complete_content_workflow_until_human_handoff(
     tmp_path: Path,
 ) -> None:
@@ -5562,21 +6454,53 @@ def test_loop_run_with_multiple_pipeline_wait_owners_fails_closed(
     )
 
     invoker = FakeInvoker()
-    with pytest.raises(SegmentError, match="multiple resumable"):
-        dispatch(
-            CommandRequest(command="loop.run"),
-            apply=True,
-            dependencies=replace(
-                _dependencies(config, ledger, gitlab, FakeRepository(config)),
-                invoke=invoker,
-            ),
-        )
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+        ),
+    )
+    assert report.outcome == "pipeline_blocked"
     for record in (first, second):
         persisted = ledger.load(record.issue_iid)
         assert persisted is not None
         assert persisted.state is RunnerState.OBSERVING
         assert persisted.phase is WorkflowPhase.PIPELINE_WAIT
     assert invoker.prompts == []
+
+
+def test_pipeline_inventory_ranks_a_later_failure_before_an_earlier_wait(
+    tmp_path: Path,
+) -> None:
+    """A pending lower-IID MR cannot conceal a later failed current-SHA pipeline."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    waiting = _mr(sha="a" * 40)
+    failed = _mr(source_branch="agent/issue-13", sha="b" * 40).model_copy(
+        update={"iid": 89}
+    )
+    gitlab.open_merge_request_inventory = (waiting, failed)
+    gitlab.pipeline_by_merge_request = {
+        (waiting.iid, waiting.sha): PipelineEvidence(
+            id=4, status="running", sha=waiting.sha, web_url="https://pipeline/4"
+        ),
+        (failed.iid, failed.sha): PipelineEvidence(
+            id=5, status="failed", sha=failed.sha, web_url="https://pipeline/5"
+        ),
+    }
+
+    report = dispatch(
+        CommandRequest(command="loop.canary"),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "pipeline_blocked"
+    assert "pipeline" in (report.next_action or "")
 
 
 def test_loop_run_resumes_exact_owner_beside_inexact_historical_record(

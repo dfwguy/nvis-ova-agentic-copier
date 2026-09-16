@@ -212,13 +212,14 @@ class GitLabGateway:
             raise GitLabError("GitLab returned a different project")
         return project
 
-    def verify_authenticated_user(self) -> None:
+    def verify_authenticated_user(self) -> str:
         """Prove the configured service identity before unattended work."""
         user = self._mapping(self._call("user"), "authenticated user")
         if user.get("username") != self._config.factory_username:
             raise GitLabIdentityError(
                 "GitLab authenticated identity does not match factory identity"
             )
+        return self._config.factory_username
 
     def fetch_merge_request_feedback(
         self, iid: int

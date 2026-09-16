@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-16
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -368,6 +368,15 @@ safe next transition:
 - Retryable work uses at most three bounded automatic attempts. Exhaustion
   moves it to `agent::blocked`, not `agent::failed`.
 
+Operational recovery is deliberately plan-bound. A non-claiming canary makes a
+reviewable identity-and-evidence checkpoint without selecting an issue or
+starting a worker. Targeted recovery makes a separate plan for one IID and
+rechecks its public identity, ledger revision, worktree, MR, and exact-SHA
+pipeline evidence under the project lock before mutation. This separates human
+review of the next action from authorization to change evidence that may have
+moved since review. Conflicting active records, a competing owner, or changed
+evidence fail closed rather than allowing the loop to choose a substitute.
+
 ## Security and authority boundaries
 
 GitLab issue text and worker results remain untrusted task data. They cannot
@@ -401,10 +410,11 @@ Migration is evidence-preserving:
 5. Apply approved migrations idempotently only while the plan and inventory
    remain exact and no ledger record already exists; verify the resulting
    ledger, worktrees, labels, branches, and MRs.
-6. Run one eligible, unprojected canary issue through recovery, publication,
-   observation, and human handoff.
-7. Re-enable the timer only after the canary and operational status output are
-   verified.
+6. Create and review a non-claiming canary plan, then apply its exact checked
+   checkpoint while the timer remains stopped. Create and apply a separate
+   target-only recovery plan where retained evidence requires it.
+7. Re-enable the timer only after the expected checkpoint and operational
+   status output are verified.
 
 The implementation is maintained in reviewable slices: ledger and
 reconciliation; deterministic selection and classification; durable worktrees

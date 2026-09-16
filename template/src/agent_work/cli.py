@@ -149,6 +149,33 @@ def build_parser() -> argparse.ArgumentParser:
     retry = loop_actions.add_parser("retry", help="preview or retry one blocked item")
     _common(retry)
     retry.add_argument("--issue-iid", type=_positive_integer, required=True)
+    canary = loop_actions.add_parser(
+        "canary",
+        help="preview a non-claiming operational checkpoint",
+        description="Preview a safe checkpoint; --apply requires the exact reviewed --plan-file.",
+    )
+    _common(canary, apply_help="validate the exact reviewed plan without claiming work")
+    canary.add_argument("--plan-file", type=Path)
+    recover = loop_actions.add_parser(
+        "recover",
+        help="preview or apply one exact retained-item recovery",
+        description="Preview one target recovery; --apply requires the exact reviewed --plan-file.",
+    )
+    _common(recover, apply_help="apply only the exact reviewed target plan")
+    recover.add_argument("--issue-iid", type=_positive_integer, required=True)
+    recover.add_argument("--plan-file", type=Path)
+    recover.add_argument(
+        "--max-segments",
+        type=_positive_integer,
+        default=16,
+        help="maximum recovery segments per applied activation (default: %(default)s)",
+    )
+    recover.add_argument(
+        "--max-activation-seconds",
+        type=_positive_integer,
+        default=DEFAULT_MAX_ACTIVATION_SECONDS,
+        help="maximum seconds for one applied activation (default: %(default)s)",
+    )
 
     credential = resources.add_parser(
         "credential", help="safely inspect or rebind a service credential identity"
@@ -393,6 +420,14 @@ def main(
             return 1
         write_stdout(_render_rotation(report, as_json=parsed.json))
         return 0 if report.outcome in {"preview", "verified"} else 1
+    if (
+        parsed.resource == "loop"
+        and parsed.action in {"canary", "recover"}
+        and parsed.apply
+        and parsed.plan_file is None
+    ):
+        write_stderr("--apply requires --plan-file")
+        return 2
     if parsed.resource == "worker-result" and parsed.action == "build":
         try:
             if load_record is None or changed_paths is None:

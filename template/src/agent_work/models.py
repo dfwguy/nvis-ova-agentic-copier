@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
+import json
 import re
 import unicodedata
 from datetime import datetime
@@ -747,3 +749,29 @@ class CommandReport(BoundaryModel):
     items_truncated: bool | None = None
     summary: str | None = Field(default=None, max_length=2_048)
     next_action: str | None = Field(default=None, max_length=2_048)
+    operational_plan: OperationalPlan | None = None
+
+
+class OperationalPlan(BoundaryModel):
+    """Immutable, self-authenticating evidence for one operational action."""
+
+    command: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    project: dict[str, str | int]
+    authenticated_username: str = Field(min_length=1)
+    target_iid: int | None = Field(default=None, gt=0)
+    evidence: dict[str, str | int | bool | None] = Field(default_factory=dict)
+    fingerprint: str = Field(default="", pattern=r"^[0-9a-f]{0,64}$")
+
+    @model_validator(mode="after")
+    def validate_fingerprint(self) -> OperationalPlan:
+        """Bind the plan to canonical public evidence without retaining secrets."""
+        canonical = self.model_dump(exclude={"fingerprint"}, mode="json")
+        expected = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if self.fingerprint and self.fingerprint != expected:
+            raise ValueError("operational plan fingerprint does not match evidence")
+        if not self.fingerprint:
+            object.__setattr__(self, "fingerprint", expected)
+        return self
