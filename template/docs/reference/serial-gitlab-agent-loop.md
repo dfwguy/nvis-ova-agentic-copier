@@ -876,14 +876,39 @@ An immutable MR identity mismatch blocks immediately: the configured project,
 source branch, target branch, or recorded source SHA must not be retried as an
 eventual-consistency condition. By contrast, when GitLab has created the
 otherwise verified MR but has not yet projected its issue-closing relationship,
-the runner retains the validated draft and uses its existing bounded GitLab
-retry path. It blocks only if that projection remains absent when that retry
-path is exhausted.
+the runner binds the exact MR IID and retains its publication intent while it
+re-reads that IID in the same activation. A missing projection remains an
+observation wait, not a transport retry or identity mismatch.
 
 The runner preserves a validated MR draft across repair and retry. Observation
 re-fetches and revalidates the exact open MR, project identities, source branch,
 target, and source SHA before trusting pipeline evidence. A mismatch blocks
 with an actionable error; a conflict enters durable repair on the same branch.
+
+### Post-create publication reconciliation
+
+After creating a merge request, the controller treats GitLab's initially stale
+projections as bounded checks in the same activation. It keys those checks to
+the durable exact MR IID, the configured project on both sides of the merge
+request, its source and target branches, its issue-closing relationship, and
+the publication SHA. It checks the closing relationship once, then makes at
+most three immediate retry attempts: four closing-relation calls in total. Each
+retry rereads and revalidates the exact MR IID, and retries stop as soon as the
+closing relationship appears. This reconciliation only observes and records the
+newly created merge request; it never recreates its branch, commit, or merge
+request.
+
+If all three retries lack the closing relationship, the controller preserves
+the bound MR and yields in `Observing` at `PipelineWait`. It does not set a
+`retry_at` value or look up a pipeline; a later activation can observe again.
+Once the relationship appears, absent or nonterminal pipeline evidence for that
+exact SHA leaves the durable record in `Observing` at `PipelineWait`. Terminal
+failed evidence starts repair. Only a genuine GitLab transport or API failure
+uses the safe, bounded backoff; its durable check evidence is sanitized. An
+immutable identity mismatch blocks rather than using an eventual-consistency
+retry. The bounded post-create publication and closing reconciliation does not
+schedule a fixed 20-minute retry. Ordinary pipeline waits can still yield to
+the timer cadence.
 
 ## Retry, exits, and JSON
 
