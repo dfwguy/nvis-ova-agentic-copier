@@ -29,6 +29,7 @@ class RecoveryClassification(StrEnum):
     SUPERSEDED_DUPLICATE = "superseded_duplicate"
     CLOSURE_CANDIDATE = "closure_candidate"
     NEEDS_HUMAN_DECISION = "needs_human_decision"
+    CLOSED_NO_ACTION = "closed_no_action"
 
 
 class ResolutionChoice(StrEnum):
@@ -116,14 +117,16 @@ class ResolutionPlan:
 
 
 def _classification(observation: RecoveryObservation) -> RecoveryClassification:
+    if observation.issue_state == "closed" and observation.record_state in {
+        None,
+        RunnerState.COMPLETE,
+    }:
+        return RecoveryClassification.CLOSED_NO_ACTION
     if observation.ambiguous or observation.pipeline_status == "failed":
         return RecoveryClassification.NEEDS_HUMAN_DECISION
     if observation.stale:
         return RecoveryClassification.NEEDS_HUMAN_DECISION
-    if observation.issue_state == "closed" and observation.record_state not in {
-        None,
-        RunnerState.COMPLETE,
-    }:
+    if observation.issue_state == "closed":
         return RecoveryClassification.SUPERSEDED_DUPLICATE
     if "agent::failed" in observation.labels:
         return RecoveryClassification.CLOSURE_CANDIDATE

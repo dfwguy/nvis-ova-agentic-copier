@@ -15,7 +15,7 @@ import json
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 
 import pytest
 
@@ -23,6 +23,7 @@ from agent_work.cli import main
 from agent_work.credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
+    PathEvidence,
     RotationDependencies,
     _AtomicWriteUncertain,
     atomic_write_environment,
@@ -180,6 +181,273 @@ def _successful_commands(
     return run_command
 
 
+def _runtime_dependencies(
+    *,
+    environment: Mapping[str, str] | None = None,
+    inspect_path: Callable[[Path], PathEvidence] | None = None,
+    run_command: Callable[..., CommandResult] | None = None,
+) -> RotationDependencies:
+    """Build one injected user-bus boundary without reading host state."""
+    uid = 123
+    runtime = Path(f"/run/user/{uid}")
+    bus = runtime / "bus"
+
+    def valid(path: Path) -> PathEvidence:
+        return PathEvidence(True, path == runtime, path == bus, uid)
+
+    return RotationDependencies(
+        read_bytes=lambda _path: _environment_bytes(),
+        atomic_write=lambda _path, _content: None,
+        run_command=run_command or _successful_commands(),
+        environment=environment or {"HOME": "/home/service", "PATH": "/usr/bin"},
+        effective_uid=lambda: uid,
+        inspect_path=inspect_path or valid,
+    )
+
+
+def _typed_user_bus_dependencies() -> tuple[
+    Callable[[], int], Callable[[Path], PathEvidence]
+]:
+    """Return deterministic valid user-bus evidence for direct dependency tests."""
+    runtime = Path("/run/user/1000")
+    bus = runtime / "bus"
+
+    def inspect(path: Path) -> PathEvidence:
+        return PathEvidence(True, path == runtime, path == bus, 1000)
+
+    return (lambda: 1000), inspect
+
+
+class _UserBusDependencyKeywords(TypedDict):
+    """Typed keyword bundle for direct rotation dependency tests."""
+
+    effective_uid: Callable[[], int]
+    inspect_path: Callable[[Path], PathEvidence]
+
+
+def _typed_user_bus_kwargs() -> _UserBusDependencyKeywords:
+    """Return explicit dependency keywords for direct rotation constructions."""
+    effective_uid, inspect_path = _typed_user_bus_dependencies()
+    return {"effective_uid": effective_uid, "inspect_path": inspect_path}
+
+
+def test_rotation_derives_and_passes_validated_user_bus_fallbacks_to_every_systemctl() -> (
+    None
+):
+    """Missing runtime variables use only the effective user's canonical paths."""
+    calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append(
+            (command, cast(Mapping[str, str] | None, kwargs.get("environment")))
+        )
+        return _successful_commands()(command, **kwargs)
+
+    report = rotate_credential(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=_runtime_dependencies(run_command=run),
+    )
+
+    systemctl_environments = [
+        environment for command, environment in calls if command[0] == "systemctl"
+    ]
+    assert report.outcome == "verified"
+    assert len(systemctl_environments) == 4
+    assert all(
+        environment
+        == {
+            "HOME": "/home/service",
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": "/run/user/123",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/bus",
+        }
+        for environment in systemctl_environments
+    )
+
+
+def test_rotation_preserves_valid_explicit_user_bus_and_excludes_outer_secrets() -> (
+    None
+):
+    """An operator-provided valid bus wins over fallback without leaking tokens."""
+    runtime = Path("/run/user/777")
+    bus = runtime / "custom-bus"
+    calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+
+    def inspect(path: Path) -> PathEvidence:
+        return PathEvidence(True, path == runtime, path == bus, 123)
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append(
+            (command, cast(Mapping[str, str] | None, kwargs.get("environment")))
+        )
+        return _successful_commands()(command, **kwargs)
+
+    report = rotate_credential(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=_runtime_dependencies(
+            environment={
+                "HOME": "/home/service",
+                "PATH": "/usr/bin",
+                "XDG_RUNTIME_DIR": str(runtime),
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={bus}",
+                "GITLAB_TOKEN": "must-not-propagate",
+                "UNRELATED": "must-not-propagate",
+            },
+            inspect_path=inspect,
+            run_command=run,
+        ),
+    )
+
+    assert report.outcome == "verified"
+    for command, environment in calls:
+        if command[0] == "systemctl":
+            assert environment is not None
+            assert environment["XDG_RUNTIME_DIR"] == str(runtime)
+            assert environment["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path={bus}"
+            assert "GITLAB_TOKEN" not in environment and "UNRELATED" not in environment
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected_runtime", "expected_bus"),
+    (
+        (
+            {"XDG_RUNTIME_DIR": "/run/user/123/custom-runtime"},
+            "/run/user/123/custom-runtime",
+            "unix:path=/run/user/123/custom-runtime/bus",
+        ),
+        (
+            {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/custom-bus"},
+            "/run/user/123",
+            "unix:path=/run/user/123/custom-bus",
+        ),
+    ),
+)
+def test_rotation_derives_only_the_missing_user_bus_value(
+    environment: Mapping[str, str], expected_runtime: str, expected_bus: str
+) -> None:
+    """A valid explicit boundary is preserved when its paired value is absent."""
+    calls: list[Mapping[str, str] | None] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        if command[0] == "systemctl":
+            calls.append(cast(Mapping[str, str] | None, kwargs.get("environment")))
+        return _successful_commands()(command, **kwargs)
+
+    def inspect(path: Path) -> PathEvidence:
+        return PathEvidence(
+            True,
+            path == Path(expected_runtime),
+            path == Path(expected_bus.removeprefix("unix:path=")),
+            123,
+        )
+
+    report = rotate_credential(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=_runtime_dependencies(
+            environment={"HOME": "/home/service", "PATH": "/usr/bin"}
+            | dict(environment),
+            run_command=run,
+            inspect_path=inspect,
+        ),
+    )
+    assert report.outcome == "verified"
+    assert len(calls) == 4
+    assert all(
+        item is not None
+        and item["XDG_RUNTIME_DIR"] == expected_runtime
+        and item["DBUS_SESSION_BUS_ADDRESS"] == expected_bus
+        for item in calls
+    )
+
+
+@pytest.mark.parametrize(
+    "inspection",
+    (
+        PathEvidence(False, False, False, 123),
+        PathEvidence(True, True, False, 999),
+        PathEvidence(True, False, True, 123),
+        PathEvidence(True, True, False, 123),
+    ),
+)
+def test_rotation_rejects_invalid_runtime_or_bus_path_evidence_before_systemctl(
+    inspection: PathEvidence,
+) -> None:
+    """Missing, wrong-owner, wrong-type, and non-socket evidence all fail closed."""
+    calls: list[tuple[str, ...]] = []
+    writes: list[bytes] = []
+
+    report = rotate_credential(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=RotationDependencies(
+            read_bytes=lambda _path: _environment_bytes(),
+            atomic_write=lambda _path, content: writes.append(content),
+            run_command=lambda command, **_kwargs: (
+                calls.append(command),
+                CommandResult(0, "", ""),
+            )[1],
+            environment={"HOME": "/home/service", "PATH": "/usr/bin"},
+            effective_uid=lambda: 123,
+            inspect_path=lambda _path: inspection,
+        ),
+    )
+
+    assert report.outcome == "correction-needed"
+    assert calls == [] and writes == []
+    assert not report.timer_stopped and not report.service_stopped
+    assert "user bus" in report.next_action.lower()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        {
+            "XDG_RUNTIME_DIR": "",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/bus",
+        },
+        {"XDG_RUNTIME_DIR": "/run/user/123", "DBUS_SESSION_BUS_ADDRESS": ""},
+        {
+            "XDG_RUNTIME_DIR": "relative",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/bus",
+        },
+        {
+            "XDG_RUNTIME_DIR": "/run/user/123",
+            "DBUS_SESSION_BUS_ADDRESS": "tcp:host=bad",
+        },
+    ),
+)
+def test_rotation_rejects_present_empty_or_malformed_user_bus_before_systemctl(
+    environment: Mapping[str, str],
+) -> None:
+    """Explicit runtime values never silently fall back or reach systemctl."""
+    calls: list[tuple[str, ...]] = []
+
+    def never_run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        raise AssertionError("invalid user bus must fail before systemctl")
+
+    report = rotate_credential(
+        environment_file=Path("/etc/agent-work.env"),
+        unit_name="agent-work",
+        apply=True,
+        dependencies=_runtime_dependencies(
+            environment={"HOME": "/home/service", "PATH": "/usr/bin"}
+            | dict(environment),
+            run_command=never_run,
+        ),
+    )
+
+    assert report.outcome == "correction-needed"
+    assert calls == []
+
+
 def test_rotate_dry_run_makes_no_systemd_gitlab_preview_or_write_calls() -> None:
     calls: list[tuple[str, ...]] = []
     writes: list[bytes] = []
@@ -196,6 +464,7 @@ def test_rotate_dry_run_makes_no_systemd_gitlab_preview_or_write_calls() -> None
         unit_name="agent-work",
         apply=False,
         dependencies=RotationDependencies(
+            **_typed_user_bus_kwargs(),
             read_bytes=read_bytes,
             atomic_write=lambda _path, content: writes.append(content),
             run_command=run_command,
@@ -221,6 +490,7 @@ def test_rotate_dry_run_rejects_invalid_unit_without_effects() -> None:
         unit_name="unsafe unit",
         apply=False,
         dependencies=RotationDependencies(
+            **_typed_user_bus_kwargs(),
             read_bytes=lambda _path: _environment_bytes(),
             atomic_write=lambda _path, content: writes.append(content),
             run_command=run_command,
@@ -245,6 +515,7 @@ def test_rotate_unchanged_identity_stops_verifies_then_previews_without_write() 
         unit_name="agent-work",
         apply=True,
         dependencies=RotationDependencies(
+            **_typed_user_bus_kwargs(),
             read_bytes=lambda _path: original,
             atomic_write=lambda _path, _content: pytest.fail(
                 "unchanged identity writes"
@@ -260,7 +531,8 @@ def test_rotate_unchanged_identity_stops_verifies_then_previews_without_write() 
     assert report.outcome == "verified"
     assert report.config_updated is False
     assert report.timer_stopped is True and report.service_stopped is True
-    assert "scripts/agent-work-systemd-run.sh" in commands[-1][0]
+    assert commands[-1][:2] == ("/usr/bin/env", "bash")
+    assert "scripts/agent-work-systemd-run.sh" in commands[-1][2]
     assert "--apply" not in commands[-1]
 
 
@@ -273,6 +545,7 @@ def test_rotate_changed_identity_writes_only_rebound_value_then_previews() -> No
         unit_name="agent-work",
         apply=True,
         dependencies=RotationDependencies(
+            **_typed_user_bus_kwargs(),
             read_bytes=lambda _path: original,
             atomic_write=lambda _path, content: writes.append(content),
             run_command=_successful_commands(),
@@ -312,6 +585,7 @@ def test_rotate_scrubs_outer_environment_but_preserves_the_direnv_credential_rou
                 "GITLAB_HOST": "hostile.example",
                 "GIT_CONFIG_PARAMETERS": "hostile",
             },
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -354,12 +628,20 @@ def test_rotate_preview_uses_the_rebound_username_and_numeric_project_endpoints(
             read_bytes=lambda _path: _environment_bytes(),
             atomic_write=lambda _path, _content: None,
             run_command=run_command,
+            **_typed_user_bus_kwargs(),
         ),
     )
 
-    preview = next(entry for entry in calls if "systemd-run.sh" in entry[0][0])
+    preview = next(
+        entry for entry in calls if "agent-work-systemd-run.sh" in entry[0][2]
+    )
     assert preview[1] is not None
     assert report.outcome == "verified"
+    assert preview[0] == (
+        "/usr/bin/env",
+        "bash",
+        "/srv/agent-work/scripts/agent-work-systemd-run.sh",
+    )
     assert preview[1]["AGENT_WORK_FACTORY_USERNAME"] == "new-bot"
     assert any(command[-1] == "/projects/12/approval_rules" for command, _ in calls)
     assert any(
@@ -383,6 +665,7 @@ def test_rotate_rejects_noninactive_unit_evidence() -> None:
             read_bytes=lambda _path: original,
             atomic_write=lambda _path, _content: pytest.fail("unsafe write"),
             run_command=hostile,
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -412,6 +695,7 @@ def test_rotate_api_failure_after_stop_preserves_original_bytes_and_never_writes
                 "expired credential writes"
             ),
             run_command=expired_user,
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -466,6 +750,7 @@ def test_rotate_rejects_untrusted_gitlab_evidence_before_config_write(
             read_bytes=lambda _path: original,
             atomic_write=lambda _path, _content: pytest.fail("invalid evidence writes"),
             run_command=evidence_failure,
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -488,6 +773,7 @@ def test_rotate_failed_isolated_preview_rolls_back_once_to_exact_original_bytes(
             read_bytes=lambda _path: original,
             atomic_write=lambda _path, content: writes.append(content),
             run_command=_successful_commands(preview_returncode=1),
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -515,6 +801,7 @@ def test_rotate_write_interruption_keeps_stopped_and_reports_sanitized_handoff()
             read_bytes=lambda _path: original,
             atomic_write=interrupted_write,
             run_command=_successful_commands(),
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -538,6 +825,7 @@ def test_rotate_replace_failure_reports_unchanged_configuration() -> None:
             read_bytes=lambda _path: original,
             atomic_write=replace_failure,
             run_command=_successful_commands(),
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -560,6 +848,7 @@ def test_rotate_post_replace_uncertainty_reports_updated_configuration() -> None
             read_bytes=lambda _path: original,
             atomic_write=uncertain_write,
             run_command=_successful_commands(),
+            **_typed_user_bus_kwargs(),
         ),
     )
 
@@ -585,6 +874,7 @@ def test_rotate_rollback_failure_is_bounded_and_reports_config_uncertainty() -> 
             read_bytes=lambda _path: original,
             atomic_write=fail_rollback,
             run_command=_successful_commands(preview_returncode=1),
+            **_typed_user_bus_kwargs(),
         ),
     )
 

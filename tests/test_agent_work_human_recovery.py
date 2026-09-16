@@ -142,6 +142,31 @@ def test_inventory_classifies_recovery_evidence_without_trusting_issue_text(
     assert inventory.candidates[0].classification is classification
 
 
+@pytest.mark.parametrize(
+    "observation",
+    (
+        _observation(91, issue_state="closed", dependencies=((35, "closed"),)),
+        _observation(
+            92,
+            issue_state="closed",
+            record_state=RunnerState.COMPLETE,
+            stale=True,
+            ambiguous=True,
+        ),
+    ),
+)
+def test_closed_terminal_evidence_is_settled_before_drift_or_dependencies(
+    observation: RecoveryObservation,
+) -> None:
+    """Closed no-action and complete records never become recovery work."""
+    inventory = build_inventory((observation,))
+
+    assert (
+        inventory.candidates[0].classification
+        is RecoveryClassification.CLOSED_NO_ACTION
+    )
+
+
 def test_resolution_preview_has_a_stable_evidence_bound_digest() -> None:
     observation = _observation(
         78,

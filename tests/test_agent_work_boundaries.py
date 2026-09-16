@@ -68,6 +68,28 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
     )
 
 
+def test_changed_paths_parses_raw_porcelain_without_losing_initial_characters(
+    tmp_path: Path,
+) -> None:
+    """The NUL-delimited contract preserves ordinary, spaced, and rename paths."""
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        assert command[3:] == ("status", "--porcelain=v1", "-z")
+        return CommandResult(
+            0,
+            " M README.md\0?? docs/with space.md\0R  new name.py\0old name.py\0",
+            "",
+        )
+
+    changed = GitRepository(config, run).changed_paths(tmp_path / "worktree")
+
+    assert changed == ("README.md", "docs/with space.md", "new name.py", "old name.py")
+    assert len(calls) == 1
+
+
 def test_agent_work_config_requires_absolute_recorded_git_and_glab_paths(
     tmp_path: Path,
 ) -> None:

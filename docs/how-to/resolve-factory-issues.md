@@ -40,17 +40,37 @@ any of them.
 uv run agent-work recovery inventory --issue-iid 89 --json
 ```
 
-The inventory may say that an item is waiting, dependency-gated, safely
-retryable, superseded or duplicate, a closure candidate, or blocked on a
-specific human decision. A cleared trusted split prerequisite recommends an
-explicit `retry`; it does not start new work. Failed main and open-MR pipelines
-appear before ordinary retained work. Do not use this command to select fresh
-work: it only reports fresh items.
+Start with the aggregate `total`, `open`, `closed`, `active`, `blocked`,
+`dependency_gated`, `human_action`, and `no_action` counts. Use a detailed
+candidate's active state, `human_action_required`, bounded blocked cause,
+named open trusted prerequisites, and exact next action to decide whether to
+act. A cleared trusted split prerequisite recommends an explicit `retry`; it
+does not start new work. Failed main and open-MR pipelines appear before
+ordinary retained work. Do not use this command to select fresh work: it only
+reports fresh items.
+
+Treat `closed_no_action` as settled. It applies to a closed recordless split
+issue and a closed `COMPLETE` record even if retained worktree, head,
+merge-request, or pipeline evidence has drifted. A closed nonterminal record
+still needs human review. An untargeted inventory summarizes settled closed
+items; use `--issue-iid` when you need its exact evidence.
 
 A stale running item is an early `needs_human_decision`, not a retry target:
 use `agent-work loop recover` for its exact retained state. Retry is limited to
 a retained `BLOCKED` record whose trusted dependencies are all closed (or
 absent); it preserves any retained publication replay and retry history.
+
+When `$software-factory-supervisor` identifies action-required recovery, it
+hands exactly one IID to `$resolve-factory-issues`. Keep no-action inventories
+with the supervisor; do not turn a count-only report into bulk resolutions.
+
+An immediate owner is one record in `PREPARING`, `EXECUTING`, `PUBLISHING`,
+`OBSERVING`, `REPAIR`, or `DECOMPOSING`. `BLOCKED` is action-required, not
+runnable; `RETRY_WAIT` is queued and does not compete with an already selected
+IID. A reviewed retry changes only its selected `BLOCKED` IID to `PREPARING`,
+or retains `PUBLISHING` for a publication replay. Untouched blocked and queued
+records remain non-competing. Stop if a different immediate owner exists or if
+more than one immediate owner needs reconciliation.
 
 ## 2. Choose and preview one resolution
 
@@ -134,3 +154,40 @@ Record the receipt with the issue's recovery evidence. If application fails
 because evidence changed, retain the old plan as review history and start again
 at the inventory step. Do not work around the rejection by changing labels,
 branches, pipelines, or retained artifacts manually.
+
+## 5. Recover a clean interrupted claim for issue #35
+
+Use this route only when the exact evidence shows that issue #35 has a clean,
+interrupted `EXECUTING`/`WORKFLOW` claim. Do not edit the ledger manually.
+First create and review the exact recovery plan:
+
+```bash
+uv run agent-work loop recover --issue-iid 35 --json >agent-work-recover-35-plan.json
+```
+
+Apply that exact reviewed plan only when it confirms the claim can be safely
+normalized to `BLOCKED`:
+
+```bash
+uv run agent-work loop recover --issue-iid 35 --apply \
+  --plan-file agent-work-recover-35-plan.json --json
+```
+
+Then use the normal inventory and one-IID retry-plan sequence. Review every
+result; these commands do not authorize a choice for another issue.
+
+```bash
+uv run agent-work recovery inventory --issue-iid 35 --json
+uv run agent-work recovery resolve --issue-iid 35 --choice retry \
+  --reason "The reviewed recovery plan normalized the clean interrupted claim" \
+  --json >agent-work-recovery-35-retry-plan.json
+uv run agent-work recovery resolve --issue-iid 35 --choice retry \
+  --reason "The reviewed recovery plan normalized the clean interrupted claim" \
+  --plan-file agent-work-recovery-35-retry-plan.json --apply --json
+uv run agent-work loop run --apply --json
+```
+
+The reviewed retry is the durable handoff to the one selected IID; a
+multi-segment continuation remains pinned to #35. If normalization is not
+verified, stop for human review. This route never approves or merges a merge
+request.

@@ -21,7 +21,13 @@ import pytest
 from agent_work.cli import _render, build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
 from agent_work.ledger import LockBusy
-from agent_work.models import CommandItemReport, CommandReport, ConditionEvidence
+from agent_work.models import (
+    CommandItemReport,
+    CommandReport,
+    ConditionEvidence,
+    RecoveryCandidateReport,
+    RecoverySummary,
+)
 from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview
 
@@ -68,6 +74,51 @@ def test_human_status_renders_one_concise_answer_line_for_each_item() -> None:
     assert "changed=0" in lines[1] and "validated=failed" in lines[1]
     assert "current=failed_condition:blocked unsafe" in lines[1]
     assert all("next=" in line for line in lines)
+
+
+def test_recovery_inventory_v2_json_and_human_output_are_compact_and_sanitized() -> (
+    None
+):
+    """Inventory output exposes actionable state without leaking multiline evidence."""
+    candidate = RecoveryCandidateReport(
+        issue_iid=12,
+        classification="needs_human_decision",
+        issue_state="opened",
+        priority=0,
+        recommendation="ignored legacy recommendation",
+        active=True,
+        human_action_required=True,
+        blocked_cause="pipeline evidence disagrees",
+        dependency_explanation="trusted prerequisite #9 remains open",
+        next_action="Review issue #12 before selecting one resolution.",
+    )
+    report = CommandReport(
+        schema_version=2,
+        command="recovery.inventory",
+        applied=False,
+        outcome="inventory",
+        recovery_summary=RecoverySummary(
+            total=4,
+            open=3,
+            closed=1,
+            active=2,
+            blocked=1,
+            dependency_gated=1,
+            human_action=1,
+            no_action=3,
+        ),
+        recovery_candidates=(candidate,),
+    )
+
+    payload = json.loads(_render(report, as_json=True))
+    rendered = _render(report, as_json=False)
+
+    assert payload["schema_version"] == 2
+    assert payload["recovery_summary"]["human_action"] == 1
+    assert payload["recovery_candidates"][0]["next_action"].startswith("Review")
+    assert "human_action_required=true" in rendered
+    assert "next_action=Review issue #12 before selecting one resolution." in rendered
+    assert "\n" not in rendered and "recommendation=" not in rendered
 
 
 def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:

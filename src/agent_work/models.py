@@ -789,6 +789,20 @@ class CommandReport(BoundaryModel):
     next_action: str | None = Field(default=None, max_length=2_048)
     operational_plan: OperationalPlan | None = None
     recovery_candidates: tuple[RecoveryCandidateReport, ...] = ()
+    recovery_summary: RecoverySummary | None = None
+
+
+class RecoverySummary(BoundaryModel):
+    """Bounded aggregate of one read-only recovery inventory."""
+
+    total: int = Field(ge=0)
+    open: int = Field(ge=0)
+    closed: int = Field(ge=0)
+    active: int = Field(ge=0)
+    blocked: int = Field(ge=0)
+    dependency_gated: int = Field(ge=0)
+    human_action: int = Field(ge=0)
+    no_action: int = Field(ge=0)
 
 
 class RecoveryCandidateReport(BoundaryModel):
@@ -802,6 +816,11 @@ class RecoveryCandidateReport(BoundaryModel):
     priority: int = Field(ge=0)
     corroboration: dict[str, str] = Field(default_factory=dict)
     recommendation: str
+    active: bool = False
+    human_action_required: bool = False
+    blocked_cause: str | None = Field(default=None, max_length=2_048)
+    dependency_explanation: str | None = Field(default=None, max_length=2_048)
+    next_action: str = Field(default="", max_length=2_048)
 
 
 class OperationalPlan(BoundaryModel):

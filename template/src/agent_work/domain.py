@@ -146,6 +146,9 @@ ACTIVE_STATES = frozenset(
     }
 )
 
+# A queued retry is resumable only when no immediate owner is progressing.
+IMMEDIATE_OWNER_STATES = ACTIVE_STATES - {RunnerState.RETRY_WAIT}
+
 LIFECYCLE_LABELS: Final = (
     "agent::running",
     "agent::awaiting-human",

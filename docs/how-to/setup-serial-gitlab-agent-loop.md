@@ -253,7 +253,7 @@ env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.conf
   AGENT_WORK_AGENT_PATH="$agent_path" AGENT_WORK_DIRENV="$direnv_path" \
   AGENT_WORK_BASE_BRANCH=agent/work-base AGENT_WORK_FACTORY_USERNAME="$factory_username" GITLAB_HOST="$gitlab_host" \
   GITLAB_PROJECT_ID="$gitlab_project_id" \
-  bash "$PWD/scripts/agent-work-systemd-run.sh"
+  /usr/bin/env bash "$PWD/scripts/agent-work-systemd-run.sh"
 ```
 
 This isolated preview validates the exact service wrapper and credential route
@@ -302,6 +302,25 @@ user-manager socket; do not retry using a different credential, host, or
 environment. Systemd captures standard output and error under its
 project-specific `SyslogIdentifier`; the wrapper does not duplicate output via
 `logger`.
+
+### Establish a validated user-bus boundary
+
+The runtime applies this boundary before every executable
+`systemctl --user` command: it preserves valid explicit
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values. Only when either key
+is absent, derive `XDG_RUNTIME_DIR=/run/user/<effective-uid>` and
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<effective-uid>/bus`. The
+boundary then requires an absolute runtime directory with the effective user's
+ownership and an absolute existing bus socket owned by that user. It fails
+closed if any check fails; do not substitute another host, credential, or bus
+address.
+
+Credential rotation and service-environment migration use that same
+boundary. Their isolated previews run the intentionally mode-`0644`
+wrapper with argv,
+not a shell command: `/usr/bin/env bash <checkout>/scripts/agent-work-systemd-run.sh`.
+Service-environment migration adds `--validate-service-environment`. Do not
+add an executable bit to the wrapper.
 
 ### Repair an installed service configuration
 

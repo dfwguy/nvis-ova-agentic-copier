@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from .credential_rotation import (
     CredentialRotationError,
     EnvironmentConfigurationError,
+    PathEvidence,
     RotationDependencies,
     RotationEnvironment,
     ServiceUnitStopError,
@@ -112,6 +113,8 @@ class ServiceEnvironmentDependencies:
     run_command: CommandRunner
     resolve_executable: Callable[[str], str | None]
     checkout: Path
+    effective_uid: Callable[[], int]
+    inspect_path: Callable[[Path], PathEvidence]
     environment: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -225,10 +228,12 @@ def migrate_service_environment(
     timer = service = False
     try:
         rotation = RotationDependencies(
-            dependencies.read_bytes,
-            dependencies.atomic_write,
-            dependencies.run_command,
-            dependencies.environment,
+            read_bytes=dependencies.read_bytes,
+            atomic_write=dependencies.atomic_write,
+            run_command=dependencies.run_command,
+            effective_uid=dependencies.effective_uid,
+            inspect_path=dependencies.inspect_path,
+            environment=dependencies.environment,
         )
         stopped = stop_service_units(rotation, unit_name)
         timer, service = stopped.timer_stopped, stopped.service_stopped
@@ -254,7 +259,11 @@ def migrate_service_environment(
             outcome="correction-needed",
             timer_stopped=timer,
             service_stopped=service,
-            next_action="Keep the timer and service stopped; correct safeguards and retry.",
+            next_action=(
+                "Correct and validate the user bus before retrying."
+                if not timer and not service
+                else "Keep the timer and service stopped; correct safeguards and retry."
+            ),
         )
     updated = not current and changed != original
     if updated:
@@ -285,6 +294,8 @@ def migrate_service_environment(
         for name, field in _MANAGED.items() | _OWNED.items()
     }
     preview = (
+        "/usr/bin/env",
+        "bash",
         str(configuration.checkout / "scripts/agent-work-systemd-run.sh"),
         "--validate-service-environment",
     )

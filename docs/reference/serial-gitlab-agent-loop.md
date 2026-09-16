@@ -110,6 +110,11 @@ credential failure, preview failure, or rollback-required outcome exits `1`;
 argument or command-usage errors exit `2`. Output and errors never include a
 token, credential material, or environment-file contents.
 
+The preview invokes the installed wrapper as an argument vector, not a shell
+string: `/usr/bin/env bash <checkout>/scripts/agent-work-systemd-run.sh`.
+The wrapper is intentionally mode `0644`; this invocation does not require an
+executable-bit change.
+
 Rotation deliberately stops before canary execution, re-enablement, ordered
 canary processing, or retained-record recovery. The operator reviews the
 successful result, follows the setup guide’s canary procedure, and explicitly
@@ -155,6 +160,11 @@ result with `command`, `applied`, `outcome`, `config_updated`, `rolled_back`,
 Without `--json`, the command reports the same migration state as concise
 non-secret fields. `--debug` adds only sanitized local diagnostics.
 
+That validation invokes the same intentionally mode-`0644` wrapper through
+the unit-shaped argv `/usr/bin/env bash <checkout>/scripts/agent-work-systemd-run.sh
+--validate-service-environment`, never through a shell string or an executable
+wrapper file.
+
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
 not simulate a complete activation. `loop status` is read-only and reports
@@ -166,6 +176,17 @@ truncated. With `--issue-iid`, it performs an exact lookup for that item.
 previews one recorded blocked item; `--apply`
 resets its retry budget and moves it to resumable preparation after explicit
 human direction.
+
+The operator-visible immediate owner set is `PREPARING`, `EXECUTING`,
+`PUBLISHING`, `OBSERVING`, `REPAIR`, and `DECOMPOSING`. `BLOCKED` is excluded
+from that set: it remains action-required and is not runnable. `RETRY_WAIT` is
+queued, not a competing immediate owner when an exact IID is already selected.
+That selected IID stays pinned across a multi-segment continuation. A reviewed
+exact retry is the durable handoff: it moves one chosen `BLOCKED` IID to
+`PREPARING` (or retains `PUBLISHING` for a publication replay) without making
+untouched blocked or queued-retry records compete. Retry fails closed when a
+different immediate owner exists. More than one true immediate owner remains a
+reconciliation-required condition.
 
 `loop canary` is an operational checkpoint, not an issue run. Bare invocation
 creates a redacted, immutable plan that verifies public service and project
@@ -201,7 +222,12 @@ apply a decision; `--apply` is accepted for uniform command invocation but has
 no mutating effect. It corroborates lifecycle-projected GitLab issues with the
 local ledger, deterministic branch and retained worktree, merge request and
 exact-source pipeline, default-branch pipeline, configured project and
-credential identity, and controller, service, and project-lock evidence.
+credential identity, and controller, service, and project-lock evidence. The
+JSON and human views include aggregate `total`, `open`, `closed`,
+`active`, `blocked`, `dependency_gated`, `human_action`, and `no_action`
+counts. A detailed candidate identifies its active state,
+`human_action_required`, bounded blocked cause, dependency explanation naming
+open trusted prerequisites, and exact next action.
 
 The inventory classifies each retained item as legitimately waiting,
 dependency-gated, safely retryable, superseded or duplicate, a closure
@@ -211,6 +237,13 @@ items, safely retryable blocked items, dependency reconciliation,
 awaiting-human items, and finally fresh ordinary work. Fresh work is reported
 only; inventory never claims it. When trusted split prerequisites have cleared,
 the inventory recommends an explicit retry rather than starting a child item.
+
+`closed_no_action` takes precedence for a closed recordless split issue and a
+closed `COMPLETE` record. Those terminal states are no-action even when their
+retained worktree, head, merge-request, or pipeline evidence has drifted.
+Closed nonterminal records still require human review. An untargeted inventory
+collapses settled closed-item detail while retaining its aggregate counts;
+`--issue-iid IID` returns that item's exact evidence.
 
 `recovery resolve` creates an evidence-bound, reviewed per-issue plan by
 default. An applied resolution requires `--apply` and the exact `--plan-file`.
@@ -506,6 +539,12 @@ The controller does not infer merge-request status from a pipeline belonging to
 an older source commit.
 
 Existing active, safe resumable work remains the first priority. Only after it
+
+When an ordinary unpinned activation sees one non-`retry-wait` active record,
+it resumes that one record and leaves every retry-wait record unchanged. With
+no such record, it selects only the earliest due retry by `(retry_at, issue
+IID)`; future or undated retries remain queued. Multiple non-retry active
+records still fail closed as concurrent ownership ambiguity.
 has been reconciled may the pipeline gate decide whether ordinary fresh-issue
 selection is safe. A successful pipeline clears the corresponding observation;
 `created`, `waiting_for_resource`, `preparing`, `scheduled`, `pending`, and

@@ -45,6 +45,16 @@ class ServiceUnitStopState:
     service_stopped: bool
 
 
+@dataclass(frozen=True)
+class PathEvidence:
+    """Immutable ownership and type evidence for one inspected path."""
+
+    exists: bool
+    is_dir: bool
+    is_socket: bool
+    owner_uid: int | None
+
+
 class ServiceUnitStopError(CredentialRotationError):
     """Stopping units failed while retaining their independently observed state."""
 
@@ -133,6 +143,8 @@ class RotationDependencies:
     read_bytes: Callable[[Path], bytes]
     atomic_write: Callable[[Path, bytes], None]
     run_command: CommandRunner
+    effective_uid: Callable[[], int]
+    inspect_path: Callable[[Path], PathEvidence]
     environment: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -286,6 +298,41 @@ def _call(
     )
 
 
+def _user_bus_environment(dependencies: RotationDependencies) -> dict[str, str]:
+    """Return the validated minimal user-manager environment."""
+    uid = dependencies.effective_uid()
+    runtime_value = dependencies.environment.get("XDG_RUNTIME_DIR")
+    bus_value = dependencies.environment.get("DBUS_SESSION_BUS_ADDRESS")
+    if runtime_value is None:
+        runtime_value = f"/run/user/{uid}"
+    if bus_value is None:
+        bus_value = f"unix:path={runtime_value}/bus"
+    if not runtime_value or not bus_value:
+        raise CredentialRotationError("user bus environment is invalid")
+    runtime = Path(runtime_value)
+    prefix = "unix:path="
+    if not runtime.is_absolute() or not bus_value.startswith(prefix):
+        raise CredentialRotationError("user bus environment is invalid")
+    bus = Path(bus_value.removeprefix(prefix))
+    if not bus.is_absolute() or bus_value != f"{prefix}{bus}":
+        raise CredentialRotationError("user bus environment is invalid")
+    runtime_status = dependencies.inspect_path(runtime)
+    bus_status = dependencies.inspect_path(bus)
+    if not (
+        runtime_status.exists
+        and runtime_status.is_dir
+        and runtime_status.owner_uid == uid
+        and bus_status.exists
+        and bus_status.is_socket
+        and bus_status.owner_uid == uid
+    ):
+        raise CredentialRotationError("user bus environment is invalid")
+    return service_baseline(dependencies.environment) | {
+        "XDG_RUNTIME_DIR": runtime_value,
+        "DBUS_SESSION_BUS_ADDRESS": bus_value,
+    }
+
+
 def service_baseline(environment: Mapping[str, str]) -> dict[str, str]:
     """Keep only the service-manager baseline needed before direnv runs."""
     return {
@@ -431,6 +478,7 @@ def stop_service_units(
     dependencies: RotationDependencies, unit_name: str
 ) -> ServiceUnitStopState:
     validate_service_unit_name(unit_name)
+    environment = _user_bus_environment(dependencies)
     commands = (
         ("systemctl", "--user", "disable", "--now", f"{unit_name}.timer"),
         ("systemctl", "--user", "stop", f"{unit_name}.service"),
@@ -440,7 +488,7 @@ def stop_service_units(
 
     def attempt(command: tuple[str, ...]) -> CommandResult | None:
         try:
-            return _call(dependencies, command)
+            return _call(dependencies, command, environment)
         except (OSError, RuntimeError):
             return None
 
@@ -512,7 +560,11 @@ def rotate_credential(
             environment=configuration,
             timer=timer,
             service=service,
-            next_action="Keep the timer and service stopped; correct the credential or GitLab safeguards, then retry.",
+            next_action=(
+                "Correct and validate the user bus before retrying."
+                if not timer and not service
+                else "Keep the timer and service stopped; correct the credential or GitLab safeguards, then retry."
+            ),
         )
     updated = username != configuration.factory_username
     if not updated:
@@ -542,7 +594,11 @@ def rotate_credential(
                 service=service,
                 next_action="Keep the timer and service stopped and inspect the environment configuration before retrying.",
             )
-    preview = (str(configuration.checkout / "scripts/agent-work-systemd-run.sh"),)
+    preview = (
+        "/usr/bin/env",
+        "bash",
+        str(configuration.checkout / "scripts/agent-work-systemd-run.sh"),
+    )
     preview_environment = service_baseline(dependencies.environment) | {
         name: str(getattr(configuration, field))
         for name, field in _REQUIRED_KEYS.items()

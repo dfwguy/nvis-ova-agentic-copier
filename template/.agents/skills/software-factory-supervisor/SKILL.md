@@ -90,6 +90,11 @@ field. This skill has no mailbox persistence and does not implement a
 scheduler, daemon, webhook, queue, polling loop, merge/approval, or a
 replacement for the three canonical skills above.
 
+For recovery inventory, state `human action:none` when every item is settled,
+actively monitored, or dependency-gated. Otherwise hand off exactly one
+action-required IID and its corroborated evidence to
+`resolve-factory-issues`; never select or combine resolutions.
+
 ## Operational finding filing
 
 Filing an issue is the sole narrow mutation this supervisor may make, and only
