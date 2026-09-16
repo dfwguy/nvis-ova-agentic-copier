@@ -143,6 +143,24 @@ def test_status_projection_preserves_raw_state_while_reporting_human_lifecycle(
     assert project_status(state=state, phase=phase, source_sha=source_sha) is expected
 
 
+@pytest.mark.parametrize(
+    ("state_value", "projection_value"),
+    [
+        ("needs-repair", "needs-repair"),
+        ("repair-failed", "repair-failed"),
+        ("suggest-close", "suggest-close"),
+    ],
+)
+def test_status_projection_keeps_new_nonactive_outcomes_distinct(
+    state_value: str, projection_value: str
+) -> None:
+    assert project_status(
+        state=RunnerState(state_value),
+        phase=WorkflowPhase.POST_PUBLICATION,
+        source_sha="a" * 40,
+    ) is StatusProjection(projection_value)
+
+
 @given(
     state=st.sampled_from(tuple(RunnerState)),
     phase=st.sampled_from(tuple(WorkflowPhase)),
@@ -160,6 +178,14 @@ def test_status_projection_partitions_every_durable_state(
         if state in {RunnerState.BLOCKED, RunnerState.FAILED}
         else StatusProjection.COMPLETE
         if state is RunnerState.COMPLETE
+        else StatusProjection.NEEDS_REPAIR
+        if state is RunnerState.NEEDS_REPAIR and phase is WorkflowPhase.POST_PUBLICATION
+        else StatusProjection.REPAIR_FAILED
+        if state is RunnerState.REPAIR_FAILED
+        and phase is WorkflowPhase.POST_PUBLICATION
+        else StatusProjection.SUGGEST_CLOSE
+        if state is RunnerState.SUGGEST_CLOSE
+        and phase is WorkflowPhase.POST_PUBLICATION
         else StatusProjection.RUNNING
     )
     assert project_status(state=state, phase=phase, source_sha=source_sha) is expected

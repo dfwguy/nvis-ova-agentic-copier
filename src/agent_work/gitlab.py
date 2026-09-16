@@ -16,12 +16,14 @@ import json
 import re
 from datetime import datetime
 from typing import cast
+from urllib.parse import quote
 
 from pydantic import ValidationError
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
     HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+    LIFECYCLE_LABEL_SPECS,
     LIFECYCLE_LABELS,
     parse_split_marker,
 )
@@ -84,6 +86,7 @@ NOTE_AUTHOR_FIELDS = ("username",)
 _MAX_NOTE_PAGES = 100
 _MAX_ISSUE_PAGES = 100
 _MAX_MERGE_REQUEST_PAGES = 100
+_MAX_LABEL_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
 
@@ -586,6 +589,72 @@ class GitLabGateway:
         ):
             raise GitLabError("GitLab did not apply the lifecycle projection")
         return issue
+
+    def ensure_lifecycle_labels(self) -> None:
+        """Idempotently provision the fixed lifecycle labels in this numeric project."""
+        endpoint = f"projects/{self._config.project_id}/labels"
+        existing = self._lifecycle_label_inventory(endpoint)
+        for name in (
+            "agent::needs_repair",
+            "agent::repair_failed",
+            "agent::suggest_close",
+        ):
+            spec = LIFECYCLE_LABEL_SPECS[name]
+            current = existing.get(name)
+            if current is None:
+                self._call(
+                    endpoint,
+                    method="POST",
+                    fields=(
+                        f"name={name}",
+                        f"color={spec['color']}",
+                        f"description={spec['description']}",
+                    ),
+                )
+            elif (
+                current.get("color") != spec["color"]
+                or current.get("description") != spec["description"]
+            ):
+                self._call(
+                    f"{endpoint}/{quote(name, safe='')}",
+                    method="PUT",
+                    fields=(
+                        f"color={spec['color']}",
+                        f"description={spec['description']}",
+                    ),
+                )
+
+    def lifecycle_label_drift(self) -> tuple[str, ...]:
+        """Return fixed lifecycle labels missing or differing from their specification."""
+        endpoint = f"projects/{self._config.project_id}/labels"
+        existing = self._lifecycle_label_inventory(endpoint)
+        return tuple(
+            name
+            for name in (
+                "agent::needs_repair",
+                "agent::repair_failed",
+                "agent::suggest_close",
+            )
+            if existing.get(name) is None
+            or existing[name].get("color") != LIFECYCLE_LABEL_SPECS[name]["color"]
+            or existing[name].get("description")
+            != LIFECYCLE_LABEL_SPECS[name]["description"]
+        )
+
+    def _lifecycle_label_inventory(
+        self, endpoint: str
+    ) -> dict[object, dict[str, object]]:
+        """Read the complete bounded label inventory for safe provisioning."""
+        labels: dict[object, dict[str, object]] = {}
+        for page in range(1, _MAX_LABEL_PAGES + 1):
+            current = self._items(
+                self._call(endpoint, fields=("per_page=100", f"page={page}")),
+                "labels",
+            )
+            labels.update({item.get("name"): item for item in current})
+            if len(current) < 100:
+                return labels
+        raise GitLabError("GitLab returned too many label pages")
 
     def fetch_merge_request(self, iid: int) -> MergeRequestEvidence:
         """Fetch exact MR evidence."""

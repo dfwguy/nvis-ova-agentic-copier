@@ -54,6 +54,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.FAILED,
                 RunnerState.COMPLETE,
+                RunnerState.SUGGEST_CLOSE,
             }
         ),
         RunnerState.RETRY_WAIT: frozenset(
@@ -85,6 +86,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.OBSERVING,
                 RunnerState.EXECUTING,
                 RunnerState.REPAIR,
+                RunnerState.NEEDS_REPAIR,
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.RETRY_WAIT,
                 RunnerState.BLOCKED,
@@ -101,6 +103,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.FAILED,
                 RunnerState.COMPLETE,
                 RunnerState.AWAITING_HUMAN,
+                RunnerState.REPAIR_FAILED,
             }
         ),
         RunnerState.DECOMPOSING: frozenset(
@@ -129,6 +132,18 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
             }
         ),
         RunnerState.FAILED: frozenset({RunnerState.COMPLETE}),
+        RunnerState.NEEDS_REPAIR: frozenset(
+            {
+                RunnerState.REPAIR,
+                RunnerState.REPAIR_FAILED,
+                RunnerState.BLOCKED,
+                RunnerState.COMPLETE,
+            }
+        ),
+        RunnerState.REPAIR_FAILED: frozenset(
+            {RunnerState.NEEDS_REPAIR, RunnerState.BLOCKED, RunnerState.COMPLETE}
+        ),
+        RunnerState.SUGGEST_CLOSE: frozenset({RunnerState.COMPLETE}),
         RunnerState.COMPLETE: frozenset(),
     }
 )
@@ -360,6 +375,19 @@ def apply_worker_result(
                 RunnerState.BLOCKED,
                 error_code=result.error_code,
                 summary=result.redacted_summary or result.change_summary,
+                next_action=result.next_action,
+            )
+        )
+    if result.result_kind == "suggest_close":
+        return PlannedOutcome(
+            transition_record(
+                record,
+                RunnerState.SUGGEST_CLOSE,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                suggest_close_evidence=result.suggest_close_evidence,
+                merge_request_draft=None,
+                error_code=None,
+                summary=result.change_summary,
                 next_action=result.next_action,
             )
         )

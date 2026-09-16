@@ -82,3 +82,45 @@ def test_all_legacy_lifecycle_projections_and_worktrees_are_inventoried() -> Non
         (4, RunnerState.COMPLETE),
     ]
     assert plan.actions[0].evidence == ("worktree",)
+
+
+def test_migration_quarantines_new_nonactive_lifecycle_labels_without_evidence() -> (
+    None
+):
+    plan = build_migration_plan(
+        MigrationObservation(
+            project_id=310967,
+            issues=(
+                {"iid": 12, "state": "opened", "labels": ["agent::needs_repair"]},
+                {"iid": 13, "state": "opened", "labels": ["agent::repair_failed"]},
+                {"iid": 14, "state": "opened", "labels": ["agent::suggest_close"]},
+            ),
+            worktrees=("/state/worktrees/12", "/state/worktrees/13"),
+        )
+    )
+
+    assert [(action.issue_iid, action.target_state) for action in plan.actions] == [
+        (12, RunnerState.BLOCKED),
+        (13, RunnerState.BLOCKED),
+        (14, RunnerState.BLOCKED),
+    ]
+    assert plan.actions[0].evidence == ("worktree",)
+    assert plan.actions[1].evidence == ("worktree",)
+    assert plan.actions[2].evidence == ()
+    assert all("corrobor" in action.next_action.lower() for action in plan.actions)
+
+
+def test_migration_never_reclassifies_an_existing_blocked_record_without_targeted_live_corroboration() -> (
+    None
+):
+    plan = build_migration_plan(
+        MigrationObservation(
+            project_id=310967,
+            issues=({"iid": 12, "state": "opened", "labels": ["agent::blocked"]},),
+            worktrees=("/state/worktrees/12",),
+        )
+    )
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].target_state is RunnerState.BLOCKED
+    assert "recovery" in plan.actions[0].next_action.lower()

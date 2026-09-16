@@ -18,7 +18,6 @@ def project_status(
     *, state: RunnerState, phase: WorkflowPhase, source_sha: str | None
 ) -> StatusProjection:
     """Map durable state to one concise human lifecycle without mutation."""
-    del phase
     if state is RunnerState.PREPARING and source_sha is None:
         return StatusProjection.SELECTED
     if state is RunnerState.AWAITING_HUMAN:
@@ -27,4 +26,10 @@ def project_status(
         return StatusProjection.BLOCKED
     if state is RunnerState.COMPLETE:
         return StatusProjection.COMPLETE
+    if state is RunnerState.NEEDS_REPAIR and phase is WorkflowPhase.POST_PUBLICATION:
+        return StatusProjection.NEEDS_REPAIR
+    if state is RunnerState.REPAIR_FAILED and phase is WorkflowPhase.POST_PUBLICATION:
+        return StatusProjection.REPAIR_FAILED
+    if state is RunnerState.SUGGEST_CLOSE and phase is WorkflowPhase.POST_PUBLICATION:
+        return StatusProjection.SUGGEST_CLOSE
     return StatusProjection.RUNNING

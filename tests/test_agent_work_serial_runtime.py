@@ -30,7 +30,9 @@ from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
     ErrorCode,
+    RepairAttemptEvidence,
     RunnerState,
+    SuggestCloseEvidence,
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
@@ -181,6 +183,7 @@ class FakeGitLab:
             tuple[int, str], PipelineEvidence | None
         ] = {}
         self.preselection_calls: list[str] = []
+        self.fetch_issue_calls: list[int] = []
         self.eligible_calls = 0
         self.existing_mr: MergeRequestEvidence | None = None
         self.open_branch_merge_requests: tuple[MergeRequestEvidence, ...] = ()
@@ -266,7 +269,7 @@ class FakeGitLab:
         )
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
-        del iid
+        self.fetch_issue_calls.append(iid)
         return self.issue
 
     def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]:
@@ -559,6 +562,7 @@ class FakeRepository:
         self.publication_targets: list[str] = []
         self.publication_paths: tuple[str, ...] | None = None
         self.has_changes_calls = 0
+        self.worktree_exists_calls = 0
 
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
@@ -615,6 +619,7 @@ class FakeRepository:
 
     def worktree_exists(self, worktree: Path) -> bool:
         del worktree
+        self.worktree_exists_calls += 1
         if self.worktree_exists_error is not None:
             raise self.worktree_exists_error
         return self.worktree_present
@@ -943,7 +948,12 @@ class SingleSessionInvoker:
 
 
 def _record(
-    tmp_path: Path, *, state: RunnerState, phase: WorkflowPhase
+    tmp_path: Path,
+    *,
+    state: RunnerState,
+    phase: WorkflowPhase,
+    repair_attempt: RepairAttemptEvidence | None = None,
+    suggest_close_evidence: SuggestCloseEvidence | None = None,
 ) -> LedgerRecord:
     return LedgerRecord(
         project_id=310967,
@@ -955,6 +965,8 @@ def _record(
         source_branch="agent/issue-12",
         worktree=tmp_path / "state" / "worktrees" / "12",
         source_sha="a" * 40,
+        repair_attempt=repair_attempt,
+        suggest_close_evidence=suggest_close_evidence,
     )
 
 
@@ -1363,6 +1375,57 @@ def test_canary_apply_rejects_stale_ledger_evidence_without_effects(
             dependencies=dependencies,
         )
 
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+@pytest.mark.parametrize("mismatch", ("command", "iid"))
+def test_recover_rejects_a_reviewed_plan_for_another_command_or_iid_without_mutation(
+    mismatch: str,
+    tmp_path: Path,
+) -> None:
+    """A valid plan cannot be repurposed to poison another retained repair record."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.NEEDS_REPAIR,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::needs_repair",)})
+    )
+    repository = FakeRepository(config)
+    preview = dispatch(
+        CommandRequest(
+            command="loop.recover",
+            issue_iid=retained.issue_iid if mismatch == "command" else 77,
+        ),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    reviewed = json.loads(_operational_plan_bytes(preview))
+    if mismatch == "command":
+        reviewed["command"] = "loop.canary"
+        reviewed["fingerprint"] = ""
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        dispatch(
+            CommandRequest(
+                command="loop.recover",
+                issue_iid=retained.issue_iid,
+                plan_file=tmp_path / "other.json",
+            ),
+            apply=True,
+            dependencies=replace(
+                _dependencies(config, ledger, gitlab, repository),
+                read_plan=lambda _path: json.dumps(reviewed).encode(),
+            ),
+        )
+
+    assert ledger.load(retained.issue_iid) == retained
     assert gitlab.labels == []
     assert repository.prepared is False
 
@@ -2637,7 +2700,9 @@ def test_terminal_exact_pipeline_starts_post_publication_worker(
         now=NOW,
     )
     assert post is not None
-    assert post.state is RunnerState.EXECUTING
+    assert post.state is (
+        RunnerState.NEEDS_REPAIR if status == "failed" else RunnerState.EXECUTING
+    )
     assert post.phase is WorkflowPhase.POST_PUBLICATION
 
 
@@ -3684,7 +3749,9 @@ def test_nonterminal_pipeline_status_waits_without_repair(
     assert outcome == record
 
 
-def test_failed_pipeline_starts_post_publication_assessment(tmp_path: Path) -> None:
+def test_failed_exact_pipeline_becomes_durable_needs_repair_without_worker_activity(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
@@ -3708,9 +3775,289 @@ def test_failed_pipeline_starts_post_publication_assessment(tmp_path: Path) -> N
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome is not None and outcome.state is RunnerState("needs-repair")
     assert outcome.phase is WorkflowPhase.POST_PUBLICATION
-    assert outcome.error_code is None
+    assert outcome.error_code is ErrorCode.PIPELINE_REJECTED
+    assert gitlab.labels[-1] == "agent::needs_repair"
+
+
+def test_needs_repair_is_ineligible_for_ordinary_loop_and_only_exact_reviewed_recover_starts_repair(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState("needs-repair"),
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::needs_repair",)})
+    )
+    invoker = FakeInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    ordinary = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert ordinary.items == ()
+    assert ordinary.stop_reason == "needs_repair"
+    assert ledger.load(retained.issue_iid) == retained
+    assert invoker.prompts == []
+
+    recover_request = CommandRequest(
+        command="loop.recover", issue_iid=retained.issue_iid
+    )
+    preview = dispatch(recover_request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "repair"
+
+    applied = dispatch(
+        replace(recover_request, plan_file=tmp_path / "reviewed-repair.json"),
+        apply=True,
+        dependencies=replace(
+            dependencies, read_plan=lambda _path: _operational_plan_bytes(preview)
+        ),
+    )
+
+    assert applied.items[0].state is RunnerState.REPAIR
+    assert gitlab.labels[-1] == "agent::running"
+
+
+def test_stale_reviewed_repair_plan_or_unsuccessful_repair_persists_repair_failed_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState("needs-repair"),
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::needs_repair",)})
+    )
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+    request = CommandRequest(command="loop.recover", issue_iid=retained.issue_iid)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+
+    ledger.persist(retained.model_copy(update={"summary": "pipeline evidence changed"}))
+    with pytest.raises(RuntimeError, match="new preview"):
+        dispatch(
+            replace(request, plan_file=tmp_path / "stale-repair.json"),
+            apply=True,
+            dependencies=replace(
+                dependencies, read_plan=lambda _path: _operational_plan_bytes(preview)
+            ),
+        )
+    persisted = ledger.load(retained.issue_iid)
+
+    assert persisted is not None and persisted.state is RunnerState("repair-failed")
+    assert persisted.repair_attempt is not None
+    assert persisted.worktree == retained.worktree
+    assert (
+        persisted.repair_attempt.reviewed_plan_fingerprint
+        == preview.operational_plan.fingerprint
+    )
+    assert persisted.repair_attempt.evidence_delta
+    assert len(persisted.repair_attempt.failure_reason) <= 2_048
+    assert 0 <= persisted.repair_attempt.elapsed_seconds <= 10_800
+    assert gitlab.labels[-1] == "agent::repair_failed"
+
+
+def test_repair_failed_is_ordinary_ineligible_and_requires_a_fresh_exact_reviewed_plan(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    failed = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "state": RunnerState.REPAIR_FAILED,
+                "repair_attempt": RepairAttemptEvidence(
+                    reviewed_plan_fingerprint="a" * 64,
+                    reviewed_snapshot={"issue_iid": 12, "pipeline_id": 4},
+                    evidence_delta={"pipeline_status": "failed"},
+                    failure_reason="repair worker failed",
+                    started_at=NOW.isoformat(),
+                    elapsed_seconds=1.0,
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::repair_failed",)})
+    )
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+
+    ordinary = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert ordinary.items == ()
+    assert ledger.load(failed.issue_iid) == failed
+
+    request = CommandRequest(command="loop.recover", issue_iid=failed.issue_iid)
+    refreshed = dispatch(request, apply=False, dependencies=dependencies)
+
+    assert refreshed.operational_plan is not None
+    assert failed.repair_attempt is not None
+    assert refreshed.operational_plan.target_iid == failed.issue_iid
+    assert refreshed.operational_plan.fingerprint != "a" * 64
+    assert (
+        refreshed.operational_plan.evidence != failed.repair_attempt.reviewed_snapshot
+    )
+    assert refreshed.operational_plan.action == "repair"
+
+
+def test_executed_unsuccessful_repair_preserves_worktree_and_records_bounded_plan_delta_failure_and_timing(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.REPAIR, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "repair_attempt": {
+                    "reviewed_plan_fingerprint": "a" * 64,
+                    "reviewed_snapshot": {"issue_iid": 12, "pipeline_id": 4},
+                    "started_at": (NOW - timedelta(seconds=7)).isoformat(),
+                }
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker("not a valid worker result"),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState("repair-failed")
+    assert outcome.repair_attempt is not None
+    assert outcome.worktree == retained.worktree
+    assert outcome.repair_attempt.reviewed_plan_fingerprint == "a" * 64
+    assert outcome.repair_attempt.reviewed_snapshot == {
+        "issue_iid": 12,
+        "pipeline_id": 4,
+    }
+    assert outcome.repair_attempt.evidence_delta
+    assert outcome.repair_attempt.failure_reason
+    assert outcome.repair_attempt.elapsed_seconds == 7
+    assert gitlab.labels[-1] == "agent::repair_failed"
+
+
+@pytest.mark.parametrize("returncode", (1, None))
+def test_reviewed_repair_worker_exit_requires_a_fresh_plan(
+    tmp_path: Path, returncode: int | None
+) -> None:
+    """Nonzero and timed-out reviewed repairs never enter automatic retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.REPAIR, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "repair_attempt": RepairAttemptEvidence(
+                    reviewed_plan_fingerprint="b" * 64,
+                    reviewed_snapshot={"issue_iid": 12},
+                    started_at=(NOW - timedelta(seconds=3)).isoformat(),
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(returncode=returncode),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.REPAIR_FAILED
+    assert outcome.worktree == retained.worktree
+    assert outcome.repair_attempt is not None
+    assert outcome.repair_attempt.reviewed_plan_fingerprint == "b" * 64
+    assert outcome.repair_attempt.started_at == (NOW - timedelta(seconds=3)).isoformat()
+    assert outcome.repair_attempt.elapsed_seconds == 3
+    assert gitlab.labels[-1] == "agent::repair_failed"
+
+
+def test_suggest_close_never_changes_or_closes_an_open_issue_and_only_human_closure_completes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(
+            update={
+                "state": RunnerState.SUGGEST_CLOSE,
+                "merge_request_draft": None,
+                "suggest_close_evidence": SuggestCloseEvidence(
+                    reason="already-satisfied",
+                    issue_iid=12,
+                    evidence=("https://gitlab.example.test/group/project/-/issues/13",),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::suggest_close",)})
+    )
+    repository = FakeRepository(config)
+
+    still_open = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert still_open is not None and still_open.state is RunnerState("suggest-close")
+    assert still_open.merge_request_draft is None
+    assert gitlab.closed_issues == []
+    assert gitlab.created_merge_requests == 0
+
+    gitlab.issue = gitlab.issue.model_copy(update={"state": "closed"})
+    completed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert completed is not None and completed.state is RunnerState.COMPLETE
+    assert gitlab.labels[-1] is None
 
 
 def test_publication_transport_failure_schedules_a_recoverable_retry(
@@ -6080,13 +6427,12 @@ def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
     )
 
     persisted = ledger.load(12)
-    assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 5
-    assert invoker.phases == ["workflow", "post-publication"]
-    assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
+    assert report.stop_reason == "needs_repair"
+    assert report.segments_run == 4
+    assert invoker.phases == ["workflow"]
+    assert persisted is not None and persisted.state is RunnerState.NEEDS_REPAIR
     assert persisted.phase is WorkflowPhase.POST_PUBLICATION
-    assert persisted.error_code is None
-    assert invoker.phases == ["workflow", "post-publication"]
+    assert persisted.error_code is ErrorCode.PIPELINE_REJECTED
 
 
 def test_apply_runs_workflow_then_post_publication_assessment_for_legacy_repair(
@@ -6115,9 +6461,9 @@ def test_apply_runs_workflow_then_post_publication_assessment_for_legacy_repair(
     )
 
     persisted = ledger.load(12)
-    assert report.stop_reason == "awaiting_human"
-    assert invoker.phases == ["workflow", "post-publication"]
-    assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
+    assert report.stop_reason == "needs_repair"
+    assert invoker.phases == ["workflow"]
+    assert persisted is not None and persisted.state is RunnerState.NEEDS_REPAIR
     assert persisted.phase is WorkflowPhase.POST_PUBLICATION
 
 
@@ -6147,9 +6493,9 @@ def test_failed_pipeline_replaces_legacy_phase_with_post_publication(
         now=NOW,
     )
 
-    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome is not None and outcome.state is RunnerState.NEEDS_REPAIR
     assert outcome.phase is WorkflowPhase.POST_PUBLICATION
-    assert outcome.error_code is None
+    assert outcome.error_code is ErrorCode.PIPELINE_REJECTED
 
 
 def test_apply_segment_limit_yields_and_next_activation_recovers(
@@ -6507,7 +6853,7 @@ def test_loop_run_failed_exact_merge_request_pipeline_resumes_safe_retained_owne
         ),
     )
 
-    assert report.stop_reason == "repair"
+    assert report.stop_reason == "needs_repair"
     assert [item.issue_iid for item in report.items] == [retained.issue_iid]
     assert gitlab.eligible_calls == 0
     assert invoker.prompts == []
@@ -6675,9 +7021,9 @@ def test_loop_run_resumes_exact_owner_beside_inexact_historical_record(
         dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
     )
 
-    assert report.stop_reason == "repair"
+    assert report.stop_reason == "needs_repair"
     assert [item.issue_iid for item in report.items] == [owner.issue_iid]
-    assert report.items[0].state is RunnerState.REPAIR
+    assert report.items[0].state is RunnerState.NEEDS_REPAIR
 
 
 @pytest.mark.parametrize(
@@ -6718,6 +7064,78 @@ def test_find_exact_pipeline_owner_rejects_each_ownership_mismatch(
         project_id=config.project_id,
         default_branch="main",
         repository=repository,
+    )
+
+    assert found is None
+
+
+@pytest.mark.parametrize("state", (RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED))
+def test_find_exact_pipeline_owner_recovers_exact_durable_repair_owner(
+    tmp_path: Path, state: RunnerState
+) -> None:
+    """A failed current pipeline may resume its exact non-active repair owner."""
+    config = _config(tmp_path)
+    owner = _record(
+        tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+    ).model_copy(
+        update={
+            "state": state,
+            "phase": WorkflowPhase.POST_PUBLICATION,
+            "merge_request_iid": 88,
+            "repair_attempt": (
+                RepairAttemptEvidence(reviewed_plan_fingerprint="a" * 64)
+                if state is RunnerState.REPAIR_FAILED
+                else None
+            ),
+        }
+    )
+
+    found = find_exact_pipeline_owner(
+        records=(owner,),
+        merge_request=_mr(),
+        project_id=config.project_id,
+        default_branch="main",
+        repository=FakeRepository(config),
+    )
+
+    assert found == owner
+
+
+@pytest.mark.parametrize(
+    ("state", "updates"),
+    (
+        (RunnerState.NEEDS_REPAIR, {"phase": WorkflowPhase.WORKFLOW}),
+        (RunnerState.REPAIR_FAILED, {"source_sha": "b" * 40}),
+        (RunnerState.NEEDS_REPAIR, {"source_branch": "agent/issue-13"}),
+    ),
+)
+def test_find_exact_pipeline_owner_rejects_nonexact_durable_repair_owners(
+    tmp_path: Path, state: RunnerState, updates: dict[str, object]
+) -> None:
+    """Durable repair state does not weaken exact pipeline-owner corroboration."""
+    config = _config(tmp_path)
+    owner = _record(
+        tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+    ).model_copy(
+        update={
+            "state": state,
+            "phase": WorkflowPhase.POST_PUBLICATION,
+            "merge_request_iid": 88,
+            "repair_attempt": (
+                RepairAttemptEvidence(reviewed_plan_fingerprint="a" * 64)
+                if state is RunnerState.REPAIR_FAILED
+                else None
+            ),
+        }
+        | updates
+    )
+
+    found = find_exact_pipeline_owner(
+        records=(owner,),
+        merge_request=_mr(),
+        project_id=config.project_id,
+        default_branch="main",
+        repository=FakeRepository(config),
     )
 
     assert found is None
@@ -7028,10 +7446,10 @@ def test_runtime_status_and_run_preview_never_refresh_checkout(
     item = status.items[0]
     assert item.projected_status == "blocked"
     assert item.source_sha == "a" * 40 and item.main_sha == "b" * 40
-    assert item.corroboration["gitlab"] == "confirmed"
-    assert item.corroboration["worktree"] == "confirmed"
+    assert item.corroboration["gitlab"] == "unknown"
+    assert item.corroboration["worktree"] == "unknown"
     assert item.corroboration["process"] == "missing"
-    assert repository.changed_paths_calls == 1
+    assert repository.changed_paths_calls == 0
     assert repository.has_changes_calls == 0
     assert preview.outcome == "idle"
 
@@ -7095,6 +7513,45 @@ def test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing(
     )
     assert exact.total_items == 1 and not exact.items_truncated
     assert tuple(item.issue_iid for item in exact.items) == (201,)
+
+
+def test_bulk_status_uses_only_durable_records_while_exact_status_corroborates_live_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = ledger.persist(
+        _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN)
+    )
+    second = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+
+    bulk = dispatch(
+        CommandRequest(command="loop.status"), apply=False, dependencies=dependencies
+    )
+
+    assert tuple(item.issue_iid for item in bulk.items) == (
+        first.issue_iid,
+        second.issue_iid,
+    )
+    assert gitlab.fetch_issue_calls == []
+    assert repository.worktree_exists_calls == 0
+
+    targeted = dispatch(
+        CommandRequest(command="loop.status", issue_iid=first.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert targeted.items[0].corroboration["gitlab"] == "confirmed"
+    assert gitlab.fetch_issue_calls == [first.issue_iid]
+    assert repository.worktree_exists_calls == 1
 
 
 def test_observation_segment_does_not_refresh_the_unrelated_base_checkout(

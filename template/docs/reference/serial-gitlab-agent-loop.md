@@ -379,9 +379,10 @@ rank it compares absolute timezone-aware `created_at`, then numeric IID; it
 does not trust API ordering or query issue notes/comments. Malformed creation
 time evidence fails safely. Labels do not retroactively change existing issues.
 
-Create the two scoped labels during project setup. Humans can assign high to
-expedite fresh work, remove either label for normal ordering, or assign low to
-defer it.
+Project setup provisions the lifecycle label specifications below with their
+fixed colors and plain descriptions. Humans can assign high to expedite fresh
+work, remove either priority label for normal ordering, or assign low to defer
+it.
 
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
@@ -389,6 +390,16 @@ defer it.
 | `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, required receipts, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
+| `agent::needs_repair` | needs-repair | Corroborated retained work has a supported explicit reviewed recovery path, but is not fresh-selectable. |
+| `agent::repair_failed` | repair-failed | An explicit reviewed repair attempt failed or its exact evidence changed; a new reviewed plan is required. |
+| `agent::suggest_close` | suggest-close | Corroborated duplicate, superseded, already-satisfied, or no-longer-applicable evidence recommends human closure. |
+
+`agent::needs_repair` uses `#D4A72C`, `agent::repair_failed` uses `#C91C00`,
+and `agent::suggest_close` uses `#6F42C1`. These three labels are mutually
+exclusive with each other and with `agent::running`, `agent::awaiting-human`,
+`agent::blocked`, and `agent::failed`; none is eligible for fresh selection.
+`agent::blocked` remains the projection for an authority, safety, or unresolved
+evidence decision, and `agent::failed` remains exceptional or unrecoverable.
 
 | Queue label | Fresh-work rank | Control |
 | --- | --- | --- |
@@ -458,10 +469,10 @@ selection is safe. A successful pipeline clears the corresponding observation;
 Missing, malformed, inaccessible, identity, or validation pipeline evidence
 fails closed rather than allowing unrelated work to proceed.
 
-A corroborated failed pipeline takes precedence over
-ordinary issue selection. An exact failed merge-request pipeline may resume a
-bounded repair and revalidation only when a retained owner has exact configured
-project, merge-request, branch, source-SHA, and worktree evidence. A failed
+A corroborated failed pipeline takes precedence over ordinary issue selection.
+An exact failed merge-request pipeline with a retained owner having exact
+configured project, merge-request, branch, source-SHA, and worktree evidence
+transitions to `agent::needs_repair`; it is not resumed automatically. A failed
 default-branch pipeline, or a failed merge-request pipeline without that safe
 exact owner, records an actionable human handoff or block instead. It does not
 claim an unrelated issue, invent a repair owner, or weaken the human-only
@@ -474,15 +485,25 @@ deduplicated issue, which later normal reconciliation may select for a new
 applicable workflow; unverified evidence produces no repository work.
 
 The ordinary loop, canary checkpoint, and targeted recovery use the same
-recovery order: corroborated failed default-branch or open-MR pipelines come
-first. A failed MR pipeline can enter repair only for its exact retained owner;
-otherwise, and for a failed default-branch pipeline, the result is an
-actionable human block. Next comes the sole active resumable retained record,
-then an explicitly targeted blocked retry. A nonterminal pipeline is a wait
-before any fresh work. Only ordinary `loop run` may then select a fresh issue.
-Two active retained records, a competing owner, or a higher-priority owner is
-an identity conflict: the command fails closed and reports the exact safe next
-action.
+recovery order: the pipeline and default-evidence gate comes first; an exact
+failed-MR owner becomes `agent::needs_repair`; then comes the sole active
+resumable retained record; then exact-IID reviewed repair or reclassification;
+then waits; and only then may ordinary `loop run` select fresh work. Recovery
+is activated only by a `loop recover --issue-iid IID` preview followed by an
+exact reviewed plan and apply. A repair that fails, or whose exact evidence
+changes before apply, becomes `agent::repair_failed` while retaining plan
+identity, evidence delta, failure, timing, and worktree; a new reviewed plan
+is required. Existing blocked records may be reclassified only one IID at a
+time with live corroboration. Bulk status does not corroborate each item;
+targeted status may. Two active retained records, a competing owner, or a
+higher-priority owner is an identity conflict: the command fails closed and
+reports the exact safe next action.
+
+`agent::suggest_close` is a recommendation only. It requires structured,
+corroborated duplicate, superseded, already-satisfied, or no-longer-applicable
+evidence and never closes an issue. Only human closure reconciles the record to
+`COMPLETE` and clears that label. The runner never approves, merges, or closes
+an issue.
 
 Each timer activation acquires the single-project lock and reconciles intent
 and observed evidence. At the start of an applied activation, before it resumes

@@ -27,6 +27,7 @@ from .domain import (
     NONTERMINAL_PIPELINE_STATUSES,
     CommandRequest,
     ErrorCode,
+    RepairAttemptEvidence,
     RunnerState,
     WorkflowPhase,
     WorkKind,
@@ -230,6 +231,7 @@ def _operational_evidence(
     max_activation_seconds: int,
     gitlab: GitLabPort,
     repository: RepositoryPort,
+    lifecycle_label_drift: tuple[str, ...],
 ) -> OperationalPlan:
     """Build compact public evidence for a reviewed non-claiming operation."""
     selected = next(
@@ -264,6 +266,7 @@ def _operational_evidence(
         "record_fingerprint": None
         if selected is None
         else hashlib.sha256(selected.model_dump_json().encode()).hexdigest(),
+        "lifecycle_label_drift": ",".join(lifecycle_label_drift),
     }
     if selected is not None:
         try:
@@ -367,6 +370,11 @@ def _normalization_is_exact(
         return False
 
 
+def _repair_evidence_copy(evidence: Mapping[str, object]) -> dict[str, object]:
+    """Copy reviewed operational evidence into the bounded repair record shape."""
+    return {key: value for key, value in evidence.items()}
+
+
 def _operational_preview(
     request: CommandRequest,
     *,
@@ -387,8 +395,14 @@ def _operational_preview(
     action = "checkpoint"
     next_action = "Review the operational checkpoint; no issue was claimed."
     outcome = "checkpoint"
+    label_drift = wired.lifecycle_label_drift()
+    if request.command == "loop.canary" and label_drift:
+        action = "provision_lifecycle_labels"
+        next_action = "Review and apply the fixed lifecycle-label provisioning plan."
     if request.command == "loop.canary":
-        if gate.repair_owner is not None:
+        if action == "provision_lifecycle_labels":
+            pass
+        elif gate.repair_owner is not None:
             target = gate.repair_owner.issue_iid
             next_action = (
                 f"Recover retained issue {target} for the failed exact pipeline."
@@ -399,6 +413,40 @@ def _operational_preview(
     else:
         if target is None:
             raise RuntimeError("recover requires an issue IID")
+        if (
+            gate.repair_owner is not None
+            and gate.repair_owner.issue_iid != target
+            and gate.repair_owner.state
+            in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}
+        ):
+            action = "pipeline_blocked"
+            next_action = (
+                f"Requested issue {target} cannot be recovered while retained issue "
+                f"{gate.repair_owner.issue_iid} owns the failed exact pipeline."
+            )
+            plan = _operational_evidence(
+                config=wired.config,
+                project=project,
+                identity=username,
+                records=records,
+                target_iid=target,
+                action=action,
+                command=request.command,
+                max_segments=request.max_segments,
+                max_activation_seconds=request.max_activation_seconds,
+                gitlab=wired.gitlab,
+                repository=wired.repository,
+                lifecycle_label_drift=label_drift,
+            )
+            return _report(
+                request,
+                applied=False,
+                outcome="pipeline_blocked",
+                project={"host": wired.config.host, "project_id": project.id},
+                summary="Read-only operational plan.",
+                next_action=next_action,
+                operational_plan=plan,
+            )
         if gate.outcome is not None and gate.outcome != "pipeline_wait":
             action = gate.outcome
             next_action = gate.next_action or next_action
@@ -414,6 +462,7 @@ def _operational_preview(
                 max_activation_seconds=request.max_activation_seconds,
                 gitlab=wired.gitlab,
                 repository=wired.repository,
+                lifecycle_label_drift=label_drift,
             )
             return _report(
                 request,
@@ -454,7 +503,11 @@ def _operational_preview(
             conflict = min(conflicts, key=lambda record: record.issue_iid)
             next_action = f"Recover retained issue {conflict.issue_iid} before advancing issue {target}."
         elif record is not None:
-            action = "run_segment"
+            action = (
+                "repair"
+                if record.state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}
+                else "run_segment"
+            )
             next_action = (
                 f"Apply the reviewed repair checkpoint for retained issue {target}."
             )
@@ -470,6 +523,7 @@ def _operational_preview(
         max_activation_seconds=request.max_activation_seconds,
         gitlab=wired.gitlab,
         repository=wired.repository,
+        lifecycle_label_drift=label_drift,
     )
     return _report(
         request,
@@ -497,6 +551,8 @@ class RuntimeDependencies:
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
     process_probe: Callable[[], str]
+    lifecycle_label_drift: Callable[[], tuple[str, ...]] = lambda: ()
+    ensure_lifecycle_labels: Callable[[], None] = lambda: None
 
 
 @dataclass(frozen=True)
@@ -543,8 +599,21 @@ def find_exact_pipeline_owner(
         for record in records
         if record.merge_request_iid == merge_request.iid
         and record.project_id == project_id
-        and record.state is RunnerState.OBSERVING
-        and record.phase is WorkflowPhase.PIPELINE_WAIT
+        and (
+            (
+                record.state is RunnerState.OBSERVING
+                and record.phase is WorkflowPhase.PIPELINE_WAIT
+            )
+            or (
+                record.state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}
+                and record.phase is WorkflowPhase.POST_PUBLICATION
+            )
+            or (
+                record.state is RunnerState.REPAIR
+                and record.phase is WorkflowPhase.WORKFLOW
+                and record.repair_attempt is not None
+            )
+        )
         and record.source_sha == merge_request.sha
         and record.source_branch == merge_request.source_branch
     )
@@ -708,10 +777,11 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         )
 
     now = lambda: datetime.now(UTC)
+    gitlab = GitLabGateway(config, run_subprocess)
     return RuntimeDependencies(
         config=config,
         ledger=JsonLedger(config.state_root, clock=now),
-        gitlab=GitLabGateway(config, run_subprocess),
+        gitlab=gitlab,
         repository=GitRepository(
             config,
             run_subprocess,
@@ -725,6 +795,8 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
         process_probe=probe_project_lock,
+        lifecycle_label_drift=gitlab.lifecycle_label_drift,
+        ensure_lifecycle_labels=gitlab.ensure_lifecycle_labels,
     )
 
 
@@ -866,6 +938,11 @@ def dispatch(
             reviewed = OperationalPlan.model_validate(payload)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise RuntimeError("operational plan is invalid") from error
+        if reviewed.command != request.command or (
+            request.command == "loop.recover"
+            and reviewed.target_iid != request.issue_iid
+        ):
+            raise RuntimeError("operational plan does not match the requested command")
         with wired.lock():
             current_project = gitlab.verify_project()
             if current_project != project:
@@ -879,11 +956,51 @@ def dispatch(
                 request, wired=wired, project=current_project, username=current_username
             )
             if current.operational_plan != reviewed:
+                if request.command == "loop.recover" and request.issue_iid is not None:
+                    retained = ledger.load(request.issue_iid)
+                    if retained is not None and retained.state in {
+                        RunnerState.NEEDS_REPAIR,
+                        RunnerState.REPAIR_FAILED,
+                    }:
+                        repair_attempt = RepairAttemptEvidence(
+                            reviewed_plan_fingerprint=reviewed.fingerprint,
+                            reviewed_snapshot=_repair_evidence_copy(reviewed.evidence),
+                            evidence_delta={"current": "changed"},
+                            failure_reason="reviewed repair plan evidence changed",
+                            started_at=wired.clock().isoformat(),
+                            elapsed_seconds=0.0,
+                        )
+                        failed = ledger.persist(
+                            retained.model_copy(
+                                update={"repair_attempt": repair_attempt}
+                            )
+                            if retained.state is RunnerState.REPAIR_FAILED
+                            else transition_record(
+                                retained,
+                                RunnerState.REPAIR_FAILED,
+                                phase=WorkflowPhase.POST_PUBLICATION,
+                                repair_attempt=repair_attempt,
+                            )
+                        )
+                        gitlab.transition_labels(
+                            failed.issue_iid, label_for_state(failed.state)
+                        )
                 raise RuntimeError(
                     "operational plan evidence changed; create a new preview"
                 )
             if reviewed.action == "checkpoint":
                 return current.model_copy(update={"applied": True})
+            if reviewed.action == "provision_lifecycle_labels":
+                wired.ensure_lifecycle_labels()
+                return _report(
+                    request,
+                    applied=True,
+                    outcome="lifecycle_labels_provisioned",
+                    project=identity,
+                    summary="Fixed lifecycle labels were provisioned.",
+                    next_action="Run a new read-only canary checkpoint.",
+                    operational_plan=reviewed,
+                )
             if reviewed.action == "target_missing":
                 raise RuntimeError("operational recovery target is absent")
             if reviewed.action in {
@@ -924,7 +1041,7 @@ def dispatch(
                     project=identity,
                     operational_plan=reviewed,
                 )
-            if reviewed.action == "run_segment":
+            if reviewed.action in {"run_segment", "repair"}:
                 wired.invoke.preflight()
                 if record.state is RunnerState.BLOCKED:
                     record = ledger.persist(
@@ -937,6 +1054,49 @@ def dispatch(
                         )
                     )
                     gitlab.transition_labels(target, label_for_state(record.state))
+                elif record.state in {
+                    RunnerState.NEEDS_REPAIR,
+                    RunnerState.REPAIR_FAILED,
+                }:
+                    if record.state is RunnerState.REPAIR_FAILED:
+                        record = ledger.persist(
+                            transition_record(
+                                record,
+                                RunnerState.NEEDS_REPAIR,
+                                phase=WorkflowPhase.POST_PUBLICATION,
+                                summary="Fresh exact-IID repair plan reviewed.",
+                                next_action="Run the reviewed repair.",
+                            )
+                        )
+                    record = ledger.persist(
+                        transition_record(
+                            record,
+                            RunnerState.REPAIR,
+                            phase=WorkflowPhase.WORKFLOW,
+                            error_code=ErrorCode.PIPELINE_REJECTED,
+                            repair_attempt=RepairAttemptEvidence(
+                                reviewed_plan_fingerprint=reviewed.fingerprint,
+                                reviewed_snapshot=_repair_evidence_copy(
+                                    reviewed.evidence
+                                ),
+                                evidence_delta={},
+                                failure_reason="",
+                                started_at=wired.clock().isoformat(),
+                                elapsed_seconds=0.0,
+                            ),
+                            summary="Exact-IID reviewed repair activated.",
+                            next_action="Run the repair workflow.",
+                        )
+                    )
+                    gitlab.transition_labels(target, label_for_state(record.state))
+                    return _report(
+                        request,
+                        applied=True,
+                        outcome="activation_complete",
+                        records=(record,),
+                        project=identity,
+                        operational_plan=reviewed,
+                    )
                 started = wired.monotonic()
                 results: list[LedgerRecord] = []
                 for _segment_number in range(request.max_segments):
@@ -1005,7 +1165,13 @@ def dispatch(
                         repository=repository,
                         clock=wired.clock,
                         process_probe=lambda: process,
-                    ),
+                    )
+                    if request.issue_iid is not None
+                    else {
+                        "gitlab": "unknown",
+                        "worktree": "unknown",
+                        "process": process,
+                    },
                 )
                 for record in shown
             ),
@@ -1213,12 +1379,7 @@ def dispatch(
         raise RuntimeError("unsupported command")
     if not apply:
         records = ledger.list_records()
-        active = tuple(
-            record
-            for record in records
-            if record.state.value
-            not in {"blocked", "awaiting-human", "failed", "complete"}
-        )
+        active = tuple(record for record in records if record.state in ACTIVE_STATES)
         if active:
             return _report(
                 request,
@@ -1244,15 +1405,18 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
-        if gate.repair_owner is not None:
+        if (
+            gate.repair_owner is not None
+            and gate.repair_owner.state is not RunnerState.REPAIR
+        ):
             return _report(
                 request,
                 applied=False,
                 outcome="pipeline_blocked",
                 project=identity,
                 stop_reason="pipeline_blocked",
-                summary="An exact retained owner can resume failed-pipeline repair.",
-                next_action="Run the applied loop command to resume bounded repair.",
+                summary="An exact retained owner needs a reviewed repair plan.",
+                next_action="Preview and apply exact-IID loop recover; ordinary loop run cannot start repair.",
             )
         record_iids = {record.issue_iid for record in records}
         eligible = tuple(
@@ -1290,25 +1454,47 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
-        if gate.repair_owner is not None:
-            repaired = ledger.persist(
+        retained_repair = next(
+            (
+                item
+                for item in inventory
+                if item.state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}
+            ),
+            None,
+        )
+        if retained_repair is not None:
+            return _report(
+                request,
+                applied=True,
+                outcome="idle",
+                project=identity,
+                stop_reason=retained_repair.state.value.replace("-", "_"),
+            )
+        if (
+            gate.repair_owner is not None
+            and gate.repair_owner.state is not RunnerState.REPAIR
+        ):
+            needs_repair = ledger.persist(
                 transition_record(
                     gate.repair_owner,
-                    RunnerState.REPAIR,
-                    phase=WorkflowPhase.WORKFLOW,
+                    RunnerState.NEEDS_REPAIR,
+                    phase=WorkflowPhase.POST_PUBLICATION,
                     error_code=ErrorCode.PIPELINE_REJECTED,
                     summary="The exact current-source pipeline failed.",
-                    next_action="Run the bounded post-publication repair and revalidation segment.",
+                    next_action="Review a new exact-IID repair plan before recovery.",
                 )
+            )
+            gitlab.transition_labels(
+                needs_repair.issue_iid, label_for_state(needs_repair.state)
             )
             return _report(
                 request,
                 applied=True,
                 outcome="activation_complete",
-                records=(repaired,),
+                records=(needs_repair,),
                 project=identity,
                 segments_run=1,
-                stop_reason="repair",
+                stop_reason="needs_repair",
             )
 
         def remaining_activation_seconds() -> float:
@@ -1365,6 +1551,9 @@ def dispatch(
                 RunnerState.FAILED,
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.COMPLETE,
+                RunnerState.NEEDS_REPAIR,
+                RunnerState.REPAIR_FAILED,
+                RunnerState.SUGGEST_CLOSE,
             }:
                 stop_reason = record.state.value.replace("-", "_")
                 break

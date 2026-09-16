@@ -130,6 +130,63 @@ def test_builder_derives_trusted_identity_and_validates_completed_workflow(
     assert transitioned.phase is WorkflowPhase.READY_TO_PUBLISH
 
 
+def test_builder_produces_a_structured_human_only_close_suggestion(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
+    )
+    build_input = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "coding",
+            "result_kind": "suggest_close",
+            "change_summary": "The work is already satisfied by the exact merged change.",
+            "next_action": "A human may review the evidence and close the issue.",
+            "suggest_close_evidence": {
+                "reason": "already-satisfied",
+                "issue_iid": 81,
+                "evidence": [
+                    "https://gitlab.example.test/group/project/-/merge_requests/9"
+                ],
+            },
+        }
+    )
+
+    result = build_worker_result(record, build_input, changed_paths=())
+    outcome = apply_worker_result(record, result, now=datetime(2026, 9, 16, tzinfo=UTC))
+
+    assert result.phase_status == "complete"
+    assert outcome.record.state is RunnerState.SUGGEST_CLOSE
+    assert outcome.record.suggest_close_evidence is not None
+    assert outcome.record.suggest_close_evidence.issue_iid == record.issue_iid
+
+
+def test_builder_rejects_a_close_suggestion_bound_to_another_issue(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
+    )
+    build_input = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "coding",
+            "result_kind": "suggest_close",
+            "change_summary": "The work is already satisfied.",
+            "next_action": "A human may review the evidence.",
+            "suggest_close_evidence": {
+                "reason": "already-satisfied",
+                "issue_iid": 82,
+                "evidence": [
+                    "https://gitlab.example.test/group/project/-/merge_requests/9"
+                ],
+            },
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError):
+        build_worker_result(record, build_input, changed_paths=())
+
+
 def test_builder_preserves_a_complete_multiline_coding_receipt_audit(
     tmp_path: Path,
 ) -> None:

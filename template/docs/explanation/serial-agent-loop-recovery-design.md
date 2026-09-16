@@ -118,12 +118,19 @@ GitLab labels have deliberately coarse meanings:
 | `agent::awaiting-human` | The exact MR, named source commit, required receipts, and factory-authored actionable issue handoff are ready for human review. |
 | `agent::blocked` | A documented human action is necessary before work can continue. |
 | `agent::failed` | An exceptional unrecoverable condition prevented safe reconciliation or recording. |
+| `agent::needs_repair` | Corroborated retained work has a supported explicit reviewed recovery path, but cannot be freshly selected. |
+| `agent::repair_failed` | A reviewed repair attempt failed or exact evidence changed, so a new reviewed plan is necessary. |
+| `agent::suggest_close` | Structured corroborated evidence recommends human closure for duplicate, superseded, already-satisfied, or no-longer-applicable work. |
 
-The ledger refines `agent::running` into `preparing`, `executing`,
-`retry-wait`, `publishing`, `observing`, and `repair`. It also records terminal
-details for `blocked`, `awaiting-human`, and exceptional `failed` outcomes.
-Labels communicate operator-visible ownership; they are not the transaction
-log.
+The three recovery/closure labels are mutually exclusive with each other and
+with running, awaiting-human, blocked, and failed labels. They are not fresh
+selection candidates. The ledger refines `agent::running` into `preparing`,
+`executing`, `retry-wait`, `publishing`, `observing`, and `repair`; it retains
+the plan identity, evidence delta, failure, timing, and worktree when a repair
+becomes `agent::repair_failed`. `agent::blocked` continues to mean authority,
+safety, or unresolved-evidence work, while `agent::failed` remains exceptional
+or unrecoverable. Labels communicate operator-visible ownership; they are not
+the transaction log.
 
 ## State-machine activation and workflow sessions
 
@@ -135,31 +142,36 @@ handoff:
 1. Acquire the single-project local lock.
 2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
    the local ledger.
-3. Resume recoverable `agent::running` work before selecting new work.
-4. Before fresh selection, inspect the configured project's newest
-   default-branch pipeline and every open merge request's newest pipeline for
-   that merge request's exact current source SHA. Missing, malformed, or
-   inaccessible evidence blocks selection; a nonterminal observation yields.
-   A corroborated terminal failure is handled before ordinary work:
-   only an exact retained owner may resume bounded merge-request repair and
-   revalidation; default-branch or ownerless merge-request failures become
-   actionable human blocks.
-5. Filter fresh work to open, non-confidential issues with no lifecycle
+3. Apply the pipeline and default-evidence gate by inspecting the configured
+   project's newest default-branch pipeline and every open merge request's
+   newest pipeline for that merge request's exact current source SHA. Missing,
+   malformed, or inaccessible evidence blocks selection; a nonterminal
+   observation yields. An exact failed MR pipeline with a retained owner
+   transitions to `agent::needs_repair`; it does not start repair automatically.
+4. Resume the sole recoverable `agent::running` work.
+5. Permit repair or blocked-record reclassification only for one exact IID,
+   with live corroboration and a reviewed `loop recover --issue-iid IID` plan.
+   A bulk status report cannot supply per-item live corroboration; targeted
+   status may.
+6. Treat a failed default-branch or ownerless merge-request pipeline as an
+   actionable human block, then continue only when the preceding gate and
+   targeted recovery decisions permit fresh selection.
+7. Filter fresh work to open, non-confidential issues with no lifecycle
    projection, ledger record, or open split prerequisite. Rank exact high,
    then normal (no recognized exact priority label), then exact low; within a
    rank compare absolute creation time and IID.
-6. Classify it before claiming it as ordinary issue work, existing-MR
+8. Classify it before claiming it as ordinary issue work, existing-MR
    remediation, merge-conflict repair, or protected policy work that requires
    the manual lane.
-7. Persist transition intent before the corresponding external mutation, then
+9. Persist transition intent before the corresponding external mutation, then
    record the observed result. Reconciliation completes or compensates any
    transition interrupted between those writes.
-8. Run one bounded workflow-owning worker in the issue's durable worktree.
-9. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
+10. Run one bounded workflow-owning worker in the issue's durable worktree.
+11. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
    `needs_human`.
-10. Publish idempotently and verify exact same-project MR, branch, target, tip,
+12. Publish idempotently and verify exact same-project MR, branch, target, tip,
    and closing-issue evidence.
-11. Record one safe, actionable outcome. Continue immediately with the same
+13. Record one safe, actionable outcome. Continue immediately with the same
     issue when progress is safe, or yield when the activation reaches idle,
     no progress or a future external wait, a terminal or human-facing
     state, or its workflow or wall-time bound.
