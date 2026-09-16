@@ -131,30 +131,31 @@ ruff-format:
           py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
-      PYTHONPATH="$CI_PROJECT_DIR/src" \
-          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-1" \
-          UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
-              --cov=src/agent_work \
-              --junitxml="test-results-$TEST_ENVIRONMENT-shard-1.xml" \
-              -o "junit_suite_name=$TEST_ENVIRONMENT" \
-              -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-1" \
-              tests/test_agent_work_serial_runtime.py tests/test_template.py &
+      run_shard() {
+          local shard="$1"
+          shift
+          PYTHONPATH="$CI_PROJECT_DIR/src" \
+              COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$shard" \
+              UV_PROJECT_ENVIRONMENT="$python_environment" \
+              uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
+                  --cov=src/agent_work \
+                  --junitxml="test-results-$TEST_ENVIRONMENT-shard-$shard.xml" \
+                  -o "junit_suite_name=$TEST_ENVIRONMENT" \
+                  -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$shard" \
+                  "$@" &
+      }
+      run_shard 1 tests/test_agent_work_serial_runtime.py
       shard_1_pid=$!
-      PYTHONPATH="$CI_PROJECT_DIR/src" \
-          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-2" \
-          UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
-              --cov=src/agent_work \
-              --junitxml="test-results-$TEST_ENVIRONMENT-shard-2.xml" \
-              -o "junit_suite_name=$TEST_ENVIRONMENT" \
-              -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-2" \
-              --ignore=tests/test_agent_work_serial_runtime.py \
-              --ignore=tests/test_template.py &
+      run_shard 2 tests/test_template.py
       shard_2_pid=$!
+      run_shard 3 \
+          --ignore=tests/test_agent_work_serial_runtime.py \
+          --ignore=tests/test_template.py
+      shard_3_pid=$!
       shard_status=0
       wait "$shard_1_pid" || shard_status=1
       wait "$shard_2_pid" || shard_status=1
+      wait "$shard_3_pid" || shard_status=1
       if [ "$shard_status" -ne 0 ]; then
           exit "$shard_status"
       fi
@@ -163,6 +164,7 @@ ruff-format:
           uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage combine \
               ".coverage.$TEST_ENVIRONMENT-shard-1" \
               ".coverage.$TEST_ENVIRONMENT-shard-2" \
+              ".coverage.$TEST_ENVIRONMENT-shard-3" \
           || coverage_combine_status=$?
       if [ "$coverage_combine_status" -ne 0 ]; then
           exit "$coverage_combine_status"
@@ -184,6 +186,7 @@ ruff-format:
       junit:
         - test-results-$TEST_ENVIRONMENT-shard-1.xml
         - test-results-$TEST_ENVIRONMENT-shard-2.xml
+        - test-results-$TEST_ENVIRONMENT-shard-3.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage-$TEST_ENVIRONMENT.xml
