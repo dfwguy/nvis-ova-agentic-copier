@@ -234,7 +234,10 @@ before checking repository safeguards.
    plan, then create, review, and apply one exact non-claiming canary plan
    before re-enabling the timer. For retained work, use a separate exact-IID
    `loop recover --issue-iid IID --apply --plan-file PATH` plan; do not use
-   ordinary `loop run` as a recovery canary.
+   ordinary `loop run` as a recovery canary. A canary may instead propose the
+   fixed lifecycle-label provisioning action; review and apply that exact plan
+   while stopped, then checkpoint before re-enabling. It never assigns labels
+   to an issue.
 
 Enabling the guarded loop authorizes it to resume active or automatically
 resumable work before selecting fresh open, non-confidential issues without a

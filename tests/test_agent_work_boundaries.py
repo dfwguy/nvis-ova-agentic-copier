@@ -860,6 +860,91 @@ def test_gitlab_lifecycle_transition_never_requests_target_removal(
         assert f"add_labels={target}" in update
 
 
+@pytest.mark.parametrize(
+    "lifecycle_label",
+    ["agent::needs_repair", "agent::repair_failed", "agent::suggest_close"],
+)
+def test_new_nonactive_lifecycle_label_is_ineligible_and_transition_removes_all_competitors(
+    tmp_path: Path, lifecycle_label: str
+) -> None:
+    api = ApiStub()
+    api.issue = _issue_payload(labels=["customer::priority", lifecycle_label])
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    assert gateway.list_eligible() == ()
+
+    gateway.transition_labels(12, lifecycle_label)
+
+    update = next(command for command in api.commands if "PUT" in command)
+    removed = next(part for part in update if part.startswith("remove_labels="))
+    assert set(removed.removeprefix("remove_labels=").split(",")) == {
+        "agent::running",
+        "agent::awaiting-human",
+        "agent::blocked",
+        "agent::failed",
+        "agent::needs_repair",
+        "agent::repair_failed",
+        "agent::suggest_close",
+    }.difference({lifecycle_label})
+
+
+def test_gitlab_lifecycle_label_provisioning_is_idempotent_and_numeric_project_scoped(
+    tmp_path: Path,
+) -> None:
+    class LabelApi:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+            self.labels: list[dict[str, str]] = []
+
+        def __call__(
+            self, command: tuple[str, ...], **_kwargs: object
+        ) -> CommandResult:
+            self.commands.append(command)
+            endpoint = command[command.index("-X") + 2]
+            method = command[command.index("-X") + 1]
+            if endpoint != "projects/310967/labels":
+                raise AssertionError(endpoint)
+            if method == "POST":
+                fields = {
+                    field.partition("=")[0]: field.partition("=")[2]
+                    for field in command
+                    if "=" in field
+                }
+                self.labels.append(
+                    {
+                        "name": fields["name"],
+                        "color": fields["color"],
+                        "description": fields["description"],
+                    }
+                )
+                return CommandResult(0, json.dumps(self.labels[-1]), "")
+            return CommandResult(0, json.dumps(self.labels), "")
+
+    api = LabelApi()
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    gateway.ensure_lifecycle_labels()
+    gateway.ensure_lifecycle_labels()
+
+    creates = [
+        command
+        for command in api.commands
+        if "-X" in command and command[command.index("-X") + 1] == "POST"
+    ]
+    assert len(creates) == 3
+    assert {label["name"] for label in api.labels} == {
+        "agent::needs_repair",
+        "agent::repair_failed",
+        "agent::suggest_close",
+    }
+    assert {label["color"] for label in api.labels} == {"#D4A72C", "#C91C00", "#6F42C1"}
+    assert all(label["description"].strip() for label in api.labels)
+    assert all(
+        command[command.index("-X") + 2] == "projects/310967/labels"
+        for command in api.commands
+    )
+
+
 def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     tmp_path: Path,
 ) -> None:

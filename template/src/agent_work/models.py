@@ -31,8 +31,10 @@ from pydantic import (
 
 from .domain import (
     ErrorCode,
+    RepairAttemptEvidence,
     RunnerState,
     StatusProjection,
+    SuggestCloseEvidence,
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
@@ -563,6 +565,8 @@ class LedgerRecord(BoundaryModel):
     merge_request_draft: MergeRequestDraft | None = None
     feedback_cursor: MergeRequestFeedbackCursor | None = None
     pending_feedback: PendingMergeRequestFeedback | None = None
+    repair_attempt: RepairAttemptEvidence | None = None
+    suggest_close_evidence: SuggestCloseEvidence | None = None
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
     error_code: ErrorCode | None = None
@@ -578,8 +582,22 @@ class LedgerRecord(BoundaryModel):
     next_action: str = ""
 
     @model_validator(mode="after")
-    def validate_decomposition(self) -> LedgerRecord:
-        """Keep durable decomposition state and recovered child progress coherent."""
+    def validate_lifecycle_and_decomposition(self) -> LedgerRecord:
+        """Keep durable lifecycle and decomposition evidence coherent."""
+        if (
+            self.state is RunnerState.SUGGEST_CLOSE
+            and self.suggest_close_evidence is None
+        ):
+            raise ValueError("suggest-close state requires structured evidence")
+        if self.suggest_close_evidence is not None and (
+            self.state is not RunnerState.SUGGEST_CLOSE
+            or self.suggest_close_evidence.issue_iid != self.issue_iid
+        ):
+            raise ValueError(
+                "suggest-close evidence must bind its matching state and issue"
+            )
+        if self.state is RunnerState.REPAIR_FAILED and self.repair_attempt is None:
+            raise ValueError("repair-failed state requires repair-attempt evidence")
         requires_plan = self.state is RunnerState.DECOMPOSING or (
             self.state is RunnerState.RETRY_WAIT
             and self.prior_state is RunnerState.DECOMPOSING
@@ -625,7 +643,11 @@ class WorkerResultEnvelope(BoundaryModel):
     expected_phase: WorkflowPhase
     workflow_lane: WorkflowLane
     result_kind: Literal[
-        "ready_to_publish", "retryable", "needs_human", "split_required"
+        "ready_to_publish",
+        "retryable",
+        "needs_human",
+        "split_required",
+        "suggest_close",
     ]
     phase_status: Literal["complete", "rejected"]
     completed_phase: WorkflowPhase
@@ -638,6 +660,7 @@ class WorkerResultEnvelope(BoundaryModel):
     redacted_summary: str = ""
     next_action: str = Field(min_length=1, max_length=2_000)
     audit_summary: AuditReceiptSummary | None = None
+    suggest_close_evidence: SuggestCloseEvidence | None = None
 
     @model_validator(mode="after")
     def validate_split_context(self) -> WorkerResultEnvelope:
@@ -658,6 +681,21 @@ class WorkerResultEnvelope(BoundaryModel):
                 raise ValueError("split_required envelope has invalid context")
         elif self.split_plan is not None:
             raise ValueError("split_plan is only valid for split_required")
+        if self.result_kind == "suggest_close":
+            if (
+                self.expected_phase is not WorkflowPhase.POST_PUBLICATION
+                or self.completed_phase is not WorkflowPhase.POST_PUBLICATION
+                or self.phase_status != "complete"
+                or self.suggest_close_evidence is None
+                or self.suggest_close_evidence.issue_iid != self.issue_iid
+                or self.receipts
+                or self.merge_request_draft is not None
+                or self.audit_summary is not None
+                or self.error_code is not None
+            ):
+                raise ValueError("suggest_close envelope has invalid context")
+        elif self.suggest_close_evidence is not None:
+            raise ValueError("suggest_close_evidence is only valid for suggest_close")
         is_completed_workflow = (
             self.completed_phase is WorkflowPhase.WORKFLOW
             and self.result_kind == "ready_to_publish"

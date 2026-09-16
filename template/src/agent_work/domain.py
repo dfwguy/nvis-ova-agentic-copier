@@ -16,7 +16,10 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
 HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS: Final = 120
@@ -34,6 +37,9 @@ class RunnerState(StrEnum):
     PUBLISHING = "publishing"
     OBSERVING = "observing"
     REPAIR = "repair"
+    NEEDS_REPAIR = "needs-repair"
+    REPAIR_FAILED = "repair-failed"
+    SUGGEST_CLOSE = "suggest-close"
     DECOMPOSING = "decomposing"
     BLOCKED = "blocked"
     AWAITING_HUMAN = "awaiting-human"
@@ -76,6 +82,9 @@ class StatusProjection(StrEnum):
     AWAITING_HUMAN_REVIEW = "awaiting-human-review"
     BLOCKED = "blocked"
     COMPLETE = "complete"
+    NEEDS_REPAIR = "needs-repair"
+    REPAIR_FAILED = "repair-failed"
+    SUGGEST_CLOSE = "suggest-close"
 
 
 class WorkKind(StrEnum):
@@ -142,7 +151,104 @@ LIFECYCLE_LABELS: Final = (
     "agent::awaiting-human",
     "agent::blocked",
     "agent::failed",
+    "agent::needs_repair",
+    "agent::repair_failed",
+    "agent::suggest_close",
 )
+
+LIFECYCLE_LABEL_SPECS: Final = MappingProxyType(
+    {
+        "agent::running": MappingProxyType(
+            {"color": "#1F78D1", "description": "Agent work is active."}
+        ),
+        "agent::awaiting-human": MappingProxyType(
+            {
+                "color": "#1F78D1",
+                "description": "Human review is required.",
+            }
+        ),
+        "agent::blocked": MappingProxyType(
+            {"color": "#C91C00", "description": "Agent work is blocked."}
+        ),
+        "agent::failed": MappingProxyType(
+            {"color": "#C91C00", "description": "Agent work failed."}
+        ),
+        "agent::needs_repair": MappingProxyType(
+            {
+                "color": "#D4A72C",
+                "description": "Pipeline repair needs a newly reviewed exact-IID plan.",
+            }
+        ),
+        "agent::repair_failed": MappingProxyType(
+            {
+                "color": "#C91C00",
+                "description": "A reviewed repair failed; preserve evidence and review a new plan.",
+            }
+        ),
+        "agent::suggest_close": MappingProxyType(
+            {
+                "color": "#6F42C1",
+                "description": "Structured evidence suggests closure; only a human may close it.",
+            }
+        ),
+    }
+)
+
+
+class _Evidence(BaseModel):
+    """Bounded non-secret evidence retained at a durable boundary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SuggestCloseEvidence(_Evidence):
+    """Evidence that permits a human-only close suggestion."""
+
+    reason: str
+    issue_iid: int = Field(gt=0)
+    evidence: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        if value not in {
+            "duplicate",
+            "superseded",
+            "already-satisfied",
+            "no-longer-applicable",
+        }:
+            raise ValueError("unsupported close-suggestion reason")
+        return value
+
+    @field_validator("evidence")
+    @classmethod
+    def validate_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            not item.strip()
+            or len(item) > 2048
+            or item.strip().lower() in {"close it", "claim"}
+            for item in value
+        ):
+            raise ValueError("close evidence must be bounded and meaningful")
+        return value
+
+
+class RepairAttemptEvidence(_Evidence):
+    """Reviewed plan and bounded evidence retained after a repair failure."""
+
+    reviewed_plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewed_snapshot: dict[str, object] = Field(default_factory=dict)
+    evidence_delta: dict[str, object] = Field(default_factory=dict)
+    failure_reason: str = Field(default="", max_length=2048)
+    started_at: str = Field(default="", max_length=128)
+    elapsed_seconds: float = Field(default=0.0, ge=0, le=DEFAULT_MAX_ACTIVATION_SECONDS)
+
+    @model_validator(mode="after")
+    def validate_size(self) -> RepairAttemptEvidence:
+        if len(str(self.reviewed_snapshot)) + len(str(self.evidence_delta)) > 8192:
+            raise ValueError("repair evidence exceeds bound")
+        return self
+
 
 AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"
 _SPLIT_MARKER: Final = re.compile(
@@ -217,6 +323,9 @@ def label_for_state(state: RunnerState) -> str | None:
         RunnerState.BLOCKED: "agent::blocked",
         RunnerState.AWAITING_HUMAN: "agent::awaiting-human",
         RunnerState.FAILED: "agent::failed",
+        RunnerState.NEEDS_REPAIR: "agent::needs_repair",
+        RunnerState.REPAIR_FAILED: "agent::repair_failed",
+        RunnerState.SUGGEST_CLOSE: "agent::suggest_close",
         RunnerState.COMPLETE: None,
     }[state]
 

@@ -35,13 +35,17 @@ is authorized by enabling the project-level timer. It selects eligible open,
 non-confidential issues without a lifecycle projection or ledger record, never
 approves or merges, and never applies or drops a recovery stash.
 
-Before enabling the loop, create the scoped GitLab labels
-`agent-priority::high` and `agent-priority::low`. For fresh eligible work, the
-loop orders exact high, normal (no recognized exact priority value), then exact
-low; within each group it uses absolute creation time and IID. Apply high to
-expedite an issue, low to defer it, or remove either label to return it to
-normal ordering. Active/resumable work and all eligibility checks still take
-precedence. Do not retroactively label existing issues.
+Before enabling the loop, ensure setup provisions the scoped GitLab priority
+labels `agent-priority::high` and `agent-priority::low`, plus lifecycle labels
+`agent::needs_repair` (`#D4A72C`), `agent::repair_failed` (`#C91C00`), and
+`agent::suggest_close` (`#6F42C1`). Use plain descriptions matching the
+reference meanings; do not repurpose these labels for a local workflow. For
+fresh eligible work, the loop orders exact high, normal (no recognized exact
+priority value), then exact low; within each group it uses absolute creation
+time and IID. Apply high to expedite an issue, low to defer it, or remove
+either label to return it to normal ordering. Active/resumable work and all
+eligibility checks still take precedence. Do not retroactively label existing
+issues.
 
 ## Check prerequisites and Developer-readable safeguards
 
@@ -386,7 +390,7 @@ durable-worktree recovery outcome in the same way as any other timeout.
 Use `--debug` when the redacted status needs local diagnostic context. Do not
 copy debug output containing private operational details into an issue.
 
-## Retry or recover running work
+## Retry or recover retained work
 
 First inspect the recorded state and next action. A retry is appropriate only
 for the named blocked item after explicit human direction; it resets that
@@ -407,6 +411,30 @@ not change labels to resume blocked work.
 Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
+
+When an item is `agent::needs_repair`, first request a targeted status for that
+exact IID. A bulk status listing does not live-corroborate every record. Review
+the resulting recovery plan, then apply that exact plan only if the evidence is
+still current:
+
+```bash
+export AGENT_WORK_BASE_BRANCH=agent/work-base
+uv run agent-work loop status --issue-iid IID --json
+uv run agent-work loop recover --issue-iid IID --json
+uv run agent-work loop recover --issue-iid IID --apply --plan-file PATH --json
+```
+
+Do not replace this sequence with a broad label edit or a bulk recovery. If the
+repair fails or the exact evidence changes, the record becomes
+`agent::repair_failed`; retain its worktree and plan evidence, obtain a new
+reviewed plan, and repeat the targeted process. A blocked record can likewise
+be reclassified only one IID at a time with live corroboration.
+
+An `agent::suggest_close` label is a structured recommendation for human
+closure, never an automated close. Review its duplicate, superseded,
+already-satisfied, or no-longer-applicable evidence. Only a human may close the
+issue; that closure reconciles the record to `COMPLETE` and clears the label.
+The loop never approves, merges, or closes issues.
 
 ### Observe an automated `split_required` decomposition
 
@@ -474,6 +502,11 @@ uv run agent-work loop canary --json >agent-work-canary-plan.json
 uv run agent-work loop canary --apply --plan-file agent-work-canary-plan.json --json
 uv run agent-work loop status --json
 ```
+
+If the preview reports lifecycle-label provisioning, review that deterministic
+label-spec action and apply it with the same stopped-timer sequence above.
+The apply rechecks the preview, creates missing fixed labels, and corrects
+their color or description; it never assigns an issue label.
 
 When status names a retained item requiring recovery, make a separate plan for
 that IID. Do not use ordinary `loop run` to bypass the targeted evidence check:

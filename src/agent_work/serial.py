@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
     ACTIVE_STATES,
+    DEFAULT_MAX_ACTIVATION_SECONDS,
     LIFECYCLE_LABELS,
     NONTERMINAL_PIPELINE_STATUSES,
     ErrorCode,
@@ -40,6 +41,7 @@ from .models import (
     MergeRequestFeedback,
     MergeRequestFeedbackCursor,
     PendingMergeRequestFeedback,
+    RepairAttemptEvidence,
     SplitChildEvidence,
     TransitionIntentRecord,
 )
@@ -63,6 +65,51 @@ from .worker import (
 
 class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
+
+
+def _record_reviewed_repair_failure(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+    evidence_delta: dict[str, object],
+    failure_reason: str,
+) -> LedgerRecord:
+    """Close one reviewed repair attempt and require a new exact-IID plan."""
+    attempt = record.repair_attempt
+    if record.state is not RunnerState.REPAIR or attempt is None:
+        raise ValueError("reviewed repair failure requires an active repair attempt")
+    started = datetime.fromisoformat(attempt.started_at)
+    if started.tzinfo is None or started.utcoffset() is None:
+        raise ValueError("reviewed repair attempt lacks a timezone-aware start time")
+    elapsed = min(
+        DEFAULT_MAX_ACTIVATION_SECONDS,
+        max(0.0, (now.astimezone(UTC) - started.astimezone(UTC)).total_seconds()),
+    )
+    delta: dict[str, object] = dict(evidence_delta)
+    if not delta:
+        delta["repair_failure"] = "recorded"
+    failed_attempt = RepairAttemptEvidence(
+        reviewed_plan_fingerprint=attempt.reviewed_plan_fingerprint,
+        reviewed_snapshot=attempt.reviewed_snapshot,
+        evidence_delta=delta,
+        failure_reason=failure_reason[:2_048] or "reviewed repair failed",
+        started_at=attempt.started_at,
+        elapsed_seconds=elapsed,
+    )
+    failed = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.REPAIR_FAILED,
+            phase=WorkflowPhase.POST_PUBLICATION,
+            repair_attempt=failed_attempt,
+            summary="Reviewed repair failed.",
+            next_action="Review a fresh exact-IID repair plan.",
+        )
+    )
+    gitlab.transition_labels(failed.issue_iid, label_for_state(failed.state))
+    return failed
 
 
 def _has_workflow_receipt(record: LedgerRecord) -> bool:
@@ -663,6 +710,8 @@ def select_record(
             raise SegmentError("pinned issue is not the active durable record")
         if _can_reconcile_published_ordinary_work(pinned):
             return pinned, gitlab.fetch_issue(pinned.issue_iid)
+        if pinned.state is RunnerState.SUGGEST_CLOSE:
+            return pinned, gitlab.fetch_issue(pinned.issue_iid)
         if pinned not in active:
             raise SegmentError("pinned issue is not the active durable record")
         if not _due(pinned, now):
@@ -674,6 +723,8 @@ def select_record(
     for record in records:
         issue = issues[record.issue_iid]
         if issue.state != "opened" and record.state is not RunnerState.COMPLETE:
+            return record, issue
+        if record.state is RunnerState.SUGGEST_CLOSE:
             return record, issue
     if active:
         record = active[0]
@@ -1455,6 +1506,15 @@ def _execute(
             if invocation.returncode is not None
             else None
         )
+        if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
+            return _record_reviewed_repair_failure(
+                record.model_copy(update={"worker_exit": worker_exit}),
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                evidence_delta={"worker_returncode": invocation.returncode},
+                failure_reason="repair worker returned a non-zero result",
+            )
         return _record_retry(
             record.model_copy(update={"worker_exit": worker_exit}),
             ledger=ledger,
@@ -1476,6 +1536,15 @@ def _execute(
                 expected_revision=record.revision,
             )
         except WorkerProtocolError as error:
+            if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
+                return _record_reviewed_repair_failure(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    evidence_delta={"worker_protocol": "invalid"},
+                    failure_reason="repair worker returned an invalid result",
+                )
             return _record_retry(
                 record,
                 ledger=ledger,
@@ -1490,8 +1559,32 @@ def _execute(
                 result.expected_state is not record.state
                 or result.expected_phase is not record.phase
             ):
+                if (
+                    record.state is RunnerState.REPAIR
+                    and record.repair_attempt is not None
+                ):
+                    return _record_reviewed_repair_failure(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        evidence_delta={"worker_result": "state_or_phase_mismatch"},
+                        failure_reason="repair worker result did not match the recorded phase",
+                    )
                 raise SegmentError("worker result does not match the recorded phase")
             if result.result_kind == "retryable":
+                if (
+                    record.state is RunnerState.REPAIR
+                    and record.repair_attempt is not None
+                ):
+                    return _record_reviewed_repair_failure(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        evidence_delta={"worker_result": "retryable"},
+                        failure_reason="repair worker requested a retry",
+                    )
                 return _record_retry(
                     record,
                     ledger=ledger,
@@ -1508,6 +1601,18 @@ def _execute(
                 )
                 outcome = apply_worker_result(record, result, now=now).record
             except RepositoryTransientError:
+                if (
+                    record.state is RunnerState.REPAIR
+                    and record.repair_attempt is not None
+                ):
+                    return _record_reviewed_repair_failure(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        evidence_delta={"validation": "repository_transient"},
+                        failure_reason="repair validation encountered a repository transient",
+                    )
                 return _record_retry(
                     record,
                     ledger=ledger,
@@ -1516,10 +1621,34 @@ def _execute(
                     error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
                 )
             except RepositoryError as error:
+                if (
+                    record.state is RunnerState.REPAIR
+                    and record.repair_attempt is not None
+                ):
+                    return _record_reviewed_repair_failure(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        evidence_delta={"validation": "repository_error"},
+                        failure_reason=f"repair validation failed: {error}",
+                    )
                 return _block_publication_identity(
                     record, ledger=ledger, gitlab=gitlab, summary=str(error)
                 )
             except (ValueError, WorkerProtocolError) as error:
+                if (
+                    record.state is RunnerState.REPAIR
+                    and record.repair_attempt is not None
+                ):
+                    return _record_reviewed_repair_failure(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        evidence_delta={"validation": "receipt_or_protocol_invalid"},
+                        failure_reason="repair receipts or validation were not coherent",
+                    )
                 return _record_retry(
                     record,
                     ledger=ledger,
@@ -2087,6 +2216,21 @@ def _observe(
         )
     if pipeline is None or pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
         return record
+    if pipeline.status == "failed":
+        needs_repair = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.NEEDS_REPAIR,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                error_code=ErrorCode.PIPELINE_REJECTED,
+                summary="The exact source-SHA pipeline failed.",
+                next_action="Review a new exact-IID repair plan.",
+            )
+        )
+        gitlab.transition_labels(
+            needs_repair.issue_iid, label_for_state(needs_repair.state)
+        )
+        return needs_repair
     return ledger.persist(
         transition_record(
             record,

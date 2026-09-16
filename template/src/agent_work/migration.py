@@ -14,17 +14,10 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-from .domain import RunnerState
+from .domain import LIFECYCLE_LABELS, RunnerState
 from .models import MigrationAction, MigrationObservation, MigrationPlan
 
-_LIFECYCLE = frozenset(
-    {
-        "agent::running",
-        "agent::awaiting-human",
-        "agent::blocked",
-        "agent::failed",
-    }
-)
+_LIFECYCLE = frozenset(LIFECYCLE_LABELS)
 _STASH_ISSUE = re.compile(r"\bissue-(?P<iid>[1-9][0-9]*)\b")
 
 
@@ -69,6 +62,14 @@ def build_migration_plan(observation: MigrationObservation) -> MigrationPlan:
         elif "agent::awaiting-human" in lifecycle:
             target = RunnerState.AWAITING_HUMAN
             next_action = "Verify the retained merge request before human review."
+        elif lifecycle.intersection(
+            {"agent::needs_repair", "agent::repair_failed", "agent::suggest_close"}
+        ):
+            target = RunnerState.BLOCKED
+            next_action = (
+                "ORPHAN_EVIDENCE: obtain targeted live corroboration before "
+                "reconstructing this lifecycle state."
+            )
         else:
             target = RunnerState.BLOCKED
             retained = " and ".join(evidence) if evidence else "GitLab"
