@@ -212,6 +212,8 @@ ledger record. A record contains at least:
 - schema version, project identity, issue IID, and work kind;
 - state, coarse workflow phase, attempt number, retry deadline, and last transition time;
 - base, source, and target branches plus observed commit IDs;
+- the exact verified reconciliation target commit used when the worktree is
+  merged with the target branch before a replayed workflow;
 - merge-request identity and last verified publication evidence;
 - worker protocol version, latest result kind, and required receipts;
 - a stable error code, redacted summary, and explicit next action; and
@@ -244,6 +246,11 @@ The implementation must maintain these invariants:
   and reconciliation is safe after interruption at either side of that write.
 - Publication is idempotent and accepted only from exact GitLab and Git
   evidence.
+- Protected-policy applicability is determined from the prospective
+  publication tree relative to the durable verified reconciliation target, not
+  from raw worktree status. This attributes target-branch-only policy changes
+  to the target branch while retaining review evidence for issue-owned changes
+  and merge resolutions that differ from the target tree.
 - Before projecting `agent::awaiting-human`, the runner writes one
   factory-authored actionable issue handoff for the exact MR source commit. Its
   deterministic project, issue, MR, and SHA marker plus verified factory author
@@ -333,6 +340,11 @@ safe next transition:
 - A persisted transition intent is checked against GitLab and Git; an already
   completed external mutation is recorded, while an absent idempotent mutation
   may be retried.
+- Before a workflow replay needs target-branch reconciliation, the runner
+  persists the exact verified target commit. Recovery uses that same commit,
+  so an interruption cannot silently compare the prospective publication tree
+  with a later target tip. An unresolved conflict or a missing, mismatched, or
+  ambiguous merge identity fails closed before publication.
 - An awaiting-human projection is reconciled against its exact MR source SHA
   and its factory-authored issue handoff even when its label is already present.
   A missing handoff is repaired before the label is projected. A transient
