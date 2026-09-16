@@ -130,6 +130,30 @@ def test_parser_exposes_the_nested_resource_action_contract(
     assert build_parser().parse_args(arguments)
 
 
+def test_credential_rotate_parser_requires_noninteractive_target_inputs() -> None:
+    parsed = build_parser().parse_args(
+        [
+            "credential",
+            "rotate",
+            "--environment-file",
+            "/etc/agent-work.env",
+            "--unit-name",
+            "agent-work",
+            "--apply",
+            "--json",
+            "--debug",
+        ]
+    )
+
+    assert parsed.resource == "credential"
+    assert parsed.action == "rotate"
+    assert parsed.environment_file == Path("/etc/agent-work.env")
+    assert parsed.unit_name == "agent-work"
+    assert parsed.apply is True
+    assert parsed.json is True
+    assert parsed.debug is True
+
+
 def test_bare_loop_run_is_a_read_only_preview() -> None:
     seen: list[bool] = []
 

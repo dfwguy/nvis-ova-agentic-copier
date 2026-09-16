@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-16
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -34,6 +34,7 @@ agent-work loop run [--apply] [--max-segments COUNT]
                     [--json] [--debug]
 agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
+agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
@@ -55,6 +56,50 @@ reads bounded general comments and inline discussion replies. New human feedback
 wakes only that issue for existing-MR remediation; no-change feedback is
 acknowledged once, while code changes reuse the same MR and preserve its title,
 description, and closing reference.
+
+### `credential rotate`
+
+`credential rotate` safely rebinds the environment file’s
+`AGENT_WORK_FACTORY_USERNAME` after an operator has changed the configured
+directory-scoped GitLab credential. `--environment-file PATH` identifies the
+existing service environment file; `--unit-name NAME` identifies its user
+service and timer. Both are required. A token is never accepted as a flag or
+written to configuration, standard output, diagnostics, or logs.
+
+Without `--apply`, the command is a dry run: it validates the named non-secret
+configuration, reports a redacted prospective outcome, and makes no
+configuration or systemd change. With `--apply`, it disables and stops the
+timer and stops the service before requesting credential-dependent evidence.
+They remain stopped in every outcome, including success.
+
+Before writing, applied rotation derives the authenticated username through the
+environment file’s configured bare GitLab host and positive numeric project
+endpoint. It requires all of the following: exactly Developer (`30`) effective
+access; an effective default branch that is protected and neither pushable nor
+mergeable by Developers; and at least one global approval rule requiring at
+least one approval. It then atomically changes only the expected username
+entry. Invalid, expired, unauthorized, or username-mismatched credentials, and
+all failed preconditions before a write, leave the environment file byte-identical.
+
+After an applied update, the command runs one bounded, isolated, scrubbed,
+non-claiming wrapper preview. That preview verifies the updated runtime
+credential route and the existing fail-closed username check without starting
+normal work. If it fails, rotation makes one bounded exact-byte rollback
+attempt and returns a sanitized corrective handoff. If that rollback cannot be
+confirmed, it reports configuration uncertainty for human correction. It never
+retries updates indefinitely or starts, enables, or re-enables the timer.
+
+Successful text output is a concise redacted state outcome. `--json` produces
+the corresponding redacted structured result for automation. `--debug` adds
+only local sanitized diagnostics. Success exits `0`; a rejected precondition,
+credential failure, preview failure, or rollback-required outcome exits `1`;
+argument or command-usage errors exit `2`. Output and errors never include a
+token, credential material, or environment-file contents.
+
+Rotation deliberately stops before canary execution, re-enablement, ordered
+canary processing, or retained-record recovery. The operator reviews the
+successful result, follows the setup guide’s canary procedure, and explicitly
+re-enables the timer only after that review.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does

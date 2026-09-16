@@ -5,7 +5,7 @@ summary: Install, inspect, recover, migrate, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-14
+last_reviewed: 2026-09-16
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -298,6 +298,53 @@ Stop the timer before changing its environment file. Re-run the environment
 file creation block above, then reload and enable the timer. Do not change
 credentials, worktrees, ledger files, branches, or stashes merely to make the
 service start.
+
+### Rotate the directory-scoped GitLab credential
+
+Use the credential-rotation command after the directory-scoped credential used
+by the installed wrapper changes ownership. It updates only the configured
+`AGENT_WORK_FACTORY_USERNAME`; the credential remains in its existing
+directory-scoped route and is never a command argument, environment-file
+value, diagnostic, or log entry.
+
+First stop unattended work and inspect the dry-run result. Supply the exact
+mode-600 service environment file and the installed unit name. The dry run
+does not write the file and leaves the timer and service stopped.
+
+```bash
+systemctl --user disable --now "$unit_name.timer"
+systemctl --user stop "$unit_name.service"
+uv run agent-work credential rotate \
+  --environment-file "$HOME/.config/$unit_name/agent-work.env" \
+  --unit-name "$unit_name" --json
+```
+
+After reviewing the redacted result, apply the same command. It checks the
+configured bare host and numeric project through the newly configured
+credential, requires exactly Developer access, strict effective default-branch
+protection, and at least one global approval rule before it changes the
+expected username entry atomically.
+
+```bash
+uv run agent-work credential rotate \
+  --environment-file "$HOME/.config/$unit_name/agent-work.env" \
+  --unit-name "$unit_name" --apply --json
+```
+
+Do not re-enable the timer as part of credential rotation. On success, inspect
+the redacted result, perform the normal explicit operator review and bounded
+canary in [Canary and re-enable](#canary-and-re-enable), then re-enable the
+timer only when that review succeeds. Ordered canary execution and retained
+record recovery are outside this command.
+
+If the command reports an invalid, expired, unauthorized, or mismatched
+credential, leave the timer and service stopped. The environment file is
+byte-identical unless all preconditions pass. If the bounded post-update
+wrapper preview fails, the command makes one exact-byte rollback attempt and
+returns a sanitized corrective handoff. If rollback cannot be confirmed, it
+reports configuration uncertainty for human correction. Preserve the stopped services and the
+environment file, act on that handoff, and rerun a dry run after correcting the
+directory-scoped credential; do not manually edit the username to bypass it.
 
 ## Run and inspect an activation
 
