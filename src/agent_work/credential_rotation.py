@@ -33,6 +33,26 @@ class CredentialRotationError(RuntimeError):
     """A rotation precondition or verification could not be established."""
 
 
+class EnvironmentConfigurationError(ValueError):
+    """A non-secret environment file does not satisfy the shared grammar."""
+
+
+@dataclass(frozen=True)
+class ServiceUnitStopState:
+    """Observed stopped state after a service-unit stop attempt."""
+
+    timer_stopped: bool
+    service_stopped: bool
+
+
+class ServiceUnitStopError(CredentialRotationError):
+    """Stopping units failed while retaining their independently observed state."""
+
+    def __init__(self, state: ServiceUnitStopState) -> None:
+        super().__init__("could not stop service units")
+        self.state = state
+
+
 class _AtomicWriteUncertain(OSError):
     """An atomic replacement completed but its directory durability is uncertain."""
 
@@ -142,29 +162,9 @@ _UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*")
 def parse_rotation_environment(content: bytes) -> RotationEnvironment:
     """Parse the mode-600 non-secret environment configuration fail-closed."""
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as error:
+        values = parse_nonsecret_environment(content)
+    except EnvironmentConfigurationError as error:
         raise CredentialRotationError("environment configuration is invalid") from error
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise CredentialRotationError("environment configuration is invalid")
-        name, raw_value = line.split("=", 1)
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or name in values:
-            raise CredentialRotationError("environment configuration is invalid")
-        if _SECRET_NAME.search(name):
-            raise CredentialRotationError("environment configuration is invalid")
-        try:
-            parsed_value = shlex.split(raw_value, posix=True)
-        except ValueError as error:
-            raise CredentialRotationError(
-                "environment configuration is invalid"
-            ) from error
-        if len(parsed_value) != 1:
-            raise CredentialRotationError("environment configuration is invalid")
-        values[name] = parsed_value[0]
     if set(_REQUIRED_KEYS) - set(values):
         raise CredentialRotationError("environment configuration is invalid")
     try:
@@ -173,6 +173,33 @@ def parse_rotation_environment(content: bytes) -> RotationEnvironment:
         )
     except ValidationError as error:
         raise CredentialRotationError("environment configuration is invalid") from error
+
+
+def parse_nonsecret_environment(content: bytes) -> dict[str, str]:
+    """Parse the shared, non-secret assignment grammar without key policy."""
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EnvironmentConfigurationError from error
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise EnvironmentConfigurationError
+        name, raw_value = line.split("=", 1)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or name in values:
+            raise EnvironmentConfigurationError
+        if _SECRET_NAME.search(name):
+            raise EnvironmentConfigurationError
+        try:
+            parsed_value = shlex.split(raw_value, posix=True)
+        except ValueError as error:
+            raise EnvironmentConfigurationError from error
+        if len(parsed_value) != 1:
+            raise EnvironmentConfigurationError
+        values[name] = parsed_value[0]
+    return values
 
 
 def replace_factory_username(content: bytes, username: str) -> bytes:
@@ -259,7 +286,7 @@ def _call(
     )
 
 
-def _baseline(environment: Mapping[str, str]) -> dict[str, str]:
+def service_baseline(environment: Mapping[str, str]) -> dict[str, str]:
     """Keep only the service-manager baseline needed before direnv runs."""
     return {
         name: environment[name]
@@ -294,7 +321,7 @@ def _json_call(
         configuration.host,
         endpoint,
     )
-    result = _call(dependencies, command, _baseline(dependencies.environment))
+    result = _call(dependencies, command, service_baseline(dependencies.environment))
     if result.returncode != 0:
         raise CredentialRotationError("GitLab verification failed")
     try:
@@ -336,7 +363,7 @@ def _is_global_approval_rule(value: object) -> bool:
     )
 
 
-def _verify_evidence(
+def verify_service_safeguards(
     dependencies: RotationDependencies, configuration: RotationEnvironment
 ) -> str:
     user = _require_mapping(_json_call(dependencies, configuration, "user"))
@@ -393,28 +420,44 @@ def _verify_evidence(
     return username
 
 
-def _stop_units(
-    dependencies: RotationDependencies, unit_name: str
-) -> tuple[bool, bool]:
+def validate_service_unit_name(unit_name: str) -> str:
+    """Accept only one safe user-systemd unit stem."""
     if not _UNIT_NAME.fullmatch(unit_name):
         raise CredentialRotationError("service unit name is invalid")
+    return unit_name
+
+
+def stop_service_units(
+    dependencies: RotationDependencies, unit_name: str
+) -> ServiceUnitStopState:
+    validate_service_unit_name(unit_name)
     commands = (
         ("systemctl", "--user", "disable", "--now", f"{unit_name}.timer"),
         ("systemctl", "--user", "stop", f"{unit_name}.service"),
         ("systemctl", "--user", "is-active", f"{unit_name}.timer"),
         ("systemctl", "--user", "is-active", f"{unit_name}.service"),
     )
-    for command in commands[:2]:
-        if _call(dependencies, command).returncode != 0:
-            raise CredentialRotationError("could not stop service units")
-    inactive = tuple(
-        (result := _call(dependencies, command)).returncode == 3
-        and result.stdout.strip() == "inactive"
-        for command in commands[2:]
+
+    def attempt(command: tuple[str, ...]) -> CommandResult | None:
+        try:
+            return _call(dependencies, command)
+        except (OSError, RuntimeError):
+            return None
+
+    results = tuple(attempt(command) for command in commands)
+    stop_results = tuple(
+        result is not None and result.returncode == 0 for result in results[:2]
     )
-    if inactive != (True, True):
-        raise CredentialRotationError("service units remain active")
-    return (inactive[0], inactive[1])
+    inactive = tuple(
+        result is not None
+        and result.returncode == 3
+        and result.stdout.strip() == "inactive"
+        for result in results[2:]
+    )
+    state = ServiceUnitStopState(*inactive)
+    if stop_results != (True, True) or inactive != (True, True):
+        raise ServiceUnitStopError(state)
+    return state
 
 
 def rotate_credential(
@@ -450,8 +493,18 @@ def rotate_credential(
         )
     timer = service = False
     try:
-        timer, service = _stop_units(dependencies, unit_name)
-        username = _verify_evidence(dependencies, configuration)
+        stopped = stop_service_units(dependencies, unit_name)
+        timer, service = stopped.timer_stopped, stopped.service_stopped
+        username = verify_service_safeguards(dependencies, configuration)
+    except ServiceUnitStopError as error:
+        return _report(
+            applied=True,
+            outcome="correction-needed",
+            environment=configuration,
+            timer=error.state.timer_stopped,
+            service=error.state.service_stopped,
+            next_action="Keep any stopped unit stopped; correct the service state and retry.",
+        )
     except (CredentialRotationError, OSError):
         return _report(
             applied=True,
@@ -490,7 +543,7 @@ def rotate_credential(
                 next_action="Keep the timer and service stopped and inspect the environment configuration before retrying.",
             )
     preview = (str(configuration.checkout / "scripts/agent-work-systemd-run.sh"),)
-    preview_environment = _baseline(dependencies.environment) | {
+    preview_environment = service_baseline(dependencies.environment) | {
         name: str(getattr(configuration, field))
         for name, field in _REQUIRED_KEYS.items()
     }

@@ -39,6 +39,7 @@ agent-work loop recover --issue-iid IID [--apply --plan-file PATH]
                         [--max-segments COUNT]
                         [--max-activation-seconds SECONDS] [--json] [--debug]
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
+agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
@@ -104,6 +105,46 @@ Rotation deliberately stops before canary execution, re-enablement, ordered
 canary processing, or retained-record recovery. The operator reviews the
 successful result, follows the setup guide’s canary procedure, and explicitly
 re-enables the timer only after that review.
+
+### `service-environment migrate`
+
+`service-environment migrate` validates or upgrades one installed user-service
+environment file to the current factory-managed contract. `--environment-file
+PATH` and `--unit-name NAME` are required. Bare invocation is a non-mutating,
+non-claiming validation and preview: it does not select an issue, acquire loop
+work, mutate an issue, ledger, worktree, branch, or label, change GitLab, or
+start a worker.
+
+The current contract version is `1`. Factory-managed required keys are the
+contract-version marker, `AGENT_WORK_CHECKOUT`, `AGENT_WORK_GIT`,
+`AGENT_WORK_GLAB`, `AGENT_WORK_JQ`, `AGENT_WORK_FLOCK`, `AGENT_WORK_TIMEOUT`,
+`AGENT_WORK_UV`, `AGENT_WORK_AGENT_PATH`, and `AGENT_WORK_DIRENV`. The
+project-owned keys `AGENT_WORK_AGENT`, `AGENT_WORK_BASE_BRANCH`,
+`AGENT_WORK_FACTORY_USERNAME`, `GITLAB_HOST`, and `GITLAB_PROJECT_ID` are
+preserved rather than regenerated.
+
+With `--apply`, the command disables and stops the named timer, stops the
+service, and verifies that both are inactive. Before any write, it validates
+the existing configured Developer identity, numeric project, protected default
+branch, and required approval safeguards through the checkout's `direnv` and
+password-store credential route. It never rebinds that identity and never
+places credentials in command arguments, the environment file, output,
+diagnostics, logs, or the ledger.
+
+After pre-write validation, applied migration regenerates only factory-managed
+version, checkout, and tool-path fields using a recoverable mode-600 atomic
+replacement, then performs one isolated non-claiming validation. It leaves the
+timer and service stopped in every outcome for human review, canary execution,
+and explicit re-enablement. A failed pre-write check changes no bytes. A later
+failure returns one sanitized actionable error while preserving a
+byte-recoverable prior configuration; it does not start either unit. Successful
+preview or apply exits `0`; a rejected precondition or migration failure exits
+`1`; invalid command usage exits `2`. `--json` produces a redacted structured
+result with `command`, `applied`, `outcome`, `config_updated`, `rolled_back`,
+`timer_stopped`, `service_stopped`, and `next_action`. The outcome is one of
+`current`, `stale`, `verified`, `rolled-back`, or `correction-needed`.
+Without `--json`, the command reports the same migration state as concise
+non-secret fields. `--debug` adds only sanitized local diagnostics.
 
 Without `--apply`, `loop run` reports the next safe action once without
 changing GitLab, the ledger, worktrees, branches, labels, or services; it does
@@ -318,6 +359,12 @@ credential-shaped variables.
 Nested workflow commands may later run `direnv exec .` in a retained worktree
 that has no `.envrc`; without stale parent-checkout metadata, that command does
 not unload the permitted scoped token.
+
+Initial setup emits the deterministic current service-environment contract.
+Repository upgrades must use `service-environment migrate` for a stale or
+incomplete installed contract before an operator starts or enables the timer.
+A missing installed contract requires the supported setup procedure to recreate
+it; manual reconstruction is outside the supported upgrade path.
 
 ## Lifecycle
 
@@ -751,6 +798,11 @@ records before any mutation, and refuses the complete plan on mismatch.
 After a partial GitLab label-projection failure, apply persists a
 `migrate_projection` intent, safely replays that exact projection, and clears
 the intent only after it verifies the label projection.
+
+Service-environment migration reports `current`, `stale`, `verified`,
+`rolled-back`, or `correction-needed` without changing loop state. Its redacted
+report contains only the validation or migration outcome; it never contains
+credential values or service-environment contents.
 
 | Exit | Meaning |
 | --- | --- |

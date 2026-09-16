@@ -416,6 +416,16 @@ Migration is evidence-preserving:
 7. Re-enable the timer only after the expected checkpoint and operational
    status output are verified.
 
+The installed service environment has a separate versioned contract because
+the timer may outlive a repository upgrade. A version marker lets the operator
+distinguish a current runtime configuration from one that is missing a newly
+required executable path or timeout without guessing from file shape. Stopping
+the timer and service before migration prevents an activation from reading a
+partly replaced contract. The migration boundary preserves project-owned
+identity choices and credential routing, replaces only factory-managed runtime
+fields atomically, and leaves units stopped so a human can review a
+non-claiming validation and canary before explicitly resuming unattended work.
+
 The implementation is maintained in reviewable slices: ledger and
 reconciliation; deterministic selection and classification; durable worktrees
 and versioned workflow sessions; idempotent publication and existing-MR

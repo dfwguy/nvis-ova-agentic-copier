@@ -15,6 +15,10 @@ stop() {
   exit 2
 }
 
+if [[ "${AGENT_WORK_ENV_VERSION:-}" != "1" ]]; then
+  stop 'AGENT_WORK_ENV_VERSION=1 is required'
+fi
+
 require_path() {
   local value="${!1:-}"
   if [[ "$value" != /* || ! -x "$value" ]]; then
@@ -112,7 +116,7 @@ authenticated() {
     "GIT_CONFIG_COUNT=4" "GIT_CONFIG_KEY_0=credential.helper" \
     "GIT_CONFIG_VALUE_0=" "GIT_CONFIG_KEY_1=credential.helper" \
     "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential" \
-    "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true"
+    "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true" \
     "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false")
   if "$bounded"; then
     housekeeping "${command[@]}" "$@"
@@ -238,6 +242,9 @@ if [[ "${1:-}" != --apply ]]; then
   fi
   if [[ "${lines%%[[:space:]]*}" != "$(housekeeping "${git[@]}" -C "$checkout" rev-parse HEAD)" ]]; then
     stop 'preview checkout is not current with origin default branch'
+  fi
+  if [[ "${1:-}" == --validate-service-environment ]]; then
+    exit 0
   fi
 else
   refresh_base
