@@ -1280,8 +1280,8 @@ def _reconcile_published_ordinary_work(
     candidate_url = mr.web_url
     candidate_sha = mr.sha
     try:
-        if not _mr_evidence_is_exact(
-            record, mr, gitlab=gitlab, repository=repository, source_sha=mr.sha
+        if not _mr_publication_identity_is_exact(
+            record, mr, repository=repository, source_sha=mr.sha
         ):
             raise RepositoryError("discovered merge request evidence is not exact")
         worktree = repository.worktree_for_existing_branch(
@@ -1298,10 +1298,9 @@ def _reconcile_published_ordinary_work(
             or mr.sha != candidate_sha
         ):
             raise RepositoryError("reconciled merge request identity changed")
-        if not _mr_evidence_is_exact(
+        if not _mr_publication_identity_is_exact(
             record,
             mr,
-            gitlab=gitlab,
             repository=repository,
             source_sha=candidate_sha,
         ):
@@ -2034,7 +2033,11 @@ def _publish(
                     next_action="Resolve the retained merge and rerun the full workflow.",
                 )
             )
-        already_published = False
+        already_published = (
+            replaying
+            and record.merge_request_iid is not None
+            and record.publication_sha is not None
+        )
         if remediation:
             _verify_authenticated_user(gitlab)
             if record.merge_request_iid is None:
@@ -2114,9 +2117,6 @@ def _publish(
         identity_exact = _mr_publication_identity_is_exact(
             record, mr, repository=repository, source_sha=sha
         )
-        closes_issue = identity_exact and gitlab.mr_closes_issue(
-            mr.iid, record.issue_iid
-        )
     except PublicationError as error:
         blocked = ledger.persist(
             transition_record(
@@ -2177,18 +2177,33 @@ def _publish(
             gitlab=gitlab,
             summary="Published merge request evidence is not exact.",
         )
-    if not closes_issue:
-        return _record_retry(
-            record.model_copy(
-                update={
-                    "merge_request_iid": mr.iid,
-                    "merge_request_url": mr.web_url,
-                }
-            ),
+    if remediation:
+        try:
+            closes_issue = gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+        except GitLabError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GITLAB_RETRYABLE,
+            )
+        if not closes_issue:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Feedback publication merge request does not close its issue.",
+            )
+    else:
+        return _reconcile_new_publication(
+            record,
+            mr=mr,
+            sha=sha,
             ledger=ledger,
             gitlab=gitlab,
+            repository=repository,
             now=now,
-            error_code=ErrorCode.GITLAB_RETRYABLE,
         )
     pending = record.pending_feedback
     if pending is not None:
@@ -2216,6 +2231,95 @@ def _publish(
     )
 
 
+def _reconcile_new_publication(
+    record: LedgerRecord,
+    *,
+    mr: MergeRequestEvidence,
+    sha: str,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord:
+    """Bind and re-read a new MR without replaying its publication transport."""
+    bound = record
+    if record.merge_request_iid != mr.iid or record.merge_request_url != mr.web_url:
+        bound = ledger.persist(
+            record.model_copy(
+                update={
+                    "merge_request_iid": mr.iid,
+                    "merge_request_url": mr.web_url,
+                    "source_sha": sha,
+                }
+            )
+        )
+    try:
+        reconciled_mr = mr
+        closes_issue = gitlab.mr_closes_issue(mr.iid, bound.issue_iid)
+        for _ in range(3):
+            if closes_issue:
+                break
+            reconciled_mr = gitlab.fetch_merge_request(bound.merge_request_iid or 0)
+            if not _mr_publication_identity_is_exact(
+                bound,
+                reconciled_mr,
+                repository=repository,
+                source_sha=sha,
+            ):
+                return _block_publication_identity(
+                    bound,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Post-publication merge request evidence is not exact.",
+                )
+            closes_issue = gitlab.mr_closes_issue(reconciled_mr.iid, bound.issue_iid)
+    except GitLabIdentityError as error:
+        return _block_identity_drift(bound, ledger=ledger, summary=str(error))
+    except GitLabError:
+        return _record_retry(
+            bound,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+            detail="post-publication check: closing relationship",
+        )
+    if not closes_issue:
+        return ledger.persist(
+            transition_record(
+                bound,
+                RunnerState.OBSERVING,
+                phase=WorkflowPhase.PIPELINE_WAIT,
+                source_sha=sha,
+                intent=None,
+                summary="Merge request is published; its closing projection is pending.",
+                next_action="Reconcile the exact merge request before observing its pipeline.",
+            )
+        )
+    published = ledger.persist(
+        transition_record(
+            bound,
+            RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+            merge_request_iid=reconciled_mr.iid,
+            merge_request_url=reconciled_mr.web_url,
+            source_sha=sha,
+            intent=None,
+            summary="Merge request published and verified.",
+            next_action="Observe the exact source-SHA pipeline.",
+        )
+    )
+    return _observe(
+        published,
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        now=now,
+        merge_request=reconciled_mr,
+        closing_evidence=True,
+    )
+
+
 def _observe(
     record: LedgerRecord,
     *,
@@ -2223,20 +2327,25 @@ def _observe(
     gitlab: GitLabPort,
     repository: RepositoryPort,
     now: datetime,
+    merge_request: MergeRequestEvidence | None = None,
+    closing_evidence: bool | None = None,
 ) -> LedgerRecord:
     if record.merge_request_iid is None or record.source_sha is None:
         raise SegmentError("observation record lacks merge request evidence")
     try:
         _verify_authenticated_user(gitlab)
-        mr = gitlab.fetch_merge_request(record.merge_request_iid)
-        exact = _mr_evidence_is_exact(
-            record,
-            mr,
-            gitlab=gitlab,
-            repository=repository,
-            source_sha=record.source_sha,
+        mr = merge_request or gitlab.fetch_merge_request(record.merge_request_iid)
+        exact = _mr_publication_identity_is_exact(
+            record, mr, repository=repository, source_sha=record.source_sha
         )
-        if exact and mr.has_conflicts:
+        closes_issue = exact and (
+            closing_evidence
+            if closing_evidence is not None
+            else gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+        )
+        if exact and closes_issue and record.intent is not None:
+            record = ledger.persist(record.model_copy(update={"intent": None}))
+        if exact and closes_issue and mr.has_conflicts:
             repair_phase = (
                 WorkflowPhase.WORKFLOW
                 if _has_workflow_receipt(record)
@@ -2253,8 +2362,12 @@ def _observe(
                     next_action="Run the bounded merge-conflict repair segment.",
                 )
             )
-        pipeline = gitlab.latest_pipeline_for_sha(
-            record.merge_request_iid, record.source_sha
+        if record.merge_request_iid is None or record.source_sha is None:
+            raise SegmentError("observation record lacks merge request evidence")
+        pipeline = (
+            gitlab.latest_pipeline_for_sha(record.merge_request_iid, record.source_sha)
+            if exact and closes_issue
+            else None
         )
     except GitLabIdentityError as error:
         return _block_identity_drift(record, ledger=ledger, summary=str(error))
@@ -2275,8 +2388,24 @@ def _observe(
             gitlab=gitlab,
             summary="Observed merge request evidence is not exact.",
         )
-    if pipeline is None or pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
+    if not closes_issue:
         return record
+    if pipeline is None or pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
+        if (
+            record.intent is None
+            and record.summary
+            != "Merge request is published; its closing projection is pending."
+        ):
+            return record
+        return ledger.persist(
+            record.model_copy(
+                update={
+                    "intent": None,
+                    "summary": "Merge request closing projection is verified; pipeline is pending.",
+                    "next_action": "Observe the exact source-SHA pipeline.",
+                }
+            )
+        )
     if pipeline.status == "failed":
         needs_repair = ledger.persist(
             transition_record(
