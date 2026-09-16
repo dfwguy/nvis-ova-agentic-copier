@@ -13,36 +13,36 @@ This repository ships one portable workflow for Codex, Pi, and Claude Code.
 `AGENTS.md` is the canonical routing manifest; frontend-specific configuration
 must not replace or reinterpret it.
 
-This is a software factory: humans provide product and policy inputs and retain
-final MR approval and merge, while routine architecture, decomposition, Red/Green,
-validation, repair, and publication proceed without an inner-loop human decision.
-Safe bounded uncertainty is recorded as a structured Draft handoff; capacity and
-technical transients are execution blockers or retryable unless authority is needed.
+This is a software factory. Humans provide product and policy inputs. They alone
+approve and merge MRs. Routine architecture, decomposition, Red/Green,
+validation, repair, and publication can proceed without an inner-loop human
+decision. Record safe bounded uncertainty as a structured Draft handoff.
+Capacity limits and temporary technical failures either block execution or can
+be retried. Stop for authority when resolving them requires it.
 
 ## Software factory operating model
 
-Humans provide the product and policy inputs. They review every resulting merge
-request and are the only people who approve or merge it. The deterministic
-controller and the AI workflow prepare work and publish or update the merge
-request; neither crosses that human boundary.
+Humans provide product and policy inputs. They review every resulting merge
+request and are the only people who approve or merge it. The controller and AI
+workflow prepare work and publish or update the merge request. Neither crosses
+that human boundary.
 
-For each bounded activation, the deterministic controller locks the configured
-project, refreshes its dedicated checkout, and reconciles observable GitLab,
-ledger, branch, merge-request, and retained-worktree evidence. It resumes a
-recoverable item before it selects at most one eligible new issue. After it
-creates or recovers that issue's retained worktree, it invokes one
-workflow-owning AI session. It validates the session's bounded result, updates
-the same branch and merge request when publication is justified, records the
-next action and evidence, then exits. The AI begins only after issue selection
-and worktree preparation; the controller is not a second workflow engine.
+For each bounded activation, the controller locks the configured project,
+refreshes its dedicated checkout, and reconciles GitLab, ledger, branch, MR,
+and retained-worktree evidence. It resumes recoverable work before selecting
+at most one eligible issue. After it creates or recovers that issue's retained
+worktree, it starts one workflow-owning AI session. It validates the bounded
+result, updates the same branch and MR when justified, records evidence and the
+next action, then exits. The AI starts only after issue selection and worktree
+preparation. The controller is not a second workflow engine.
 
-The AI session keeps all work nested under its live Architect. In the coding
-lane, the Architect delegates Red behavior tests and the Diátaxis Writer in
-parallel, then Green implements and reconciles their results, runs every
-applicable parallel review, performs license review after those reviews, and
-obtains final validation. In the documentation and agent-policy lane, the Architect instead
-delegates the Documentation Writer, then the Documentation Finalizer. These
-roles run inside the same session, not as independently restored phases.
+Keep AI work under the live Architect. In the coding lane, the Architect
+delegates Red behavior tests and the Diátaxis Writer in parallel. Green then
+implements and reconciles their results, runs every applicable parallel review,
+runs license review after those reviews, and gets final validation. In the
+documentation and agent-policy lane, the Architect instead delegates the
+Documentation Writer, then the Documentation Finalizer. These roles run in one
+session, not as independently restored phases.
 
 Before publication, the controller reconciles current `main` into the retained
 worktree using normal Git evidence; it never discards work to do so. After a
