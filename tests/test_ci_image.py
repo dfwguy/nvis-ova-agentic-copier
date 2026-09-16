@@ -243,11 +243,8 @@ def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
     assert "validation (9 gates)" not in configuration
     assert configuration["workflow"]["rules"] == [
         {"if": '$CI_PIPELINE_SOURCE == "merge_request_event"'},
-        {
-            "if": "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS",
-            "when": "never",
-        },
-        {"if": "$CI_COMMIT_BRANCH"},
+        {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"},
+        {"when": "never"},
     ]
     for name in _VALIDATION_JOBS:
         expected_base = ".pytest" if name.startswith("pytest-") else ".base_uv"

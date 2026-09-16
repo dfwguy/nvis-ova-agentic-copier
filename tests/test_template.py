@@ -179,19 +179,16 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
         assert "run-ci-checks.sh" not in str(_ci_job_script(configuration, job_name))
 
 
-def test_ci_avoids_duplicate_push_and_merge_request_pipelines(
+def test_ci_runs_only_merge_request_and_default_branch_pipelines(
     generated_project: Path,
     project_root: Path,
     template_dir: Path,
 ) -> None:
-    """An open merge request suppresses the duplicate branch pipeline."""
+    """CI runs only for merge requests and the default branch."""
     expected_rules = [
         {"if": '$CI_PIPELINE_SOURCE == "merge_request_event"'},
-        {
-            "if": "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS",
-            "when": "never",
-        },
-        {"if": "$CI_COMMIT_BRANCH"},
+        {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"},
+        {"when": "never"},
     ]
     for root in (project_root, template_dir, generated_project):
         assert _ci_configuration(root)["workflow"]["rules"] == expected_rules
