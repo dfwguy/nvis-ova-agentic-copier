@@ -310,11 +310,11 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
         assert observed.read_text().strip() == expected_environment
 
 
-def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
+def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverage(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment keeps both shard reports and one rooted coverage file."""
+    """Each image environment separates costly groups and combines all coverage."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
@@ -324,14 +324,17 @@ def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
     assert pytest_template["artifacts"]["reports"]["junit"] == [
         "test-results-$TEST_ENVIRONMENT-shard-1.xml",
         "test-results-$TEST_ENVIRONMENT-shard-2.xml",
+        "test-results-$TEST_ENVIRONMENT-shard-3.xml",
     ]
-    assert "tests/test_agent_work_serial_runtime.py tests/test_template.py" in script
+    assert "tests/test_agent_work_serial_runtime.py" in script
+    assert "tests/test_template.py" in script
     assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
     assert "--ignore=tests/test_template.py" in script
     assert "--cov=src/agent_work" in script
     assert "coverage combine \\" in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-2"' in script
+    assert '".coverage.$TEST_ENVIRONMENT-shard-3"' in script
     assert "coverage report --fail-under=85" in script
     assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
     assert script.index("coverage report --fail-under=85") < script.index(
@@ -346,8 +349,13 @@ def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
         "#!/usr/bin/env bash\n"
         'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
         '>> "$INVOCATIONS"\n'
-        "if [[ \"$*\" == *'--ignore=tests/test_template.py'* ]] && "
-        '[[ "${FAIL_SECOND_SHARD:-0}" = 1 ]]; then\n'
+        'case "$*" in\n'
+        "    *'--ignore=tests/test_agent_work_serial_runtime.py'*) shard=remaining ;;\n"
+        "    *'tests/test_agent_work_serial_runtime.py'*) shard=agent-work ;;\n"
+        "    *'tests/test_template.py'*) shard=template ;;\n"
+        "    *) shard=other ;;\n"
+        "esac\n"
+        'if [[ "${FAIL_SHARD:-}" = "$shard" ]]; then\n'
         "    exit 7\n"
         "fi\n"
         "if [[ \"$*\" == *'coverage report --fail-under=85'* ]] && "
@@ -383,26 +391,52 @@ def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
 
     assert succeeded.returncode == 0
     calls = invocations.read_text().splitlines()
-    assert len(calls) == 5
-    assert {call.split("|", maxsplit=2)[1] for call in calls[:2]} == {
+    assert len(calls) == 6
+    assert {call.split("|", maxsplit=2)[1] for call in calls[:3]} == {
         ".coverage.py311-shard-1",
         ".coverage.py311-shard-2",
+        ".coverage.py311-shard-3",
     }
-    assert all(call.startswith(f"{tmp_path / 'src'}|") for call in calls[:2])
-    assert all("--cov=src/agent_work" in call for call in calls[:2])
-
-    failed_environment = environment | {"FAIL_SECOND_SHARD": "1"}
-    failed = subprocess.run(
-        ["bash", "-c", script],
-        check=False,
-        capture_output=True,
-        cwd=tmp_path,
-        env=failed_environment,
-        text=True,
+    shard_calls = calls[:3]
+    assert all(call.startswith(f"{tmp_path / 'src'}|") for call in shard_calls)
+    assert all("--cov=src/agent_work" in call for call in shard_calls)
+    serial_runtime_call = next(
+        call
+        for call in shard_calls
+        if "tests/test_agent_work_serial_runtime.py" in call
+        and "--ignore=tests/test_agent_work_serial_runtime.py" not in call
     )
+    template_call = next(
+        call
+        for call in shard_calls
+        if "tests/test_template.py" in call
+        and "--ignore=tests/test_template.py" not in call
+    )
+    assert serial_runtime_call != template_call
+    remaining_call = next(
+        call
+        for call in shard_calls
+        if "--ignore=tests/test_agent_work_serial_runtime.py" in call
+    )
+    assert "--ignore=tests/test_template.py" in remaining_call
 
-    assert failed.returncode != 0
-    assert len(invocations.read_text().splitlines()) == 7
+    for failed_shard in ("agent-work", "template", "remaining"):
+        failure_start = len(invocations.read_text().splitlines())
+        failed = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            cwd=tmp_path,
+            env=environment | {"FAIL_SHARD": failed_shard},
+            text=True,
+        )
+
+        assert failed.returncode != 0
+        failure_calls = invocations.read_text().splitlines()[failure_start:]
+        assert len(failure_calls) == 3
+        assert all("coverage combine" not in call for call in failure_calls)
+        assert all("coverage report" not in call for call in failure_calls)
+        assert all("coverage xml" not in call for call in failure_calls)
 
     coverage_failed = subprocess.run(
         ["bash", "-c", script],
@@ -414,7 +448,7 @@ def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
     )
 
     assert coverage_failed.returncode == 9
-    coverage_failure_calls = invocations.read_text().splitlines()[-5:]
+    coverage_failure_calls = invocations.read_text().splitlines()[-6:]
     report_index = next(
         index
         for index, call in enumerate(coverage_failure_calls)
@@ -437,7 +471,7 @@ def test_root_pytest_job_runs_two_shards_and_combines_stable_source_coverage(
     )
 
     assert combine_failed.returncode == 8
-    combine_failure_calls = invocations.read_text().splitlines()[-3:]
+    combine_failure_calls = invocations.read_text().splitlines()[-4:]
     assert any("coverage combine" in call for call in combine_failure_calls)
     assert all("coverage report" not in call for call in combine_failure_calls)
     assert all("coverage xml" not in call for call in combine_failure_calls)
