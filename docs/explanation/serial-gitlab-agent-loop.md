@@ -42,8 +42,10 @@ For each activation, the controller performs these stages in order:
 1. **Lock and refresh** — lock the configured project and refresh its dedicated
    checkout.
 2. **Reconcile** — compare the ledger with GitLab issues and merge requests,
-   Git branches, and any retained worktree. Recoverable work always comes
-   before new work.
+   Git branches, and any retained worktree. An active owner with exact,
+   immediately runnable evidence comes before new work. A retained item in a
+   scheduled repair backoff or automatic-repair quarantine remains visible, but
+   does not monopolize later activations.
 3. **Observe pipeline safety** — before fresh selection, inspect the newest
    default-branch pipeline and each open merge request's newest pipeline for
    its current source SHA. Missing, malformed, or inaccessible evidence blocks.
@@ -51,7 +53,9 @@ For each activation, the controller performs these stages in order:
    short bounded exponential delay; a terminal failure takes priority over
    ordinary work.
 4. **Select** — after any safe resumable work and the pipeline gate, select at
-   most one eligible issue, or stop when no safe item is available. Fresh
+   most one eligible item, or stop when no safe item is available. Exact failed
+   pipeline repairs are considered before fresh issues, but the controller
+   scans to another eligible exact repair when the first is deferred. Fresh
    selection is deterministic: exact high priority, then normal, then exact
    low priority; creation time and IID break ties.
 5. **Prepare worktree** — create or recover that issue's retained worktree.
@@ -76,8 +80,14 @@ The same gate protects manual applied runs and timer-driven next activations,
 so one entry path cannot start unrelated work while the other has detected a
 pipeline problem. A failed merge-request pipeline can resume bounded repair
 only through a retained owner with exact project, merge-request, branch,
-current-source-SHA, and worktree evidence. A failed default-branch pipeline or
-an ownerless failed merge request instead produces an actionable human block.
+current-source-SHA, and worktree evidence. Each such owner receives at most
+three automatic repair attempts. A failed attempt records a durable 20-minute
+per-item backoff and then lets a later activation scan for another eligible
+exact repair or ordinary work. After the third failed automatic attempt, the
+item is quarantined or deferred for human review; it remains visible in status
+and preview but does not create a loop-wide human checkpoint. A failed
+default-branch pipeline or an ownerless failed merge request instead produces
+an actionable human block.
 This intentionally favors visible, attributable recovery over guessing which
 issue should repair shared or ambiguous pipeline evidence. The [reference
 contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate)
@@ -133,6 +143,12 @@ keeps a past retry or failure from being presented as the current condition and
 lets unavailable, stale, or conflicting observations remain honestly unknown
 instead of being mistaken for current truth. The exact fields, bounded output,
 and state mapping belong in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
+
+Scheduled repair backoff and repair quarantine are item-local states. They are
+not `RETRY_WAIT`, which is the ordinary workflow retry state, and they are not
+global blockers. In contrast, ambiguous or inexact identity, active ownership,
+credential, policy, or authority conflicts still fail closed. Issue and merge
+request text cannot set repair priority, the attempt budget, or a backoff.
 
 ## Publication separates observation from repair
 

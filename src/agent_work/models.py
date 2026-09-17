@@ -556,6 +556,8 @@ class LedgerRecord(BoundaryModel):
     worktree: Path
     retry_count: int = Field(default=0, ge=0)
     retry_at: datetime | None = None
+    automatic_repair_count: int = Field(default=0, ge=0)
+    automatic_repair_at: datetime | None = None
     prior_state: RunnerState | None = None
     prior_phase: WorkflowPhase | None = None
     merge_request_iid: int | None = Field(default=None, gt=0)
@@ -749,6 +751,8 @@ class CommandItemReport(BoundaryModel):
     attempt: int = Field(ge=1)
     retries_remaining: int = Field(ge=0)
     retry_at: datetime | None = None
+    automatic_repair_count: int = Field(default=0, ge=0)
+    automatic_repair_at: datetime | None = None
     source_branch: str
     source_sha: str | None = None
     main_branch: str | None = None

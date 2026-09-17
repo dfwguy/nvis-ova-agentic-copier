@@ -10,7 +10,7 @@ related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
   - path: ../how-to/resolve-factory-issues.md
-    why: Applies one reviewed lifecycle decision to retained issue evidence.
+    why: Applies one reviewed decision to exceptional retained issue evidence.
   - path: ../explanation/serial-gitlab-agent-loop.md
     why: Explains the architecture behind this contract.
   - path: ../explanation/serial-agent-loop-recovery-design.md
@@ -198,8 +198,11 @@ rechecks the plan's exact evidence while holding the project lock before it
 performs its bounded checkpoint action. A changed identity or evidence requires
 a new preview.
 
-`loop recover --issue-iid IID` is a targeted counterpart for one retained
-item. Bare invocation creates a redacted recovery plan without mutation.
+`loop recover --issue-iid IID` is a targeted counterpart for one interrupted,
+ambiguous, or otherwise unsafe retained item. Bare invocation creates a
+redacted recovery plan without mutation. It is not required for an exact failed
+current-source MR pipeline with one uniquely corroborated retained owner: an
+applied ordinary loop activation transitions that owner directly to `repair`.
 Apply requires both `--apply` and the reviewed `--plan-file`; it rechecks the
 configured project, default branch, authenticated username, ledger revision
 and state, lifecycle label, deterministic branch, retained-worktree HEAD and
@@ -467,8 +470,8 @@ it.
 | `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, required receipts, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
-| `agent::needs_repair` | needs-repair | Corroborated retained work has a supported explicit reviewed recovery path, but is not fresh-selectable. |
-| `agent::repair_failed` | repair-failed | An explicit reviewed repair attempt failed or its exact evidence changed; a new reviewed plan is required. |
+| `agent::needs_repair` | needs-repair | A legacy or manually checkpointed repair awaits exact recovery; ordinary exact pipeline failures do not enter this state. |
+| `agent::repair_failed` | repair-failed | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed; it retains the evidence needed for safe follow-up. |
 | `agent::suggest_close` | suggest-close | Corroborated duplicate, superseded, already-satisfied, or no-longer-applicable evidence recommends human closure. |
 
 `agent::needs_repair` uses `#D4A72C`, `agent::repair_failed` uses `#C91C00`,
@@ -553,13 +556,19 @@ Missing, malformed, inaccessible, identity, or validation pipeline evidence
 fails closed rather than allowing unrelated work to proceed.
 
 A corroborated failed pipeline takes precedence over ordinary issue selection.
-An exact failed merge-request pipeline with a retained owner having exact
+An exact failed merge-request pipeline with one retained owner having exact
 configured project, merge-request, branch, source-SHA, and worktree evidence
-transitions to `agent::needs_repair`; it is not resumed automatically. A failed
-default-branch pipeline, or a failed merge-request pipeline without that safe
-exact owner, records an actionable human handoff or block instead. It does not
-claim an unrelated issue, invent a repair owner, or weaken the human-only
-approval and merge boundary.
+is an eligible automatic repair. The controller runs at most one repair
+workflow in an activation. It considers exact repair candidates in deterministic
+order and scans past an item in a scheduled repair backoff or quarantine to
+another eligible exact repair before considering ordinary work. A failed
+automatic repair records a 20-minute durable, per-item backoff. After three
+automatic repair attempts, it is quarantined or deferred for human review and
+is not selected automatically. Status and preview retain the item, its attempt
+count, timing, evidence, and next action. A failed default-branch pipeline, or
+a failed merge-request pipeline without one safe exact owner, records an
+actionable human handoff or block instead. It does not claim an unrelated issue,
+invent a repair owner, or weaken the human-only approval and merge boundary.
 
 Post-publication pipeline assessment is a fresh context after terminal
 exact-SHA evidence. It does not edit the published MR or directly enter a
@@ -569,18 +578,19 @@ applicable workflow; unverified evidence produces no repository work.
 
 The ordinary loop, canary checkpoint, and targeted recovery use the same
 recovery order: the pipeline and default-evidence gate comes first; an exact
-failed-MR owner becomes `agent::needs_repair`; then comes the sole active
-resumable retained record; then exact-IID reviewed repair or reclassification;
-then waits; and only then may ordinary `loop run` select fresh work. Recovery
-is activated only by a `loop recover --issue-iid IID` preview followed by an
-exact reviewed plan and apply. A repair that fails, or whose exact evidence
-changes before apply, becomes `agent::repair_failed` while retaining plan
-identity, evidence delta, failure, timing, and worktree; a new reviewed plan
-is required. Existing blocked records may be reclassified only one IID at a
-time with live corroboration. Bulk status does not corroborate each item;
-targeted status may. Two active retained records, a competing owner, or a
-higher-priority owner is an identity conflict: the command fails closed and
-reports the exact safe next action.
+failed-MR pipeline with one corroborated retained owner is considered for one
+eligible repair workflow; then comes the sole active resumable retained record;
+then an
+exact-IID reviewed reclassification for exceptional retained work; then waits;
+and only then may ordinary `loop run` select fresh work. A repair that fails,
+or whose exact evidence changes, retains the evidence, failure, timing, and
+worktree needed for safe subsequent handling. Scheduled repair backoff and
+automatic-repair quarantine are item-local eligibility outcomes, not
+`retry-wait` and not global blockers. Existing blocked records may be
+reclassified only one IID at a time with live corroboration. Bulk status does
+not corroborate each item; targeted status may. Two active retained records, a
+competing owner, or a higher-priority owner is an identity conflict: the
+command fails closed and reports the exact safe next action.
 
 `agent::suggest_close` is a recommendation only. It requires structured,
 corroborated duplicate, superseded, already-satisfied, or no-longer-applicable
@@ -617,9 +627,11 @@ systemd wrapper continues only after `awaiting-human`, `blocked`, `failed`, or
 `complete`: it validates that report, makes one fresh read-only eligibility and
 preselection-pipeline check, and begins another activation only for `eligible`.
 Between issues it re-queries GitLab and fast-forwards the clean service base;
-this bounded housekeeping is outside the per-issue budget. A future
-`retry-wait`, `repair`, `time-limit`, `segment-limit`, human or safety block,
-or missing, failed, or unrecognized evidence remains a handoff. `idle` means
+this bounded housekeeping is outside the per-issue budget. A sole exact failed
+current-source pipeline activates `repair` and runs its workflow in the same
+applied activation. A future `retry-wait`, `time-limit`, `segment-limit`, human
+or safety block, or missing, failed, or unrecognized evidence remains a
+handoff. `idle` means
 there is no eligible or resumable work. `OnUnitInactiveSec=20min` schedules a
 newly arrived-work check only after that genuine idle service exit; it is not
 the cadence for active pipeline polling. The activation deadline and the
@@ -915,7 +927,7 @@ publication and closing reconciliation does not schedule a fixed 20-minute
 retry. The activation deadline and outer timeout can still hand off an active
 observation.
 
-## Retry, exits, and JSON
+## Retry, repair deferment, exits, and JSON
 
 The initial workflow attempt plus at most three retry attempts are bounded.
 `retry-wait` records its deadline; exhaustion becomes `agent::blocked`, never
@@ -933,6 +945,19 @@ without credentials or transcripts. For a nonzero worker exit, optional
 The diagnostic is one safe line of at most 2048 UTF-8 bytes; it excludes prompts,
 issue content, stdout, credentials, terminal controls, and unbounded output.
 Retry exhaustion retains it, while a validated successful worker result clears it.
+
+Automatic exact-pipeline repair has its own budget: at most three repair
+workflows for one exact retained owner. After each unsuccessful attempt, the
+ledger records `automatic_repair_count` and a 20-minute
+`automatic_repair_at` deadline, separate from ordinary `retry_count` and
+`retry_at`. A due item can be considered
+again by a later activation; an item at its third unsuccessful attempt is
+quarantined or deferred and requires reviewed recovery. This is separate from
+ordinary `retry-wait` and its workflow retry count. It neither changes a
+human-controlled pipeline-performance budget nor stops unrelated eligible work.
+Only reviewed recovery is exceptional: it requires one exact IID and current
+corroborated evidence, does not consume the automatic repair budget, and cannot
+be triggered or parameterized by untrusted issue or merge-request content.
 Migration preview follows every page of lifecycle projections. Apply preflights
 all actions against unchanged evidence, project identity, and absent ledger
 records before any mutation, and refuses the complete plan on mismatch.
@@ -977,7 +1002,9 @@ housekeeping is not a segment), and `stop_reason`,
 which identifies why the activation yielded; its `items[]` lists workflow
 results in chronological order. Per-issue values—including `issue_iid`, state,
 coarse workflow phase, attempt, retry timing, source branch, durable worktree, MR reference,
-error code, optional `worker_exit`, summary, and next action—are objects in
+error code, `automatic_repair_count`, `automatic_repair_at`, and other repair
+attempt or quarantine information when present, optional `worker_exit`, summary,
+and next action—are objects in
 `items[]`. Human output renders `returncode=<integer>` and
 `worker_diagnostic=<safe diagnostic>` when this evidence is present. Migration
 preview and apply return their proposed or applied migration actions in
