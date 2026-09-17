@@ -73,9 +73,11 @@ locked project dependencies. They must not run `apt-get`, `uv python install`,
 
 Run the consumer pipeline and inspect the nine named root jobs directly; do
 not look for a root synthetic aggregate validation job or JUnit gate suite. Each
-pytest job runs four concurrent shards: two exhaustive, non-overlapping
-serial-runtime test partitions, template tests, and remaining tests that ignore
-the two dedicated test files. It waits for every shard PID before coverage
+pytest job runs four concurrent shards: one complete serial-runtime test shard,
+one complete template-test shard, and two exhaustive, non-overlapping remaining-suite
+partitions. The remaining-suite shards use `tests.helpers.serial_runtime_shard`
+with indices 0 and 1 of 2 and ignore both dedicated test files. The job waits
+for every shard PID before coverage
 aggregation. Inspect every shard JUnit report and the one combined
 per-version Cobertura report when it was generated; otherwise inspect the job
 log. The combined report measures only maintained `src/agent_work` source. A

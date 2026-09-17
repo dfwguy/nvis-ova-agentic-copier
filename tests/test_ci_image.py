@@ -316,7 +316,7 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment partitions serial runtime and joins all coverage."""
+    """Each image environment isolates long suites before balancing the remainder."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
@@ -329,10 +329,6 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         "test-results-$TEST_ENVIRONMENT-shard-3.xml",
         "test-results-$TEST_ENVIRONMENT-shard-4.xml",
     ]
-    assert "-p tests.helpers.serial_runtime_shard" in script
-    assert "--serial-runtime-shard-index=0" in script
-    assert "--serial-runtime-shard-index=1" in script
-    assert "--serial-runtime-shard-count=2" in script
     assert "tests/test_template.py" in script
     assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
     assert "--ignore=tests/test_template.py" in script
@@ -357,10 +353,10 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
         '>> "$INVOCATIONS"\n'
         'case "$*" in\n'
-        "    *'--ignore=tests/test_agent_work_serial_runtime.py'*) shard=remaining ;;\n"
-        "    *'--serial-runtime-shard-index=0'*) shard=agent-work-0 ;;\n"
-        "    *'--serial-runtime-shard-index=1'*) shard=agent-work-1 ;;\n"
+        "    *'--serial-runtime-shard-index=0'*) shard=remaining-0 ;;\n"
+        "    *'--serial-runtime-shard-index=1'*) shard=remaining-1 ;;\n"
         "    *'tests/test_template.py'*) shard=template ;;\n"
+        "    *'tests/test_agent_work_serial_runtime.py'*) shard=serial-runtime ;;\n"
         "    *) shard=other ;;\n"
         "esac\n"
         'if [[ "${FAIL_SHARD:-}" = "$shard" ]]; then\n'
@@ -428,25 +424,35 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         if "tests/test_template.py" in call
         and "--ignore=tests/test_template.py" not in call
     )
-    assert len(serial_runtime_calls) == 2
-    assert "--serial-runtime-shard-index=0" in serial_runtime_calls[0] or (
-        "--serial-runtime-shard-index=0" in serial_runtime_calls[1]
-    )
-    assert "--serial-runtime-shard-index=1" in serial_runtime_calls[0] or (
-        "--serial-runtime-shard-index=1" in serial_runtime_calls[1]
-    )
-    assert all(
-        "--serial-runtime-shard-count=2" in call for call in serial_runtime_calls
-    )
-    assert all(call != template_call for call in serial_runtime_calls)
-    remaining_call = next(
-        call
-        for call in shard_calls
-        if "--ignore=tests/test_agent_work_serial_runtime.py" in call
-    )
-    assert "--ignore=tests/test_template.py" in remaining_call
+    assert len(serial_runtime_calls) == 1
+    assert "-p tests.helpers.serial_runtime_shard" not in serial_runtime_calls[0]
+    assert "--serial-runtime-shard-index" not in serial_runtime_calls[0]
+    assert serial_runtime_calls[0] != template_call
 
-    for failed_shard in ("agent-work-0", "agent-work-1", "template", "remaining"):
+    remaining_calls = [
+        call for call in shard_calls if "-p tests.helpers.serial_runtime_shard" in call
+    ]
+    assert len(remaining_calls) == 2
+    assert {
+        "--serial-runtime-shard-index=0",
+        "--serial-runtime-shard-index=1",
+    } == {
+        option
+        for call in remaining_calls
+        for option in (
+            "--serial-runtime-shard-index=0",
+            "--serial-runtime-shard-index=1",
+        )
+        if option in call
+    }
+    assert all("--serial-runtime-shard-count=2" in call for call in remaining_calls)
+    assert all(
+        "--ignore=tests/test_agent_work_serial_runtime.py" in call
+        and "--ignore=tests/test_template.py" in call
+        for call in remaining_calls
+    )
+
+    for failed_shard in ("serial-runtime", "template", "remaining-0", "remaining-1"):
         failure_start = len(invocations.read_text().splitlines())
         failed = subprocess.run(
             ["bash", "-c", script],
