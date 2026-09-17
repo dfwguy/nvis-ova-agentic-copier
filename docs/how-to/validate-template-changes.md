@@ -5,7 +5,7 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -47,7 +47,8 @@ definition, whose image is
 pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
 `uv sync` bootstrap. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
-GitLab job. Each root pytest job runs three deterministic concurrent shards: one for
+GitLab job. Each root pytest job runs four deterministic concurrent shards: two
+exhaustive, non-overlapping partitions of
 `tests/test_agent_work_serial_runtime.py`, one for `tests/test_template.py`,
 and one for the remaining suite while ignoring both dedicated files. It waits
 for every shard PID and publishes a JUnit report for each shard. After all

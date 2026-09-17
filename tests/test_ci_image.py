@@ -224,7 +224,9 @@ def test_root_validation_consumes_the_published_image_without_bootstrap(
     pytest_script = "\n".join(configuration[".pytest"]["script"])
     assert 'py311) python_environment="$CI_PY311_ENVIRONMENT"' in pytest_script
     assert 'py314) python_environment="$CI_PY314_ENVIRONMENT"' in pytest_script
-    assert 'PYTHONPATH="$CI_PROJECT_DIR/src"' in str(configuration[".pytest"])
+    assert 'PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src"' in str(
+        configuration[".pytest"]
+    )
 
 
 def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
@@ -310,11 +312,11 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
         assert observed.read_text().strip() == expected_environment
 
 
-def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverage(
+def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment separates costly groups and combines all coverage."""
+    """Each image environment partitions serial runtime and joins all coverage."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
@@ -325,8 +327,12 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
         "test-results-$TEST_ENVIRONMENT-shard-1.xml",
         "test-results-$TEST_ENVIRONMENT-shard-2.xml",
         "test-results-$TEST_ENVIRONMENT-shard-3.xml",
+        "test-results-$TEST_ENVIRONMENT-shard-4.xml",
     ]
-    assert "tests/test_agent_work_serial_runtime.py" in script
+    assert "-p tests.helpers.serial_runtime_shard" in script
+    assert "--serial-runtime-shard-index=0" in script
+    assert "--serial-runtime-shard-index=1" in script
+    assert "--serial-runtime-shard-count=2" in script
     assert "tests/test_template.py" in script
     assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
     assert "--ignore=tests/test_template.py" in script
@@ -335,6 +341,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-2"' in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-3"' in script
+    assert '".coverage.$TEST_ENVIRONMENT-shard-4"' in script
     assert "coverage report --fail-under=85" in script
     assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
     assert script.index("coverage report --fail-under=85") < script.index(
@@ -351,7 +358,8 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
         '>> "$INVOCATIONS"\n'
         'case "$*" in\n'
         "    *'--ignore=tests/test_agent_work_serial_runtime.py'*) shard=remaining ;;\n"
-        "    *'tests/test_agent_work_serial_runtime.py'*) shard=agent-work ;;\n"
+        "    *'--serial-runtime-shard-index=0'*) shard=agent-work-0 ;;\n"
+        "    *'--serial-runtime-shard-index=1'*) shard=agent-work-1 ;;\n"
         "    *'tests/test_template.py'*) shard=template ;;\n"
         "    *) shard=other ;;\n"
         "esac\n"
@@ -391,28 +399,46 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
 
     assert succeeded.returncode == 0
     calls = invocations.read_text().splitlines()
-    assert len(calls) == 6
-    assert {call.split("|", maxsplit=2)[1] for call in calls[:3]} == {
+    assert len(calls) == 7
+    assert {call.split("|", maxsplit=2)[1] for call in calls[:4]} == {
         ".coverage.py311-shard-1",
         ".coverage.py311-shard-2",
         ".coverage.py311-shard-3",
+        ".coverage.py311-shard-4",
     }
-    shard_calls = calls[:3]
-    assert all(call.startswith(f"{tmp_path / 'src'}|") for call in shard_calls)
+    shard_calls = calls[:4]
+    expected_import_path = os.pathsep.join((str(tmp_path), str(tmp_path / "src")))
+    assert all(call.startswith(f"{expected_import_path}|") for call in shard_calls)
+    assert all(
+        call.split("|", maxsplit=2)[2].startswith(
+            "run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest "
+        )
+        for call in shard_calls
+    )
     assert all("--cov=src/agent_work" in call for call in shard_calls)
-    serial_runtime_call = next(
+    serial_runtime_calls = [
         call
         for call in shard_calls
         if "tests/test_agent_work_serial_runtime.py" in call
         and "--ignore=tests/test_agent_work_serial_runtime.py" not in call
-    )
+    ]
     template_call = next(
         call
         for call in shard_calls
         if "tests/test_template.py" in call
         and "--ignore=tests/test_template.py" not in call
     )
-    assert serial_runtime_call != template_call
+    assert len(serial_runtime_calls) == 2
+    assert "--serial-runtime-shard-index=0" in serial_runtime_calls[0] or (
+        "--serial-runtime-shard-index=0" in serial_runtime_calls[1]
+    )
+    assert "--serial-runtime-shard-index=1" in serial_runtime_calls[0] or (
+        "--serial-runtime-shard-index=1" in serial_runtime_calls[1]
+    )
+    assert all(
+        "--serial-runtime-shard-count=2" in call for call in serial_runtime_calls
+    )
+    assert all(call != template_call for call in serial_runtime_calls)
     remaining_call = next(
         call
         for call in shard_calls
@@ -420,7 +446,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     )
     assert "--ignore=tests/test_template.py" in remaining_call
 
-    for failed_shard in ("agent-work", "template", "remaining"):
+    for failed_shard in ("agent-work-0", "agent-work-1", "template", "remaining"):
         failure_start = len(invocations.read_text().splitlines())
         failed = subprocess.run(
             ["bash", "-c", script],
@@ -433,7 +459,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
 
         assert failed.returncode != 0
         failure_calls = invocations.read_text().splitlines()[failure_start:]
-        assert len(failure_calls) == 3
+        assert len(failure_calls) == 4
         assert all("coverage combine" not in call for call in failure_calls)
         assert all("coverage report" not in call for call in failure_calls)
         assert all("coverage xml" not in call for call in failure_calls)
@@ -448,7 +474,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     )
 
     assert coverage_failed.returncode == 9
-    coverage_failure_calls = invocations.read_text().splitlines()[-6:]
+    coverage_failure_calls = invocations.read_text().splitlines()[-7:]
     report_index = next(
         index
         for index, call in enumerate(coverage_failure_calls)
@@ -471,7 +497,7 @@ def test_root_pytest_job_runs_balanced_shards_and_combines_stable_source_coverag
     )
 
     assert combine_failed.returncode == 8
-    combine_failure_calls = invocations.read_text().splitlines()[-4:]
+    combine_failure_calls = invocations.read_text().splitlines()[-5:]
     assert any("coverage combine" in call for call in combine_failure_calls)
     assert all("coverage report" not in call for call in combine_failure_calls)
     assert all("coverage xml" not in call for call in combine_failure_calls)

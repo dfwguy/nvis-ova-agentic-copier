@@ -134,7 +134,7 @@ ruff-format:
       run_shard() {
           local shard="$1"
           shift
-          PYTHONPATH="$CI_PROJECT_DIR/src" \
+          PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
               COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$shard" \
               UV_PROJECT_ENVIRONMENT="$python_environment" \
               uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
@@ -144,18 +144,29 @@ ruff-format:
                   -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$shard" \
                   "$@" &
       }
-      run_shard 1 tests/test_agent_work_serial_runtime.py
+      run_shard 1 \
+          -p tests.helpers.serial_runtime_shard \
+          --serial-runtime-shard-index=0 \
+          --serial-runtime-shard-count=2 \
+          tests/test_agent_work_serial_runtime.py
       shard_1_pid=$!
-      run_shard 2 tests/test_template.py
+      run_shard 2 \
+          -p tests.helpers.serial_runtime_shard \
+          --serial-runtime-shard-index=1 \
+          --serial-runtime-shard-count=2 \
+          tests/test_agent_work_serial_runtime.py
       shard_2_pid=$!
-      run_shard 3 \
+      run_shard 3 tests/test_template.py
+      shard_3_pid=$!
+      run_shard 4 \
           --ignore=tests/test_agent_work_serial_runtime.py \
           --ignore=tests/test_template.py
-      shard_3_pid=$!
+      shard_4_pid=$!
       shard_status=0
       wait "$shard_1_pid" || shard_status=1
       wait "$shard_2_pid" || shard_status=1
       wait "$shard_3_pid" || shard_status=1
+      wait "$shard_4_pid" || shard_status=1
       if [ "$shard_status" -ne 0 ]; then
           exit "$shard_status"
       fi
@@ -165,6 +176,7 @@ ruff-format:
               ".coverage.$TEST_ENVIRONMENT-shard-1" \
               ".coverage.$TEST_ENVIRONMENT-shard-2" \
               ".coverage.$TEST_ENVIRONMENT-shard-3" \
+              ".coverage.$TEST_ENVIRONMENT-shard-4" \
           || coverage_combine_status=$?
       if [ "$coverage_combine_status" -ne 0 ]; then
           exit "$coverage_combine_status"
@@ -187,6 +199,7 @@ ruff-format:
         - test-results-$TEST_ENVIRONMENT-shard-1.xml
         - test-results-$TEST_ENVIRONMENT-shard-2.xml
         - test-results-$TEST_ENVIRONMENT-shard-3.xml
+        - test-results-$TEST_ENVIRONMENT-shard-4.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage-$TEST_ENVIRONMENT.xml
