@@ -38,8 +38,8 @@ preparation. The controller is not a second workflow engine.
 
 Keep AI work under the live Architect. In the coding lane, the Architect
 delegates Red behavior tests and the Diátaxis Writer in parallel. Green then
-implements and reconciles their results, runs every applicable parallel review,
-runs license review after those reviews, and gets final validation. In the
+implements and reconciles their results, runs every applicable parallel review
+including license review, and gets final validation. In the
 documentation and agent-policy lane, the Architect instead delegates the
 Documentation Writer, then the Documentation Finalizer. These roles run in one
 session, not as independently restored phases.
@@ -96,9 +96,9 @@ Before taking repository action:
    the applicability record. Required slots are main, every resident ancestor,
    and every applicable child in the widest same-number phase. Count a
    conditional role as N/A only when demonstrably false; uncertainty is
-   applicable. Coding requires at most 13 live slots: main, Architect, Green,
-   and ten concurrent pre-license Phase-4 reviewers; License and post-publication
-   work are sequential. Documentation/policy requires at most 3: main,
+   applicable. Coding requires at most 14 live slots: main, Architect, Green,
+   and eleven concurrent Phase-4 reviewers including `$license-checker`.
+   Documentation/policy requires at most 3: main,
    Architect, and the current writer or finalizer child. If capacity is unknown
    or insufficient, stop before delegation and return `needs_human`. Report
    the workflow lane, required total live slots, available total or `unknown`,
@@ -199,12 +199,13 @@ the content-only boundary.
 | 4h `$cli-syntax-judge` | CLI surface or contract changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | CLI diff and tests or N/A reason | Complete CLI verdict → Green |
 | 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
 | 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
-| 4k `$license-checker` | Required; child of Green | Delegated; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and every Phase 4 review receipt | License-policy receipt → Green |
+| 4k `$license-checker` | Required; child of Green | Delegated in parallel; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and current test/JUnit evidence | License-policy receipt identifying the checked in-scope diff → Green |
 | 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record including Phase-2 writer evidence and Phase-4 comparison verdict, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
 | 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip |
 | 7 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Judge receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
 
-Green waits for every initially applicable Phase 4 reviewer, consolidates the
+Green waits for every initially applicable Phase 4 reviewer, including `$license-checker`,
+consolidates the
 complete finding set, and makes a consolidated correction for all findings it can resolve.
 A finding is concrete and resolvable only when it names an
 owner or domain, path or scope, evidence, requested outcome, and a correction
@@ -225,8 +226,9 @@ evidence, no approved-scope correction, scope expansion, or genuine
 controversy; never waive or relabel a finding to manufacture progress.
 
 After a correction, rerun only a reviewer whose finding was addressed or whose
-owned domain or evidence changed; rerun license review when changed maintained
-files affect it. Rerun the full test gate only when behavior or tests changed.
+owned domain or evidence changed; rerun license review if and only if maintained in-scope files changed
+after its approval. Rerun the full test gate only when
+behavior or tests changed.
 Green returns receipts, the ledger, repairs, and unresolved findings to the
 still-live Architect. Reviewers never mutate the shared worktree or fail fast
 after another reviewer rejects.
@@ -240,8 +242,11 @@ needed, tests, and unchanged project-owned values. A draft-safety verdict never
 approves merge. Unsafe or unvalidated diffs, or ambiguous publication authority,
 return `needs_human` without publication. Normal clean approval is unchanged.
 
-The read-only license-checker runs after the other Phase 4 reviews and before
-finalization; a violation returns to Green for a consolidated correction.
+The read-only license-checker is an initial Phase-4 reviewer. It independently
+checks the stable post-Green diff and returns a receipt identifying that checked
+in-scope diff. Finalizer requires a current approving `$license-checker` receipt
+matching the final in-scope diff for normal and draft-safety paths. A violation
+is not approval and cannot be waived or recorded as not applicable.
 
 ## Documentation and agent-policy workflow manifest
 

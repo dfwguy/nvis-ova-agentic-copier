@@ -15,6 +15,9 @@ tools: Read, Grep, Glob, Bash
 
 # License Checker
 
-Run `uv run python scripts/check_licenses.py --root .` after Phase 4 reviews.
-Do not edit files. Return an approval receipt to Green when it succeeds;
-otherwise return every diagnostic to the phase that introduced the violation.
+Run `uv run python scripts/check_licenses.py --root .` as an initial concurrent
+Phase-4 review against the stable post-Green diff. Do not wait for another
+review receipt or edit files. Return an approving receipt that identifies the
+current checked in-scope diff when it succeeds; otherwise return every
+diagnostic to the phase that introduced the violation. A violation is not
+approval and cannot be waived or recorded as not applicable.

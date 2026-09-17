@@ -112,14 +112,15 @@ implementer, reviewer, or internal phase after a crash.
 
 After implementation, Green starts the parallel review fan-out: the
 Non-functional Reviewer, Implementation Judge, Diátaxis Judge, Quality Judge,
-Test Judge, CI/CD Judge, and README Reviewer. The CLI Syntax Judge, Filesystem
-Structure Judge, and Agent-policy Judge join that fan-out only when their
-subjects apply. Once every initially applicable reviewer returns, Green
-consolidates and repairs actionable findings. The License Checker runs after
-those reviews, not in the parallel fan-out. The Architect then receives the
-complete result and delegates the Finalizer. This order makes documentation
-writing happen before implementation, implementation happen before reviews,
-and final validation happen after review and license evidence.
+Test Judge, CI/CD Judge, README Reviewer, and License Checker. The CLI Syntax
+Judge, Filesystem Structure Judge, and Agent-policy Judge join that fan-out
+only when their subjects apply. Every initially applicable reviewer examines
+the same stable post-Green diff, and Green waits for every receipt before it
+consolidates and repairs actionable findings. The License Checker does not
+wait for another review receipt. The Architect then receives the complete
+result and delegates the Finalizer. This order makes documentation writing
+happen before implementation, implementation happen before reviews, and final
+validation happen after current license evidence.
 
 ## Recovery is coarse and observable
 

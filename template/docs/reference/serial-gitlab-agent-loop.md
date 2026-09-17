@@ -528,8 +528,10 @@ hands the approved design concurrently to Red and the Diátaxis Writer. Red
 exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`.
 Architect waits for both receipts before Green starts with the design, Red test
 diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
-draft with the final interface, fans out applicable read-only judges, and
-returns consolidated feedback to Architect for the final decision.
+draft with the final interface, then fans out every applicable initial
+read-only Phase-4 reviewer, including `$license-checker`, against the same
+stable post-Green diff. It waits for every initial receipt before consolidating
+feedback and returns that result to Architect for the final decision.
 
 ### Preselection pipeline gate
 
@@ -815,8 +817,11 @@ diagnostic, and next action. The trusted runner validates it against the
 ledger, configured numeric project, Git evidence, and required workflow
 receipts before changing state.
 For coding work, the final audit names every mandatory role: Architect, Red,
-Diátaxis Writer, Green, all applicable reviews, the sequential
-`$license-checker`, and Finalizer; content work retains its separate role set.
+Diátaxis Writer, Green, all applicable reviews including the initial
+`$license-checker`, and Finalizer. The finalizer requires a current approving
+license receipt for the final in-scope diff. On correction, the checker reruns
+only if maintained files in its checked scope changed; a violation cannot be
+waived or marked not applicable. Content work retains its separate role set.
 
 ### Intake sizing contract
 

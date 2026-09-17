@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-17
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -44,8 +44,10 @@ by the manifest is the only identifier an agent may load or delegate.
 Capacity is a workflow precondition, not a repository setting. The active
 frontend reports available live-agent capacity through trusted runtime or
 session metadata, and the manifest compares that total with the lane's widest
-parallel phase. For the setup procedure and the required `needs_human`
-reporting, see [Configure agent capacity](../how-to/configure-agent-capacity.md).
+parallel phase. The coding lane needs at most 14 live slots: Main, Architect,
+Green, and 11 initially applicable Phase-4 reviewers. For the setup procedure
+and the required `needs_human` reporting, see [Configure agent
+capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` is intentionally a concise routing manifest rather than a second
 copy of every role procedure. It says which file or skill to read, when it
@@ -148,6 +150,7 @@ flowchart TD
         cli["$cli-syntax-judge (conditional)"]
         filesystem["$filesystem-structure-judge (conditional)"]
         policy["$agent-policy-judge (conditional)"]
+        license["$license-checker"]
     end
     green --> nonfunctional
     green --> judge
@@ -159,6 +162,7 @@ flowchart TD
     green --> cli
     green --> filesystem
     green --> policy
+    green --> license
     nonfunctional --> reviews["All initially applicable reviews returned"]
     judge --> reviews
     diataxis --> reviews
@@ -169,16 +173,13 @@ flowchart TD
     cli --> reviews
     filesystem --> reviews
     policy --> reviews
+    license --> reviews
     reviews --> phase4outcome{"Concrete, resolvable Phase-4 findings with material progress?"}
     phase4outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
     focusedgreen --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
     selective --> phase4outcome
-    phase4outcome -- "no findings" --> license["$license-checker (sequential)"]
+    phase4outcome -- "no findings" --> finalizer["$tdd-finalizer"]
     phase4outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
-    license --> licenseoutcome{"License clean or resolvable violation with material progress?"}
-    licenseoutcome -- "clean" --> finalizer["$tdd-finalizer"]
-    licenseoutcome -- "resolvable violation" --> focusedgreen
-    licenseoutcome -- "no progress or human-judgment blocker" --> humanstop
     finalizer --> decision{"Architect accepts finalizer verdict?"}
     decision -- "normal approval" --> publish["Main publication"]
     decision -- "needs human" --> humanstop
@@ -235,12 +236,15 @@ flowchart TD
     selection --> childworkflow["Fresh AI context: applicable full workflow"]
 ```
 
-The coding review fan-out is concurrent only for initially applicable Phase-4
-reviewers. Green consolidates and corrects their evidence-led findings before
-the sequential License Checker examines the final diff and complete Phase-4
-receipts. A license violation re-enters focused correction and affected
-reviewer reruns before License examines the resulting final diff again. A
-Draft publication, when an explicit draft-safety verdict permits it, remains a
+The coding review fan-out includes the License Checker as an initial,
+read-only Phase-4 reviewer. Every applicable reviewer examines the same stable
+post-Green diff, and Green waits for every initial receipt before consolidating
+findings; a license receipt never depends on another review receipt. A license
+violation re-enters focused correction with the other actionable findings. The
+checker reruns only if maintained files in its checked scope changed. Final
+validation requires a current approving license receipt for the final in-scope
+diff: a violation cannot be waived or marked not applicable. A Draft
+publication, when an explicit draft-safety verdict permits it, remains a
 separate human handoff rather than an automatic consequence of a stop.
 
 The ordinary interactive branch convention is `clanker/<slug>`. The serial
@@ -305,11 +309,14 @@ closed finding. Repetition, unchanged evidence, an unavailable approved-scope
 correction, scope expansion, or genuine controversy stops the loop rather than
 relabeling a finding to create apparent progress.
 
-The first review includes every applicable reviewer. A correction reruns only
-the reviewer whose finding was addressed or whose domain/evidence changed;
-license review follows changes to maintained files, and the full test gate runs
-only when behavior or tests changed. When a safe diff stops at a human judgment
-boundary, the Finalizer can give a draft-safety verdict. That can hand off a
+The first review includes every applicable reviewer, including the License
+Checker. A correction reruns only the reviewer whose finding was addressed or
+whose domain/evidence changed; the License Checker reruns when maintained files
+in its checked scope changed, and the full test gate runs only when behavior or
+tests changed. The Finalizer requires a current approving license receipt for
+the final in-scope diff; a license violation cannot be waived or marked not
+applicable. When a safe diff stops at a human judgment boundary, the Finalizer
+can give a draft-safety verdict. That can hand off a
 clearly titled `Draft:` merge request containing unresolved findings, the
 evidence/cycle ledger, exact human decisions, tests, and unchanged project-owned
 values. It is not merge approval. Unsafe or unvalidated work, or unclear
@@ -381,6 +388,7 @@ approval and merge boundary.
 | CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
+| License Checker | Independently checks license compliance on the stable post-Green diff | Edit files, wait for another review receipt, or waive a violation |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |
 | Documentation Finalizer | Verifies content classification, structure, mirrors, and source synchronization | Edit, stage, publish, or call remote APIs |
 
