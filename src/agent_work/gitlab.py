@@ -27,6 +27,7 @@ from .domain import (
     LIFECYCLE_LABELS,
     PREREQUISITE_LABEL_COLOR,
     PREREQUISITE_LABEL_DESCRIPTION,
+    legacy_prerequisite_label_iid,
     parse_split_marker,
     prerequisite_label_iid,
 )
@@ -186,6 +187,8 @@ class GitLabGateway:
             raise GitLabError("GitLab API request timed out") from error
         if result.returncode != 0:
             raise GitLabError("GitLab API request failed")
+        if method == "DELETE" and not result.stdout.strip():
+            return None
         try:
             return cast(object, json.loads(result.stdout))
         except json.JSONDecodeError as error:
@@ -502,6 +505,24 @@ class GitLabGateway:
                 )
                 changed = True
         return changed
+
+    def retire_legacy_prerequisite_labels(self) -> bool:
+        """Delete exact legacy prerequisite definitions in numeric IID order."""
+        endpoint = f"projects/{self._config.project_id}/labels"
+        legacy_names = tuple(
+            sorted(
+                (
+                    name
+                    for name in self._label_inventory(endpoint)
+                    if isinstance(name, str)
+                    and legacy_prerequisite_label_iid(name) is not None
+                ),
+                key=lambda name: legacy_prerequisite_label_iid(name) or 0,
+            )
+        )
+        for name in legacy_names:
+            self._call(f"{endpoint}/{quote(name, safe='')}", method="DELETE")
+        return bool(legacy_names)
 
     def transition_prerequisite_labels(
         self, iid: int, labels: tuple[str, ...]

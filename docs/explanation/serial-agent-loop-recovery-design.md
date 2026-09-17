@@ -136,14 +136,19 @@ or unrecoverable. Labels communicate operator-visible ownership; they are not
 the transaction log.
 
 Split prerequisite labels are a separate, derived operator view. For an open
-split child, `agent::prereq_<IID>` means that IID is a currently open trusted
-prerequisite. The validated marker and the prerequisite's live issue state,
-not that label, decide dependency gating. The runner derives a numerically
-ordered intended set, creates or reuses labels with stable presentation, and
-reconciles missing or stale projections idempotently. It removes a projection
-when its prerequisite closes, the marker dependency disappears, or the child
-closes. A failed remote update leaves retryable projection drift; it does not
-change the child's authority, lifecycle, or eligibility.
+split child, `agent-prereq_<IID>` means that IID is a currently open trusted
+prerequisite. These labels are non-scoped so one issue can display several
+open prerequisites; GitLab's scoped-label form could not do that. The validated
+marker and the prerequisite's live issue state, not that label, decide
+dependency gating. The runner derives a numerically ordered intended set,
+creates or reuses labels with stable presentation, and reconciles missing or
+stale projections idempotently. It removes a projection when its prerequisite
+closes, the marker dependency disappears, or the child closes. During the
+migration, it retains exact legacy `agent::prereq_<IID>` project-label
+definitions until every affected issue has moved to its complete canonical
+set, making an interrupted transition safely retryable. A failed remote update
+leaves retryable projection drift; it does not change the child's authority,
+lifecycle, or eligibility.
 
 An automatic exact-pipeline repair is bounded per retained item. An
 unsuccessful attempt creates a durable 20-minute repair eligibility backoff,

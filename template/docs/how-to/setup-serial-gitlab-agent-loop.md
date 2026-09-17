@@ -48,8 +48,9 @@ either label to return it to normal ordering. Active/resumable work and all
 eligibility checks still take precedence. Do not retroactively label existing
 issues.
 
-The loop creates and maintains `agent::prereq_<IID>` labels only when a
-validated split child has an open trusted prerequisite. These labels are an
+The loop creates and maintains `agent-prereq_<IID>` labels only when a
+validated split child has an open trusted prerequisite. These non-scoped
+labels let one child display several open prerequisites at once. They are an
 operator-visible projection, not a way to control the queue. Do not add,
 remove, or use them to bypass a dependency: the split markers and the live
 state of prerequisite issues remain authoritative.
@@ -567,11 +568,16 @@ decomposition state, saved plan or progress record, checkpoint restoration, or
 special queue to repair.
 
 For an open child, the runner projects every open trusted prerequisite as one
-`agent::prereq_<IID>` label, ordered by numeric IID. It removes a projection
+`agent-prereq_<IID>` label, ordered by numeric IID. It removes a projection
 when the prerequisite closes, the dependency is removed from the trusted
 marker, or the child closes. Preview `loop run` and `recovery inventory` show
 the current and intended labels without writing them. An applied `loop run`
-repairs missing or stale labels before normal selection. If it repairs any
+repairs missing or stale labels before normal selection. It creates or
+normalizes the canonical project-label definitions, removes exact legacy
+`agent::prereq_<IID>` labels from affected issues, and adds the complete
+ordered canonical set. Only after every issue-label transition succeeds does
+it delete the matching legacy project-label definitions. A partial transition
+keeps those definitions available for a safe retry. If it repairs any
 projection drift, that pass does only the repair and does not claim work,
 create a ledger record or worktree, or start a worker. A later run resumes
 normal selection.

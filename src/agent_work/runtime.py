@@ -2607,12 +2607,8 @@ def dispatch(
         projection_drift = prerequisite_reconciliation.projections
         prerequisite_projections = _prerequisite_projection_reports(projection_drift)
         intended_definitions = prerequisite_reconciliation.label_names
-        definitions_changed = (
-            gitlab.ensure_prerequisite_labels(intended_definitions)
-            if intended_definitions
-            else False
-        )
-        if projection_drift or definitions_changed:
+        definitions_changed = gitlab.ensure_prerequisite_labels(intended_definitions)
+        if projection_drift:
             for projection in projection_drift:
                 gitlab.transition_prerequisite_labels(
                     projection.issue_iid,
@@ -2622,6 +2618,8 @@ def dispatch(
                         if prerequisite_label_iid(label) is not None
                     ),
                 )
+        legacy_definitions_retired = gitlab.retire_legacy_prerequisite_labels()
+        if projection_drift or definitions_changed or legacy_definitions_retired:
             return _report(
                 request,
                 applied=True,
