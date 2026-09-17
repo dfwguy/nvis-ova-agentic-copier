@@ -914,16 +914,14 @@ def _pipeline_handoff(
     )
 
 
-def find_exact_pipeline_owner(
+def _exact_pipeline_owner_candidates(
     *,
     records: tuple[LedgerRecord, ...],
     merge_request: MergeRequestEvidence,
     project_id: int,
-    default_branch: str,
-    repository: RepositoryPort,
-) -> LedgerRecord | None:
-    """Return the sole exact observation owner, or ``None`` on any ambiguity."""
-    candidates = tuple(
+) -> tuple[LedgerRecord, ...]:
+    """Return durable records that claim one exact merge-request pipeline."""
+    return tuple(
         record
         for record in records
         if record.merge_request_iid == merge_request.iid
@@ -945,6 +943,20 @@ def find_exact_pipeline_owner(
         )
         and record.source_sha == merge_request.sha
         and record.source_branch == merge_request.source_branch
+    )
+
+
+def find_exact_pipeline_owner(
+    *,
+    records: tuple[LedgerRecord, ...],
+    merge_request: MergeRequestEvidence,
+    project_id: int,
+    default_branch: str,
+    repository: RepositoryPort,
+) -> LedgerRecord | None:
+    """Return the sole exact observation owner, or ``None`` on any ambiguity."""
+    candidates = _exact_pipeline_owner_candidates(
+        records=records, merge_request=merge_request, project_id=project_id
     )
     if len(candidates) != 1:
         return None
@@ -1028,6 +1040,16 @@ def _inspect_pipeline_gate(
         for merge_request, pipeline in inspected:
             if pipeline.status != "failed":
                 continue
+            exact_owner_records = _exact_pipeline_owner_candidates(
+                records=records, merge_request=merge_request, project_id=project_id
+            )
+            if len(exact_owner_records) > 1:
+                return _pipeline_handoff(
+                    outcome="pipeline_blocked",
+                    pipeline_url=pipeline.web_url,
+                    detail="Multiple retained records claim one exact failed pipeline.",
+                    next_action="Reconcile the competing retained records before selecting work.",
+                )
             owner = find_exact_pipeline_owner(
                 records=records,
                 merge_request=merge_request,
@@ -1050,12 +1072,10 @@ def _inspect_pipeline_gate(
                     merge_request=merge_request,
                     pipeline=pipeline,
                 )
-            return _pipeline_handoff(
-                outcome="pipeline_blocked",
-                pipeline_url=pipeline.web_url,
-                detail="An open merge request failed for its current source SHA without one exact retained owner.",
-                next_action="Inspect the pipeline and reconcile its exact retained owner before selecting work.",
-            )
+            # An ownerless or inexact failed MR is item-local evidence.  It
+            # cannot reserve the project-wide serial slot or starve later
+            # exact repairs and fresh eligible work.
+            continue
         for _merge_request, pipeline in inspected:
             if pipeline.status == "failed":
                 continue
@@ -2604,6 +2624,22 @@ def dispatch(
                 if item.state in IMMEDIATE_OWNER_STATES
             )
         )
+        if len(immediate_owners) > 1:
+            return _report(
+                request,
+                applied=True,
+                outcome="pipeline_blocked",
+                project=identity,
+                stop_reason="cross_item_identity_ambiguous",
+                summary=(
+                    "Multiple active retained records have conflicting serial "
+                    "ownership; reconcile their shared identity before resuming."
+                ),
+                next_action=(
+                    "Reconcile the active retained records before selecting or "
+                    "repairing work."
+                ),
+            )
         poll_delay = _PIPELINE_POLL_INITIAL_SECONDS
         while gate.outcome == "pipeline_wait" and not immediate_owners:
             poll_delay, viable = _sleep_for_pipeline_poll(

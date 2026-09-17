@@ -605,6 +605,7 @@ class FakeRepository:
         self.verified_heads: list[str] = []
         self.synced_heads: list[tuple[str, str]] = []
         self.current_head = "a" * 40
+        self.ancestry = True
         self.reconciliation_sha: str | None = None
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
@@ -685,6 +686,11 @@ class FakeRepository:
         self.verified_heads.append(expected_head)
         if not self.worktree_valid:
             raise RepositoryError("worktree branch or baseline changed")
+
+    def is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
+        """Model trusted Git ancestry for controller fast-forward recovery."""
+        del worktree
+        return self.ancestry and ancestor != "0" * 40 and descendant != "0" * 40
 
     def sync_feedback_worktree(
         self, worktree: Path, branch: str, old_sha: str, new_sha: str
@@ -3809,7 +3815,7 @@ def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
     assert "raw-worker-prose-secret" not in comment
 
 
-def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
+def test_future_retry_wait_does_not_reserve_the_serial_slot(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
@@ -3820,16 +3826,15 @@ def test_future_retry_wait_reserves_the_serial_slot(tmp_path: Path) -> None:
     gitlab = FakeGitLab(_issue(iid=13))
     repository = FakeRepository(config)
 
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
+    selected, issue = select_record(
+        ledger,
+        gitlab,  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
         now=NOW,
     )
 
-    assert outcome is None
+    assert selected is not None and selected.issue_iid == 13
+    assert issue is not None and issue.iid == 13
     assert not repository.prepared
     assert ledger.load(13) is None
 
@@ -3869,7 +3874,62 @@ def test_suggest_close_precedes_future_retry_wait_without_inventory(
         repository=FakeRepository(config),  # type: ignore[arg-type]
     )
     assert selected == suggested and issue is not None and issue.iid == 55
-    assert gitlab.fetch_issue_calls == [55]
+    assert gitlab.fetch_issue_calls == [12, 55]
+
+
+@pytest.mark.parametrize(
+    "owner_state",
+    (RunnerState.PREPARING, RunnerState.EXECUTING, RunnerState.RETRY_WAIT),
+)
+def test_selector_prioritizes_planned_owner_over_suggest_close(
+    tmp_path: Path, owner_state: RunnerState
+) -> None:
+    """An operator-visible suggestion cannot starve one planned durable owner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    owner = ledger.persist(
+        _record(
+            tmp_path, state=owner_state, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "retry_at": NOW - timedelta(seconds=1)
+                if owner_state is RunnerState.RETRY_WAIT
+                else None,
+            }
+        )
+    )
+    suggested = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.CODING_GREEN
+        ).model_copy(
+            update={
+                "state": RunnerState.SUGGEST_CLOSE,
+                "issue_iid": 55,
+                "source_branch": "agent/issue-55",
+                "suggest_close_evidence": SuggestCloseEvidence(
+                    reason="already-satisfied",
+                    issue_iid=55,
+                    evidence=("https://example.test",),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue(iid=owner.issue_iid))
+    gitlab.issues = {
+        owner.issue_iid: _issue(iid=owner.issue_iid),
+        suggested.issue_iid: _issue(iid=suggested.issue_iid),
+    }
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+    )
+
+    assert selected == owner
+    assert issue is not None and issue.iid == owner.issue_iid
+    assert ledger.load(suggested.issue_iid) == suggested
 
 
 def test_future_retry_wait_skips_recovery_inventory_and_preserves_retry_budget(
@@ -4286,10 +4346,10 @@ def test_malformed_awaiting_handoff_blocks_before_eligible_selection(
     assert len(gitlab.comments) == 1
 
 
-def test_changed_awaiting_sha_blocks_before_eligible_selection(
+def test_changed_awaiting_sha_quarantines_the_handoff_and_selects_eligible_work(
     tmp_path: Path,
 ) -> None:
-    """Unreviewed external MR drift cannot leave an old handoff awaiting."""
+    """Unreviewed external MR drift is local and cannot starve eligible work."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
@@ -4323,10 +4383,209 @@ def test_changed_awaiting_sha_blocks_before_eligible_selection(
         now=NOW,
     )
 
-    assert outcome is not None and outcome.issue_iid == 12
-    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
-    assert gitlab.labels == ["agent::blocked"]
+    assert outcome is not None and outcome.issue_iid == 13
+    blocked = ledger.load(12)
+    assert blocked is not None
+    assert blocked.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert gitlab.labels == ["agent::blocked", "agent::running"]
     assert len(gitlab.comments) == 1
+
+
+def test_prepare_adopts_exact_controller_descendant_for_issue_100(
+    tmp_path: Path,
+) -> None:
+    """A real remediation prepare adopts a clean, exact controller descendant."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    old_sha = "e" * 40
+    new_sha = "a" * 40
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.CODING_GREEN,
+        ).model_copy(
+            update={
+                "issue_iid": 100,
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "source_branch": "agent/issue-100",
+                "worktree": config.state_root / "worktrees" / "100",
+                "source_sha": old_sha,
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(
+                    source_branch="agent/issue-100", sha=new_sha
+                ).web_url,
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue(iid=100))
+    gitlab.existing_mr = _mr(source_branch="agent/issue-100", sha=new_sha)
+    repository = FakeRepository(config)
+    repository.current_head = new_sha
+    repository.dirty = False
+    repository.paths = ()
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+        issue_iid=record.issue_iid,
+    )
+
+    assert prepared is not None
+    assert prepared.state is RunnerState.EXECUTING
+    assert prepared.source_sha == new_sha
+    assert prepared.merge_request_iid == 88
+    assert repository.verified_heads[-1] == new_sha
+
+
+def test_prepare_rejects_non_descendant_locally_then_selects_a_fresh_issue(
+    tmp_path: Path,
+) -> None:
+    """Failed ancestry quarantines one remediation and leaves later work runnable."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.CODING_GREEN,
+        ).model_copy(
+            update={
+                "issue_iid": 100,
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "source_branch": "agent/issue-100",
+                "worktree": config.state_root / "worktrees" / "100",
+                "source_sha": "e" * 40,
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(
+                    source_branch="agent/issue-100", sha="a" * 40
+                ).web_url,
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue(iid=100))
+    gitlab.existing_mr = _mr(source_branch="agent/issue-100", sha="a" * 40)
+    repository = FakeRepository(config)
+    repository.current_head = "a" * 40
+    repository.dirty = False
+    repository.paths = ()
+    repository.ancestry = False
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+        issue_iid=record.issue_iid,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
+
+    class LaterEligibleGitLab(FakeGitLab):
+        def list_eligible(self) -> tuple[GitLabIssue, ...]:
+            return (_issue(iid=101),)
+
+    later = LaterEligibleGitLab(_issue(iid=100))
+    selected, issue = select_record(
+        ledger,
+        later,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+
+    assert selected is not None and selected.issue_iid == 101
+    assert issue is not None and issue.iid == 101
+
+
+@pytest.mark.parametrize(
+    "failed_boundary",
+    (
+        "worktree_missing",
+        "worktree_dirty",
+        "worktree_changed_paths",
+        "worktree_branch",
+        "ancestry",
+        "source_project",
+        "target_branch",
+        "competing_identity",
+    ),
+)
+def test_prepare_quarantines_each_failed_controller_adoption_boundary(
+    tmp_path: Path, failed_boundary: str
+) -> None:
+    """Every real adoption corroboration failure blocks only its remediation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    old_sha = "e" * 40
+    new_sha = "a" * 40
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PREPARING,
+            phase=WorkflowPhase.CODING_GREEN,
+        ).model_copy(
+            update={
+                "issue_iid": 100,
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "source_branch": "agent/issue-100",
+                "worktree": config.state_root / "worktrees" / "100",
+                "source_sha": old_sha,
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(
+                    source_branch="agent/issue-100", sha=new_sha
+                ).web_url,
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue(iid=100))
+    mr_updates: dict[str, object] = {}
+    if failed_boundary == "source_project":
+        mr_updates["source_project_id"] = 1
+    if failed_boundary == "target_branch":
+        mr_updates["target_branch"] = "release"
+    gitlab.existing_mr = _mr(source_branch="agent/issue-100", sha=new_sha).model_copy(
+        update=mr_updates
+    )
+    repository = FakeRepository(config)
+    repository.current_head = new_sha
+    repository.dirty = failed_boundary == "worktree_dirty"
+    repository.paths = (
+        ("src/changed.py",) if failed_boundary == "worktree_changed_paths" else ()
+    )
+    repository.worktree_present = failed_boundary != "worktree_missing"
+    repository.worktree_valid = failed_boundary != "worktree_branch"
+    if failed_boundary == "ancestry":
+        repository.ancestry = False
+    if failed_boundary == "competing_identity":
+        ledger.persist(
+            record.model_copy(
+                update={
+                    "issue_iid": 101,
+                    "state": RunnerState.BLOCKED,
+                    "worktree": config.state_root / "worktrees" / "101",
+                }
+            )
+        )
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+        issue_iid=record.issue_iid,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
 
 
 def test_unpinned_selection_scans_every_terminal_record_for_a_later_published_mr(
@@ -5403,10 +5662,10 @@ def test_loop_preview_only_offers_an_exact_pipeline_repair_when_its_trusted_budg
         assert gitlab.issue.iid == 90
 
 
-def test_preview_fails_closed_when_a_deferred_owner_is_not_exact(
+def test_preview_skips_a_deferred_owner_that_is_not_exact(
     tmp_path: Path,
 ) -> None:
-    """A retry deadline never permits an inexact failed-pipeline owner to be skipped."""
+    """An inexact deferred owner is item-local and does not reserve the slot."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     owner = ledger.persist(
@@ -5446,9 +5705,9 @@ def test_preview_fails_closed_when_a_deferred_owner_is_not_exact(
         dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
     )
 
-    assert preview.outcome == "pipeline_blocked"
+    assert preview.outcome == "eligible"
     assert ledger.load(owner.issue_iid) == owner
-    assert gitlab.eligible_calls == 0
+    assert gitlab.eligible_calls == 1
 
 
 def test_loop_preview_scans_past_an_exhausted_exact_owner_to_a_due_exact_owner(
@@ -8393,10 +8652,10 @@ def test_applied_run_skips_every_segment_when_activation_budget_is_exhausted(
     assert repository.prepared is False
 
 
-def test_recover_pipeline_wait_allows_exact_target_but_failed_or_missing_evidence_blocks(
+def test_recover_pipeline_wait_skips_an_unrelated_failed_pipeline(
     tmp_path: Path,
 ) -> None:
-    """Only a pending pipeline yields to exact recovery; unsafe evidence still blocks it."""
+    """Only project pipeline evidence blocks a recovery of another exact item."""
     config = _config(tmp_path)
     target = _record(
         tmp_path,
@@ -8455,7 +8714,7 @@ def test_recover_pipeline_wait_allows_exact_target_but_failed_or_missing_evidenc
         PipelineEvidence(
             id=5, status="failed", sha="b" * 40, web_url="https://pipeline/5"
         )
-    ) == ("pipeline_blocked", [])
+    ) == ("run_segment", ["coding-green"])
     assert apply_action(None) == ("pipeline_inventory_blocked", [])
 
 
@@ -9217,10 +9476,10 @@ def test_loop_run_failed_exact_merge_request_pipeline_resumes_safe_retained_owne
 
 
 @pytest.mark.parametrize("owner_kind", ("missing", "sha_mismatch"))
-def test_loop_run_failed_merge_request_pipeline_without_safe_owner_fails_closed(
+def test_loop_run_skips_failed_merge_request_pipeline_without_safe_owner(
     tmp_path: Path, owner_kind: str
 ) -> None:
-    """A failed MR pipeline never falls through to an unrelated fresh issue."""
+    """An ownerless or inexact failed MR pipeline cannot starve fresh work."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     if owner_kind == "sha_mismatch":
@@ -9257,14 +9516,8 @@ def test_loop_run_failed_merge_request_pipeline_without_safe_owner_fails_closed(
         ),
     )
 
-    assert report.outcome == "pipeline_blocked"
-    assert report.stop_reason == "pipeline_blocked"
-    assert report.items == ()
-    assert report.summary is not None
-    assert "https://pipeline/4" in report.summary
-    assert report.next_action
-    assert gitlab.eligible_calls == 0
-    assert invoker.prompts == []
+    assert report.outcome == "activation_complete"
+    assert report.items and report.items[0].issue_iid == 12
 
 
 def test_loop_run_with_multiple_pipeline_wait_owners_fails_closed(
@@ -9309,10 +9562,10 @@ def test_loop_run_with_multiple_pipeline_wait_owners_fails_closed(
     assert invoker.prompts == []
 
 
-def test_pipeline_inventory_ranks_a_later_failure_before_an_earlier_wait(
+def test_pipeline_inventory_waits_after_skipping_an_ownerless_later_failure(
     tmp_path: Path,
 ) -> None:
-    """A pending lower-IID MR cannot conceal a later failed current-SHA pipeline."""
+    """An ownerless failure is local; a pending exact pipeline remains observable."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab()
@@ -9337,7 +9590,7 @@ def test_pipeline_inventory_ranks_a_later_failure_before_an_earlier_wait(
     )
 
     assert report.operational_plan is not None
-    assert report.operational_plan.action == "pipeline_blocked"
+    assert report.operational_plan.action == "pipeline_wait"
     assert "pipeline" in (report.next_action or "")
 
 

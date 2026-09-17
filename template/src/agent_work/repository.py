@@ -426,6 +426,10 @@ class GitRepository:
             raise RepositoryError("Git operation failed")
         return result.returncode == 0
 
+    def is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
+        """Return whether the retained worktree proves a fast-forward relation."""
+        return self._is_ancestor(ancestor, descendant, worktree)
+
     def _merge_current_default(self, default_sha: str, worktree: Path) -> None:
         """Start a merge while retaining conflict state for workflow repair."""
         result = self._bounded_command(
