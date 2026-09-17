@@ -180,6 +180,22 @@ or uncertain diff as coding; content work never bypasses behavior testing.
 This coding manifest remains the full route for non-trivial changes outside
 the content-only boundary.
 
+## Test boundary for documentation and policy
+
+Tests MUST NOT assert or otherwise lock documentation prose, agent-policy
+wording or content, Markdown structure, headings, examples, or fenced-command
+text. Never add tests merely for documentation or policy changes;
+documentation and policy correctness belongs to their applicable review
+workflow. Test executable behavior described in documentation at its owning
+implementation or interface boundary, never by inspecting the prose or fenced
+text.
+
+The sole permitted documentation- or policy-related test is this repository's
+existing repository-maintenance synchronization check for declared required
+mirrors. It may verify that mirrors are byte-identical, copied, or rendered as
+required, but must not test their content. This exception does not authorize a
+generated project to add documentation or policy tests.
+
 ## Coding workflow manifest
 
 | Phase / exact skill | Applies | Owner | Tier / Codex | Requires | Receipt; rejection route |
