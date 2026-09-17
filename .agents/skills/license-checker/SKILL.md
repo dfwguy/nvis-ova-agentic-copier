@@ -17,7 +17,7 @@ metadata:
 # License Checker
 
 Read and follow [the role instructions](../../agents/license-checker.md) before
-running the repository checker after all required reviews and before finalization:
+running the repository checker as an initial concurrent Phase-4 review:
 
 ```bash
 uv run python scripts/check_licenses.py --root .

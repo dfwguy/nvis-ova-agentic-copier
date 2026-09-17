@@ -54,7 +54,7 @@ exists. Do not add untested functionality.
    replace them before review.
    For Bash, run the selected shell test command, `bash -n`, and ShellCheck.
 5. **Fan out review.** On the initial review, delegate every applicable Phase
-   4 judge from `AGENTS.md` concurrently, subject to available slots. Give each
+   4 judge, including `$license-checker`, from `AGENTS.md` concurrently, subject to available slots. Give each
    only its relevant diff, instructions, and current test/JUnit evidence.
    Reviewers are read-only. Wait for every result even when one rejects.
 6. **Classify and repair with evidence.** Consolidate the complete finding set before
@@ -64,8 +64,8 @@ exists. Do not add untested functionality.
    reviewers, acceptance controversy, project-owned value change, and scope
    expansion are human-judgment blockers. Fix all resolvable findings in one
    pass. After correction, rerun only reviewers whose finding was addressed or
-   whose owned domain/evidence changed (including license review for affected
-   maintained files); rerun the full test gate only when behavior or tests
+   whose owned domain/evidence changed; rerun license review if and only if
+   maintained in-scope files changed after its approval; rerun the full test gate only when behavior or tests
    changed. If a test must change, first reconfirm that it fails against
    pre-fix behavior.
 7. **Return a cycle ledger to Architect.** Report Red/Green evidence, changed

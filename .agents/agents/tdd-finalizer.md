@@ -32,6 +32,9 @@ syntax and ShellCheck gates; mixed changes use both. Do not fix issues yourself
 The record must also contain the required Phase-2 Diátaxis Writer receipt or
 no-doc rationale, and the Diátaxis Judge's comparison verdict against the
 design, draft/report, final documentation, and implemented interface.
+It must contain a current approving `$license-checker` receipt identifying the
+final in-scope diff. A finding or violation is not approval and cannot be
+waived or recorded as not applicable for either normal or draft-safety paths.
 
 ## When This Runs
 
@@ -97,7 +100,12 @@ disposition, and termination reason.
    back to Green; do not update them yourself. This check always
    applies.
 
-7. **Verdict**: Approve only when the applicability record is complete, all
+7. **Verify license freshness.** Reject when the approval receipt does not
+   identify the final in-scope diff, or when maintained files in its checked
+   scope changed after approval. Route to Green for a rerun; do not waive a
+   violation or substitute a not-applicable result.
+
+8. **Verdict**: Approve only when the applicability record is complete, all
    applicable language gates, non-test pre-commit hooks, and current Python
    evidence (when Python changed) are clean, README
    is in sync, and documentation checks pass. If rejecting, include the first

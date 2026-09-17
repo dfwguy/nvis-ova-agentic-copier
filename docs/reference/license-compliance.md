@@ -5,7 +5,7 @@ summary: Look up the repository license-header policy, checked scope, and docume
 audience: maintainer
 tags: [compliance, template]
 status: current
-last_reviewed: 2026-09-11
+last_reviewed: 2026-09-17
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why final validation uses specialized review roles.
@@ -35,10 +35,12 @@ License compliance is checked in both local and remote validation:
 | --- | --- |
 | Pre-commit | The `license-check` hook rejects a proposed change with missing, malformed, or unrecognized license information before it is committed. |
 | GitLab CI | The `license-check` gate independently applies the same policy to the submitted repository state. |
-| Final validation | The portable, read-only `$license-checker` phase runs before `$tdd-finalizer`. |
+| Final validation | The portable, read-only `$license-checker` is an initial Phase-4 reviewer. It runs concurrently with every other applicable reviewer against the same stable post-Green diff. Green waits for its receipt before consolidating findings, and `$tdd-finalizer` requires a current approving receipt for the final in-scope diff. |
 
-The checker does not modify files. Maintainers correct the file header or add
-an allowed annotation, then rerun validation.
+The checker does not modify files. A violation is a required correction, not a
+waivable or not-applicable review result. Maintainers correct the file header or
+add an allowed annotation, then rerun the checker if maintained files in its
+checked scope changed.
 
 It is a read-only repository development/CI helper, rather than a user-facing
 operational application. Its ephemeral diagnostics deliberately preserve the

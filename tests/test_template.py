@@ -3701,6 +3701,39 @@ def test_portable_markdown_mirrors_match_generated_output(
         assert template_content == (generated_project / relative_path).read_bytes()
 
 
+def test_license_review_is_an_initial_parallel_gate_with_a_fresh_final_receipt(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """License review is concurrent initially and current at finalization."""
+    policies = tuple(
+        (root / "AGENTS.md").read_text()
+        for root in (project_root, template_dir, generated_project)
+    )
+
+    assert policies[0] == policies[1] == policies[2]
+    policy = policies[0]
+    coding_manifest = policy.split("## Coding workflow manifest", maxsplit=1)[1].split(
+        "## Documentation and agent-policy workflow manifest", maxsplit=1
+    )[0]
+    license_row = next(
+        row
+        for row in coding_manifest.splitlines()
+        if row.startswith("| 4k `$license-checker`")
+    )
+
+    assert "Required; child of Green" in license_row
+    assert "Delegated in parallel; read-only" in license_row
+    assert "Final diff" in license_row
+    assert "every Phase 4 review receipt" not in license_row
+    assert "at most 14 live slots" in policy
+    assert "eleven concurrent Phase-4 reviewers" in policy
+    assert "including `$license-checker`" in coding_manifest
+    assert "if and only if maintained in-scope files changed" in coding_manifest
+    assert "current approving `$license-checker` receipt" in coding_manifest
+    assert "matching the final in-scope diff" in coding_manifest
+    assert "cannot be waived or recorded as not applicable" in coding_manifest
+
+
 def test_git_flow_publishes_and_verifies_literal_markdown_mr_descriptions(
     project_root: Path, template_dir: Path
 ) -> None:
