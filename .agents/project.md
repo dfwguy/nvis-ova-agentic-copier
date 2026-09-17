@@ -122,6 +122,14 @@ mirror parity, and synchronization with configured behavior. Do not add tests
 that merely lock down wording. Bash fenced snippets that operators execute are
 interfaces and remain in the coding workflow.
 
+### Copier-local maintenance synchronization exception
+
+This Copier repository may retain its existing repository-maintenance
+synchronization check for declared root/template mirrors. It may verify byte
+identity, copy synchronization, or render synchronization only; it must never
+assert documentation or agent-policy content. This is a repository-local
+exception, not portable policy for generated projects.
+
 ## Testing source of truth
 
 - Python behavior, versions, and the supported matrix: `pyproject.toml` and tox.
@@ -129,6 +137,8 @@ interfaces and remain in the coding workflow.
 - Local validation: `.pre-commit-config.yaml`.
 - Bash behavior: source scripts and ShellCheck configuration.
 - Shared instructions: root and `template/` byte parity.
+- Copier root/template maintenance synchronization: the content-agnostic
+  exception above.
 - Rendered project context: Copier smoke output.
 
 ## Pipeline Performance Budget
