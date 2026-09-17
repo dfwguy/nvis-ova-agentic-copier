@@ -667,6 +667,7 @@ class GitRepository:
         issue_iid: int,
         *,
         expected_head: str,
+        validated_paths: tuple[str, ...] | None = None,
     ) -> str:
         """Create exactly one runner commit and return its unpushed SHA."""
         if self._git("branch", "--show-current", cwd=worktree) != branch:
@@ -678,7 +679,10 @@ class GitRepository:
         )
         ordinary_candidate = not merge_head and self.has_changes(worktree)
         if current_head == expected_head and (resolved_merge or ordinary_candidate):
-            self._git("add", "--all", cwd=worktree)
+            if validated_paths is None:
+                self._git("add", "--all", cwd=worktree)
+            else:
+                self._git("add", "--all", "--", *validated_paths, cwd=worktree)
             self._git("commit", "-m", f"Resolve issue #{issue_iid}", cwd=worktree)
         else:
             message = (

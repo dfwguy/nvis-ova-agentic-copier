@@ -40,6 +40,7 @@ from agent_work.models import (
     MergeRequestFeedbackCursor,
     PendingMergeRequestFeedback,
     PipelineEvidence,
+    TransitionIntentRecord,
 )
 from agent_work.repository import (
     RepositoryError,
@@ -1296,6 +1297,7 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         now=NOW,
     )  # type: ignore[arg-type]
     assert published is not None and published.state is RunnerState.OBSERVING
+    assert repository.prepared_paths == ("src/example.py",)
     assert gitlab.reconciled_drafts == []
     assert gitlab.closing_reference_updates == 0
     assert gitlab.feedback_outcomes == []
@@ -1329,6 +1331,280 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
     assert final.feedback_cursor is not None
     assert final.feedback_cursor.feedback_source_sha == published.source_sha
     assert len(gitlab.feedback_outcomes) == 1
+
+
+def test_feedback_publication_blocks_when_worktree_no_longer_matches_validated_audit_paths(
+    tmp_path: Path,
+) -> None:
+    """Publication may stage only the controller-validated feedback result."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/review_fix.py",)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    publishing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=changed_feedback,
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert publishing is not None and publishing.audit_evidence is not None
+    repository.paths = ("secrets/customer-export.csv",)
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert repository.pushes == 0
+    assert "customer-export.csv" not in blocked.summary
+    assert "customer-export.csv" not in blocked.next_action
+
+
+def test_feedback_publication_replay_before_commit_prepares_exact_durable_intent(
+    tmp_path: Path,
+) -> None:
+    """An interrupted feedback publication resumes its one validated commit."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = repository.paths
+
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    publishing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=changed_feedback,
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert publishing is not None and publishing.audit_evidence is not None
+    fingerprint = hashlib.sha256(b"src/review_fix.py\0").hexdigest()
+    ledger.persist(
+        publishing.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=f"12:publish:{publishing.revision}",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                        "validated_path_count": 1,
+                        "validated_paths_fingerprint": fingerprint,
+                    },
+                )
+            }
+        )
+    )
+
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+
+    assert resumed is not None and resumed.state is RunnerState.OBSERVING
+    assert resumed.publication_sha == "a" * 40
+    assert repository.prepared_paths == ("src/review_fix.py",)
+    assert repository.pushes == 1
+
+
+@pytest.mark.parametrize(
+    ("retained_paths", "expected_state"),
+    [
+        (("src/review_fix.py",), RunnerState.OBSERVING),
+        (("src/unrelated.py",), RunnerState.BLOCKED),
+    ],
+)
+def test_feedback_publication_replay_after_commit_binds_only_an_exact_path_set(
+    tmp_path: Path, retained_paths: tuple[str, ...], expected_state: RunnerState
+) -> None:
+    """A retained feedback commit must match its durable validated path set."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/review_fix.py",)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    publishing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=changed_feedback,
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert publishing is not None
+    retained_sha = "b" * 40
+    fingerprint = hashlib.sha256(b"src/review_fix.py\0").hexdigest()
+    repository.current_head = retained_sha
+    repository.bound_sha = retained_sha
+    repository.paths = retained_paths
+    repository.dirty = False
+    gitlab.existing_mr = _mr()
+    repository.push_observer = lambda _sha: setattr(
+        gitlab, "existing_mr", _mr(sha=retained_sha)
+    )
+    ledger.persist(
+        publishing.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=f"12:publish:{publishing.revision}",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                        "validated_path_count": 1,
+                        "validated_paths_fingerprint": fingerprint,
+                    },
+                )
+            }
+        )
+    )
+
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+
+    assert resumed is not None and resumed.state is expected_state
+    if expected_state is RunnerState.BLOCKED:
+        assert resumed.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+        assert repository.binds == 0
+        assert repository.pushes == 0
+    else:
+        assert resumed.publication_sha == retained_sha
+        assert repository.binds == 1
+        assert repository.prepares == 0
+        assert repository.pushes == 1
+        assert gitlab.created_merge_requests == 0
+
+
+@pytest.mark.parametrize("dirty", (False, True), ids=("clean", "dirty"))
+def test_feedback_publication_replay_after_push_requires_a_clean_exact_worktree(
+    tmp_path: Path, dirty: bool
+) -> None:
+    """An already-pushed feedback SHA never repushes and never accepts dirt."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = ("src/review_fix.py",)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    publishing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=changed_feedback,
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert publishing is not None
+    published_sha = "b" * 40
+    fingerprint = hashlib.sha256(b"src/review_fix.py\0").hexdigest()
+    repository.current_head = published_sha
+    repository.dirty = dirty
+    gitlab.existing_mr = _mr(sha=published_sha)
+    ledger.persist(
+        publishing.model_copy(
+            update={
+                "publication_sha": published_sha,
+                "intent": TransitionIntentRecord(
+                    operation_id=f"12:publish:{publishing.revision}",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                        "publication_sha": published_sha,
+                        "validated_path_count": 1,
+                        "validated_paths_fingerprint": fingerprint,
+                    },
+                ),
+            }
+        )
+    )
+
+    replayed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+
+    if dirty:
+        assert replayed is not None and replayed.state is RunnerState.BLOCKED
+        assert replayed.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    else:
+        assert replayed is not None and replayed.state is RunnerState.OBSERVING
+    assert repository.pushes == 0
+    assert repository.prepares == 0
 
 
 @pytest.mark.parametrize(

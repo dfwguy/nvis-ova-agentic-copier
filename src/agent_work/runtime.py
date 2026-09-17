@@ -1410,7 +1410,11 @@ def _resume_blocked_retry(
     retained_publication = (
         record.intent is not None and record.intent.kind == "publish_merge_request"
     )
-    if retained_publication and record.publication_sha is None:
+    if (
+        retained_publication
+        and record.pending_feedback is None
+        and record.publication_sha is None
+    ):
         if record.source_sha is None:
             raise RuntimeError("retained publication has no baseline SHA")
         publication_sha = wired.repository.bind_retained_commit(
@@ -2399,7 +2403,11 @@ def dispatch(
                 record.intent is not None
                 and record.intent.kind == "publish_merge_request"
             )
-            if retained_publication and record.publication_sha is None:
+            if (
+                retained_publication
+                and record.pending_feedback is None
+                and record.publication_sha is None
+            ):
                 if record.source_sha is None:
                     raise RuntimeError("retained publication has no baseline SHA")
                 publication_sha = wired.repository.bind_retained_commit(

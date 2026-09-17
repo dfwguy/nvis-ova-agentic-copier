@@ -598,6 +598,8 @@ class FakeRepository:
         self.existing_worktree_error: RepositoryError | None = None
         self.changed_paths_error: RepositoryError | None = None
         self.prepare_error: RepositoryError | None = None
+        self.prepares = 0
+        self.prepared_paths: tuple[str, ...] | None = None
         self.push_error: RepositoryError | None = None
         self.push_observer: Callable[[str], None] | None = None
         self.binds = 0
@@ -714,8 +716,11 @@ class FakeRepository:
         branch: str,
         issue_iid: int,
         expected_head: str | None = None,
+        validated_paths: tuple[str, ...] | None = None,
     ) -> str:
         del worktree, branch, issue_iid, expected_head
+        self.prepares += 1
+        self.prepared_paths = validated_paths
         if self.prepare_error is not None:
             raise self.prepare_error
         return "a" * 40

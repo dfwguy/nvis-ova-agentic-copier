@@ -211,6 +211,7 @@ class RepositoryPort(Protocol):
         issue_iid: int,
         *,
         expected_head: str,
+        validated_paths: tuple[str, ...] | None = None,
     ) -> str: ...
 
     def push_prepared(

@@ -2673,6 +2673,50 @@ def test_prepare_commit_requires_a_resolved_pending_merge_and_exact_ordered_pare
         )
 
 
+def test_prepare_commit_stages_only_explicit_validated_paths_including_deletions(
+    tmp_path: Path,
+) -> None:
+    """Publication never broad-stages unrelated dirty files."""
+    config = _config(tmp_path)
+    candidate, prepared = "a" * 40, "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(
+                0, f"{candidate if len(calls) < 5 else prepared}\n", ""
+            )
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(
+                0, "M docs/space name.md\n D removed.py\n?? unrelated.py\n", ""
+            )
+        if arguments[:2] == ("commit", "-m"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-list", "--parents", "-n", "1", prepared):
+            return CommandResult(0, f"{prepared} {candidate}\n", "")
+        return CommandResult(0, "", "")
+
+    prepared_sha = GitRepository(config, fake).prepare_commit(
+        tmp_path / "worktree",
+        "agent/issue-12",
+        12,
+        expected_head=candidate,
+        validated_paths=("docs/space name.md", "removed.py"),
+    )
+
+    assert prepared_sha == prepared
+    assert ("add", "--all", "--", "docs/space name.md", "removed.py") in [
+        call[3:] for call in calls
+    ]
+    assert not any(call[3:] == ("add", "--all") for call in calls)
+
+
 @pytest.mark.parametrize(
     ("parents", "second_parent_is_current", "raises"),
     (
