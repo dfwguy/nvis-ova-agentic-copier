@@ -39,6 +39,7 @@ from .domain import (
 )
 from .gitlab import GitLabError, GitLabIdentityError
 from .models import (
+    AuditReceiptSummary,
     ConditionEvidence,
     GitLabIssue,
     LedgerRecord,
@@ -1547,6 +1548,17 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
     revision_is_older = len(revision) < len(record_revision) or (
         len(revision) == len(record_revision) and revision < record_revision
     )
+    expected_evidence: dict[str, str | int | None] = {
+        "branch": record.source_branch,
+        "baseline_sha": baseline_sha,
+    }
+    if record.publication_sha is not None:
+        expected_evidence["publication_sha"] = record.publication_sha
+    if record.pending_feedback is not None:
+        validated_paths = _feedback_validated_paths(record)
+        if validated_paths is None:
+            return False
+        expected_evidence |= _validated_path_evidence(validated_paths)
     return (
         intent.kind == "publish_merge_request"
         and issue_iid == str(record.issue_iid)
@@ -1555,17 +1567,50 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
         and action_separator == ":"
         and revision_is_canonical
         and revision_is_older
-        and intent.expected_evidence
-        == (
-            {
-                "branch": record.source_branch,
-                "baseline_sha": baseline_sha,
-                "publication_sha": record.publication_sha,
-            }
-            if record.publication_sha is not None
-            else {"branch": record.source_branch, "baseline_sha": baseline_sha}
+        and intent.expected_evidence == expected_evidence
+    )
+
+
+def _feedback_validated_paths(record: LedgerRecord) -> tuple[str, ...] | None:
+    """Return the canonical controller-validated feedback commit set."""
+    audit = record.audit_evidence
+    if not isinstance(audit, AuditReceiptSummary):
+        return None
+    paths = tuple(sorted(set(audit.changed_paths)))
+    return paths if paths and len(paths) == len(audit.changed_paths) else None
+
+
+def _validated_path_evidence(paths: tuple[str, ...]) -> dict[str, str | int | None]:
+    """Bind a non-secret stable fingerprint of the exact commit path set."""
+    return {
+        "validated_path_count": len(paths),
+        "validated_paths_fingerprint": hashlib.sha256(
+            "".join(f"{path}\0" for path in paths).encode()
+        ).hexdigest(),
+    }
+
+
+def _block_feedback_path_mismatch(
+    record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort
+) -> LedgerRecord:
+    """Fail closed without exposing the paths rejected at the commit boundary."""
+    blocked = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.BLOCKED,
+            error_code=ErrorCode.WORKER_RECEIPT_INVALID,
+            summary="Feedback publication paths no longer match validated receipt evidence.",
+            next_action="Re-run the feedback workflow and validate its exact changed-path receipt.",
         )
     )
+    gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
+    gitlab.comment_outcome(
+        record.issue_iid,
+        error_code=str(blocked.error_code),
+        summary=blocked.summary,
+        next_action=blocked.next_action,
+    )
+    return blocked
 
 
 def _mr_evidence_is_exact(
@@ -2435,35 +2480,110 @@ def _publish(
                 next_action=blocked.next_action,
             )
             return blocked
+        expected_evidence: dict[str, str | int | None] = {
+            "branch": record.source_branch,
+            "baseline_sha": baseline_sha,
+        }
+        if record.pending_feedback is not None:
+            validated_paths = _feedback_validated_paths(record)
+            if validated_paths is None:
+                return _block_feedback_path_mismatch(
+                    record, ledger=ledger, gitlab=gitlab
+                )
+            expected_evidence |= _validated_path_evidence(validated_paths)
         record = ledger.persist(
             record.model_copy(
                 update={
                     "intent": TransitionIntentRecord(
                         operation_id=f"{record.issue_iid}:publish:{record.revision}",
                         kind="publish_merge_request",
-                        expected_evidence={
-                            "branch": record.source_branch,
-                            "baseline_sha": baseline_sha,
-                        },
+                        expected_evidence=expected_evidence,
                     )
                 }
             )
         )
+    publication_was_bound = record.publication_sha is not None
     try:
         if record.publication_sha is None:
-            if replaying:
+            validated_paths = (
+                _feedback_validated_paths(record)
+                if record.pending_feedback is not None
+                else None
+            )
+            if record.pending_feedback is not None and validated_paths is None:
+                return _block_feedback_path_mismatch(
+                    record, ledger=ledger, gitlab=gitlab
+                )
+            current_head = (
+                repository.head(record.worktree)
+                if record.pending_feedback is not None
+                else baseline_sha
+            )
+            if (
+                record.pending_feedback is not None
+                and current_head == baseline_sha
+                and tuple(sorted(set(repository.changed_paths(record.worktree))))
+                != validated_paths
+            ):
+                return _block_feedback_path_mismatch(
+                    record, ledger=ledger, gitlab=gitlab
+                )
+            if (
+                replaying
+                and record.pending_feedback is not None
+                and current_head != baseline_sha
+            ):
+                if repository.has_changes(record.worktree):
+                    return _block_publication_identity(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        summary="Retained feedback publication commit is not clean.",
+                    )
+                if (
+                    tuple(
+                        sorted(
+                            set(
+                                repository.publication_changed_paths(
+                                    record.worktree, baseline_sha
+                                )
+                            )
+                        )
+                    )
+                    != validated_paths
+                ):
+                    return _block_feedback_path_mismatch(
+                        record, ledger=ledger, gitlab=gitlab
+                    )
+                prepared_sha = repository.bind_retained_commit(
+                    record.worktree,
+                    record.source_branch,
+                    record.issue_iid,
+                    baseline_sha,
+                )
+            elif replaying and record.pending_feedback is not None:
+                prepared_sha = repository.prepare_commit(
+                    record.worktree,
+                    record.source_branch,
+                    record.issue_iid,
+                    expected_head=baseline_sha,
+                    validated_paths=validated_paths,
+                )
+            elif replaying:
                 return _block_publication_identity(
                     record,
                     ledger=ledger,
                     gitlab=gitlab,
                     summary="Retained publication commit was not durably bound.",
                 )
-            prepared_sha = repository.prepare_commit(
-                record.worktree,
-                record.source_branch,
-                record.issue_iid,
-                expected_head=baseline_sha,
-            )
+            else:
+                prepared_sha = repository.prepare_commit(
+                    record.worktree,
+                    record.source_branch,
+                    record.issue_iid,
+                    expected_head=baseline_sha,
+                    validated_paths=validated_paths,
+                )
             if record.intent is None:
                 raise SegmentError("publication intent is missing")
             record = ledger.persist(
@@ -2482,8 +2602,12 @@ def _publish(
         publication_sha = record.publication_sha
         if publication_sha is None:
             raise SegmentError("publication commit is not durably bound")
-        reconciliation_sha = repository.reconcile_default_branch(
-            record.worktree, record.source_branch, publication_sha
+        reconciliation_sha = (
+            None
+            if record.pending_feedback is not None
+            else repository.reconcile_default_branch(
+                record.worktree, record.source_branch, publication_sha
+            )
         )
         if reconciliation_sha is not None:
             return ledger.persist(
@@ -2506,6 +2630,7 @@ def _publish(
             )
         already_published = (
             replaying
+            and publication_was_bound
             and record.merge_request_iid is not None
             and record.publication_sha is not None
         )
@@ -2517,7 +2642,8 @@ def _publish(
                 )
             retained_mr = gitlab.fetch_merge_request(record.merge_request_iid)
             already_published = (
-                record.publication_sha is not None
+                publication_was_bound
+                and record.publication_sha is not None
                 and _mr_evidence_is_exact(
                     record,
                     retained_mr,
@@ -2548,6 +2674,13 @@ def _publish(
         else:
             sha = repository.push_prepared(
                 record.worktree, record.source_branch, publication_sha
+            )
+        if remediation and repository.has_changes(record.worktree):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Published feedback worktree is not clean.",
             )
         if remediation:
             if record.merge_request_iid is None:

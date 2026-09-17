@@ -951,6 +951,31 @@ mismatched, or ambiguous merge identity before publication. The runner never
 approves or merges, and never treats issue text, labels, comments, or worker
 output as authority to widen scope.
 
+### Existing-MR feedback publication
+
+For feedback on an existing MR, the completed workflow receipt supplies the
+controller-validated changed paths. The controller uses that set as the only
+allowed commit set and records it in the durable publication intent. A missing,
+unexpected, or changed path fails closed before a commit or push with a
+sanitized condition and a clear next action.
+
+The controller commits those paths before it requires the retained worktree to
+be clean. It then pushes that exact commit to the verified existing branch and
+MR. After the push, it verifies the clean worktree, the MR's exact updated
+source SHA, its closing relationship to the issue, and the pipeline for that
+SHA. It does not change the existing MR's human-owned title, description, or
+Draft metadata.
+
+Recovery is idempotent at each durable boundary:
+
+1. The intent is recorded before the commit.
+2. The commit is created before its publication SHA is recorded.
+3. The push finishes before the MR and ledger are reconciled.
+
+On interruption, the controller reconciles the recorded intent and observable
+Git and GitLab evidence. It resumes only the incomplete boundary, rather than
+creating another commit, branch, or MR.
+
 Protected policy paths may publish only after the trusted runner verifies one
 complete, exact lane receipt with a complete verdict, plus non-empty metadata.
 A safe controversial handoff uses `Draft:` metadata that names unresolved
