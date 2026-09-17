@@ -92,15 +92,20 @@ esac
 require_path AGENT_WORK_DIRENV
 
 git=("$AGENT_WORK_GIT" -c core.hooksPath=/dev/null)
+checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
+credential_helper="$checkout/src/agent-work-git-credential.sh"
+if [[ ! -f "$credential_helper" || -L "$credential_helper" || ! -x "$credential_helper" ]]; then
+  stop 'repository Git credential helper must be an executable regular file'
+fi
 export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
 export GIT_CONFIG_COUNT=4 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
 export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
 export GIT_CONFIG_KEY_1=credential.helper
-export GIT_CONFIG_VALUE_1="$AGENT_WORK_GLAB auth git-credential"
+export GIT_CONFIG_VALUE_1="!exec \"\$AGENT_WORK_GIT_CREDENTIAL_HELPER\""
+export AGENT_WORK_GIT_CREDENTIAL_HELPER="$credential_helper"
 export GIT_CONFIG_KEY_2=credential.useHttpPath GIT_CONFIG_VALUE_2=true
 export GIT_CONFIG_KEY_3=core.askPass GIT_CONFIG_VALUE_3=/bin/false
 unset GIT_CONFIG_PARAMETERS
-checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
 authenticated() {
   local bounded=false
   if [[ "${1:-}" == --housekeeping ]]; then
@@ -115,7 +120,8 @@ authenticated() {
     "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false" \
     "GIT_CONFIG_COUNT=4" "GIT_CONFIG_KEY_0=credential.helper" \
     "GIT_CONFIG_VALUE_0=" "GIT_CONFIG_KEY_1=credential.helper" \
-    "GIT_CONFIG_VALUE_1=$AGENT_WORK_GLAB auth git-credential" \
+    "GIT_CONFIG_VALUE_1=!exec \"\$AGENT_WORK_GIT_CREDENTIAL_HELPER\"" \
+    "AGENT_WORK_GIT_CREDENTIAL_HELPER=$credential_helper" \
     "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true" \
     "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false")
   if "$bounded"; then

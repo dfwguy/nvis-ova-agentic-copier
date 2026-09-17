@@ -26,7 +26,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
 from .ports import CommandResult, CommandRunner
-from .repository import build_git_environment
 
 
 class CredentialRotationError(RuntimeError):
@@ -347,7 +346,7 @@ def _json_call(
     configuration: RotationEnvironment,
     endpoint: str,
 ) -> object:
-    controls = build_git_environment({}, configuration.glab) | {
+    controls = {
         "GITLAB_HOST": configuration.host,
         "GITLAB_PROJECT_ID": str(configuration.project_id),
         "AGENT_WORK_FACTORY_USERNAME": configuration.factory_username,

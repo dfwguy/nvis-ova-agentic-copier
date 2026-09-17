@@ -5,7 +5,7 @@ summary: Install, inspect, plan recovery, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -50,24 +50,47 @@ issues.
 
 ## Check prerequisites and Developer-readable safeguards
 
-Run the loop from the repository it operates on. It confirms Git access,
-derives the GitLab host and project from `origin`, resolves the numeric project
-endpoint, and stores durable state below `XDG_STATE_HOME` (or the platform
-default). Do not print, export, or put tokens in this setup.
+Run the loop from the repository it operates on. It uses the configured GitLab
+host and numeric project ID, confirms Git and API access independently, and
+stores durable state below `XDG_STATE_HOME` (or the platform default). Do not
+print, export, or put tokens in this setup.
 
 Choose `codex` (default), `claude`, or `pi`; verify Git, `glab`, `jq`, and the
-selected agent. A stored `glab` login or directory-scoped `GITLAB_TOKEN` is
-supported. Git and the API can use separate credentials.
+selected agent. Configure a directory-scoped `GITLAB_TOKEN` that can access
+the configured project. Require a non-empty `GITLAB_HOST` and positive numeric
+`GITLAB_PROJECT_ID`. The API and Git checks are separate: the same token must
+pass both, but neither check substitutes for the other.
 
 ```bash
 export AGENT_WORK_AGENT=claude  # Or: pi. Omit for the codex default.
 agent_name="${AGENT_WORK_AGENT:-codex}"
 case "$agent_name" in codex|claude|pi) ;; *) exit 2;; esac
 command -v git glab "$agent_name" jq
-glab api --hostname "$GITLAB_HOST" user >/dev/null
-git pull --ff-only
+direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"' >/dev/null
 git remote get-url origin
 ```
+
+The final setup route gives Git the token only when it asks the repository
+credential-protocol helper for HTTPS credentials. Do not place a token or a
+derived Basic-authentication header in `origin`, Git configuration, the service
+environment file, a command line, a diagnostic, a ledger, or another retained
+record. Keep `origin` as a credential-free HTTPS URL. The service and ordinary
+interactive publication paths use the same helper; inherited credential
+helpers and related ambient Git configuration cannot override it, and prompts
+remain disabled.
+
+Before enabling the timer, run the supported non-mutating Git readiness check
+from the [Git Flow preflight](../../.agents/skills/git-flow/SKILL.md), separately
+from the numeric-project API check above. Both checks must pass before a remote
+mutation. Missing configuration stops setup before that mutation. Treat an
+invalid or expired token as an authentication failure; treat a token that
+authenticates but cannot push as an authorization failure. Only a known
+temporary transport failure is retryable. Preserve only the safe classification
+in reports; never paste command output or credential material into an issue,
+log, or ledger.
+
+This guide intentionally does not introduce a new operator CLI or a
+token-bearing command.
 
 Run `codex login status` or `claude auth status` before enabling `--apply`.
 Pi has no equivalent non-secret status command; verify its provider credential
@@ -188,7 +211,7 @@ and UV are available. Confirm Git and GitLab API access without exposing a
 token, then inspect the recoverable state before enabling a timer:
 
 ```bash
-git pull --ff-only
+# Run the command-scoped credential-helper Git readiness check above.
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 uv run agent-work loop canary --json
@@ -689,6 +712,22 @@ change journald storage settings or use another credential route.
 
 ## Publication credential readiness and retained recovery
 
-The wrapper uses the configured absolute `glab` executable as Git's only credential helper in a noninteractive, scrubbed environment. Before either preview or apply invokes the worker, it verifies the configured credential-free HTTPS origin and runs a non-mutating `git push --dry-run` readiness check. Authentication, authorization, policy, and configuration failures block immediately with a safe error code; only known transport failures consume the bounded retry path. Local diagnostics never include command output, URLs with credentials, or tokens.
+Before either preview or apply invokes the worker, the shared Git credential
+route verifies the configured credential-free HTTPS origin and performs a
+non-mutating Git readiness check. It receives the configured `GITLAB_TOKEN`
+only at runtime through the repository-owned credential-protocol helper; the
+token and any derived Basic header never enter a remote URL, persistent Git
+configuration, service environment file, command arguments or process reports,
+logs, diagnostics, ledger, or retained record. The check is independent from
+the GitLab API verification for `GITLAB_HOST` and numeric
+`GITLAB_PROJECT_ID`.
+
+Missing configuration stops before remote mutation. Invalid or expired
+credentials are authentication failures; an authenticated identity without
+push permission is an authorization failure. Known temporary transport
+failures alone use the bounded retry path. Inherited credential helpers and
+hostile ambient Git configuration cannot replace the shared route, and it
+never falls back to an interactive prompt. Keep the human approval and merge
+boundary unchanged.
 
 For retained publication recovery, first inspect status, the source branch, local `HEAD`, recorded source SHA, and the exact pending publication intent. Run preview, then explicitly run `agent-work loop retry --issue-iid IID --apply`. A retained publish intent moves directly back to publishing: it keeps the same branch, SHA, draft evidence, and intent, and replays the clean committed head without a second commit or merge request. Do not copy credentials or command output into the ledger or issue.

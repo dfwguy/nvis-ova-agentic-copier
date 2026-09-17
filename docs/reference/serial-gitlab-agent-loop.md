@@ -446,6 +446,34 @@ incomplete installed contract before an operator starts or enables the timer.
 A missing installed contract requires the supported setup procedure to recreate
 it; manual reconstruction is outside the supported upgrade path.
 
+## Git authentication contract
+
+`GITLAB_TOKEN` is the configured directory-scoped GitLab credential. The
+repository-owned Git credential-protocol helper translates it to GitLab HTTPS
+Basic credentials only when Git requests them at runtime. The serial
+controller/service and ordinary `$git-flow` publication use that same helper.
+The remote remains a credential-free HTTPS URL; the helper does not rewrite or
+persist the remote.
+
+The token and its derived Basic-authentication header must not appear in a
+remote URL, persistent Git configuration, the service environment file, command
+arguments or process reports, logs, diagnostics, ledgers, or retained records.
+Git prompts are disabled. The route clears inherited credential helpers and
+hostile ambient credential configuration so they cannot override the helper.
+
+The API check and Git check are independent. The API route continues to target
+the configured bare `GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID`.
+The Git readiness check uses the same configured token through the helper and
+does not mutate the remote. A missing token is a configuration failure before
+remote mutation; an invalid or expired token is an authentication failure; and
+an authenticated identity without required push scope is an authorization
+failure. Known temporary transport failures are retryable where the calling
+operation permits retry. Diagnostics report only that safe classification.
+
+This contract adds no CLI and does not change GitLab API semantics, branch
+protection, roles, token creation or rotation, or the human-only approval and
+merge boundary.
+
 ## Lifecycle
 
 GitLab is the shared queue projection; the local ledger is the transaction
@@ -790,8 +818,9 @@ require that `HEAD` is the remote default-branch tip without fetching or
 writing a tracking ref. Applied execution fetches only that default branch and
 fast-forwards it; any failure blocks UV. Checkout-local Git configuration is
 strictly allowlisted, target filter attributes are rejected, and submodule
-recursion is disabled. System/global transport and credential configuration is
-the operator-managed service boundary. After first deployment, stop the timer,
+recursion is disabled. The shared Git authentication contract controls
+credential handling instead of ambient helpers or persisted credentials. After
+first deployment, stop the timer,
 manually fast-forward once, preview/canary, then restart it; later applied
 activations self-refresh.
 
@@ -1093,4 +1122,4 @@ merge, stash apply, or stash deletion.
 
 ## Publication credential and retry contract
 
-Git uses only the configured absolute `glab` credential helper with prompts disabled. The wrapper verifies the credential-free HTTPS origin and performs a non-mutating `git push --dry-run` before worker invocation. Authentication, authorization, policy, and configuration categories block immediately; only known transport failures are retryable. A blocked record retaining an exact `publish_merge_request` intent transitions directly to `publishing` on explicit retry while retaining its branch, SHA, draft, and intent. See the setup guide for the recovery procedure.
+Git uses the repository-owned credential-protocol helper with prompts disabled. The wrapper verifies the credential-free HTTPS origin and performs a non-mutating `git push --dry-run` readiness check before worker invocation. Authentication, authorization, policy, and configuration categories block immediately; only known transport failures are retryable. A blocked record retaining an exact `publish_merge_request` intent transitions directly to `publishing` on explicit retry while retaining its branch, SHA, draft, and intent. See the setup guide for the recovery procedure.

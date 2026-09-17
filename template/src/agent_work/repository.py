@@ -147,9 +147,18 @@ def classify_publication_failure(stderr: str) -> PublicationFailure:
 
 
 def build_git_environment(
-    service_environment: Mapping[str, str], glab_path: Path
+    service_environment: Mapping[str, str], credential_helper: Path
 ) -> dict[str, str]:
-    """Build the noninteractive, glab-only credential environment for Git."""
+    """Build the noninteractive, repository-helper-only environment for Git."""
+    if not service_environment.get("GITLAB_TOKEN"):
+        raise RepositoryError("GitLab token is required for Git operations")
+    return _git_environment_controls(service_environment, credential_helper)
+
+
+def _git_environment_controls(
+    service_environment: Mapping[str, str], credential_helper: Path
+) -> dict[str, str]:
+    """Scrub ambient Git controls without adding a credential value."""
     environment = dict(service_environment)
     environment.pop("GIT_CONFIG_PARAMETERS", None)
     for key in tuple(environment):
@@ -157,6 +166,7 @@ def build_git_environment(
             del environment[key]
     environment["GIT_ASKPASS"] = "/bin/false"
     environment["SSH_ASKPASS"] = "/bin/false"
+    environment["AGENT_WORK_GIT_CREDENTIAL_HELPER"] = str(credential_helper)
     environment.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
@@ -165,7 +175,7 @@ def build_git_environment(
             "GIT_CONFIG_KEY_0": "credential.helper",
             "GIT_CONFIG_VALUE_0": "",
             "GIT_CONFIG_KEY_1": "credential.helper",
-            "GIT_CONFIG_VALUE_1": f"{glab_path} auth git-credential",
+            "GIT_CONFIG_VALUE_1": '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
             "GIT_CONFIG_KEY_2": "credential.useHttpPath",
             "GIT_CONFIG_VALUE_2": "true",
             "GIT_CONFIG_KEY_3": "core.askPass",
@@ -334,8 +344,9 @@ class GitRepository:
     ) -> None:
         self.config = config
         self._run_command = run_command
-        self._environment = build_git_environment(
-            service_environment or {}, config.glab_path
+        self._environment = _git_environment_controls(
+            service_environment or {},
+            config.checkout / "src" / "agent-work-git-credential.sh",
         )
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
 
@@ -361,6 +372,13 @@ class GitRepository:
     def _git(
         self, *arguments: str, cwd: Path | None = None, transient: bool = False
     ) -> str:
+        if arguments[:1] in {
+            ("fetch",),
+            ("pull",),
+            ("push",),
+            ("ls-remote",),
+        } and not self._environment.get("GITLAB_TOKEN"):
+            raise RepositoryError("GitLab token is required for Git operations")
         result = self._bounded_command(
             (
                 str(self.config.git_path),
