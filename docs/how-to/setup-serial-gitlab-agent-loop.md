@@ -490,23 +490,32 @@ Leave a dirty durable worktree in place. If status inventories a stash,
 preserve it for review: do not use `git stash apply` or `git stash drop` as an
 automated recovery step.
 
-When an item is `agent::needs_repair`, first request a targeted status for that
-exact IID. A bulk status listing does not live-corroborate every record. Review
-the resulting recovery plan, then apply that exact plan only if the evidence is
-still current:
+An exact failed current-source merge-request pipeline with one uniquely
+corroborated retained owner repairs automatically. Keep the timer enabled, or
+run one ordinary applied activation; the loop runs one eligible repair workflow
+without a reviewed checkpoint:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
-uv run agent-work loop status --issue-iid IID --json
-uv run agent-work loop recover --issue-iid IID --json
-uv run agent-work loop recover --issue-iid IID --apply --plan-file PATH --json
+uv run agent-work loop run --apply --json
 ```
 
-Do not replace this sequence with a broad label edit or a bulk recovery. If the
-repair fails or the exact evidence changes, the record becomes
-`agent::repair_failed`; retain its worktree and plan evidence, obtain a new
-reviewed plan, and repeat the targeted process. A blocked record can likewise
-be reclassified only one IID at a time with live corroboration.
+Do not replace this with a broad label edit or a manual recovery command. An
+unsuccessful automatic repair records a 20-minute backoff for that item. The
+next activation can select another eligible exact repair or ordinary work; it
+does not stop the whole factory for this item. After three unsuccessful
+automatic repairs, the item is quarantined or deferred for human review. Use
+`loop status --issue-iid IID --json` or the non-mutating preview to inspect its
+attempt count, backoff or quarantine, exact evidence, and next action.
+
+Use targeted `loop recover` only for interrupted, ambiguous, or otherwise
+unsafe retained work. It is an exceptional reviewed path for one exact IID
+with live corroboration; it does not spend or reset the automatic repair
+budget. Ambiguous or inexact identity, active ownership, credential, policy,
+or authority conflicts remain fail-closed. Neither issue nor merge-request
+text can set repair priority, the budget, or the backoff. The loop never
+approves or merges. A blocked record can likewise be reclassified only one IID
+at a time with live corroboration.
 
 An `agent::suggest_close` label is a structured recommendation for human
 closure, never an automated close. Review its duplicate, superseded,

@@ -17,9 +17,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
 HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS: Final = 120
@@ -179,13 +186,13 @@ LIFECYCLE_LABEL_SPECS: Final = MappingProxyType(
         "agent::needs_repair": MappingProxyType(
             {
                 "color": "#D4A72C",
-                "description": "Pipeline repair needs a newly reviewed exact-IID plan.",
+                "description": "Retained pipeline repair requires exact recovery evidence.",
             }
         ),
         "agent::repair_failed": MappingProxyType(
             {
                 "color": "#C91C00",
-                "description": "A reviewed repair failed; preserve evidence and review a new plan.",
+                "description": "A repair failed; preserve exact evidence for safe follow-up.",
             }
         ),
         "agent::suggest_close": MappingProxyType(
@@ -237,10 +244,17 @@ class SuggestCloseEvidence(_Evidence):
 
 
 class RepairAttemptEvidence(_Evidence):
-    """Reviewed plan and bounded evidence retained after a repair failure."""
+    """Bounded evidence retained for one repair attempt."""
 
-    reviewed_plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reviewed_snapshot: dict[str, object] = Field(default_factory=dict)
+    fingerprint: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        validation_alias=AliasChoices("fingerprint", "reviewed_plan_fingerprint"),
+    )
+    snapshot: dict[str, object] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("snapshot", "reviewed_snapshot"),
+    )
+    origin: Literal["reviewed-plan", "automatic-exact-pipeline"] = "reviewed-plan"
     evidence_delta: dict[str, object] = Field(default_factory=dict)
     failure_reason: str = Field(default="", max_length=2048)
     started_at: str = Field(default="", max_length=128)
@@ -248,9 +262,19 @@ class RepairAttemptEvidence(_Evidence):
 
     @model_validator(mode="after")
     def validate_size(self) -> RepairAttemptEvidence:
-        if len(str(self.reviewed_snapshot)) + len(str(self.evidence_delta)) > 8192:
+        if len(str(self.snapshot)) + len(str(self.evidence_delta)) > 8192:
             raise ValueError("repair evidence exceeds bound")
         return self
+
+    @property
+    def reviewed_plan_fingerprint(self) -> str:
+        """Read legacy repair-plan field names from older callers."""
+        return self.fingerprint
+
+    @property
+    def reviewed_snapshot(self) -> dict[str, object]:
+        """Read legacy repair-plan field names from older callers."""
+        return self.snapshot
 
 
 AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"

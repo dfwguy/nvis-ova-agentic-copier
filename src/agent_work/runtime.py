@@ -83,7 +83,13 @@ from .repository import (
     discover_config,
     run_subprocess,
 )
-from .serial import reconcile_closed_issues, resume_candidates, run_segment
+from .serial import (
+    AUTOMATIC_REPAIR_MAX_ATTEMPTS,
+    activate_exact_pipeline_repair,
+    reconcile_closed_issues,
+    resume_candidates,
+    run_segment,
+)
 from .state_machine import transition_record
 from .status import project_status
 from .worker import AgentInvoker
@@ -104,6 +110,8 @@ def _item(
         attempt=record.retry_count + 1,
         retries_remaining=retries_remaining(record.retry_count),
         retry_at=record.retry_at,
+        automatic_repair_count=record.automatic_repair_count,
+        automatic_repair_at=record.automatic_repair_at,
         source_branch=record.source_branch,
         source_sha=record.source_sha,
         main_branch=record.main_branch,
@@ -261,6 +269,16 @@ def _operational_evidence(
         "record_revision": None if selected is None else selected.revision,
         "record_state": None if selected is None else selected.state.value,
         "record_phase": None if selected is None else selected.phase.value,
+        "retry_count": None if selected is None else selected.retry_count,
+        "retry_at": None
+        if selected is None or selected.retry_at is None
+        else selected.retry_at.isoformat(),
+        "automatic_repair_count": None
+        if selected is None
+        else selected.automatic_repair_count,
+        "automatic_repair_at": None
+        if selected is None or selected.automatic_repair_at is None
+        else selected.automatic_repair_at.isoformat(),
         "source_branch": None if selected is None else selected.source_branch,
         "source_sha": None if selected is None else selected.source_sha,
         "merge_request_iid": None if selected is None else selected.merge_request_iid,
@@ -613,6 +631,7 @@ def _operational_preview(
         records=records,
         project_id=project.id,
         default_branch=project.default_branch,
+        now=wired.clock(),
     )
     target = request.issue_iid
     action = "checkpoint"
@@ -625,10 +644,21 @@ def _operational_preview(
     if request.command == "loop.canary":
         if action == "provision_lifecycle_labels":
             pass
-        elif gate.repair_owner is not None:
-            target = gate.repair_owner.issue_iid
+        elif gate.repair_owner is not None or gate.deferred_owner is not None:
+            deferred = gate.deferred_owner is not None
+            selected_owner = gate.deferred_owner or gate.repair_owner
+            assert selected_owner is not None
+            target = selected_owner.issue_iid
             next_action = (
-                f"Recover retained issue {target} for the failed exact pipeline."
+                (
+                    f"Inspect quarantined retained issue {target}'s automatic repair evidence."
+                    if selected_owner.automatic_repair_count
+                    >= AUTOMATIC_REPAIR_MAX_ATTEMPTS
+                    and selected_owner.automatic_repair_at is None
+                    else f"Inspect deferred retained issue {target}'s automatic repair evidence."
+                )
+                if deferred
+                else f"Recover retained issue {target} for the failed exact pipeline."
             )
         elif gate.outcome is not None:
             action = gate.outcome
@@ -795,10 +825,67 @@ class _PipelineGateDecision:
     summary: str | None = None
     next_action: str | None = None
     repair_owner: LedgerRecord | None = None
+    merge_request: MergeRequestEvidence | None = None
+    pipeline: PipelineEvidence | None = None
+    deferred_owner: LedgerRecord | None = None
+
+
+@dataclass(frozen=True)
+class _RepairActivationDecision:
+    """One exact-pipeline repair activation or fail-closed ownership result."""
+
+    record: LedgerRecord | None = None
+    competing_active_owner: bool = False
 
 
 _PIPELINE_POLL_INITIAL_SECONDS = 5.0
 _PIPELINE_POLL_MAX_SECONDS = 30.0
+
+
+def _has_competing_repair_owner(
+    records: tuple[LedgerRecord, ...], owner: LedgerRecord
+) -> bool:
+    """Return whether another retained record prevents this repair activation."""
+    return any(
+        record.issue_iid != owner.issue_iid and record.state in IMMEDIATE_OWNER_STATES
+        for record in records
+    )
+
+
+def _activate_pipeline_repair_gate(
+    *,
+    gate: _PipelineGateDecision,
+    records: tuple[LedgerRecord, ...],
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+) -> _RepairActivationDecision | None:
+    """Apply one exact gate consistently before or after pipeline polling."""
+    owner = gate.repair_owner
+    if (
+        owner is None
+        or owner.state
+        not in {
+            RunnerState.OBSERVING,
+            RunnerState.NEEDS_REPAIR,
+            RunnerState.REPAIR_FAILED,
+        }
+        or gate.merge_request is None
+        or gate.pipeline is None
+    ):
+        return None
+    if _has_competing_repair_owner(records, owner):
+        return _RepairActivationDecision(competing_active_owner=True)
+    return _RepairActivationDecision(
+        record=activate_exact_pipeline_repair(
+            owner,
+            merge_request=gate.merge_request,
+            pipeline=gate.pipeline,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+        )
+    )
 
 
 def _sleep_for_pipeline_poll(
@@ -886,6 +973,7 @@ def _inspect_pipeline_gate(
     records: tuple[LedgerRecord, ...],
     project_id: int,
     default_branch: str,
+    now: datetime,
 ) -> _PipelineGateDecision:
     """Inspect default and current-MR pipelines before any fresh issue selection."""
     try:
@@ -936,6 +1024,7 @@ def _inspect_pipeline_gate(
                     next_action="Validate the current merge-request pipeline before selecting work.",
                 )
             inspected.append((merge_request, pipeline))
+        deferred_owner: LedgerRecord | None = None
         for merge_request, pipeline in inspected:
             if pipeline.status != "failed":
                 continue
@@ -947,7 +1036,20 @@ def _inspect_pipeline_gate(
                 repository=repository,
             )
             if owner is not None:
-                return _PipelineGateDecision(repair_owner=owner)
+                if owner.state is RunnerState.REPAIR_FAILED and (
+                    owner.automatic_repair_count >= AUTOMATIC_REPAIR_MAX_ATTEMPTS
+                    or (
+                        owner.automatic_repair_at is not None
+                        and owner.automatic_repair_at > now
+                    )
+                ):
+                    deferred_owner = owner
+                    continue
+                return _PipelineGateDecision(
+                    repair_owner=owner,
+                    merge_request=merge_request,
+                    pipeline=pipeline,
+                )
             return _pipeline_handoff(
                 outcome="pipeline_blocked",
                 pipeline_url=pipeline.web_url,
@@ -955,6 +1057,8 @@ def _inspect_pipeline_gate(
                 next_action="Inspect the pipeline and reconcile its exact retained owner before selecting work.",
             )
         for _merge_request, pipeline in inspected:
+            if pipeline.status == "failed":
+                continue
             if pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
                 return _pipeline_handoff(
                     outcome="pipeline_wait",
@@ -976,7 +1080,7 @@ def _inspect_pipeline_gate(
             detail="Pipeline inventory could not be validated.",
             next_action="Restore GitLab access and validate pipeline inventory before selecting work.",
         )
-    return _PipelineGateDecision()
+    return _PipelineGateDecision(deferred_owner=deferred_owner)
 
 
 def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
@@ -1935,8 +2039,9 @@ def dispatch(
                         RunnerState.REPAIR_FAILED,
                     }:
                         repair_attempt = RepairAttemptEvidence(
-                            reviewed_plan_fingerprint=reviewed.fingerprint,
-                            reviewed_snapshot=_repair_evidence_copy(reviewed.evidence),
+                            fingerprint=reviewed.fingerprint,
+                            snapshot=_repair_evidence_copy(reviewed.evidence),
+                            origin="reviewed-plan",
                             evidence_delta={"current": "changed"},
                             failure_reason="reviewed repair plan evidence changed",
                             started_at=wired.clock().isoformat(),
@@ -2030,16 +2135,6 @@ def dispatch(
                     RunnerState.NEEDS_REPAIR,
                     RunnerState.REPAIR_FAILED,
                 }:
-                    if record.state is RunnerState.REPAIR_FAILED:
-                        record = ledger.persist(
-                            transition_record(
-                                record,
-                                RunnerState.NEEDS_REPAIR,
-                                phase=WorkflowPhase.POST_PUBLICATION,
-                                summary="Fresh exact-IID repair plan reviewed.",
-                                next_action="Run the reviewed repair.",
-                            )
-                        )
                     record = ledger.persist(
                         transition_record(
                             record,
@@ -2047,10 +2142,9 @@ def dispatch(
                             phase=WorkflowPhase.WORKFLOW,
                             error_code=ErrorCode.PIPELINE_REJECTED,
                             repair_attempt=RepairAttemptEvidence(
-                                reviewed_plan_fingerprint=reviewed.fingerprint,
-                                reviewed_snapshot=_repair_evidence_copy(
-                                    reviewed.evidence
-                                ),
+                                fingerprint=reviewed.fingerprint,
+                                snapshot=_repair_evidence_copy(reviewed.evidence),
+                                origin="reviewed-plan",
                                 evidence_delta={},
                                 failure_reason="",
                                 started_at=wired.clock().isoformat(),
@@ -2353,22 +2447,23 @@ def dispatch(
     if not apply:
         records = ledger.list_records()
         resumable = resume_candidates(records, now=wired.clock())
-        if resumable:
-            return _report(
-                request,
-                applied=False,
-                outcome="resume_available",
-                records=resumable[:1],
-                project=identity,
-            )
         gate = _inspect_pipeline_gate(
             gitlab=gitlab,
             repository=repository,
             records=records,
             project_id=project.id,
             default_branch=project.default_branch,
+            now=wired.clock(),
         )
         if gate.outcome is not None:
+            if resumable and gate.outcome == "pipeline_wait":
+                return _report(
+                    request,
+                    applied=False,
+                    outcome="resume_available",
+                    records=resumable[:1],
+                    project=identity,
+                )
             return _report(
                 request,
                 applied=False,
@@ -2378,18 +2473,47 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
-        if (
-            gate.repair_owner is not None
-            and gate.repair_owner.state is not RunnerState.REPAIR
-        ):
+        if gate.repair_owner is not None:
+            if _has_competing_repair_owner(records, gate.repair_owner):
+                return _report(
+                    request,
+                    applied=False,
+                    outcome="pipeline_blocked",
+                    project=identity,
+                    stop_reason="pipeline_blocked",
+                    summary="The exact failed pipeline has competing retained work.",
+                    next_action="Reconcile the competing retained records before repair.",
+                )
+            if gate.repair_owner.state is RunnerState.REPAIR:
+                return _report(
+                    request,
+                    applied=False,
+                    outcome="resume_available",
+                    records=(gate.repair_owner,),
+                    project=identity,
+                )
+            if gate.repair_owner.state in {
+                RunnerState.OBSERVING,
+                RunnerState.NEEDS_REPAIR,
+                RunnerState.REPAIR_FAILED,
+            }:
+                return _report(
+                    request,
+                    applied=False,
+                    outcome="repair_ready",
+                    records=(gate.repair_owner,),
+                    project=identity,
+                    stop_reason="repair_ready",
+                    summary="An exact retained owner will repair the failed current-source pipeline when applied.",
+                    next_action="Run the ordinary loop with --apply.",
+                )
+        if resumable:
             return _report(
                 request,
                 applied=False,
-                outcome="pipeline_blocked",
+                outcome="resume_available",
+                records=resumable[:1],
                 project=identity,
-                stop_reason="pipeline_blocked",
-                summary="An exact retained owner needs a reviewed repair plan.",
-                next_action="Preview and apply exact-IID loop recover; ordinary loop run cannot start repair.",
             )
         record_iids = {record.issue_iid for record in records}
         eligible = tuple(
@@ -2409,6 +2533,42 @@ def dispatch(
         reconcile_closed_issues(ledger, gitlab, project_id=project.id)
         started = wired.monotonic()
 
+        def activate_pipeline_repair(
+            gate: _PipelineGateDecision, inventory: tuple[LedgerRecord, ...]
+        ) -> tuple[LedgerRecord | None, CommandReport | None]:
+            """Activate one exact repair or return its bounded terminal report."""
+            decision = _activate_pipeline_repair_gate(
+                gate=gate,
+                records=inventory,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=wired.clock(),
+            )
+            if decision is None:
+                return None, None
+            if decision.competing_active_owner:
+                return None, _report(
+                    request,
+                    applied=True,
+                    outcome="pipeline_blocked",
+                    project=identity,
+                    stop_reason="pipeline_blocked",
+                    summary="The exact failed pipeline has a competing active owner.",
+                    next_action="Reconcile the active retained owner before repair.",
+                )
+            assert decision.record is not None
+            if decision.record.state is not RunnerState.REPAIR:
+                return decision.record, _report(
+                    request,
+                    applied=True,
+                    outcome="activation_complete",
+                    records=(decision.record,),
+                    project=identity,
+                    segments_run=1,
+                    stop_reason=decision.record.state.value.replace("-", "_"),
+                )
+            return decision.record, None
+
         inventory = tuple(ledger.list_records())
         gate = _inspect_pipeline_gate(
             gitlab=gitlab,
@@ -2416,6 +2576,7 @@ def dispatch(
             records=inventory,
             project_id=project.id,
             default_branch=project.default_branch,
+            now=wired.clock(),
         )
         if gate.outcome is not None and gate.outcome != "pipeline_wait":
             return _report(
@@ -2427,56 +2588,21 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
-        retained_repair = next(
-            (
-                item
-                for item in inventory
-                if item.state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}
-            ),
-            None,
-        )
-        if retained_repair is not None:
-            return _report(
-                request,
-                applied=True,
-                outcome="idle",
-                project=identity,
-                stop_reason=retained_repair.state.value.replace("-", "_"),
-            )
-        if (
-            gate.repair_owner is not None
-            and gate.repair_owner.state is not RunnerState.REPAIR
-        ):
-            needs_repair = ledger.persist(
-                transition_record(
-                    gate.repair_owner,
-                    RunnerState.NEEDS_REPAIR,
-                    phase=WorkflowPhase.POST_PUBLICATION,
-                    error_code=ErrorCode.PIPELINE_REJECTED,
-                    summary="The exact current-source pipeline failed.",
-                    next_action="Review a new exact-IID repair plan before recovery.",
-                )
-            )
-            gitlab.transition_labels(
-                needs_repair.issue_iid, label_for_state(needs_repair.state)
-            )
-            return _report(
-                request,
-                applied=True,
-                outcome="activation_complete",
-                records=(needs_repair,),
-                project=identity,
-                segments_run=1,
-                stop_reason="needs_repair",
-            )
+        activated_repair, repair_report = activate_pipeline_repair(gate, inventory)
+        if repair_report is not None:
+            return repair_report
 
         def remaining_activation_seconds() -> float:
             return request.max_activation_seconds - (wired.monotonic() - started)
 
-        immediate_owners = tuple(
-            item
-            for item in ledger.list_records()
-            if item.state in IMMEDIATE_OWNER_STATES
+        immediate_owners = (
+            (activated_repair,)
+            if activated_repair is not None
+            else tuple(
+                item
+                for item in ledger.list_records()
+                if item.state in IMMEDIATE_OWNER_STATES
+            )
         )
         poll_delay = _PIPELINE_POLL_INITIAL_SECONDS
         while gate.outcome == "pipeline_wait" and not immediate_owners:
@@ -2500,6 +2626,7 @@ def dispatch(
                 records=inventory,
                 project_id=project.id,
                 default_branch=project.default_branch,
+                now=wired.clock(),
             )
         if gate.outcome is not None and not immediate_owners:
             return _report(
@@ -2511,6 +2638,12 @@ def dispatch(
                 summary=gate.summary,
                 next_action=gate.next_action,
             )
+        if not immediate_owners:
+            activated_repair, repair_report = activate_pipeline_repair(gate, inventory)
+            if repair_report is not None:
+                return repair_report
+            if activated_repair is not None:
+                immediate_owners = (activated_repair,)
 
         prior_state = immediate_owners[0].state if len(immediate_owners) == 1 else None
         prior_revision = (
@@ -2519,6 +2652,7 @@ def dispatch(
         issue_iid = (
             immediate_owners[0].issue_iid if len(immediate_owners) == 1 else None
         )
+        repair_workflow_ran = prior_state is RunnerState.REPAIR
         segments_run = 0
         while segments_run < request.max_segments:
             if remaining_activation_seconds() <= 0:
@@ -2558,6 +2692,11 @@ def dispatch(
             if record.revision != prior_revision:
                 segments_run += 1
             prior_revision = record.revision
+            if segment_start_state is RunnerState.REPAIR:
+                repair_workflow_ran = True
+            if record.state is RunnerState.REPAIR and repair_workflow_ran:
+                stop_reason = "repair"
+                break
             if record.state in {
                 RunnerState.BLOCKED,
                 RunnerState.FAILED,
@@ -2573,12 +2712,6 @@ def dispatch(
                 if record.retry_at is not None and record.retry_at <= wired.clock():
                     continue
                 stop_reason = "retry_wait"
-                break
-            if (
-                record.state is RunnerState.REPAIR
-                and record.phase is WorkflowPhase.WORKFLOW
-            ):
-                stop_reason = "repair"
                 break
             if record.state is RunnerState.OBSERVING:
                 poll_delay, viable = _sleep_for_pipeline_poll(

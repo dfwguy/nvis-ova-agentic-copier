@@ -102,13 +102,13 @@ stateDiagram-v2
     RetryWait --> Executing: immediately due worker retry or external retry becomes due
     Executing --> Publishing: worker result is ready_to_publish
     Publishing --> Observing: exact MR evidence verified
-    Observing --> Repair: exact MR conflict needs repair
+    Observing --> Repair: eligible exact failed current-source MR pipeline has one corroborated retained owner
     Observing --> Executing: terminal exact-SHA pipeline starts fresh assessment
     Repair --> Publishing: repair result is ready_to_publish
     Executing --> AwaitingHuman: Pipeline Performance Judge receipt is complete
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
-    Repair --> Blocked: automatic repair is unsafe
+    Repair --> Blocked: retained owner or pipeline evidence is ambiguous or unsafe
     Blocked --> Preparing: explicit retry after human action
     AwaitingHuman --> [*]: human merges or closes
 ```
@@ -121,8 +121,8 @@ GitLab labels have deliberately coarse meanings:
 | `agent::awaiting-human` | The exact MR, named source commit, required receipts, and factory-authored actionable issue handoff are ready for human review. |
 | `agent::blocked` | A documented human action is necessary before work can continue. |
 | `agent::failed` | An exceptional unrecoverable condition prevented safe reconciliation or recording. |
-| `agent::needs_repair` | Corroborated retained work has a supported explicit reviewed recovery path, but cannot be freshly selected. |
-| `agent::repair_failed` | A reviewed repair attempt failed or exact evidence changed, so a new reviewed plan is necessary. |
+| `agent::needs_repair` | A legacy or manually checkpointed repair awaits exact recovery; ordinary exact pipeline failures do not enter this state. |
+| `agent::repair_failed` | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed; it retains the evidence needed for safe follow-up. |
 | `agent::suggest_close` | Structured corroborated evidence recommends human closure for duplicate, superseded, already-satisfied, or no-longer-applicable work. |
 
 The three recovery/closure labels are mutually exclusive with each other and
@@ -134,6 +134,17 @@ becomes `agent::repair_failed`. `agent::blocked` continues to mean authority,
 safety, or unresolved-evidence work, while `agent::failed` remains exceptional
 or unrecoverable. Labels communicate operator-visible ownership; they are not
 the transaction log.
+
+An automatic exact-pipeline repair is bounded per retained item. An
+unsuccessful attempt creates a durable 20-minute repair eligibility backoff,
+and three unsuccessful automatic attempts quarantine or defer that item for human review.
+Those conditions are visible through status and preview but do not prevent a
+later activation from scanning to another eligible exact repair or ordinary
+work. They are distinct from the ordinary `RETRY_WAIT` workflow state and from
+global fail-closed conflicts: inexact identity, active ownership, credentials,
+policy, and authority still stop safe automatic selection. Reviewed recovery
+remains an exceptional exact-IID action and does not consume the automatic
+repair budget.
 
 ## State-machine activation and workflow sessions
 
@@ -149,13 +160,15 @@ handoff:
    project's newest default-branch pipeline and every open merge request's
    newest pipeline for that merge request's exact current source SHA. Missing,
    malformed, or inaccessible evidence blocks selection; a nonterminal
-   observation yields. An exact failed MR pipeline with a retained owner
-   transitions to `agent::needs_repair`; it does not start repair automatically.
+   observation yields. An exact failed MR pipeline with one uniquely
+   corroborated retained owner transitions directly to `repair` and starts the
+   repair workflow in that activation.
 4. Resume the sole recoverable `agent::running` work.
-5. Permit repair or blocked-record reclassification only for one exact IID,
-   with live corroboration and a reviewed `loop recover --issue-iid IID` plan.
-   A bulk status report cannot supply per-item live corroboration; targeted
-   status may.
+5. Permit a blocked-record reclassification only for one exact IID, with live
+   corroboration and a reviewed `loop recover --issue-iid IID` plan. A bulk
+   status report cannot supply per-item live corroboration; targeted status
+   may. This manual path is for interrupted, ambiguous, or otherwise unsafe
+   retained work, not a uniquely owned failed current-source MR pipeline.
 6. Treat a failed default-branch or ownerless merge-request pipeline as an
    actionable human block, then continue only when the preceding gate and
    targeted recovery decisions permit fresh selection.

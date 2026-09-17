@@ -87,6 +87,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.EXECUTING,
                 RunnerState.REPAIR,
                 RunnerState.NEEDS_REPAIR,
+                RunnerState.REPAIR_FAILED,
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.RETRY_WAIT,
                 RunnerState.BLOCKED,
@@ -142,7 +143,12 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
             }
         ),
         RunnerState.REPAIR_FAILED: frozenset(
-            {RunnerState.NEEDS_REPAIR, RunnerState.BLOCKED, RunnerState.COMPLETE}
+            {
+                RunnerState.NEEDS_REPAIR,
+                RunnerState.REPAIR,
+                RunnerState.BLOCKED,
+                RunnerState.COMPLETE,
+            }
         ),
         RunnerState.SUGGEST_CLOSE: frozenset({RunnerState.COMPLETE}),
         RunnerState.COMPLETE: frozenset(),

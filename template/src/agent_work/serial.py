@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -42,6 +44,7 @@ from .models import (
     MergeRequestFeedback,
     MergeRequestFeedbackCursor,
     PendingMergeRequestFeedback,
+    PipelineEvidence,
     RepairAttemptEvidence,
     SplitChildEvidence,
     TransitionIntentRecord,
@@ -68,7 +71,174 @@ class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
 
 
-def _record_reviewed_repair_failure(
+AUTOMATIC_REPAIR_MAX_ATTEMPTS = 3
+AUTOMATIC_REPAIR_BACKOFF_SECONDS = 20 * 60
+
+
+def _automatic_repair_failure(
+    record: LedgerRecord, *, now: datetime, reason: str
+) -> tuple[int, datetime | None, str, str]:
+    """Return durable item-local automatic repair eligibility and guidance."""
+    attempts = record.automatic_repair_count
+    if attempts >= AUTOMATIC_REPAIR_MAX_ATTEMPTS:
+        return (
+            attempts,
+            None,
+            "Automatic repair budget exhausted; this item is quarantined.",
+            "Inspect the retained evidence; other eligible work may continue.",
+        )
+    return (
+        attempts,
+        now + timedelta(seconds=AUTOMATIC_REPAIR_BACKOFF_SECONDS),
+        f"Automatic repair deferred after failure: {reason}",
+        "Wait for this item's bounded automatic repair backoff.",
+    )
+
+
+def activate_exact_pipeline_repair(
+    record: LedgerRecord,
+    *,
+    merge_request: MergeRequestEvidence,
+    pipeline: PipelineEvidence,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+) -> LedgerRecord:
+    """Persist one bounded repair attempt for an exact failed MR pipeline."""
+    if (
+        record.state
+        not in {
+            RunnerState.OBSERVING,
+            RunnerState.NEEDS_REPAIR,
+            RunnerState.REPAIR_FAILED,
+        }
+        or record.source_sha != merge_request.sha
+        or record.source_branch != merge_request.source_branch
+        or record.merge_request_iid != merge_request.iid
+        or pipeline.status != "failed"
+        or pipeline.sha != record.source_sha
+    ):
+        raise SegmentError("exact failed pipeline repair evidence is invalid")
+    snapshot: dict[str, object] = {
+        "issue_iid": record.issue_iid,
+        "project_id": record.project_id,
+        "merge_request_iid": merge_request.iid,
+        "merge_request_url": merge_request.web_url,
+        "source_branch": merge_request.source_branch,
+        "source_sha": merge_request.sha,
+        "pipeline_id": pipeline.id,
+        "pipeline_sha": pipeline.sha,
+        "pipeline_status": pipeline.status,
+        "pipeline_url": pipeline.web_url,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if record.automatic_repair_count >= AUTOMATIC_REPAIR_MAX_ATTEMPTS:
+        exhausted = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.REPAIR_FAILED,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                error_code=ErrorCode.RETRY_EXHAUSTED,
+                automatic_repair_at=None,
+                repair_attempt=RepairAttemptEvidence(
+                    fingerprint=fingerprint,
+                    snapshot=snapshot,
+                    origin="automatic-exact-pipeline",
+                    failure_reason="Automatic repair budget exhausted.",
+                    started_at=now.isoformat(),
+                    elapsed_seconds=0.0,
+                ),
+                summary="Automatic repair budget exhausted; this item is quarantined.",
+                next_action="Inspect the retained evidence; other eligible work may continue.",
+            )
+        )
+        gitlab.transition_labels(exhausted.issue_iid, label_for_state(exhausted.state))
+        return exhausted
+    if (
+        record.state is RunnerState.OBSERVING
+        and record.repair_attempt is not None
+        and record.repair_attempt.origin == "automatic-exact-pipeline"
+    ):
+        failed_attempt = RepairAttemptEvidence(
+            fingerprint=fingerprint,
+            snapshot=snapshot,
+            origin="automatic-exact-pipeline",
+            evidence_delta={
+                "pipeline_status": "failed",
+                "prior_repair_fingerprint": record.repair_attempt.fingerprint,
+            },
+            failure_reason="The exact pipeline remained failed after repair.",
+            started_at=record.repair_attempt.started_at,
+            elapsed_seconds=record.repair_attempt.elapsed_seconds,
+        )
+        attempts, retry_at, summary, next_action = _automatic_repair_failure(
+            record, now=now, reason="the exact pipeline remained failed"
+        )
+        failed = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.REPAIR_FAILED,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                error_code=(
+                    ErrorCode.RETRY_EXHAUSTED
+                    if attempts >= AUTOMATIC_REPAIR_MAX_ATTEMPTS
+                    else ErrorCode.PIPELINE_REJECTED
+                ),
+                automatic_repair_count=attempts,
+                automatic_repair_at=retry_at,
+                repair_attempt=failed_attempt,
+                summary=summary,
+                next_action=next_action,
+            )
+        )
+        gitlab.transition_labels(failed.issue_iid, label_for_state(failed.state))
+        return failed
+    prior_failure = (
+        record.repair_attempt.failure_reason
+        if record.state is RunnerState.REPAIR_FAILED
+        and record.repair_attempt is not None
+        else ""
+    )
+    if record.state is RunnerState.REPAIR_FAILED:
+        record = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.NEEDS_REPAIR,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                summary="The exact failed pipeline was freshly corroborated.",
+                next_action="Run one bounded repair workflow.",
+            )
+        )
+    activated = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.REPAIR,
+            phase=WorkflowPhase.WORKFLOW,
+            error_code=ErrorCode.PIPELINE_REJECTED,
+            automatic_repair_count=record.automatic_repair_count + 1,
+            automatic_repair_at=None,
+            repair_attempt=RepairAttemptEvidence(
+                fingerprint=fingerprint,
+                snapshot=snapshot,
+                origin="automatic-exact-pipeline",
+                evidence_delta=(
+                    {"prior_repair_failure": prior_failure} if prior_failure else {}
+                ),
+                failure_reason="",
+                started_at=now.isoformat(),
+                elapsed_seconds=0.0,
+            ),
+            summary="The exact current-source pipeline failed; repair activated.",
+            next_action="Run the bounded repair workflow.",
+        )
+    )
+    gitlab.transition_labels(activated.issue_iid, label_for_state(activated.state))
+    return activated
+
+
+def _record_repair_failure(
     record: LedgerRecord,
     *,
     ledger: LedgerPort,
@@ -77,13 +247,13 @@ def _record_reviewed_repair_failure(
     evidence_delta: dict[str, object],
     failure_reason: str,
 ) -> LedgerRecord:
-    """Close one reviewed repair attempt and require a new exact-IID plan."""
+    """Close one bounded repair attempt with origin-accurate guidance."""
     attempt = record.repair_attempt
     if record.state is not RunnerState.REPAIR or attempt is None:
-        raise ValueError("reviewed repair failure requires an active repair attempt")
+        raise ValueError("repair failure requires an active repair attempt")
     started = datetime.fromisoformat(attempt.started_at)
     if started.tzinfo is None or started.utcoffset() is None:
-        raise ValueError("reviewed repair attempt lacks a timezone-aware start time")
+        raise ValueError("repair attempt lacks a timezone-aware start time")
     elapsed = min(
         DEFAULT_MAX_ACTIVATION_SECONDS,
         max(0.0, (now.astimezone(UTC) - started.astimezone(UTC)).total_seconds()),
@@ -92,21 +262,39 @@ def _record_reviewed_repair_failure(
     if not delta:
         delta["repair_failure"] = "recorded"
     failed_attempt = RepairAttemptEvidence(
-        reviewed_plan_fingerprint=attempt.reviewed_plan_fingerprint,
-        reviewed_snapshot=attempt.reviewed_snapshot,
+        fingerprint=attempt.fingerprint,
+        snapshot=attempt.snapshot,
+        origin=attempt.origin,
         evidence_delta=delta,
-        failure_reason=failure_reason[:2_048] or "reviewed repair failed",
+        failure_reason=failure_reason[:2_048] or "repair failed",
         started_at=attempt.started_at,
         elapsed_seconds=elapsed,
     )
+    retry_count = record.automatic_repair_count
+    retry_at = record.automatic_repair_at
+    summary = "Reviewed repair failed."
+    next_action = "Review a fresh exact-IID repair plan."
+    if attempt.origin == "automatic-exact-pipeline":
+        retry_count, retry_at, summary, next_action = _automatic_repair_failure(
+            record, now=now, reason="the repair workflow failed"
+        )
+        if retry_count >= AUTOMATIC_REPAIR_MAX_ATTEMPTS:
+            error_code = ErrorCode.RETRY_EXHAUSTED
+        else:
+            error_code = record.error_code
+    else:
+        error_code = record.error_code
     failed = ledger.persist(
         transition_record(
             record,
             RunnerState.REPAIR_FAILED,
             phase=WorkflowPhase.POST_PUBLICATION,
             repair_attempt=failed_attempt,
-            summary="Reviewed repair failed.",
-            next_action="Review a fresh exact-IID repair plan.",
+            automatic_repair_count=retry_count,
+            automatic_repair_at=retry_at,
+            error_code=error_code,
+            summary=summary,
+            next_action=next_action,
         )
     )
     gitlab.transition_labels(failed.issue_iid, label_for_state(failed.state))
@@ -723,13 +911,13 @@ def select_record(
         record for record in records if record.state in IMMEDIATE_OWNER_STATES
     )
     if issue_iid is not None:
-        if len(immediate_owners) > 1:
-            raise SegmentError("multiple resumable records require reconciliation")
         pinned = next(
             (record for record in records if record.issue_iid == issue_iid), None
         )
         if pinned is None:
             raise SegmentError("pinned issue is not the active durable record")
+        if len(immediate_owners) > 1:
+            raise SegmentError("multiple resumable records require reconciliation")
         if _can_reconcile_published_ordinary_work(pinned):
             return pinned, gitlab.fetch_issue(pinned.issue_iid)
         if pinned.state is RunnerState.SUGGEST_CLOSE:
@@ -1551,7 +1739,7 @@ def _execute(
             else None
         )
         if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
-            return _record_reviewed_repair_failure(
+            return _record_repair_failure(
                 record.model_copy(update={"worker_exit": worker_exit}),
                 ledger=ledger,
                 gitlab=gitlab,
@@ -1581,7 +1769,7 @@ def _execute(
             )
         except WorkerProtocolError as error:
             if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
-                return _record_reviewed_repair_failure(
+                return _record_repair_failure(
                     record,
                     ledger=ledger,
                     gitlab=gitlab,
@@ -1607,7 +1795,7 @@ def _execute(
                     record.state is RunnerState.REPAIR
                     and record.repair_attempt is not None
                 ):
-                    return _record_reviewed_repair_failure(
+                    return _record_repair_failure(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
@@ -1621,7 +1809,7 @@ def _execute(
                     record.state is RunnerState.REPAIR
                     and record.repair_attempt is not None
                 ):
-                    return _record_reviewed_repair_failure(
+                    return _record_repair_failure(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
@@ -1649,7 +1837,7 @@ def _execute(
                     record.state is RunnerState.REPAIR
                     and record.repair_attempt is not None
                 ):
-                    return _record_reviewed_repair_failure(
+                    return _record_repair_failure(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
@@ -1669,7 +1857,7 @@ def _execute(
                     record.state is RunnerState.REPAIR
                     and record.repair_attempt is not None
                 ):
-                    return _record_reviewed_repair_failure(
+                    return _record_repair_failure(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
@@ -1685,7 +1873,7 @@ def _execute(
                     record.state is RunnerState.REPAIR
                     and record.repair_attempt is not None
                 ):
-                    return _record_reviewed_repair_failure(
+                    return _record_repair_failure(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
@@ -2407,20 +2595,14 @@ def _observe(
             )
         )
     if pipeline.status == "failed":
-        needs_repair = ledger.persist(
-            transition_record(
-                record,
-                RunnerState.NEEDS_REPAIR,
-                phase=WorkflowPhase.POST_PUBLICATION,
-                error_code=ErrorCode.PIPELINE_REJECTED,
-                summary="The exact source-SHA pipeline failed.",
-                next_action="Review a new exact-IID repair plan.",
-            )
+        return activate_exact_pipeline_repair(
+            record,
+            merge_request=mr,
+            pipeline=pipeline,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
         )
-        gitlab.transition_labels(
-            needs_repair.issue_iid, label_for_state(needs_repair.state)
-        )
-        return needs_repair
     return ledger.persist(
         transition_record(
             record,

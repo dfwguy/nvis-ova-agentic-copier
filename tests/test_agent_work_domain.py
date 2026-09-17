@@ -65,11 +65,11 @@ def test_lifecycle_label_specs_are_stable_and_cover_every_projection() -> None:
     specs = domain.LIFECYCLE_LABEL_SPECS
     assert specs["agent::needs_repair"] == {
         "color": "#D4A72C",
-        "description": "Pipeline repair needs a newly reviewed exact-IID plan.",
+        "description": "Retained pipeline repair requires exact recovery evidence.",
     }
     assert specs["agent::repair_failed"] == {
         "color": "#C91C00",
-        "description": "A reviewed repair failed; preserve evidence and review a new plan.",
+        "description": "A repair failed; preserve exact evidence for safe follow-up.",
     }
     assert specs["agent::suggest_close"] == {
         "color": "#6F42C1",
@@ -116,6 +116,11 @@ def test_new_repair_transitions_require_reviewed_recovery(
     assert validate_transition(RunnerState(source_value), RunnerState(target_value))
 
 
+def test_repair_failed_to_repair_is_a_declared_reviewed_recovery_edge() -> None:
+    """Runtime evidence, rather than this declaration, authorizes reviewed recovery."""
+    assert validate_transition(RunnerState.REPAIR_FAILED, RunnerState.REPAIR)
+
+
 @pytest.mark.parametrize(
     ("source", "target"),
     [
@@ -134,7 +139,6 @@ def test_forbidden_transition_edges_fail_closed(
     ("source_value", "target_value"),
     [
         ("needs-repair", "executing"),
-        ("repair-failed", "repair"),
         ("suggest-close", "executing"),
     ],
 )
@@ -197,8 +201,8 @@ def test_repair_attempt_evidence_is_bounded_nonsecret_and_binds_plan_and_delta()
 ):
     evidence_type = domain.RepairAttemptEvidence
     attempt = evidence_type(
-        reviewed_plan_fingerprint="a" * 64,
-        reviewed_snapshot={"issue_iid": 12, "pipeline_id": 4},
+        fingerprint="a" * 64,
+        snapshot={"issue_iid": 12, "pipeline_id": 4},
         evidence_delta={"pipeline_status": "failed"},
         failure_reason="repair worker returned a non-zero result",
         started_at="2026-09-10T00:00:00+00:00",
@@ -208,6 +212,27 @@ def test_repair_attempt_evidence_is_bounded_nonsecret_and_binds_plan_and_delta()
     assert attempt.reviewed_plan_fingerprint == "a" * 64
     assert attempt.evidence_delta == {"pipeline_status": "failed"}
     assert attempt.elapsed_seconds == 12.5
+
+
+def test_repair_attempt_evidence_loads_legacy_reviewed_aliases_as_neutral_reviewed_plan() -> (
+    None
+):
+    """Persisted reviewed-plan evidence remains readable after neutral renaming."""
+    attempt = domain.RepairAttemptEvidence.model_validate(
+        {
+            "reviewed_plan_fingerprint": "a" * 64,
+            "reviewed_snapshot": {"issue_iid": 12},
+        }
+    )
+
+    assert attempt.origin == "reviewed-plan"
+    assert attempt.fingerprint == "a" * 64
+    assert attempt.snapshot == {"issue_iid": 12}
+    serialized = attempt.model_dump(mode="json")
+    assert serialized["fingerprint"] == "a" * 64
+    assert serialized["snapshot"] == {"issue_iid": 12}
+    assert "reviewed_plan_fingerprint" not in serialized
+    assert "reviewed_snapshot" not in serialized
 
 
 @pytest.mark.parametrize(

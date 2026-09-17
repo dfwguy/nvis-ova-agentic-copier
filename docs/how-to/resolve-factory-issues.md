@@ -1,7 +1,7 @@
 ---
 title: How to resolve factory issue recovery
 type: how-to
-summary: Inspect recovery evidence and apply one reviewed resolution for a retained factory issue.
+summary: Inspect exceptional recovery evidence and apply one reviewed resolution for a retained factory issue.
 audience: maintainer
 tags: [agent-workflow]
 status: draft
@@ -10,7 +10,7 @@ related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the recovery inventory and resolution command contract.
   - path: ../explanation/serial-agent-loop-recovery-design.md
-    why: Explains why recovery uses retained evidence and an explicit decision.
+    why: Explains why exceptional recovery uses retained evidence and an explicit decision.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -24,10 +24,15 @@ related:
 
 # How to resolve factory issue recovery
 
-Use this procedure when a factory issue has retained recovery evidence and a
-human needs to make one bounded lifecycle decision. It does not approve or
-merge a merge request, claim fresh work, discard a retained worktree, or alter
-project policy.
+Use this procedure when a factory issue has interrupted, ambiguous, or unsafe
+retained recovery evidence and a human needs to make one bounded lifecycle
+decision. It does not approve or merge a merge request, claim fresh work,
+discard a retained worktree, or alter project policy.
+
+Do not use this procedure for an exact failed current-source merge-request
+pipeline with one uniquely corroborated retained owner. An applied ordinary
+`agent-work loop run --apply` activation transitions that owner to `repair` and
+runs the repair workflow without a human checkpoint.
 
 ## 1. Inspect the non-claiming inventory
 
