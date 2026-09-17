@@ -1410,15 +1410,35 @@ def _record_retry(
     detail: str | None = None,
     retry_delay: timedelta = timedelta(minutes=20),
     allow_remote_exhaustion_side_effects: bool = True,
+    stop_on_unchanged_condition: bool = False,
 ) -> LedgerRecord:
     """Persist one bounded retry and optionally publish its exhaustion block."""
-    outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
     condition = ConditionEvidence(
         occurred_at=now,
-        retry_count=outcome.retry_count,
+        retry_count=record.retry_count,
         code=error_code.value,
-        detail=detail or outcome.summary,
+        detail=detail or "Transient failure; retry scheduled.",
     )
+    if stop_on_unchanged_condition and _is_unchanged_retry_condition(record, condition):
+        outcome = transition_record(
+            record,
+            RunnerState.BLOCKED,
+            retry_at=None,
+            error_code=error_code,
+            summary="Automatic retry stopped because validation evidence did not change.",
+            next_action=(
+                "Resolve the blocker, then run agent-work loop retry --issue-iid "
+                f"{record.issue_iid} --apply."
+            ),
+        )
+    else:
+        outcome = plan_retry(record, now=now, retry_delay=retry_delay).record
+        condition = condition.model_copy(
+            update={
+                "retry_count": outcome.retry_count,
+                "detail": detail or outcome.summary,
+            }
+        )
     history = (
         *record.condition_history,
         condition,
@@ -1444,6 +1464,21 @@ def _record_retry(
             next_action=outcome.next_action,
         )
     return outcome
+
+
+def _is_unchanged_retry_condition(
+    record: LedgerRecord, condition: ConditionEvidence
+) -> bool:
+    """Return whether a retry repeats the latest uninterrupted condition."""
+    if not record.condition_history:
+        return False
+    latest = record.condition_history[-1]
+    return (
+        record.prior_phase is record.phase
+        and latest.retry_count == record.retry_count
+        and latest.code == condition.code
+        and latest.detail == condition.detail
+    )
 
 
 def _record_identity_retry(
@@ -2031,6 +2066,7 @@ def _execute(
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
                 detail=format_worker_result_diagnostic(error),
+                stop_on_unchanged_condition=True,
             )
         else:
             if (
@@ -2139,6 +2175,7 @@ def _execute(
                         if isinstance(error, WorkerProtocolError)
                         else "receipts: required receipts are not coherent"
                     ),
+                    stop_on_unchanged_condition=True,
                 )
             else:
                 outcome = outcome.model_copy(update={"worker_exit": None})

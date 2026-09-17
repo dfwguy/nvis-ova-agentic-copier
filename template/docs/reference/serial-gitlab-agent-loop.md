@@ -1003,6 +1003,20 @@ The diagnostic is one safe line of at most 2048 UTF-8 bytes; it excludes prompts
 issue content, stdout, credentials, terminal controls, and unbounded output.
 Retry exhaustion retains it, while a validated successful worker result clears it.
 
+For `worker_protocol_invalid` and `worker_receipt_invalid`, the runner also
+compares the canonical error code and bounded, stable, redacted contract-field
+or reason diagnostic with the latest automatic condition in the same coarse
+phase. The first such
+failure schedules its immediate retry. If a later automatic attempt has the
+same pair in that phase, it has made no progress: the runner blocks the issue
+immediately without consuming another retry, retains the worktree, phase, and
+safe cause, and publishes the usual blocked projection and comment. A changed
+code, diagnostic, or phase is changed evidence and follows the ordinary bounded
+retry path. This rule does not change retry handling for non-protocol transient
+failures. After the condition is corrected, use `agent-work loop retry
+--issue-iid IID --apply`; that explicit human retry resets the automatic retry
+budget.
+
 Automatic exact-pipeline repair has its own budget: at most three repair
 workflows for one exact retained owner. After each unsuccessful attempt, the
 ledger records `automatic_repair_count` and a 20-minute

@@ -3746,6 +3746,339 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
     assert sensitive_value not in diagnostic
 
 
+def test_due_worker_protocol_repeat_blocks_without_consuming_another_retry(
+    tmp_path: Path,
+) -> None:
+    """A due retry stops on the same safe worker-protocol condition."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1,'
+            '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    second = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1,'
+            '"change_summary":"another-raw-secret"}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert second is not None and second.state is RunnerState.BLOCKED
+    assert second.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert second.retry_count == first.retry_count == 1
+    assert second.retry_at is None and second.worktree == original.worktree
+    assert second.phase is WorkflowPhase.WORKFLOW
+    assert second.condition_history[-1].detail == "protocol_version: must equal 2"
+    assert gitlab.labels == ["agent::running", "agent::running", "agent::blocked"]
+    assert len(gitlab.outcome_comments) == 1
+    comment = "\n".join(gitlab.outcome_comments[0])
+    assert "protocol_version: must equal 2" in comment
+    assert "raw-worker-prose-secret" not in comment
+    assert "agent-work loop retry --issue-iid 12 --apply" in comment
+
+
+def test_due_worker_protocol_with_changed_diagnostic_consumes_another_retry(
+    tmp_path: Path,
+) -> None:
+    """A changed bounded diagnostic remains eligible for ordinary retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    second = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker("<agent-work-result>{}</agent-work-result>"),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert first is not None and first.retry_count == 1
+    assert second is not None and second.state is RunnerState.RETRY_WAIT
+    assert second.retry_count == 2
+    assert second.condition_history[-2].detail == "protocol_version: must equal 2"
+    assert second.condition_history[-1].detail != first.condition_history[-1].detail
+
+
+def test_due_worker_protocol_repeat_in_a_different_phase_consumes_another_retry(
+    tmp_path: Path,
+) -> None:
+    """The same validation identity in a new phase is not an automatic repeat."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert first is not None
+    ledger.persist(
+        first.model_copy(
+            update={
+                "state": RunnerState.EXECUTING,
+                "phase": WorkflowPhase.DISCOVERY,
+                "prior_phase": WorkflowPhase.WORKFLOW,
+                "retry_at": None,
+            }
+        )
+    )
+    second = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert second is not None and second.state is RunnerState.RETRY_WAIT
+    assert second.retry_count == 2
+
+
+def test_due_worker_validation_with_changed_code_consumes_another_retry(
+    tmp_path: Path,
+) -> None:
+    """A different worker-validation code remains eligible for ordinary retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    receipts = tuple(
+        f"{skill}: approved; uv run pytest"
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+    payload = {
+        "protocol_version": 2,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": receipts,
+        "change_summary": "safe summary",
+        "next_action": "Publish after validation.",
+        "merge_request_draft": {
+            "title": "Worker builder",
+            "description": "Ready for human review.",
+        },
+        "audit_summary": {
+            "lane": "coding",
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "role_receipts": receipts,
+            "changed_paths": ["not-an-observed-path"],
+            "tests": ["uv run pytest"],
+            "reviewers": ["$tdd-judge: approved; uv run pytest"],
+            "findings": [],
+            "corrections": [],
+        },
+    }
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert first is not None
+    payload["ledger_revision"] = first.revision + 1
+    second = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert second is not None and second.state is RunnerState.RETRY_WAIT
+    assert second.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert second.retry_count == 2
+
+
+def test_due_worker_receipt_repeat_blocks_without_consuming_another_retry(
+    tmp_path: Path,
+) -> None:
+    """Repeated receipt evidence failures stop with their bounded audit cause."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    receipts = tuple(
+        f"{skill}: approved; uv run pytest"
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+
+    def invalid_receipt(revision: int) -> str:
+        payload = {
+            "protocol_version": 2,
+            "project_id": 310967,
+            "issue_iid": 12,
+            "ledger_revision": revision,
+            "expected_state": "executing",
+            "expected_phase": "workflow",
+            "workflow_lane": "coding",
+            "result_kind": "ready_to_publish",
+            "phase_status": "complete",
+            "completed_phase": "workflow",
+            "receipts": receipts,
+            "change_summary": "raw-worker-prose-secret",
+            "next_action": "Publish after validation.",
+            "merge_request_draft": {
+                "title": "Worker builder",
+                "description": "Ready for human review.",
+            },
+            "audit_summary": {
+                "lane": "coding",
+                "capacity": {
+                    "required": 13,
+                    "available": 16,
+                    "shortfall": 0,
+                    "decision": "run",
+                },
+                "role_receipts": receipts,
+                "changed_paths": ["raw-worker-prose-secret"],
+                "tests": ["uv run pytest"],
+                "reviewers": ["$tdd-judge: approved; uv run pytest"],
+                "findings": [],
+                "corrections": [],
+            },
+        }
+        return f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(invalid_receipt(original.revision)),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    second = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(invalid_receipt(first.revision + 1)),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert second is not None and second.state is RunnerState.BLOCKED
+    assert second.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert second.retry_count == first.retry_count == 1
+    assert (
+        second.worktree == original.worktree and second.phase is WorkflowPhase.WORKFLOW
+    )
+    assert second.condition_history[-1].detail == (
+        "audit_summary.changed_paths: does not match observed changed paths"
+    )
+    assert gitlab.labels[-1:] == ["agent::blocked"]
+    assert "raw-worker-prose-secret" not in "\n".join(gitlab.outcome_comments[0])
+
+
+def test_explicit_retry_resets_budget_after_repeated_worker_protocol_block(
+    tmp_path: Path,
+) -> None:
+    """Human retry resets automatic counting despite the appended blocker history."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    for payload in ('{"protocol_version":1}', '{"protocol_version":1}'):
+        run_segment(
+            ledger=ledger,
+            gitlab=gitlab,  # type: ignore[arg-type]
+            repository=repository,  # type: ignore[arg-type]
+            invoke=FakeInvoker(f"<agent-work-result>{payload}</agent-work-result>"),  # type: ignore[arg-type]
+            timeout_seconds=10,
+            now=NOW,
+        )
+
+    replay = dispatch(
+        CommandRequest(command="loop.retry", issue_iid=12),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    resumed = replay.items[0]
+    persisted = ledger.load(12)
+
+    assert resumed.state is RunnerState.PREPARING
+    assert persisted is not None
+    assert persisted.retry_count == 0 and persisted.retry_at is None
+    assert persisted.worktree == resumed.worktree
+    assert (
+        persisted.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
+    )
+    assert persisted.condition_history[-1].retry_count == 1
+
+
 def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
     tmp_path: Path,
 ) -> None:
