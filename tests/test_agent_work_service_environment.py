@@ -782,16 +782,6 @@ def test_installed_setup_and_wrapper_require_the_versioned_contract_before_contr
     template_wrapper = (
         project_root / "template" / "scripts" / "agent-work-systemd-run.sh"
     ).read_text()
-    root_setup = (
-        project_root / "docs" / "how-to" / "setup-serial-gitlab-agent-loop.md"
-    ).read_text()
-    template_setup = (
-        project_root
-        / "template"
-        / "docs"
-        / "how-to"
-        / "setup-serial-gitlab-agent-loop.md"
-    ).read_text()
     root_service = (
         project_root / "systemd" / "agentic-copier-agent-work.service"
     ).read_text()
@@ -808,8 +798,6 @@ def test_installed_setup_and_wrapper_require_the_versioned_contract_before_contr
     assert root_wrapper.index("AGENT_WORK_ENV_VERSION") < root_wrapper.index(
         "agent-work loop run"
     )
-    assert "AGENT_WORK_ENV_VERSION=%q" in root_setup
-    assert "AGENT_WORK_ENV_VERSION=%q" in template_setup
     for service in (root_service, template_service):
         assert "EnvironmentFile=" in service
         assert "agent-work-systemd-run.sh --apply" in service

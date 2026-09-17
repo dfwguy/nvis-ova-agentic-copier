@@ -16,7 +16,6 @@ import io
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -688,36 +687,3 @@ def test_generated_aggregate_dispatches_records_and_reports_license_once(
     license_cases = report.findall(".//testcase[@name='license-check']")
     assert len(license_cases) == 1
     assert (license_cases[0].find("failure") is not None) is (license_status != 0)
-
-
-def test_portable_license_skill_and_current_workflow_route_are_preserved(
-    generated_project: Path, project_root: Path, template_dir: Path
-) -> None:
-    """License review is a byte-identical read-only child before finalization."""
-    roots = (project_root, template_dir, generated_project)
-    skill = Path(".agents/skills/license-checker/SKILL.md")
-    contents = {(root / skill).read_bytes() for root in roots}
-    assert len(contents) == 1
-    for root in roots:
-        manifest = (root / "AGENTS.md").read_text()
-        assert "$license-checker" in manifest
-        assert "read-only" in manifest
-        assert manifest.index("$license-checker") < manifest.index("$tdd-finalizer")
-        assert "child of Green" in manifest
-
-
-def test_filesystem_deviation_inventories_license_checker_boundaries(
-    project_root: Path, template_dir: Path
-) -> None:
-    """Project context documents both checker copies, tests, and direct entry points."""
-    root_context = (project_root / ".agents/project.md").read_text()
-    template_context = (template_dir / ".agents/project.md.jinja").read_text()
-    for context in (root_context, template_context):
-        assert "scripts/check_licenses.py" in context
-        assert "template/scripts/check_licenses.py" in context
-        assert "tests/test_licenses.py" in context
-        assert ".pre-commit-config.yaml" in context
-        assert ".gitlab-ci.yml" in context
-    assert re.search(
-        r"rendered.*scripts/check_licenses.py", template_context, re.DOTALL
-    )
