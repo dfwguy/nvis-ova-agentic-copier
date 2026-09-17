@@ -271,6 +271,8 @@ validate_applied_report() {
     length == 1 and (.[0] | (
       .schema_version == 1 and .command == "loop.run" and .applied == true and
       ((.stop_reason == "idle" and .outcome == "idle") or
+       (.stop_reason == "prerequisite_labels_reconciled" and
+        .outcome == "prerequisite_labels_reconciled") or
        (.stop_reason == "awaiting_human" and .outcome == "activation_complete") or
        (.stop_reason == "blocked" and .outcome == "activation_complete") or
        (.stop_reason == "failed" and .outcome == "activation_complete") or
