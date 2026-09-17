@@ -146,6 +146,13 @@ policy, and authority still stop safe automatic selection. Reviewed recovery
 remains an exceptional exact-IID action and does not consume the automatic
 repair budget.
 
+Split handling is not a durable recovery state. After validating a
+protocol-v2 `split_required` result, the controller creates or reuses the
+marker-bound child issues in the executing segment, then notes and closes the
+parent. A retry starts a fresh workflow and repeats those marker searches. It
+does not restore a saved plan, progress record, transactional prefix, or
+checkpoint, and split children need no special supervisor projection.
+
 ## Scheduler liveness and item-local recovery
 
 The scheduler has one liveness invariant: no state of one item may prevent an
@@ -173,7 +180,6 @@ its next safe action and continues a deterministic scan for another candidate.
 | `NEEDS_REPAIR` | Legacy or reviewed recovery evidence | Defer from ordinary selection; expose exact-IID reviewed recovery and continue scanning. |
 | `REPAIR_FAILED` | Automatic repair timing and attempt evidence | Resume only when due and safe; otherwise defer or quarantine locally and continue scanning. |
 | `SUGGEST_CLOSE` | Corroborated duplicate, supersession, or no-longer-applicable evidence | Skip automatic work and show the human closure decision. |
-| `DECOMPOSING` | Retained split-plan workflow evidence | Resume or repair one safely active owner; skip dependency-gated child work. |
 | `BLOCKED` | Recorded human action or unresolved item evidence | Skip automatic work and show the exact operator action. |
 | `AWAITING_HUMAN` | Verified human-review handoff for an exact MR source SHA | Skip automatic work and preserve the human handoff. |
 | `FAILED` | Exceptional item-local failure with a safe next action | Skip automatic work and show the required recovery action. |

@@ -5,7 +5,7 @@ summary: Inspect exceptional recovery evidence and apply one reviewed resolution
 audience: maintainer
 tags: [agent-workflow]
 status: draft
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the recovery inventory and resolution command contract.
@@ -49,8 +49,7 @@ Start with the aggregate `total`, `open`, `closed`, `active`, `blocked`,
 `dependency_gated`, `human_action`, and `no_action` counts. Use a detailed
 candidate's active state, `human_action_required`, bounded blocked cause,
 named open trusted prerequisites, and exact next action to decide whether to
-act. A cleared trusted split prerequisite recommends an explicit `retry`; it
-does not start new work. Failed main and open-MR pipelines appear before
+act. Failed main and open-MR pipelines appear before
 ordinary retained work. Do not use this command to select fresh work: it only
 reports fresh items.
 
@@ -62,7 +61,7 @@ items; use `--issue-iid` when you need its exact evidence.
 
 A stale running item is an early `needs_human_decision`, not a retry target:
 use `agent-work loop recover` for its exact retained state. Retry is limited to
-a retained `BLOCKED` record whose trusted dependencies are all closed (or
+a retained `BLOCKED` record whose trusted prerequisites are all closed (or
 absent); it preserves any retained publication replay and retry history.
 
 When `$software-factory-supervisor` identifies action-required recovery, it
@@ -70,7 +69,7 @@ hands exactly one IID to `$resolve-factory-issues`. Keep no-action inventories
 with the supervisor; do not turn a count-only report into bulk resolutions.
 
 An immediate owner is one record in `PREPARING`, `EXECUTING`, `PUBLISHING`,
-`OBSERVING`, `REPAIR`, or `DECOMPOSING`. `BLOCKED` is action-required, not
+`OBSERVING`, or `REPAIR`. `BLOCKED` is action-required, not
 runnable; `RETRY_WAIT` is queued and does not compete with an already selected
 IID. A reviewed retry changes only its selected `BLOCKED` IID to `PREPARING`,
 or retains `PUBLISHING` for a publication replay. Untouched blocked and queued

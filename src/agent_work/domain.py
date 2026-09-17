@@ -47,7 +47,6 @@ class RunnerState(StrEnum):
     NEEDS_REPAIR = "needs-repair"
     REPAIR_FAILED = "repair-failed"
     SUGGEST_CLOSE = "suggest-close"
-    DECOMPOSING = "decomposing"
     BLOCKED = "blocked"
     AWAITING_HUMAN = "awaiting-human"
     FAILED = "failed"
@@ -149,7 +148,6 @@ ACTIVE_STATES = frozenset(
         RunnerState.PUBLISHING,
         RunnerState.OBSERVING,
         RunnerState.REPAIR,
-        RunnerState.DECOMPOSING,
     }
 )
 

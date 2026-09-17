@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -134,8 +134,10 @@ reconciles observable repository state and preserves the retained worktree. It
 starts a fresh complete workflow session at the coarse boundary and repeats
 validation when necessary. It does not restore individual agents, their
 prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue
-is instead handed back as a structured split plan; the trusted controller
-creates any child issues only after validating that plan.
+is instead handed back as a structured split plan. The controller validates the
+plan and handles it immediately: it reuses marker-matched children, creates
+only missing children, then notes and closes the parent. A later retry reruns
+the workflow and marker searches; it does not resume a saved decomposition.
 
 The concise audit is durable only in the ledger; status is deliberately an
 operational projection over that record plus best-effort live evidence. This

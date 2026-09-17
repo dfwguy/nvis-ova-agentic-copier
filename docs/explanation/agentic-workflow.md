@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-17
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -230,7 +230,7 @@ flowchart TD
     retain --> recovery["Controller reconciliation"]
     recovery --> recoveryworkflow["Fresh AI context: applicable full workflow"]
     oversized["Oversized intake"] --> split["Structured split plan"]
-    split --> children["Controller creates or recovers ordered child issues"]
+    split --> children["Controller reuses marker-matched children or creates missing ordered child issues"]
     children --> selection["Later selection of each child"]
     selection --> childworkflow["Fresh AI context: applicable full workflow"]
 ```

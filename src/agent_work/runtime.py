@@ -293,10 +293,6 @@ def _operational_evidence(
         if selected is None
         else selected.feedback_cursor is not None,
         "has_receipts": None if selected is None else bool(selected.receipts),
-        "has_decomposition": None
-        if selected is None
-        else selected.decomposition_plan is not None
-        or bool(selected.decomposition_progress),
         "record_fingerprint": None
         if selected is None
         else hashlib.sha256(selected.model_dump_json().encode()).hexdigest(),
@@ -599,8 +595,6 @@ def _normalization_is_exact(
             and record.feedback_cursor is None
             and record.pending_feedback is None
             and not record.receipts
-            and record.decomposition_plan is None
-            and not record.decomposition_progress
             and record.intent is None
             and repository.verify_worktree(
                 record.worktree, record.source_branch, record.source_sha or ""

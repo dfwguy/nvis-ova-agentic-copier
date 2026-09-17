@@ -38,7 +38,6 @@ from .domain import (
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
-    split_fingerprint,
 )
 
 
@@ -434,15 +433,6 @@ class SplitPlan(BoundaryModel):
         return self
 
 
-class SplitChildEvidence(BoundaryModel):
-    """One durable child binding for an ordered split slice."""
-
-    ordinal: int = Field(ge=1)
-    key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    issue_iid: int = Field(gt=0)
-
-
 class WorkerExitEvidence(BoundaryModel):
     """Bounded, safe diagnostic evidence from one failed worker process."""
 
@@ -578,14 +568,41 @@ class LedgerRecord(BoundaryModel):
     completed_at: datetime | None = None
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = "unknown"
     condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
-    decomposition_plan: SplitPlan | None = None
-    decomposition_progress: tuple[SplitChildEvidence, ...] = ()
     summary: str = ""
     next_action: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_split_record(cls, value: object) -> object:
+        """Discard only the retired split checkpoint from an older ledger record."""
+        if not isinstance(value, dict):
+            return value
+        record = cast("dict[str, object]", value)
+        state = record.get("state")
+        prior_state = record.get("prior_state")
+        has_legacy_fields = any(
+            field in record
+            for field in ("decomposition_plan", "decomposition_progress")
+        )
+        if (
+            state != "decomposing"
+            and prior_state != "decomposing"
+            and not has_legacy_fields
+        ):
+            return value
+        normalized = dict(record)
+        if state == "decomposing":
+            normalized["state"] = RunnerState.EXECUTING.value
+        if prior_state == "decomposing":
+            normalized["prior_state"] = RunnerState.EXECUTING.value
+        if has_legacy_fields:
+            normalized.pop("decomposition_plan", None)
+            normalized.pop("decomposition_progress", None)
+        return normalized
+
     @model_validator(mode="after")
-    def validate_lifecycle_and_decomposition(self) -> LedgerRecord:
-        """Keep durable lifecycle and decomposition evidence coherent."""
+    def validate_lifecycle(self) -> LedgerRecord:
+        """Keep durable lifecycle evidence coherent."""
         if (
             self.state is RunnerState.SUGGEST_CLOSE
             and self.suggest_close_evidence is None
@@ -600,37 +617,6 @@ class LedgerRecord(BoundaryModel):
             )
         if self.state is RunnerState.REPAIR_FAILED and self.repair_attempt is None:
             raise ValueError("repair-failed state requires repair-attempt evidence")
-        requires_plan = self.state is RunnerState.DECOMPOSING or (
-            self.state is RunnerState.RETRY_WAIT
-            and self.prior_state is RunnerState.DECOMPOSING
-        )
-        if (
-            requires_plan or self.decomposition_progress
-        ) and self.decomposition_plan is None:
-            raise ValueError("decomposition state or progress requires a plan")
-        if self.decomposition_plan is not None:
-            if len(self.decomposition_progress) > len(self.decomposition_plan.slices):
-                raise ValueError("decomposition progress exceeds its plan")
-            progress_iids = tuple(
-                item.issue_iid for item in self.decomposition_progress
-            )
-            if len(set(progress_iids)) != len(progress_iids) or any(
-                iid == self.issue_iid for iid in progress_iids
-            ):
-                raise ValueError("decomposition progress has invalid child issue IDs")
-            expected = self.decomposition_plan.slices[
-                : len(self.decomposition_progress)
-            ]
-            if any(
-                evidence.ordinal != slice_.ordinal
-                or evidence.key != slice_.key
-                or evidence.fingerprint
-                != split_fingerprint(self.project_id, self.issue_iid, slice_.key)
-                for evidence, slice_ in zip(
-                    self.decomposition_progress, expected, strict=True
-                )
-            ):
-                raise ValueError("decomposition progress is not an exact plan prefix")
         return self
 
 

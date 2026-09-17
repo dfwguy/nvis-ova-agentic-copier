@@ -5,7 +5,7 @@ summary: Install, inspect, plan recovery, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -526,16 +526,22 @@ The loop never approves, merges, or closes issues.
 ### Observe an automated `split_required` decomposition
 
 When an Architect returns `result_kind=split_required`, the trusted runner
-durably creates or recovers the proposed child issues and closes the parent.
-Review the parent decomposition note and the marker-bound child issues. A child
-with an open `Depends-on` issue remains ineligible until every prerequisite is
-closed; no manual filing or retry is needed.
+handles the validated plan in the current executing segment. It searches for
+each exact child marker, reuses a matching child, and creates only missing
+children. Each new child has a full description with links to the parent and
+its dependencies. Once every child exists, the controller adds one parent note
+and closes the parent.
+
+If that handling is interrupted, the next attempt reruns the workflow and the
+same marker searches recover children already created. There is no separate
+decomposition state, saved plan or progress record, checkpoint restoration, or
+special queue to repair.
 
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or
-close it according to the project's issue practice; do not retry it merely to
-re-run the same sizing decision. If the parent itself was narrowed to a
-suitable outcome, explicitly retry that IID only after the edit is complete:
+close it according to the project's issue practice. If the parent itself was
+narrowed to a suitable outcome, explicitly retry that IID only after the edit
+is complete:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base

@@ -178,7 +178,7 @@ resets its retry budget and moves it to resumable preparation after explicit
 human direction.
 
 The operator-visible immediate owner set is `PREPARING`, `EXECUTING`,
-`PUBLISHING`, `OBSERVING`, `REPAIR`, and `DECOMPOSING`. `BLOCKED` is excluded
+`PUBLISHING`, `OBSERVING`, and `REPAIR`. `BLOCKED` is excluded
 from that set: it remains action-required and is not runnable. `RETRY_WAIT` is
 queued, not a competing immediate owner when an exact IID is already selected.
 That selected IID stays pinned across a multi-segment continuation. A reviewed
@@ -612,7 +612,6 @@ project or the sole item to advance.
 | `NEEDS_REPAIR` | Legacy or reviewed recovery record | Defer; expose exact-IID reviewed recovery; scan on. |
 | `REPAIR_FAILED` | Per-item repair timing and attempt evidence | Resume only when due and safe; otherwise defer or quarantine locally and scan on. |
 | `SUGGEST_CLOSE` | Corroborated closure recommendation | Skip; expose the human closure decision. |
-| `DECOMPOSING` | Active retained split-plan work | Resume or repair the active owner; skip dependency-gated children. |
 | `BLOCKED` | Recorded human action or unresolved item evidence | Skip automatic work; expose the exact action. |
 | `AWAITING_HUMAN` | Verified review handoff for an exact MR source SHA | Skip automatic work; preserve the human handoff. |
 | `FAILED` | Item-local exceptional failure and next action | Skip automatic work; expose recovery action. |
@@ -844,11 +843,17 @@ capabilities, returns one protocol-version-2 envelope with these values:
 
 This route requires no receipts, merge-request draft, or error code. The worker
 makes no worktree or GitLab mutation, creates no child issues, and executes no
-proposed slice. The trusted runner persists `decomposing`, derives a durable
-marker for each child, recovers crash-created children by that marker, creates
-missing children in dependency order, posts one decomposition note, and closes
-the parent. Children whose prerequisites remain open are not eligible until
-those dependencies close. `LedgerRecord.schema_version` and
+proposed slice. The controller handles a valid split result directly in its
+executing segment. For every proposal, it searches for the exact durable child
+marker and reuses that child when found; otherwise it creates the child with a
+full description that links to the parent and its dependencies. After all
+children exist, it posts one parent note and closes the parent. It does not
+persist a decomposition lifecycle state, plan, or progress
+ledger, checkpoint, or special queue state. A retry reruns the complete
+workflow and repeats the exact-marker searches, so a partially completed prior
+attempt does not create duplicate children. Children enter ordinary eligibility
+and each uses the normal workflow and merge-request path when its lower-ordinal
+dependencies have closed. `LedgerRecord.schema_version` and
 `WorkerResultEnvelope.protocol_version` are `2` for newly persisted records
 and every fresh worker envelope, including `split_required`. The reader accepts
 legacy v1 ledger records only; worker output is always v2.
