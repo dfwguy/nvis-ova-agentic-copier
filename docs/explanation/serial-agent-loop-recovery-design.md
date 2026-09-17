@@ -321,6 +321,20 @@ transient category and is immediately retried within the activation. External
 transient failures retain their future retry deadline. `needs_human` names the blocked reason
 and a concrete action without treating a deliberate stop as failure.
 
+Malformed protocol and receipt-validation failures need one additional progress
+check. The first automatic failure schedules the current immediate retry. On a
+later automatic attempt, the runner compares its canonical identity—the
+canonical error code and bounded, stable, redacted contract-field or reason
+diagnostic—with the latest
+automatic condition in the same coarse phase. An identical identity shows that
+retrying has not changed the relevant evidence. The runner blocks immediately
+instead of spending another retry, while retaining the coarse phase, durable
+worktree, and safe cause. It then makes the normal blocked projection and
+comment. A changed code, diagnostic, or phase remains evidence of progress and
+continues through the ordinary bounded retry path; non-protocol transient
+failures keep their existing retry behavior. A human fixes the condition and
+explicitly retries the exact issue, which resets its automatic retry budget.
+
 For every new-MR work kind, including protected policy work, the coding or
 content finalizer may return
 `ready_to_publish` only with a returned or ledger-retained
