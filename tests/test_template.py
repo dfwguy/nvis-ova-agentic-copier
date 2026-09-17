@@ -1100,9 +1100,8 @@ def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
         git,
         'case " $* " in\n'
         '  *" push --dry-run "*)\n'
-        '    printf \'{"arguments":"%s","helper0":"%s","helper1":"%s","prompt":"%s"}\\n\' "$*" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_VALUE_1" "$GIT_TERMINAL_PROMPT" > "$PUSH_MARKER"\n'
-        "    set -- $GIT_CONFIG_VALUE_1\n"
-        '    "$@"\n'
+        '    printf \'{"arguments":"%s","helper0":"%s","helper1":"%s","prompt":"%s"}\\n\' "$*" "$GIT_CONFIG_VALUE_0" "$AGENT_WORK_GIT_CREDENTIAL_HELPER" "$GIT_TERMINAL_PROMPT" > "$PUSH_MARKER"\n'
+        '    printf "protocol=https\\nhost=gitlab.example.test\\n\\n" | "$AGENT_WORK_GIT_CREDENTIAL_HELPER" get\n'
         "    ;;\n"
         '  *" ls-remote "*)\n'
         '    sha="$("$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" rev-parse HEAD)"\n'
@@ -1116,6 +1115,7 @@ def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
         "PUSH_MARKER": str(push_marker),
         "REAL_GIT": str(shutil.which("git")),
         "GLAB_HELPER_EXIT": "0" if helper_succeeds else "23",
+        "GITLAB_TOKEN": "test-only-gitlab-token" if helper_succeeds else "",
         "GIT_CONFIG_VALUE_0": "ambient-helper-must-be-cleared",
     }
 
@@ -1127,7 +1127,9 @@ def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
     readiness = json.loads(push_marker.read_text())
     assert "push --dry-run" in readiness["arguments"]
     assert readiness["helper0"] == ""
-    assert readiness["helper1"] == f"{commands / 'glab'} auth git-credential"
+    assert readiness["helper1"] == str(
+        checkout / "src" / "agent-work-git-credential.sh"
+    )
     assert readiness["prompt"] == "0"
     if helper_succeeds:
         assert result.returncode == 0, result.stderr
@@ -1135,6 +1137,29 @@ def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
     else:
         assert result.returncode != 0
         assert not marker.exists()
+
+
+@pytest.mark.parametrize("helper_state", ("missing", "symlink", "nonexecutable"))
+def test_agent_loop_wrapper_rejects_an_unusable_credential_helper_before_authentication(
+    project_root: Path, tmp_path: Path, helper_state: str
+) -> None:
+    """The helper gate fails before any authenticated GitLab command."""
+    checkout, environment, marker, glab_marker = _wrapper_checkout_environment(tmp_path)
+    helper = checkout / "src" / "agent-work-git-credential.sh"
+    if helper_state == "missing":
+        helper.unlink()
+    elif helper_state == "symlink":
+        helper.unlink()
+        helper.symlink_to("/bin/false")
+    else:
+        helper.chmod(0o644)
+
+    result = _run_wrapper(project_root, environment)
+
+    assert result.returncode != 0
+    assert "credential helper" in result.stderr
+    assert not marker.exists()
+    assert not glab_marker.exists()
 
 
 @pytest.mark.parametrize("arguments", ((), ("--apply",)))
@@ -1163,7 +1188,7 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
     )
     _write_command(
         commands / "git",
-        'case " $* " in *" push --dry-run "*) printf \'{"host":"%s","project":"%s","helper":"%s","askpass":"%s","parameters":"%s"}\\n\' "$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$GIT_CONFIG_VALUE_1" "$GIT_ASKPASS" "${GIT_CONFIG_PARAMETERS:-}" > "$READINESS"; set -- $GIT_CONFIG_VALUE_1; "$@" ;; *" ls-remote "*) sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;; *fetch*) for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;; *) exec "$REAL_GIT" "$@" ;; esac',
+        'case " $* " in *" push --dry-run "*) printf \'{"host":"%s","project":"%s","helper":"%s","askpass":"%s","parameters":"%s"}\\n\' "$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$AGENT_WORK_GIT_CREDENTIAL_HELPER" "$GIT_ASKPASS" "${GIT_CONFIG_PARAMETERS:-}" > "$READINESS"; printf "protocol=https\\nhost=gitlab.example.test\\n\\n" | "$AGENT_WORK_GIT_CREDENTIAL_HELPER" get ;; *" ls-remote "*) sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;; *fetch*) for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;; *) exec "$REAL_GIT" "$@" ;; esac',
     )
     _write_command(
         commands / "uv",
@@ -1175,6 +1200,7 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
         "AGENT_WORK_GIT": str(commands / "git"),
         "READINESS": str(readiness),
         "HELPER_OK": "1" if helper_succeeds else "0",
+        "GITLAB_TOKEN": "test-only-gitlab-token" if helper_succeeds else "",
     }
     result = _run_wrapper(project_root, environment, *arguments)
     assert readiness.exists(), result.stderr
@@ -1182,7 +1208,7 @@ def test_agent_loop_wrapper_direnv_readiness_restores_scrubbed_controls(
     assert observed == {
         "host": "gitlab.example.test",
         "project": "123",
-        "helper": f"{commands / 'glab'} auth git-credential",
+        "helper": str(checkout / "src" / "agent-work-git-credential.sh"),
         "askpass": "/bin/false",
         "parameters": "",
     }
@@ -1256,14 +1282,14 @@ def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
         '  [ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] &&\n'
         '  [ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] &&\n'
         '  [ "$GIT_CONFIG_VALUE_0" = "" ] &&\n'
-        '  [ "$GIT_CONFIG_VALUE_1" = "$AGENT_WORK_GLAB auth git-credential" ] &&\n'
+        '  [ "$GIT_CONFIG_VALUE_1" = \'!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"\' ] &&\n'
         '  [ "$GIT_ASKPASS" = /bin/false ] &&\n'
         '  [ -z "${GIT_CONFIG_PARAMETERS:-}" ]\n'
         "}\n"
         'case " $* " in\n'
         '  *" ls-remote "*) check_boundary || exit 26; printf "ls-remote:ok\\n" >> "$STAGE_MARKER"; sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;;\n'
         '  *" fetch "*) check_boundary || exit 27; printf "fetch:ok\\n" >> "$STAGE_MARKER"; for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;;\n'
-        '  *" push --dry-run "*) check_boundary || exit 28; printf "readiness:ok\\n" >> "$STAGE_MARKER"; set -- $GIT_CONFIG_VALUE_1; "$@" ;;\n'
+        '  *" push --dry-run "*) check_boundary || exit 28; printf "readiness:ok\\n" >> "$STAGE_MARKER"; printf "protocol=https\\nhost=gitlab.example.test\\n\\n" | "$AGENT_WORK_GIT_CREDENTIAL_HELPER" get ;;\n'
         '  *) exec "$REAL_GIT" "$@" ;;\n'
         "esac",
     )
@@ -1271,7 +1297,7 @@ def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
         commands / "uv",
         '[ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] || exit 29\n'
         '[ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] || exit 30\n'
-        '[ "$GIT_CONFIG_VALUE_1" = "$AGENT_WORK_GLAB auth git-credential" ] || exit 31\n'
+        '[ "$GIT_CONFIG_VALUE_1" = \'!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"\' ] || exit 31\n'
         '[ "$GIT_ASKPASS" = /bin/false ] || exit 32\n'
         '[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || exit 33\n'
         'printf "runner:ok\\n" >> "$STAGE_MARKER"\n'
@@ -1296,7 +1322,6 @@ def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
     assert stages.count("api:ok") == 1
     assert expected_transport in stages
     assert "readiness:ok" in stages
-    assert "helper:ok" in stages
     assert "runner:ok" in stages
     assert environment["TEST_SENTINEL"] not in stage_marker.read_text()
     assert environment["TEST_SENTINEL"] not in result.stdout + result.stderr
@@ -2285,6 +2310,14 @@ def _wrapper_checkout_environment(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     _initialize_test_repository(checkout)
+    scripts = checkout / "scripts"
+    scripts.mkdir()
+    source = checkout / "src"
+    source.mkdir()
+    shutil.copy2(
+        Path("src/agent-work-git-credential.sh"),
+        source / "agent-work-git-credential.sh",
+    )
     (checkout / ".gitignore").write_text("/.envrc\n")
     (checkout / "version").write_text("one\n")
     _commit_repository_state(checkout, "initial")
@@ -2333,7 +2366,7 @@ def _wrapper_checkout_environment(
         commands / "git",
         'case " $* " in\n'
         '  *" ls-remote "*) sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/main)"; printf "%s\\trefs/heads/main\\n" "$sha" ;;\n'
-        '  *" push --dry-run "*) "$AGENT_WORK_GLAB" auth git-credential >/dev/null 2>&1 ;;\n'
+        '  *" push --dry-run "*) printf "protocol=https\\nhost=gitlab.example.test\\n\\n" | "$AGENT_WORK_GIT_CREDENTIAL_HELPER" get >/dev/null 2>&1 ;;\n'
         '  *fetch*) for part in "$@"; do refspec="$part"; done; exec "$REAL_GIT" -C "$AGENT_WORK_CHECKOUT" fetch --no-tags --no-recurse-submodules "$LOCAL_ORIGIN" "$refspec" ;;\n'
         '  *) exec "$REAL_GIT" "$@" ;;\n'
         "esac",
@@ -2365,6 +2398,7 @@ def _wrapper_checkout_environment(
         "AGENT_WORK_GLAB": str(commands / "glab"),
         "GITLAB_HOST": "gitlab.example.test",
         "GITLAB_PROJECT_ID": "123",
+        "GITLAB_TOKEN": "test-only-gitlab-token",
         "UV_MARKER": str(marker),
         "GLAB_MARKER": str(glab_marker),
         "REAL_GIT": str(shutil.which("git")),

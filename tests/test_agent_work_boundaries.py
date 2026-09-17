@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,9 +132,9 @@ def test_sync_feedback_worktree_uses_the_exact_fast_forward_command_seam(
         calls.append(command)
         return next(responses)
 
-    GitRepository(config, fake).sync_feedback_worktree(
-        worktree, "agent/issue-12", old_sha, new_sha
-    )
+    GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    ).sync_feedback_worktree(worktree, "agent/issue-12", old_sha, new_sha)
 
     assert [command[3:] for command in calls] == [
         ("status", "--porcelain"),
@@ -168,9 +169,9 @@ def test_sync_feedback_worktree_replay_at_new_sha_only_verifies_without_merging(
         calls.append(command)
         return next(responses)
 
-    GitRepository(config, fake).sync_feedback_worktree(
-        worktree, "agent/issue-12", old_sha, new_sha
-    )
+    GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    ).sync_feedback_worktree(worktree, "agent/issue-12", old_sha, new_sha)
 
     assert [command[3:] for command in calls] == [
         ("status", "--porcelain"),
@@ -210,7 +211,9 @@ def test_sync_feedback_worktree_rejects_dirty_or_inexact_git_evidence(
     """The concrete Git repository rejects unsafe resume evidence before mutation."""
     iterator = iter(responses)
     repository = GitRepository(
-        _config(tmp_path), lambda *_args, **_kwargs: next(iterator)
+        _config(tmp_path),
+        lambda *_args, **_kwargs: next(iterator),
+        service_environment={"GITLAB_TOKEN": "test-token"},
     )
 
     with pytest.raises(RepositoryError, match=message):
@@ -239,7 +242,9 @@ def test_sync_feedback_worktree_rejects_unsafe_remote_without_merging(
         return next(responses)
 
     with pytest.raises(RepositoryError, match="remote branch"):
-        GitRepository(_config(tmp_path), fake).sync_feedback_worktree(
+        GitRepository(
+            _config(tmp_path), fake, service_environment={"GITLAB_TOKEN": "test-token"}
+        ).sync_feedback_worktree(
             tmp_path / "worktree", "agent/issue-12", "a" * 40, "b" * 40
         )
 
@@ -412,7 +417,13 @@ def test_discovery_and_git_repository_use_recorded_executables_and_environment(
     git_call = calls[-1]
     assert git_call[0][0] == str(git)
     assert "not-in-argv" not in " ".join(git_call[0])
-    assert git_environments[-1]["GIT_CONFIG_VALUE_1"] == f"{glab} auth git-credential"
+    assert (
+        git_environments[-1]["GIT_CONFIG_VALUE_1"]
+        == '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"'
+    )
+    assert git_environments[-1]["AGENT_WORK_GIT_CREDENTIAL_HELPER"] == str(
+        config.checkout / "src" / "agent-work-git-credential.sh"
+    )
     assert {kwargs.get("timeout_seconds") for _, kwargs in calls} == {120}
 
 
@@ -578,17 +589,19 @@ def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
     assert "secret-token" not in str(failure.value)
 
 
-def test_git_credential_environment_disables_prompts_and_uses_only_glab_helper(
+def test_git_credential_environment_disables_prompts_and_uses_only_repository_helper(
     tmp_path: Path,
 ) -> None:
-    glab = tmp_path / "bin" / "glab"
+    credential_helper = tmp_path / "src" / "agent-work-git-credential.sh"
     environment = build_git_environment(
         {
             "GITLAB_TOKEN": "secret-value",
             "PATH": "/untrusted/bin",
             "GIT_CONFIG_PARAMETERS": "credential.helper=hostile",
+            "GIT_ASKPASS": "/hostile/askpass",
+            "SSH_ASKPASS": "/hostile/ssh-askpass",
         },
-        glab,
+        credential_helper,
     )
 
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
@@ -597,7 +610,10 @@ def test_git_credential_environment_disables_prompts_and_uses_only_glab_helper(
     assert environment["GIT_CONFIG_KEY_0"] == "credential.helper"
     assert environment["GIT_CONFIG_VALUE_0"] == ""
     assert environment["GIT_CONFIG_KEY_1"] == "credential.helper"
-    assert environment["GIT_CONFIG_VALUE_1"] == f"{glab} auth git-credential"
+    assert (
+        environment["GIT_CONFIG_VALUE_1"] == '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"'
+    )
+    assert environment["AGENT_WORK_GIT_CREDENTIAL_HELPER"] == str(credential_helper)
     assert environment["GIT_CONFIG_KEY_2"] == "credential.useHttpPath"
     assert environment["GIT_CONFIG_VALUE_2"] == "true"
     assert environment["GIT_ASKPASS"] == "/bin/false"
@@ -606,6 +622,40 @@ def test_git_credential_environment_disables_prompts_and_uses_only_glab_helper(
     assert environment["GIT_CONFIG_VALUE_3"] == "/bin/false"
     assert environment["GITLAB_TOKEN"] == "secret-value"
     assert "GIT_CONFIG_PARAMETERS" not in environment
+
+
+@pytest.mark.parametrize("token", (None, ""))
+def test_git_credential_environment_rejects_an_unavailable_token_before_git_runs(
+    tmp_path: Path, token: str | None
+) -> None:
+    service_environment = {"PATH": "/untrusted/bin"}
+    if token is not None:
+        service_environment["GITLAB_TOKEN"] = token
+
+    with pytest.raises(RepositoryError, match="token"):
+        build_git_environment(
+            service_environment,
+            tmp_path / "src" / "agent-work-git-credential.sh",
+        )
+
+
+@pytest.mark.parametrize("operation", ("fetch", "pull", "push", "ls-remote"))
+@pytest.mark.parametrize("service_environment", ({}, None))
+def test_repository_blocks_remote_git_without_a_token_before_command_runner(
+    tmp_path: Path, operation: str, service_environment: Mapping[str, str] | None
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(
+        _config(tmp_path), run, service_environment=service_environment
+    )
+    with pytest.raises(RepositoryError, match="token"):
+        repository._git(operation, "origin")
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -2007,7 +2057,9 @@ def test_repository_prepares_publishes_and_inventories(
             return CommandResult(0, "agent-work recovery issue-12\n", "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
     with pytest.raises(RepositoryError, match="clean"):
         repository.refresh_base()
     responses[("status", "--porcelain")] = CommandResult(0, "", "")
@@ -2154,7 +2206,9 @@ def test_existing_mr_worktree_requires_the_recorded_remote_sha(tmp_path: Path) -
             return CommandResult(0, "b" * 40, "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
 
     with pytest.raises(RepositoryError, match="recorded merge request SHA"):
         repository.worktree_for_existing_branch(12, "review/existing", "a" * 40)
@@ -2183,7 +2237,9 @@ def test_publication_rejects_wrong_branch_worker_commits_and_empty_changes(
             return CommandResult(0, status, "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
 
     with pytest.raises(RepositoryError):
         repository.prepare_commit(
@@ -2489,7 +2545,9 @@ def test_repository_reconciles_current_default_or_recovers_only_exact_pending_me
             return CommandResult(0 if merge_head_is_current else 1, "", "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
     if raises:
         with pytest.raises(RepositoryError):
             repository.reconcile_default_branch(
@@ -2534,9 +2592,9 @@ def test_repository_reconciliation_rejects_dirty_worktree_without_pending_merge(
         return CommandResult(0, "", "")
 
     with pytest.raises(RepositoryError, match="uncommitted changes"):
-        GitRepository(config, fake).reconcile_default_branch(
-            tmp_path / "worktree", "agent/issue-12", candidate
-        )
+        GitRepository(
+            config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+        ).reconcile_default_branch(tmp_path / "worktree", "agent/issue-12", candidate)
 
 
 def test_repository_publication_changed_paths_compares_the_prospective_tree_to_target(
@@ -2655,7 +2713,9 @@ def test_prepare_commit_requires_a_resolved_pending_merge_and_exact_ordered_pare
             return CommandResult(0, f"{prepared} {' '.join(parents)}\n", "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
     if raises:
         with pytest.raises(RepositoryError):
             repository.prepare_commit(
@@ -2718,7 +2778,9 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
             return CommandResult(0 if second_parent_is_current else 1, "", "")
         return CommandResult(0, "", "")
 
-    repository = GitRepository(config, fake)
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
     if raises:
         with pytest.raises(RepositoryError):
             repository.bind_retained_commit(

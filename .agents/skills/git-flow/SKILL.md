@@ -42,24 +42,35 @@ unrelated preflight result.
 ## Git and GitLab access preflight
 
 Before branching from `main` or publishing, prove the two independent access
-paths with read-only commands. This works whether credentials come from
-directory-scoped environment variables (for example, `GITLAB_TOKEN`), a
-stored `glab` login, an SSH agent, or an existing Git credential helper. Do
-not print, inspect, or copy secret environment-variable values.
+paths with read-only commands. For HTTPS Git, load the directory-scoped
+`GITLAB_TOKEN` only at runtime and configure Git with this checkout's
+`src/agent-work-git-credential.sh`; it is the sole credential helper for
+that command. Do not print, inspect, or copy secret environment-variable
+values, and do not use a stored helper or SSH agent for this route.
 
 First require a non-empty `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID`.
 Then, from a clean `main`, run:
 
 ```bash
-git pull --ff-only
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"
+credential_helper="$PWD/src/agent-work-git-credential.sh"
+test -x "$credential_helper"
+direnv exec . /usr/bin/env -u GIT_CONFIG_PARAMETERS \
+  AGENT_WORK_GIT_CREDENTIAL_HELPER="$credential_helper" \
+  GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
+  GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+  GIT_CONFIG_KEY_1=credential.helper 'GIT_CONFIG_VALUE_1=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"' \
+  GIT_CONFIG_KEY_2=credential.useHttpPath GIT_CONFIG_VALUE_2=true \
+  GIT_CONFIG_KEY_3=core.askPass GIT_CONFIG_VALUE_3=/bin/false \
+  git pull --ff-only
+direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'
 ```
 
-`git pull --ff-only` verifies the configured Git remote, network route, and
-Git credential, while the `glab` request verifies API authentication and that
-the supplied host/project pair is accessible. Neither command assumes a
-sandbox proxy. Do not change a working remote or credential configuration just
-because it differs from another developer's VM.
+`git pull --ff-only` verifies the configured credential-free HTTPS origin,
+network route, and Git credential, while the `glab` request independently
+verifies API authentication and that the supplied host/project pair is
+accessible. Neither command assumes a sandbox proxy. The helper emits `oauth2`
+and the token only through Git's credential protocol; never put either in a
+remote URL, persisted Git configuration, command report, or diagnostic.
 
 When a checkout supplies `GITLAB_TOKEN` through `.envrc`, run every API
 command through `direnv exec . /usr/bin/env bash -c` so variables expand after
