@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import (
     AliasChoices,
@@ -27,6 +27,9 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+if TYPE_CHECKING:
+    from .models import GitLabIssue
 
 DEFAULT_MAX_ACTIVATION_SECONDS: Final = 10_800
 HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS: Final = 120
@@ -279,6 +282,118 @@ AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"
 _SPLIT_MARKER: Final = re.compile(
     r"<!-- agent-work-split:v1 fingerprint=([0-9a-f]{64}) parent=([1-9][0-9]*) key=([a-z0-9]+(?:-[a-z0-9]+)*) dependencies=(none|[1-9][0-9]*(?:,[1-9][0-9]*)*) -->"
 )
+PREREQUISITE_LABEL_PREFIX: Final = "agent::prereq_"
+PREREQUISITE_LABEL_PATTERN: Final = re.compile(r"^agent::prereq_([1-9][0-9]*)$")
+PREREQUISITE_LABEL_COLOR: Final = "#6F42C1"
+PREREQUISITE_LABEL_DESCRIPTION: Final = (
+    "Open split prerequisites for agent-work issue dependency display."
+)
+
+
+@dataclass(frozen=True)
+class PrerequisiteLabelProjection:
+    """One derived display-label projection for an issue."""
+
+    issue_iid: int
+    current_labels: tuple[str, ...]
+    intended_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PrerequisiteLabelReconciliation:
+    """Validated dynamic-label repair intent for one complete issue snapshot."""
+
+    projections: tuple[PrerequisiteLabelProjection, ...]
+    label_names: tuple[str, ...]
+
+
+def prerequisite_label_iid(label: str) -> int | None:
+    """Return the prerequisite IID encoded by an exact dynamic label."""
+    match = PREREQUISITE_LABEL_PATTERN.fullmatch(label)
+    return None if match is None else int(match.group(1))
+
+
+def prerequisite_label_name(iid: int) -> str:
+    """Return the canonical display label for one positive prerequisite IID."""
+    if iid < 1:
+        raise ValueError("prerequisite IID must be positive")
+    return f"{PREREQUISITE_LABEL_PREFIX}{iid}"
+
+
+def prerequisite_projection_inventory(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> tuple[PrerequisiteLabelProjection, ...]:
+    """Derive safe prerequisite-label projections from a complete issue snapshot."""
+    return tuple(
+        projection
+        for projection in _prerequisite_label_intentions(issues, project_id=project_id)
+        if frozenset(projection.current_labels) != frozenset(projection.intended_labels)
+    )
+
+
+def prerequisite_label_reconciliation(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> PrerequisiteLabelReconciliation:
+    """Derive all applied label repairs from one validated issue snapshot."""
+    intentions = _prerequisite_label_intentions(issues, project_id=project_id)
+    return PrerequisiteLabelReconciliation(
+        projections=tuple(
+            projection
+            for projection in intentions
+            if frozenset(projection.current_labels)
+            != frozenset(projection.intended_labels)
+        ),
+        label_names=tuple(
+            sorted(
+                {
+                    label
+                    for projection in intentions
+                    for label in projection.intended_labels
+                    if prerequisite_label_iid(label) is not None
+                },
+                key=lambda label: prerequisite_label_iid(label) or 0,
+            )
+        ),
+    )
+
+
+def _prerequisite_label_intentions(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> tuple[PrerequisiteLabelProjection, ...]:
+    """Derive complete intended labels while validating the trusted snapshot."""
+    by_iid = {issue.iid: issue for issue in issues}
+    if len(by_iid) != len(issues):
+        raise ValueError("issue inventory contains duplicate IIDs")
+    projections: list[PrerequisiteLabelProjection] = []
+    for issue in sorted(issues, key=lambda item: item.iid):
+        if issue.state not in {"opened", "closed"}:
+            raise ValueError("issue state is invalid")
+        marker = parse_split_marker(issue.description, project_id)
+        if marker is None:
+            dependency_iids: tuple[int, ...] = ()
+        else:
+            parent_iid, _key, dependency_iids = marker
+            if parent_iid == issue.iid or issue.iid in dependency_iids:
+                raise ValueError("invalid split marker dependency")
+            if any(dependency_iid not in by_iid for dependency_iid in dependency_iids):
+                raise ValueError("split dependency is missing")
+        intended_dynamic = (
+            tuple(
+                prerequisite_label_name(dependency_iid)
+                for dependency_iid in sorted(dependency_iids)
+                if by_iid[dependency_iid].state == "opened"
+            )
+            if issue.state == "opened"
+            else ()
+        )
+        intended = (
+            *(label for label in issue.labels if prerequisite_label_iid(label) is None),
+            *intended_dynamic,
+        )
+        projections.append(
+            PrerequisiteLabelProjection(issue.iid, issue.labels, intended)
+        )
+    return tuple(projections)
 
 
 def split_fingerprint(project_id: int, parent_iid: int, key: str) -> str:

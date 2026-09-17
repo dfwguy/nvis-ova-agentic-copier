@@ -358,6 +358,8 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
         payload = report.model_dump(mode="json", exclude_none=True)
         if not payload.get("recovery_candidates"):
             payload.pop("recovery_candidates", None)
+        if not payload.get("prerequisite_projections"):
+            payload.pop("prerequisite_projections", None)
         return json.dumps(payload, default=str, separators=(",", ":"))
     if report.command != "loop.status":
         details = [report.outcome]
@@ -411,6 +413,22 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
                 details.append(
                     f"dependency_explanation={_sanitize_human_value(candidate.dependency_explanation)}"
                 )
+        for projection in report.prerequisite_projections:
+            details.extend(
+                (
+                    f"issue=#{projection.issue_iid}",
+                    "current_labels="
+                    + ",".join(
+                        _sanitize_human_value(label)
+                        for label in projection.current_labels
+                    ),
+                    "intended_labels="
+                    + ",".join(
+                        _sanitize_human_value(label)
+                        for label in projection.intended_labels
+                    ),
+                )
+            )
         return " ".join(details)
 
     safe = _sanitize_human_value

@@ -25,7 +25,10 @@ from .domain import (
     HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
     LIFECYCLE_LABEL_SPECS,
     LIFECYCLE_LABELS,
+    PREREQUISITE_LABEL_COLOR,
+    PREREQUISITE_LABEL_DESCRIPTION,
     parse_split_marker,
+    prerequisite_label_iid,
 )
 from .models import (
     AgentWorkConfig,
@@ -461,6 +464,70 @@ class GitLabGateway:
             )
         )
 
+    def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+        """Return the complete bounded issue snapshot for label reconciliation."""
+        return self._issues(state="all")
+
+    def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+        """Create or normalize exact dynamic prerequisite label definitions."""
+        endpoint = f"projects/{self._config.project_id}/labels"
+        existing = self._label_inventory(endpoint)
+        changed = False
+        for name in sorted(
+            labels, key=lambda label: prerequisite_label_iid(label) or 0
+        ):
+            current = existing.get(name)
+            if current is None:
+                self._call(
+                    endpoint,
+                    method="POST",
+                    fields=(
+                        f"name={name}",
+                        f"color={PREREQUISITE_LABEL_COLOR}",
+                        f"description={PREREQUISITE_LABEL_DESCRIPTION}",
+                    ),
+                )
+                changed = True
+            elif (
+                current.get("color") != PREREQUISITE_LABEL_COLOR
+                or current.get("description") != PREREQUISITE_LABEL_DESCRIPTION
+            ):
+                self._call(
+                    f"{endpoint}/{quote(name, safe='')}",
+                    method="PUT",
+                    fields=(
+                        f"color={PREREQUISITE_LABEL_COLOR}",
+                        f"description={PREREQUISITE_LABEL_DESCRIPTION}",
+                    ),
+                )
+                changed = True
+        return changed
+
+    def transition_prerequisite_labels(
+        self, iid: int, labels: tuple[str, ...]
+    ) -> GitLabIssue:
+        """Replace only dynamic prerequisite labels and verify the exact result."""
+        issue = self.fetch_issue(iid)
+        removed = tuple(
+            label for label in issue.labels if prerequisite_label_iid(label) is not None
+        )
+        self._call(
+            f"projects/{self._config.project_id}/issues/{iid}",
+            method="PUT",
+            fields=(
+                f"remove_labels={','.join(removed)}",
+                f"add_labels={','.join(labels)}",
+            ),
+        )
+        updated = self.fetch_issue(iid)
+        expected = (
+            *(label for label in issue.labels if prerequisite_label_iid(label) is None),
+            *labels,
+        )
+        if frozenset(updated.labels) != frozenset(expected):
+            raise GitLabError("GitLab did not apply the prerequisite projection")
+        return updated
+
     def fetch_issue(self, iid: int) -> GitLabIssue:
         """Fetch one issue by IID."""
         try:
@@ -593,7 +660,7 @@ class GitLabGateway:
     def ensure_lifecycle_labels(self) -> None:
         """Idempotently provision the fixed lifecycle labels in this numeric project."""
         endpoint = f"projects/{self._config.project_id}/labels"
-        existing = self._lifecycle_label_inventory(endpoint)
+        existing = self._label_inventory(endpoint)
         for name in (
             "agent::needs_repair",
             "agent::repair_failed",
@@ -627,7 +694,7 @@ class GitLabGateway:
     def lifecycle_label_drift(self) -> tuple[str, ...]:
         """Return fixed lifecycle labels missing or differing from their specification."""
         endpoint = f"projects/{self._config.project_id}/labels"
-        existing = self._lifecycle_label_inventory(endpoint)
+        existing = self._label_inventory(endpoint)
         return tuple(
             name
             for name in (
@@ -641,9 +708,7 @@ class GitLabGateway:
             != LIFECYCLE_LABEL_SPECS[name]["description"]
         )
 
-    def _lifecycle_label_inventory(
-        self, endpoint: str
-    ) -> dict[object, dict[str, object]]:
+    def _label_inventory(self, endpoint: str) -> dict[object, dict[str, object]]:
         """Read the complete bounded label inventory for safe provisioning."""
         labels: dict[object, dict[str, object]] = {}
         for page in range(1, _MAX_LABEL_PAGES + 1):

@@ -64,6 +64,14 @@ invocation receives the positive, ceil-rounded time remaining from that single
 budget. Exhausting the budget follows the normal retry and durable-worktree
 recovery contract.
 
+Before it selects work, an applied run reconciles prerequisite-label
+projections for split children. If that pass repairs any projection drift, the
+activation performs only that housekeeping: it does not claim a dependent
+issue, create a ledger record or worktree, or start a worker. A partial remote
+failure is retryable; repeating the same reconciliation is safe. Without
+`--apply`, `loop run` reports each current and intended prerequisite-label
+projection but makes no writes.
+
 `AGENT_WORK_FACTORY_USERNAME` is required and must equal the authenticated
 GitLab service username. While an exact open factory MR awaits review, the loop
 reads bounded general comments and inline discussion replies. New human feedback
@@ -230,7 +238,8 @@ JSON and human views include aggregate `total`, `open`, `closed`,
 `active`, `blocked`, `dependency_gated`, `human_action`, and `no_action`
 counts. A detailed candidate identifies its active state,
 `human_action_required`, bounded blocked cause, dependency explanation naming
-open trusted prerequisites, and exact next action.
+open trusted prerequisites, current and intended prerequisite-label
+projections, and exact next action.
 
 The inventory classifies each retained item as legitimately waiting,
 dependency-gated, safely retryable, superseded or duplicate, a closure
@@ -891,6 +900,23 @@ dependencies have closed. `LedgerRecord.schema_version` and
 `WorkerResultEnvelope.protocol_version` are `2` for newly persisted records
 and every fresh worker envelope, including `split_required`. The reader accepts
 legacy v1 ledger records only; worker output is always v2.
+
+### Split prerequisite-label projection
+
+Validated split markers and the live state of their referenced issues are the
+only authority for a child's dependency gate. The runner projects that state
+for operators with `agent::prereq_<IID>` labels. A projection label never makes
+an issue eligible or ineligible.
+
+For every open split child, the intended labels are exactly one
+`agent::prereq_<IID>` label for each currently open trusted prerequisite. The
+runner orders prerequisite IIDs numerically when it calculates and reports the
+set. It creates or reuses each project label idempotently with its stable color
+`#6F42C1` and the plain description `Open split prerequisites for agent-work
+issue dependency display.`, then adds missing labels and removes stale ones. A
+label is removed when its prerequisite closes, the trusted marker dependency is
+removed, or the dependent issue closes. These repairs are idempotent and a
+partially completed remote update remains retryable.
 
 Immediately before each worker execution, the runner retrieves that issue's
 notes through its bounded GitLab retry path. It excludes system notes and both
