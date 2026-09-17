@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -591,6 +591,63 @@ reclassified only one IID at a time with live corroboration. Bulk status does
 not corroborate each item; targeted status may. Two active retained records, a
 competing owner, or a higher-priority owner is an identity conflict: the
 command fails closed and reports the exact safe next action.
+
+### Durable scheduler states and liveness
+
+This is the complete durable-state lookup. One item's state must not prevent
+consideration of an unrelated eligible item. Only configured project identity
+or credential failure, held or ambiguous project-lock ownership, corrupt shared
+durable state, or a truly ambiguous cross-item identity stops the activation.
+Those cases are project-wide because the controller cannot safely identify the
+project or the sole item to advance.
+
+| State | Representative evidence | Scheduler result |
+| --- | --- | --- |
+| `PREPARING` | Matching selected record and clean retained worktree | Resume or repair this item. |
+| `EXECUTING` | One recoverable workflow owner | Resume or repair this item. |
+| `RETRY_WAIT` | Due `retry_at`, with no immediate owner | Resume earliest due retry; defer a future retry and scan on. |
+| `PUBLISHING` | Exact retained branch and pending publication identity | Resume or repair publication for this item. |
+| `OBSERVING` | Exact current source SHA and pipeline evidence | Observe or resume; nonterminal evidence waits and an exact safe failure can repair. |
+| `REPAIR` | One uniquely owned failed current-source pipeline | Run or resume at most one repair workflow in this activation. |
+| `NEEDS_REPAIR` | Legacy or reviewed recovery record | Defer; expose exact-IID reviewed recovery; scan on. |
+| `REPAIR_FAILED` | Per-item repair timing and attempt evidence | Resume only when due and safe; otherwise defer or quarantine locally and scan on. |
+| `SUGGEST_CLOSE` | Corroborated closure recommendation | Skip; expose the human closure decision. |
+| `DECOMPOSING` | Active retained split-plan work | Resume or repair the active owner; skip dependency-gated children. |
+| `BLOCKED` | Recorded human action or unresolved item evidence | Skip automatic work; expose the exact action. |
+| `AWAITING_HUMAN` | Verified review handoff for an exact MR source SHA | Skip automatic work; preserve the human handoff. |
+| `FAILED` | Item-local exceptional failure and next action | Skip automatic work; expose recovery action. |
+| `COMPLETE` | Closed issue or completed record | No action. |
+
+The controller advances at most one active owner and at most one repair
+workflow in an activation. A stable no-progress fingerprint binds the item,
+state and phase, exact branch/MR/pipeline identity where applicable, and the
+resulting action. A materially changed fingerprint or closed earlier outcome is
+progress. Unchanged evidence and fingerprint are no progress, so the item stays
+durably deferred, quarantined, or operator-visible instead of consuming later
+activations. Status and preview report the bounded reason, attempt information,
+timing, evidence summary, and next action. Preview is non-mutating and uses the
+same eligibility logic without claiming work or changing GitLab, ledger,
+worktrees, branches, or services.
+
+Retry counts, repair budgets, delay bounds, priorities, and lock rules are
+trusted controller constants. Untrusted issue or merge-request text cannot set,
+reset, or otherwise influence those control values.
+
+For failed-pipeline inventory, the controller skips an owner that is blocked,
+deferred, quarantined, retry-exhausted, awaiting human action, or
+dependency-gated. It continues to another exact eligible repair, then ordinary
+eligible work when the remaining gate permits it. One locally ineligible owner
+does not produce a global `pipeline_blocked` result. Only a failed default-branch
+pipeline or genuinely ambiguous cross-item owner remains a project-wide stop.
+
+Reconciliation may accept ordinary branch advancement only through a narrow
+fast-forward predicate: configured numeric project identity; retained MR
+identity and URL when recorded; matching source branch; configured target
+project and default branch; clean retained worktree; exact retained branch and
+`HEAD` equal to the MR source SHA; proof that retained SHA is an ancestor of MR
+SHA; and no competing identity. A failed predicate quarantines the retained
+item locally while inventory scanning continues. It never chooses an MR by
+recency or issue text.
 
 `agent::suggest_close` is a recommendation only. It requires structured,
 corroborated duplicate, superseded, already-satisfied, or no-longer-applicable

@@ -14,9 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
@@ -73,6 +76,166 @@ class SegmentError(RuntimeError):
 
 AUTOMATIC_REPAIR_MAX_ATTEMPTS = 3
 AUTOMATIC_REPAIR_BACKOFF_SECONDS = 20 * 60
+
+
+class SchedulingScope(str, Enum):
+    """The durable scope affected by a scheduling decision."""
+
+    ITEM = "item"
+
+
+class ItemSchedulingAction(str, Enum):
+    """The closed item-local scheduler action vocabulary."""
+
+    RESUME = "resume"
+    DEFER = "defer"
+    QUARANTINE = "quarantine"
+    SKIP = "skip"
+
+
+class ProjectStopReason(str, Enum):
+    """The only trusted conditions that stop the whole project."""
+
+    PROJECT_IDENTITY = "project-identity"
+    CREDENTIALS = "credentials"
+    LOCK_OWNERSHIP = "lock-ownership"
+    SHARED_STATE_CORRUPT = "shared-ledger-corrupt"
+    CROSS_ITEM_IDENTITY_AMBIGUOUS = "cross-item-identity-ambiguous"
+
+
+class AdoptionAction(str, Enum):
+    """Controller fast-forward reconciliation outcomes."""
+
+    ADOPT = "adopt"
+    QUARANTINE = "quarantine"
+
+
+@dataclass(frozen=True)
+class SchedulerDisposition:
+    """One pure durable scheduling decision."""
+
+    scope: SchedulingScope
+    action: ItemSchedulingAction
+
+
+@dataclass(frozen=True)
+class SchedulerInventoryPlan:
+    """A deterministic plan for one serial scheduler inventory."""
+
+    selected_issue_iid: int | None
+    project_stop: ProjectStopReason | None
+    item_actions: Mapping[int, SchedulerDisposition]
+
+
+@dataclass(frozen=True)
+class ControllerAdoptionDecision:
+    """An item-local fast-forward adoption decision."""
+
+    action: AdoptionAction
+
+
+def classify_scheduler_disposition(
+    record: LedgerRecord, *, now: datetime
+) -> SchedulerDisposition:
+    """Classify every runner state without deriving authority from task text."""
+    if record.state in IMMEDIATE_OWNER_STATES:
+        return SchedulerDisposition(SchedulingScope.ITEM, ItemSchedulingAction.RESUME)
+    if record.state is RunnerState.RETRY_WAIT:
+        return SchedulerDisposition(
+            SchedulingScope.ITEM,
+            ItemSchedulingAction.RESUME
+            if _due(record, now)
+            else ItemSchedulingAction.DEFER,
+        )
+    if record.state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED} or (
+        record.state is RunnerState.BLOCKED
+        and record.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
+    ):
+        return SchedulerDisposition(
+            SchedulingScope.ITEM, ItemSchedulingAction.QUARANTINE
+        )
+    return SchedulerDisposition(SchedulingScope.ITEM, ItemSchedulingAction.SKIP)
+
+
+def plan_scheduler_inventory(
+    records: tuple[LedgerRecord, ...],
+    *,
+    now: datetime,
+    apply: bool = False,
+    project_fault: str | None = None,
+    untrusted_text: str = "",
+) -> SchedulerInventoryPlan:
+    """Plan serial ownership from trusted durable records only.
+
+    ``apply`` and untrusted prose deliberately do not affect this pure plan; the
+    caller performs the corresponding item-local persistence at its boundary.
+    """
+    del apply, untrusted_text
+    fault = ProjectStopReason(project_fault) if project_fault is not None else None
+    actions = {
+        record.issue_iid: classify_scheduler_disposition(record, now=now)
+        for record in records
+    }
+    if fault is not None:
+        return SchedulerInventoryPlan(None, fault, MappingProxyType(actions))
+    owners = sorted(
+        (
+            record
+            for record in records
+            if actions[record.issue_iid].action is ItemSchedulingAction.RESUME
+            and record.state in IMMEDIATE_OWNER_STATES
+        ),
+        key=lambda record: record.issue_iid,
+    )
+    if len(owners) > 1:
+        return SchedulerInventoryPlan(
+            None,
+            ProjectStopReason.CROSS_ITEM_IDENTITY_AMBIGUOUS,
+            MappingProxyType(actions),
+        )
+    if owners:
+        return SchedulerInventoryPlan(
+            owners[0].issue_iid, None, MappingProxyType(actions)
+        )
+    due = sorted(
+        (
+            record
+            for record in records
+            if actions[record.issue_iid].action is ItemSchedulingAction.RESUME
+        ),
+        key=lambda record: (record.retry_at or now, record.issue_iid),
+    )
+    return SchedulerInventoryPlan(
+        None if not due else due[0].issue_iid, None, MappingProxyType(actions)
+    )
+
+
+def classify_controller_descendant_adoption(
+    record: LedgerRecord,
+    merge_request: MergeRequestEvidence,
+    *,
+    corroboration: dict[str, bool],
+) -> ControllerAdoptionDecision:
+    """Classify an already-computed exact fast-forward corroboration boundary."""
+    required = {
+        "same_numeric_project",
+        "exact_merge_request_iid",
+        "exact_merge_request_url",
+        "source_branch",
+        "target_project_and_branch",
+        "retained_worktree_exists",
+        "retained_worktree_clean",
+        "retained_worktree_branch",
+        "worktree_head_matches_merge_request",
+        "retained_sha_is_ancestor",
+        "no_competing_identity",
+    }
+    del record, merge_request
+    return ControllerAdoptionDecision(
+        AdoptionAction.ADOPT
+        if required == set(corroboration) and all(corroboration.values())
+        else AdoptionAction.QUARANTINE
+    )
 
 
 def _automatic_repair_failure(
@@ -894,6 +1057,75 @@ def resume_candidates(
     )
 
 
+def _adopt_controller_descendant(
+    record: LedgerRecord,
+    *,
+    merge_request: MergeRequestEvidence,
+    records: tuple[LedgerRecord, ...],
+    repository: RepositoryPort,
+    default_branch: str,
+) -> ControllerAdoptionDecision:
+    """Compute fast-forward adoption from GitLab and repository evidence."""
+    retained_sha = record.source_sha
+    corroboration = {
+        "same_numeric_project": (
+            merge_request.source_project_id == record.project_id
+            and merge_request.target_project_id == record.project_id
+        ),
+        "exact_merge_request_iid": (
+            record.merge_request_iid is None
+            or record.merge_request_iid == merge_request.iid
+        ),
+        "exact_merge_request_url": (
+            record.merge_request_url is None
+            or record.merge_request_url == merge_request.web_url
+        ),
+        "source_branch": record.source_branch == merge_request.source_branch,
+        "target_project_and_branch": merge_request.target_branch == default_branch,
+        "retained_worktree_exists": repository.worktree_exists(record.worktree),
+        "retained_worktree_clean": False,
+        "retained_worktree_branch": False,
+        "worktree_head_matches_merge_request": False,
+        "retained_sha_is_ancestor": False,
+        "no_competing_identity": not any(
+            item.issue_iid != record.issue_iid
+            and (
+                item.source_branch == record.source_branch
+                or item.worktree == record.worktree
+                or (
+                    item.merge_request_iid is not None
+                    and item.merge_request_iid == merge_request.iid
+                )
+                or (
+                    item.merge_request_url is not None
+                    and item.merge_request_url == merge_request.web_url
+                )
+            )
+            for item in records
+        ),
+    }
+    if corroboration["retained_worktree_exists"] and retained_sha is not None:
+        try:
+            corroboration["retained_worktree_clean"] = not repository.has_changes(
+                record.worktree
+            ) and not repository.changed_paths(record.worktree)
+            repository.verify_worktree(
+                record.worktree, record.source_branch, merge_request.sha
+            )
+            corroboration["retained_worktree_branch"] = True
+            corroboration["worktree_head_matches_merge_request"] = (
+                repository.head(record.worktree) == merge_request.sha
+            )
+            corroboration["retained_sha_is_ancestor"] = repository.is_ancestor(
+                retained_sha, merge_request.sha, record.worktree
+            )
+        except (OSError, RepositoryError, RuntimeError, ValueError):
+            pass
+    return classify_controller_descendant_adoption(
+        record, merge_request, corroboration=corroboration
+    )
+
+
 def select_record(
     ledger: LedgerPort,
     gitlab: GitLabPort,
@@ -907,6 +1139,9 @@ def select_record(
     records = ledger.list_records()
     if any(record.project_id != project.id for record in records):
         raise SegmentError("ledger record belongs to another project")
+    scheduler_plan = plan_scheduler_inventory(records, now=now)
+    if scheduler_plan.project_stop is not None:
+        raise SegmentError("multiple resumable records require reconciliation")
     immediate_owners = tuple(
         record for record in records if record.state in IMMEDIATE_OWNER_STATES
     )
@@ -916,8 +1151,6 @@ def select_record(
         )
         if pinned is None:
             raise SegmentError("pinned issue is not the active durable record")
-        if len(immediate_owners) > 1:
-            raise SegmentError("multiple resumable records require reconciliation")
         if _can_reconcile_published_ordinary_work(pinned):
             return pinned, gitlab.fetch_issue(pinned.issue_iid)
         if pinned.state is RunnerState.SUGGEST_CLOSE:
@@ -929,24 +1162,6 @@ def select_record(
         if not _due(pinned, now):
             return None, None
         return pinned, gitlab.fetch_issue(pinned.issue_iid)
-    suggested = next(
-        (record for record in records if record.state is RunnerState.SUGGEST_CLOSE),
-        None,
-    )
-    if suggested is not None:
-        return suggested, gitlab.fetch_issue(suggested.issue_iid)
-    if (
-        not immediate_owners
-        and any(
-            record.state is RunnerState.RETRY_WAIT and not _due(record, now)
-            for record in records
-        )
-        and not any(
-            record.state is RunnerState.RETRY_WAIT and _due(record, now)
-            for record in records
-        )
-    ):
-        return None, None
     issues = {
         record.issue_iid: gitlab.fetch_issue(record.issue_iid) for record in records
     }
@@ -954,13 +1169,17 @@ def select_record(
         issue = issues[record.issue_iid]
         if issue.state != "opened" and record.state is not RunnerState.COMPLETE:
             return record, issue
-        if record.state is RunnerState.SUGGEST_CLOSE:
+        if (
+            record.state is RunnerState.SUGGEST_CLOSE
+            and scheduler_plan.selected_issue_iid is None
+        ):
             return record, issue
-    if len(immediate_owners) > 1:
-        raise SegmentError("multiple resumable records require reconciliation")
-    selected_active = resume_candidates(records, now=now)
-    if selected_active:
-        record = selected_active[0]
+    if scheduler_plan.selected_issue_iid is not None:
+        record = next(
+            item
+            for item in records
+            if item.issue_iid == scheduler_plan.selected_issue_iid
+        )
         if _can_reconcile_published_ordinary_work(record):
             return record, issues[record.issue_iid]
         if not _due(record, now):
@@ -1057,23 +1276,17 @@ def select_record(
         merge_request = awaiting_merge_requests.get(waiting.issue_iid)
         if merge_request is None or merge_request.sha == waiting.source_sha:
             continue
-        issue = issues[waiting.issue_iid]
-        blocked = _block_publication_identity(
+        _block_publication_identity(
             waiting,
             ledger=ledger,
             gitlab=gitlab,
             summary="Post-publication merge request evidence is not exact.",
         )
-        return blocked, issue.model_copy(
-            update={
-                "labels": tuple(
-                    label for label in issue.labels if label not in LIFECYCLE_LABELS
-                )
-                + (label_for_state(blocked.state),)
-            }
-        )
     for reconciliable in (
-        record for record in records if _can_reconcile_published_ordinary_work(record)
+        record
+        for record in records
+        if _can_reconcile_published_ordinary_work(record)
+        and not (record.state is RunnerState.RETRY_WAIT and not _due(record, now))
     ):
         try:
             if gitlab.open_merge_requests_by_branch(reconciliable.source_branch):
@@ -1082,6 +1295,17 @@ def select_record(
             return reconciliable, issues[reconciliable.issue_iid]
     lifecycle = set(LIFECYCLE_LABELS)
     for record in records:
+        if (record.state is RunnerState.RETRY_WAIT and not _due(record, now)) or (
+            record.state is RunnerState.BLOCKED
+            and record.error_code
+            in {
+                ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+                ErrorCode.REMEDIATION_MR_MISMATCH,
+            }
+            and record.work_kind
+            in {WorkKind.EXISTING_MR_REMEDIATION, WorkKind.MERGE_CONFLICT_REPAIR}
+        ):
+            continue
         issue = issues[record.issue_iid]
         expected = label_for_state(record.state)
         if set(issue.labels).intersection(lifecycle) != (
@@ -1615,11 +1839,33 @@ def _prepare(
                 or mr.target_project_id != record.project_id
                 or mr.source_branch != record.source_branch
                 or mr.target_branch != repository.config.default_branch
-                or mr.sha != record.source_sha
             ):
                 raise SegmentError("remediation merge request evidence does not match")
+            if mr.sha != record.source_sha:
+                adoption = _adopt_controller_descendant(
+                    record,
+                    merge_request=mr,
+                    records=ledger.list_records(),
+                    repository=repository,
+                    default_branch=repository.config.default_branch,
+                )
+                if adoption.action is not AdoptionAction.ADOPT:
+                    raise SegmentError("controller fast-forward evidence is not exact")
+                record = ledger.persist(
+                    record.model_copy(
+                        update={
+                            "source_sha": mr.sha,
+                            "merge_request_iid": mr.iid,
+                            "merge_request_url": mr.web_url,
+                            "retry_at": None,
+                            "error_code": None,
+                            "summary": "Controller fast-forward publication was corroborated.",
+                            "next_action": "Prepare the exact retained remediation worktree.",
+                        }
+                    )
+                )
             worktree = repository.worktree_for_existing_branch(
-                issue.iid, record.source_branch, record.source_sha
+                issue.iid, record.source_branch, mr.sha
             )
         else:
             if newly_claimed:

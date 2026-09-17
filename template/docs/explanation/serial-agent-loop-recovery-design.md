@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -146,6 +146,53 @@ policy, and authority still stop safe automatic selection. Reviewed recovery
 remains an exceptional exact-IID action and does not consume the automatic
 repair budget.
 
+## Scheduler liveness and item-local recovery
+
+The scheduler has one liveness invariant: no state of one item may prevent an
+unrelated eligible item from being considered. A retained item's backoff,
+quarantine, dependency, ordinary retry, or human handoff is durable and
+operator-visible, but is local to that item. Only a configured project identity
+or credential failure, ownership of the single project lock, corrupt shared
+durable state, or a truly ambiguous cross-item identity can stop an activation.
+Those cases are project-scoped because the controller cannot safely identify
+the project or sole item to advance.
+
+Serial safety still applies: the controller advances at most one active owner,
+and starts at most one automatic repair workflow, per activation. A locally
+deferred retained item does not claim a later activation; the controller records
+its next safe action and continues a deterministic scan for another candidate.
+
+| Durable state | Representative corroborated evidence | Scheduler action and scope |
+| --- | --- | --- |
+| `PREPARING` | One clean retained worktree and matching selected item | Resume or repair that one item. |
+| `EXECUTING` | One retained workflow owner with recoverable worktree evidence | Resume or repair that one item at the coarse workflow boundary. |
+| `RETRY_WAIT` | Due `retry_at` with no immediate owner | Resume the earliest due item; defer a future deadline and continue scanning. |
+| `PUBLISHING` | Exact retained branch, worktree, and pending publication evidence | Resume or repair publication for that one item. |
+| `OBSERVING` | Exact current merge-request source SHA and nonterminal pipeline | Wait or resume observation; a safely owned terminal failure can enter repair. |
+| `REPAIR` | One exact failed current-source pipeline and uniquely corroborated owner | Resume or run at most one repair workflow in the activation. |
+| `NEEDS_REPAIR` | Legacy or reviewed recovery evidence | Defer from ordinary selection; expose exact-IID reviewed recovery and continue scanning. |
+| `REPAIR_FAILED` | Automatic repair timing and attempt evidence | Resume only when due and safe; otherwise defer or quarantine locally and continue scanning. |
+| `SUGGEST_CLOSE` | Corroborated duplicate, supersession, or no-longer-applicable evidence | Skip automatic work and show the human closure decision. |
+| `DECOMPOSING` | Retained split-plan workflow evidence | Resume or repair one safely active owner; skip dependency-gated child work. |
+| `BLOCKED` | Recorded human action or unresolved item evidence | Skip automatic work and show the exact operator action. |
+| `AWAITING_HUMAN` | Verified human-review handoff for an exact MR source SHA | Skip automatic work and preserve the human handoff. |
+| `FAILED` | Exceptional item-local failure with a safe next action | Skip automatic work and show the required recovery action. |
+| `COMPLETE` | Closed issue or completed durable record | Complete: no scheduler action. |
+
+Progress is bounded and observable. The controller stores a stable fingerprint
+for the retained issue identity, relevant state and phase, exact branch/MR/
+pipeline identity when present, and resulting action. A changed fingerprint or
+closed earlier outcome is progress. The same fingerprint with unchanged
+evidence is no progress: defer, quarantine, or hand off the item rather than
+retrying indefinitely. Status and preview retain the reason, timing, attempt
+count, evidence summary, and next action. Preview uses the same decisions but
+never claims work or changes GitLab, the ledger, worktrees, branches, or
+services.
+
+Retry and repair budgets, delay bounds, priorities, and lock rules are trusted
+controller constants. Untrusted issue and merge-request text cannot set them or
+turn an item-local deferment into project authority.
+
 ## State-machine activation and workflow sessions
 
 Every timer activation acquires the single-project lock, reconciles durable
@@ -203,6 +250,15 @@ without choosing a newest candidate. A mismatch or ambiguity is a
 recovery path unchanged. Once verified, retained Draft metadata is reconciled
 without downgrading it, retry fields are cleared atomically, and exact-SHA
 pipeline observation begins in that activation.
+
+When reconciliation finds ordinary retained-branch advancement, it may accept
+the MR's descendant SHA only when all facts corroborate: configured numeric
+project identity; retained MR identity and URL when present; matching source
+branch; configured target project and default branch; a clean retained
+worktree; exact retained branch and `HEAD` equal to the MR source SHA; proof
+that the retained SHA is an ancestor of the MR SHA; and no competing identity.
+Any missing or conflicting fact quarantines that item locally while the
+scheduler continues scanning. This rule never chooses a plausible newest MR.
 
 Selection of a fresh issue starts at the beginning of its applicable workflow
 and attempts to reach human handoff or another yield condition in that
