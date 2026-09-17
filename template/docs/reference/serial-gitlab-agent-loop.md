@@ -905,11 +905,11 @@ legacy v1 ledger records only; worker output is always v2.
 
 Validated split markers and the live state of their referenced issues are the
 only authority for a child's dependency gate. The runner projects that state
-for operators with `agent::prereq_<IID>` labels. A projection label never makes
-an issue eligible or ineligible.
+for operators with non-scoped `agent-prereq_<IID>` labels. A projection label
+never makes an issue eligible or ineligible.
 
 For every open split child, the intended labels are exactly one
-`agent::prereq_<IID>` label for each currently open trusted prerequisite. The
+`agent-prereq_<IID>` label for each currently open trusted prerequisite. The
 runner orders prerequisite IIDs numerically when it calculates and reports the
 set. It creates or reuses each project label idempotently with its stable color
 `#6F42C1` and the plain description `Open split prerequisites for agent-work
@@ -917,6 +917,14 @@ issue dependency display.`, then adds missing labels and removes stale ones. A
 label is removed when its prerequisite closes, the trusted marker dependency is
 removed, or the dependent issue closes. These repairs are idempotent and a
 partially completed remote update remains retryable.
+
+Applied reconciliation creates or normalizes the canonical project-label
+definitions, removes exact legacy `agent::prereq_<IID>` labels from affected
+issues, and adds the complete numerically ordered canonical set. It deletes an
+exact legacy project-label definition only after every issue-label transition
+succeeds. If a transition fails, the definitions remain for the next safe,
+idempotent retry. Reconciliation preserves unrelated labels and lifecycle
+labels. Preview reports the intended change without writing it.
 
 Immediately before each worker execution, the runner retrieves that issue's
 notes through its bounded GitLab retry path. It excludes system notes and both

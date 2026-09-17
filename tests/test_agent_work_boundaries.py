@@ -1067,7 +1067,7 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
                     if existing["name"] != label["name"]
                 ] + [label]
                 return CommandResult(0, json.dumps(label), "")
-            if endpoint == "projects/310967/labels/agent%3A%3Aprereq_37":
+            if endpoint == "projects/310967/labels/agent-prereq_37":
                 fields = {
                     item.partition("=")[0]: item.partition("=")[2]
                     for item in command
@@ -1096,24 +1096,29 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
     api = PrerequisiteLabelApi()
     gateway = GitLabGateway(_config(tmp_path), api)
 
-    assert gateway.ensure_prerequisite_labels(("agent::prereq_37", "agent::prereq_2"))
-    assert not gateway.ensure_prerequisite_labels(
-        ("agent::prereq_37", "agent::prereq_2")
-    )
+    assert gateway.ensure_prerequisite_labels(("agent-prereq_37", "agent-prereq_2"))
+    assert not gateway.ensure_prerequisite_labels(("agent-prereq_37", "agent-prereq_2"))
     updated = gateway.transition_prerequisite_labels(
-        12, ("agent::prereq_2", "agent::prereq_37")
+        12, ("agent-prereq_2", "agent-prereq_37")
     )
 
     assert updated.labels == (
         "customer::priority",
         "agent::running",
-        "agent::prereq_2",
-        "agent::prereq_37",
+        "agent-prereq_2",
+        "agent-prereq_37",
     )
     definitions = {label["name"]: label for label in api.labels}
-    assert set(definitions) == {"agent::prereq_2", "agent::prereq_37"}
-    assert {label["color"] for label in definitions.values()} == {"#6F42C1"}
-    assert {label["description"] for label in definitions.values()} == {
+    assert set(definitions) == {
+        "agent::prereq_37",
+        "agent-prereq_2",
+        "agent-prereq_37",
+    }
+    canonical_definitions = {
+        name: label for name, label in definitions.items() if name.startswith("agent-")
+    }
+    assert {label["color"] for label in canonical_definitions.values()} == {"#6F42C1"}
+    assert {label["description"] for label in canonical_definitions.values()} == {
         "Open split prerequisites for agent-work issue dependency display."
     }
     issue_update = next(
@@ -1123,7 +1128,7 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
         and command[command.index("-X") + 1] == "PUT"
     )
     assert "remove_labels=agent::prereq_10,agent::prereq_37" in issue_update
-    assert "add_labels=agent::prereq_2,agent::prereq_37" in issue_update
+    assert "add_labels=agent-prereq_2,agent-prereq_37" in issue_update
 
 
 def test_gitlab_prerequisite_projection_inventory_requests_all_issue_states(
@@ -1144,6 +1149,47 @@ def test_gitlab_prerequisite_projection_inventory_requests_all_issue_states(
     assert len(commands) == 1
     assert "state=all" in commands[0]
     assert not any(field.startswith("labels=") for field in commands[0])
+
+
+def test_gitlab_retires_only_exact_legacy_prerequisite_definitions_after_migration(
+    tmp_path: Path,
+) -> None:
+    """Legacy definition cleanup is encoded, ordered, and leaves lookalikes alone."""
+    commands: list[tuple[str, ...]] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint == "projects/310967/labels" and method == "GET":
+            return CommandResult(
+                0,
+                json.dumps(
+                    [
+                        {"name": "agent::prereq_10"},
+                        {"name": "agent::prereq_2"},
+                        {"name": "agent::prereq_01"},
+                        {"name": "customer::priority"},
+                    ]
+                ),
+                "",
+            )
+        if method == "DELETE":
+            return CommandResult(0, "", "")
+        raise AssertionError((endpoint, method))
+
+    changed = GitLabGateway(_config(tmp_path), api).retire_legacy_prerequisite_labels()
+
+    assert changed
+    deletes = [
+        command[command.index("-X") + 2]
+        for command in commands
+        if command[command.index("-X") + 1] == "DELETE"
+    ]
+    assert deletes == [
+        "projects/310967/labels/agent%3A%3Aprereq_2",
+        "projects/310967/labels/agent%3A%3Aprereq_10",
+    ]
 
 
 def test_gitlab_prerequisite_transition_rejects_an_unverified_update(

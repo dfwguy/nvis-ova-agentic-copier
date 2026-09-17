@@ -290,6 +290,10 @@ class FakeGitLab:
         del labels
         return False
 
+    def retire_legacy_prerequisite_labels(self) -> bool:
+        """Provide the no-op legacy-cleanup port for generic test fixtures."""
+        return False
+
     def transition_prerequisite_labels(
         self, iid: int, labels: tuple[str, ...]
     ) -> GitLabIssue:
@@ -9002,7 +9006,7 @@ def test_prerequisite_projection_adds_only_open_trusted_dependencies() -> None:
         (
             38,
             ("customer::priority",),
-            ("customer::priority", "agent::prereq_37"),
+            ("customer::priority", "agent-prereq_37"),
         )
     ]
 
@@ -9030,8 +9034,8 @@ def test_prerequisite_projection_orders_multiple_prerequisites_numerically() -> 
     assert projection[0].intended_labels == (
         "customer::priority",
         "agent::running",
-        "agent::prereq_2",
-        "agent::prereq_10",
+        "agent-prereq_2",
+        "agent-prereq_10",
     )
 
 
@@ -9041,7 +9045,7 @@ def test_prerequisite_projection_ignores_unordered_equivalent_labels() -> None:
     dependent = _issue(
         iid=38,
         description=render_split_marker(310967, 1, "dependent", (37,)),
-    ).model_copy(update={"labels": ("agent::prereq_37", "customer::priority")})
+    ).model_copy(update={"labels": ("agent-prereq_37", "customer::priority")})
 
     projection = domain.prerequisite_projection_inventory(
         (dependent, prerequisite), project_id=310967
@@ -9195,7 +9199,7 @@ def test_apply_reconciles_prerequisite_projection_before_worker_preflight(
             )
 
         def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
-            assert labels == ("agent::prereq_37",)
+            assert labels == ("agent-prereq_37",)
             return False
 
         def transition_prerequisite_labels(
@@ -9226,7 +9230,7 @@ def test_apply_reconciles_prerequisite_projection_before_worker_preflight(
 
     assert report.outcome == "prerequisite_labels_reconciled"
     assert gitlab.inventory_calls == 1
-    assert gitlab.transitions == [(38, ("agent::prereq_37",))]
+    assert gitlab.transitions == [(38, ("agent-prereq_37",))]
     assert gitlab.eligible_calls == 0
     assert invoker.preflight_calls == 0
     assert ledger.list_records() == ()
@@ -9248,7 +9252,7 @@ def test_apply_repairs_definition_only_prerequisite_label_drift(
                 _issue(
                     iid=38,
                     description=render_split_marker(310967, 36, "second", (37,)),
-                ).model_copy(update={"labels": ("agent::prereq_37",)}),
+                ).model_copy(update={"labels": ("agent-prereq_37",)}),
             )
 
         def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
@@ -9278,7 +9282,57 @@ def test_apply_repairs_definition_only_prerequisite_label_drift(
     )
 
     assert report.outcome == "prerequisite_labels_reconciled"
-    assert gitlab.definition_calls == [("agent::prereq_37",)]
+    assert gitlab.definition_calls == [("agent-prereq_37",)]
+    assert gitlab.eligible_calls == 0
+
+
+def test_cleanup_only_activation_retries_legacy_definition_retirement(
+    tmp_path: Path,
+) -> None:
+    """A no-projection activation retries legacy cleanup without claiming work."""
+
+    class CleanupOnlyGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.cleanup_calls = 0
+            self.cleanup_failures = 1
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (_issue(iid=37),)
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            assert labels == ()
+            return False
+
+        def retire_legacy_prerequisite_labels(self) -> bool:
+            self.cleanup_calls += 1
+            if self.cleanup_failures:
+                self.cleanup_failures -= 1
+                raise GitLabError("temporary legacy cleanup failure")
+            return self.cleanup_calls == 2
+
+    config = _config(tmp_path)
+    gitlab = CleanupOnlyGitLab()
+    dependencies = _dependencies(
+        config,
+        JsonLedger(config.state_root, clock=lambda: NOW),
+        gitlab,
+        FakeRepository(config),
+    )
+
+    with pytest.raises(GitLabError, match="temporary legacy cleanup failure"):
+        dispatch(
+            CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+        )
+    assert gitlab.cleanup_calls == 1
+    assert gitlab.eligible_calls == 0
+
+    report = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert report.outcome == "prerequisite_labels_reconciled"
+    assert gitlab.cleanup_calls == 2
     assert gitlab.eligible_calls == 0
 
 
@@ -9308,7 +9362,7 @@ def test_apply_inventories_prerequisite_projections_under_controller_lock(
             )
 
         def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
-            assert labels == ("agent::prereq_37",)
+            assert labels == ("agent-prereq_37",)
             return False
 
         def transition_prerequisite_labels(
@@ -9346,6 +9400,7 @@ def test_preview_and_recovery_inventory_render_prerequisite_label_projections(
             super().__init__(_issue(iid=37))
             self.inventory_calls = 0
             self.label_mutations = 0
+            self.cleanup_calls = 0
 
         def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
             self.inventory_calls += 1
@@ -9361,6 +9416,10 @@ def test_preview_and_recovery_inventory_render_prerequisite_label_projections(
             del labels
             self.label_mutations += 1
             return False
+
+        def retire_legacy_prerequisite_labels(self) -> bool:
+            self.cleanup_calls += 1
+            raise AssertionError("read-only inventory must not retire labels")
 
         def transition_prerequisite_labels(
             self, iid: int, labels: tuple[str, ...]
@@ -9390,7 +9449,7 @@ def test_preview_and_recovery_inventory_render_prerequisite_label_projections(
         {
             "issue_iid": 38,
             "current_labels": [],
-            "intended_labels": ["agent::prereq_37"],
+            "intended_labels": ["agent-prereq_37"],
         }
     ]
     for report in (preview, recovery):
@@ -9400,9 +9459,10 @@ def test_preview_and_recovery_inventory_render_prerequisite_label_projections(
 
         assert '"current_labels":[]' in _render(report, as_json=True)
         assert "current_labels=" in _render(report, as_json=False)
-        assert "intended_labels=agent::prereq_37" in _render(report, as_json=False)
+        assert "intended_labels=agent-prereq_37" in _render(report, as_json=False)
     assert gitlab.inventory_calls == 2
     assert gitlab.label_mutations == 0
+    assert gitlab.cleanup_calls == 0
 
 
 def test_applied_prerequisite_reconciliation_rechecks_definitions_after_first_update(
@@ -9455,7 +9515,7 @@ def test_applied_prerequisite_reconciliation_rechecks_definitions_after_first_up
     )
 
     assert first.outcome == "prerequisite_labels_reconciled"
-    assert gitlab.transitions == [(38, ("agent::prereq_37",))]
+    assert gitlab.transitions == [(38, ("agent-prereq_37",))]
     assert len(gitlab.definitions) == definition_count + 1
     assert len(gitlab.transitions) == transition_count
     assert second.outcome != "prerequisite_labels_reconciled"
@@ -9472,6 +9532,7 @@ def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
             self.labels_by_iid: dict[int, tuple[str, ...]] = {38: (), 39: ()}
             self.transitions: list[int] = []
             self.fail_iid = 39
+            self.cleanup_calls = 0
 
         def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
             return (
@@ -9488,7 +9549,7 @@ def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
             )
 
         def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
-            assert labels == ("agent::prereq_37",)
+            assert labels == ("agent-prereq_37",)
             return False
 
         def transition_prerequisite_labels(
@@ -9500,6 +9561,10 @@ def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
             self.labels_by_iid[iid] = labels
             return _issue(iid=iid).model_copy(update={"labels": labels})
 
+        def retire_legacy_prerequisite_labels(self) -> bool:
+            self.cleanup_calls += 1
+            return True
+
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = PartialFailureGitLab()
@@ -9510,7 +9575,8 @@ def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
             CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
         )
     assert gitlab.transitions == [38, 39]
-    assert gitlab.labels_by_iid[38] == ("agent::prereq_37",)
+    assert gitlab.labels_by_iid[38] == ("agent-prereq_37",)
+    assert gitlab.cleanup_calls == 0
     assert ledger.list_records() == ()
     assert gitlab.eligible_calls == 0
 
@@ -9518,7 +9584,8 @@ def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
     dispatch(CommandRequest(command="loop.run"), apply=True, dependencies=dependencies)
 
     assert gitlab.transitions == [38, 39, 39]
-    assert gitlab.labels_by_iid[39] == ("agent::prereq_37",)
+    assert gitlab.labels_by_iid[39] == ("agent-prereq_37",)
+    assert gitlab.cleanup_calls == 1
     assert ledger.list_records() == ()
 
 

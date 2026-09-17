@@ -282,8 +282,9 @@ AGENT_OUTCOME_NOTE_MARKER: Final = "<!-- agent-work-outcome:v1 -->"
 _SPLIT_MARKER: Final = re.compile(
     r"<!-- agent-work-split:v1 fingerprint=([0-9a-f]{64}) parent=([1-9][0-9]*) key=([a-z0-9]+(?:-[a-z0-9]+)*) dependencies=(none|[1-9][0-9]*(?:,[1-9][0-9]*)*) -->"
 )
-PREREQUISITE_LABEL_PREFIX: Final = "agent::prereq_"
-PREREQUISITE_LABEL_PATTERN: Final = re.compile(r"^agent::prereq_([1-9][0-9]*)$")
+PREREQUISITE_LABEL_PREFIX: Final = "agent-prereq_"
+PREREQUISITE_LABEL_PATTERN: Final = re.compile(r"^agent-prereq_([1-9][0-9]*)$")
+LEGACY_PREREQUISITE_LABEL_PATTERN: Final = re.compile(r"^agent::prereq_([1-9][0-9]*)$")
 PREREQUISITE_LABEL_COLOR: Final = "#6F42C1"
 PREREQUISITE_LABEL_DESCRIPTION: Final = (
     "Open split prerequisites for agent-work issue dependency display."
@@ -308,8 +309,16 @@ class PrerequisiteLabelReconciliation:
 
 
 def prerequisite_label_iid(label: str) -> int | None:
-    """Return the prerequisite IID encoded by an exact dynamic label."""
-    match = PREREQUISITE_LABEL_PATTERN.fullmatch(label)
+    """Return the IID encoded by an exact canonical or legacy managed label."""
+    match = PREREQUISITE_LABEL_PATTERN.fullmatch(
+        label
+    ) or LEGACY_PREREQUISITE_LABEL_PATTERN.fullmatch(label)
+    return None if match is None else int(match.group(1))
+
+
+def legacy_prerequisite_label_iid(label: str) -> int | None:
+    """Return the IID encoded by an exact managed legacy label."""
+    match = LEGACY_PREREQUISITE_LABEL_PATTERN.fullmatch(label)
     return None if match is None else int(match.group(1))
 
 
