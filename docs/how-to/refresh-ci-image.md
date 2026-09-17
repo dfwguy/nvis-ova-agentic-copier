@@ -5,7 +5,7 @@ summary: Publish, pin, and verify the project-only CI image that root validation
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-16
+last_reviewed: 2026-09-17
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -73,9 +73,10 @@ locked project dependencies. They must not run `apt-get`, `uv python install`,
 
 Run the consumer pipeline and inspect the nine named root jobs directly; do
 not look for a root synthetic aggregate validation job or JUnit gate suite. Each
-pytest job runs three concurrent shards for the serial-runtime tests, template
-tests, and remaining tests that ignore those two dedicated files; it waits for
-every shard PID before coverage aggregation. Inspect every shard JUnit report and the one combined
+pytest job runs four concurrent shards: two exhaustive, non-overlapping
+serial-runtime test partitions, template tests, and remaining tests that ignore
+the two dedicated test files. It waits for every shard PID before coverage
+aggregation. Inspect every shard JUnit report and the one combined
 per-version Cobertura report when it was generated; otherwise inspect the job
 log. The combined report measures only maintained `src/agent_work` source. A
 failure in any shard or in coverage aggregation, floor enforcement, or
