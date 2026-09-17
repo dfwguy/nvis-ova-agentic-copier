@@ -64,8 +64,10 @@ finding: <judge>|<path>|<stable-summary>
 
 Search open issues through `projects/$GITLAB_PROJECT_ID/issues` and compare the
 exact marker. Reuse an exact open match. Otherwise, build the Bug-template body
-with actual behavior, expected behavior, file evidence, acceptance criteria,
-relevant commit and MR context, and the marker in Additional context.
+with a concise problem, impact, requested outcome, validation or acceptance
+criteria, and only the evidence needed to act. State each fact once. Keep the
+marker in Additional context and retain only the commit or MR context needed
+for deduplication.
 
 Use the configured numeric project ID for every API operation. When `.envrc`
 supplies `GITLAB_TOKEN`, use `direnv exec . /usr/bin/env bash -c 'exec glab api

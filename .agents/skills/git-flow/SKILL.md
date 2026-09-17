@@ -262,7 +262,8 @@ the preflight. One user approval per remote-touching command.
 
 3a. **No existing MR — push + create by project ID** (one approval per remote command):
    - `title`: `git log -1 --format=%s` (the commit subject)
-   - `description`: Summary section (commit body, or 2–3 bullets of what shipped) + Test plan section (commands reviewers can run, e.g. `uv run tox`)
+   - `description`: concise problem, impact, requested action or intended
+     outcome, and validation; state each fact once
    - `target_branch`: `main` (or the default branch returned by the GitLab target check)
 
    Construct the intended description once as a literal multiline shell value.
@@ -274,13 +275,21 @@ the preflight. One user approval per remote-touching command.
    target_branch="main"
    title="$(git log -1 --format=%s)"
 mr_description=$(cat <<'MR_DESCRIPTION'
-## Summary
+## Problem
 
-- Publish an exact `Markdown` description.
+Review handoffs were hard to scan.
 
-## Test plan
+## Impact
 
-- `uv run tox`
+Reviewers could miss the action needed to move the work forward.
+
+## Outcome
+
+Make the MR description concise and nonduplicative.
+
+## Validation
+
+- `git diff --check`
 MR_DESCRIPTION
 )
    git push --set-upstream origin HEAD
@@ -307,13 +316,20 @@ MR_DESCRIPTION
    `remove_source_branch=true` deletes the feature branch when the MR merges;
    `squash=true` collapses the branch's commits into one on merge.
 
+   Keep role receipts, result envelopes, full correction ledgers, and duplicated
+   summaries out of the human-facing description; retain them in durable audit
+   evidence.
+
    A Finalizer draft-safety verdict is the only exception to the normal title
    shape: publish a mechanically safe but unresolved proposal with a title that
-   begins `Draft:`. Its description must enumerate unresolved findings, their
-   evidence and correction-cycle ledger, the exact human decisions needed,
-   tests run, and project-owned values left unchanged. This is a handoff for
-   human judgment, never approval to merge. Do not publish when the verdict
-   reports unsafe/unvalidated content or ambiguous publication authority.
+   begins `Draft:`. Its concise description identifies the specific human
+   decision and requested action, its impact, and enough validation to review
+   it. Keep detailed findings, receipts, and correction-cycle evidence in the
+   durable audit. Use Draft only when a real human decision remains. If no
+   actionable human decision remains and an approved-scope correction exists,
+   correct the work and publish a normal MR. This is a handoff for human
+   judgment, never approval to merge. Do not publish when the verdict reports
+   unsafe/unvalidated content or ambiguous publication authority.
 
 3b. **MR exists — push, then preserve or update its draft handoff**:
    ```bash
@@ -338,15 +354,21 @@ MR_DESCRIPTION
    fi
    ```
    GitLab updates the existing MR with the new commits. For normal approval,
-   preserve its existing title and description by capturing the selected MR JSON
-   as the intended record before the push and comparing its exact fields to the
-   read-back. This preserves trailing newlines in the description. For an accepted Finalizer
-   draft-safety verdict, first use the verified numeric-project MR identity,
+   preserve its existing title and description only when they remain current
+   and comply with the concise contract; after the shown push and read-back,
+   stop when they do. Otherwise, update that same MR once after that verified
+   push, capture the intended replacement title and description before the
+   update, then read it back and verify those exact values, its identity, and
+   its branches. This preserves trailing newlines in the description. For an
+   accepted Finalizer draft-safety verdict, first use the verified
+   numeric-project MR identity,
    preserve required existing content and closing references, and update that
-   same MR so its title begins `Draft:` and its description enumerates
-   unresolved findings, evidence/cycle ledger, exact human decisions, tests,
-   and unchanged project-owned values. Read the same MR back and verify its
-   identity, explicitly intended title, explicitly intended description, source branch, and target branch.
+   same MR so its title begins `Draft:` and its description states
+   the specific human decision and requested action, impact, and enough
+   validation to review it. Keep detailed findings, receipts, and
+   correction-cycle evidence in the durable audit. Read the same MR back and
+   verify its identity, explicitly intended title, explicitly intended
+   description, source branch, and target branch.
    Capture those intended values before any separately authorized draft update
    and compare them to the exact read-back. If it cannot
    be safely relabeled, described, or verified, return `needs_human`; never

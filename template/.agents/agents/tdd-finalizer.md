@@ -115,10 +115,11 @@ disposition, and termination reason.
    separate draft-safety verdict instead of normal approval: confirm the diff
    is mechanically safe, applicable content/language gates are clean, and
    authority boundaries are unambiguous. A safe verdict permits only a `Draft:`
-   MR whose description enumerates unresolved findings, evidence/cycle ledger,
-   exact human decisions needed, tests, and unchanged project-owned values; it
-   never approves merge. Unsafe or unvalidated diffs, or ambiguous publication
-   authority, return `needs_human` without publication.
+   MR whose concise description states the human decision and requested action,
+   impact, and validation. Keep detailed findings, receipts, and the
+   correction-cycle ledger in the durable audit; it never approves merge.
+   Unsafe or unvalidated diffs, or ambiguous publication authority, return
+   `needs_human` without publication.
 
 ## Hand-off to publish
 

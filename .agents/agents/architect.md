@@ -132,9 +132,12 @@ result envelope without altering it.
     project-owned value change, and scope expansion require human judgment. On
     a no-progress or human-judgment stop, request Finalizer's draft-safety
     verdict for the mechanically safe diff. Only a safe content/language and
-    authority verdict may publish a `Draft:` MR that lists unresolved findings,
-    evidence/cycle ledger, exact human decisions, tests, and unchanged
-    project-owned values. A draft-safety verdict is never merge approval;
+    authority verdict may publish a `Draft:` MR that concisely states the
+    human decision and requested action, impact, and validation. Keep detailed
+    findings, receipts, and the correction-cycle ledger in the durable audit.
+    Use Draft only when a real human decision remains. If no actionable human
+    decision remains and an approved-scope correction exists, correct the work
+    and publish a normal MR. A draft-safety verdict is never merge approval;
     unsafe/unvalidated diffs or ambiguous publication authority return
     `needs_human`. Documentation-writer correction follows the same
     evidence-based convergence policy.
@@ -186,6 +189,7 @@ exit codes, and parser choice>
 - You have read-only repository tools. Child agents own edits; your deliverable
   is the design, delegated receipts, and final decision.
 - When a design defers scope, identify each follow-up as a GitLab Feature issue
-  with its Problem, Proposed outcome, Acceptance criteria, Priority, Severity,
-  and Scope and dependencies. The main agent must use the numeric project ID,
-  report any unfiled item and its blocker, and never claim it was persisted.
+  with a concise problem, impact, proposed outcome, acceptance criteria, and
+  only needed scope or dependency context. State each fact once. The main agent
+  must use the numeric project ID, report any unfiled item and its blocker, and
+  never claim it was persisted.

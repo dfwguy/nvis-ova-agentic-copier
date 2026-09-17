@@ -189,8 +189,10 @@ Before writing, search open GitLab issues for the stable marker and compare exac
 Reuse an exact open match. Otherwise, after the repository's required
 submission-identity and approval-policy audits, create one GitLab Bug template
 ordinary issue through the numeric `projects/$GITLAB_PROJECT_ID/issues`
-endpoint. Include actual behavior, expected behavior, acceptance criteria,
-relevant run evidence, and the marker. Because this is not an
+endpoint. Keep the body concise: state the problem, impact, requested outcome,
+validation or acceptance criteria, and only the run evidence needed to act;
+state each fact once. Include the marker. Use the same contract for an
+unfiled fallback. Because this is not an
 `agent-mr-remediation` issue, a later serial worker uses its normal issue branch
 and the feedback remains valid after the observed MR or SHA changes.
 

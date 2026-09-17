@@ -59,8 +59,9 @@ unchanged relevant evidence, no approved-scope repair, scope expansion, or a
 human-judgment blocker; never waive/relabel findings to manufacture progress.
 For a no-progress or controversy stop, Architect obtains Finalizer's
 draft-safety verdict. Only a mechanically safe, validated, authority-clear
-diff may publish a `Draft:` MR listing unresolved findings, evidence/cycle
-ledger, exact human decisions, tests, and unchanged project-owned values; this
+diff may publish a `Draft:` MR that concisely states the human decision and
+requested action, impact, and validation. Keep detailed findings, receipts,
+and the correction-cycle ledger in the result envelope and durable audit; this
 is never merge approval. For content, Architect delegates one
 sole-mutator `$documentation-writer`, then `$documentation-finalizer`. Keep
 every required or not-applicable receipt in the single result envelope. The

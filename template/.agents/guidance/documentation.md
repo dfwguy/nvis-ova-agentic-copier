@@ -14,6 +14,12 @@ Use this discipline only when the whole change is content-only under
 workflow before editing.
 
 - Treat agent instructions as operational policy, not incidental metadata.
+- Write human-facing prose in plain language: lead with the problem, impact,
+  intended outcome or requested action, and validation; state each fact once.
+  Keep receipts, structured result envelopes, and correction ledgers in the
+  durable audit. Do not wrap ordinary prose or transcripts in inline or fenced
+  code formatting; use code formatting only for commands and identifiers. Do
+  not force a fixed heading template onto every document.
 - Check claims against their source files instead of locking prose to phrases.
 - Preserve declared root and `template/` mirrors.
 - Smoke-render Copier output when rendered Markdown or policy changes.
