@@ -26,9 +26,11 @@ from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
     HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
     ErrorCode,
+    RunnerState,
     SuggestCloseEvidence,
     WorkflowLane,
     WorkflowPhase,
+    WorkKind,
 )
 from .models import (
     AuditCapacity,
@@ -246,6 +248,19 @@ def build_worker_result(
     except ValidationError as error:
         raise _validation_error(error) from None
     validate_worker_result(record, result, changed_paths=changed_paths)
+    if result.result_kind == "split_required" and (
+        record.state is not RunnerState.EXECUTING
+        or record.work_kind is not WorkKind.ORDINARY
+        or record.merge_request_iid is not None
+        or record.merge_request_url is not None
+        or record.merge_request_draft is not None
+        or record.publication_sha is not None
+        or record.pending_feedback is not None
+        or record.feedback_cursor is not None
+    ):
+        raise WorkerProtocolError(
+            "split_required", "is limited to fresh ordinary intake"
+        )
     try:
         # Reuse the controller's exact receipt/state coherence authority.
         from .state_machine import apply_worker_result
@@ -259,7 +274,8 @@ def build_worker_result(
                 raise WorkerProtocolError(
                     "receipts", "must use each exact required skill once"
                 )
-        apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
+        if result.result_kind != "split_required":
+            apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
     except ValueError as error:
         raise WorkerProtocolError(
             "receipts", "required receipts are not coherent"

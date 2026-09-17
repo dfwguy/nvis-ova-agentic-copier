@@ -31,8 +31,6 @@ from agent_work.domain import (
 from agent_work.models import (
     LedgerRecord,
     MergeRequestEvidence,
-    SplitPlan,
-    SplitSliceProposal,
     SuggestCloseEvidence,
 )
 
@@ -64,17 +62,6 @@ def _record(
         )
     if state in {RunnerState.NEEDS_REPAIR, RunnerState.REPAIR_FAILED}:
         updates["error_code"] = ErrorCode.RETRY_EXHAUSTED
-    if state is RunnerState.DECOMPOSING:
-        updates["decomposition_plan"] = SplitPlan(
-            slices=(
-                SplitSliceProposal(
-                    ordinal=1, key="first", title="First", description="First slice."
-                ),
-                SplitSliceProposal(
-                    ordinal=2, key="second", title="Second", description="Second slice."
-                ),
-            )
-        )
     return LedgerRecord(
         project_id=310967,
         issue_iid=issue_iid,
@@ -95,7 +82,6 @@ def _record(
         (RunnerState.PUBLISHING, True, "resume"),
         (RunnerState.OBSERVING, True, "resume"),
         (RunnerState.REPAIR, True, "resume"),
-        (RunnerState.DECOMPOSING, True, "resume"),
         (RunnerState.RETRY_WAIT, True, "resume"),
         (RunnerState.RETRY_WAIT, False, "defer"),
         (RunnerState.BLOCKED, True, "skip"),
@@ -128,7 +114,6 @@ def test_scheduler_disposition_table_fails_when_a_runner_state_is_added() -> Non
         RunnerState.PUBLISHING,
         RunnerState.OBSERVING,
         RunnerState.REPAIR,
-        RunnerState.DECOMPOSING,
         RunnerState.RETRY_WAIT,
         RunnerState.BLOCKED,
         RunnerState.FAILED,

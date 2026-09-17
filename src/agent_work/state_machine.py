@@ -45,7 +45,6 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         ),
         RunnerState.EXECUTING: frozenset(
             {
-                RunnerState.DECOMPOSING,
                 RunnerState.EXECUTING,
                 RunnerState.RETRY_WAIT,
                 RunnerState.PUBLISHING,
@@ -60,7 +59,6 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
         RunnerState.RETRY_WAIT: frozenset(
             {
                 RunnerState.PREPARING,
-                RunnerState.DECOMPOSING,
                 RunnerState.EXECUTING,
                 RunnerState.PUBLISHING,
                 RunnerState.OBSERVING,
@@ -105,14 +103,6 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.COMPLETE,
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.REPAIR_FAILED,
-            }
-        ),
-        RunnerState.DECOMPOSING: frozenset(
-            {
-                RunnerState.DECOMPOSING,
-                RunnerState.RETRY_WAIT,
-                RunnerState.BLOCKED,
-                RunnerState.COMPLETE,
             }
         ),
         RunnerState.BLOCKED: frozenset(
@@ -399,20 +389,7 @@ def apply_worker_result(
             )
         )
     if result.result_kind == "split_required":
-        return PlannedOutcome(
-            transition_record(
-                record,
-                RunnerState.DECOMPOSING,
-                decomposition_plan=result.split_plan,
-                decomposition_progress=(),
-                merge_request_draft=None,
-                merge_request_iid=None,
-                merge_request_url=None,
-                error_code=None,
-                summary=result.redacted_summary or result.change_summary,
-                next_action=result.next_action,
-            )
-        )
+        raise ValueError("split_required must be fulfilled by the executor")
     required = (
         WORKFLOW_RECEIPTS.get(result.workflow_lane, ())
         if record.phase is WorkflowPhase.WORKFLOW

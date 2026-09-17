@@ -32,7 +32,6 @@ from agent_work.models import (
     DecisionReviewSignal,
     LedgerRecord,
     MergeRequestDraft,
-    SplitChildEvidence,
     WorkerResultEnvelope,
     render_decision_review_notice,
 )
@@ -268,54 +267,6 @@ def test_decision_review_draft_bounds_the_fully_rendered_description(
             is_draft=True,
             decision_review=review,
         )
-
-
-def test_ledger_rejects_decomposition_progress_without_a_plan() -> None:
-    payload = _record().model_dump(mode="python")
-    payload["decomposition_progress"] = (
-        SplitChildEvidence(ordinal=1, key="one", fingerprint="a" * 64, issue_iid=13),
-    )
-    with pytest.raises(ValidationError):
-        LedgerRecord.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    [
-        {"ordinal": 2, "key": "one", "fingerprint": "a" * 64, "issue_iid": 13},
-        {"ordinal": 1, "key": "wrong", "fingerprint": "a" * 64, "issue_iid": 13},
-        {"ordinal": 1, "key": "one", "fingerprint": "b" * 64, "issue_iid": 12},
-    ],
-)
-def test_ledger_rejects_incoherent_split_evidence(evidence: dict[str, object]) -> None:
-    payload = _record().model_dump(mode="python")
-    payload.update(
-        {
-            "state": RunnerState.DECOMPOSING,
-            "workflow_lane": WorkflowLane.UNKNOWN,
-            "decomposition_plan": {
-                "slices": [
-                    {
-                        "ordinal": 1,
-                        "key": "one",
-                        "title": "One",
-                        "description": "One.",
-                        "depends_on": [],
-                    },
-                    {
-                        "ordinal": 2,
-                        "key": "two",
-                        "title": "Two",
-                        "description": "Two.",
-                        "depends_on": [1],
-                    },
-                ]
-            },
-            "decomposition_progress": (evidence,),
-        }
-    )
-    with pytest.raises(ValidationError):
-        LedgerRecord.model_validate(payload)
 
 
 def _result(
@@ -570,9 +521,7 @@ def test_needs_human_result_becomes_a_documented_block() -> None:
     assert outcome.record.next_action == "Run the policy workflow manually."
 
 
-def test_split_required_workflow_result_persists_a_validated_decomposition_plan() -> (
-    None
-):
+def test_split_required_workflow_result_requires_executor_fulfillment() -> None:
     retry_at = NOW + timedelta(minutes=7)
     record = _record(retry_count=2).model_copy(
         update={
@@ -625,20 +574,80 @@ def test_split_required_workflow_result_persists_a_validated_decomposition_plan(
         expected_issue_iid=12,
         expected_revision=0,
     )
-    outcome = apply_worker_result(record, result, now=NOW)
-
     assert result.protocol_version == 2
-    assert outcome.record.state is RunnerState.DECOMPOSING
-    assert outcome.record.phase is WorkflowPhase.WORKFLOW
-    assert outcome.record.decomposition_plan == result.split_plan
-    assert outcome.record.retry_count == 2
-    assert outcome.record.retry_at == retry_at
-    assert outcome.record.error_code is None
-    assert outcome.record.summary == result.redacted_summary
-    assert outcome.record.next_action == result.next_action
+    with pytest.raises(ValueError, match="fulfilled by the executor"):
+        apply_worker_result(record, result, now=NOW)
 
     legacy_record = LedgerRecord.model_validate(record.model_dump(mode="json"))
     assert legacy_record.schema_version == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_state", "expected_prior_state"),
+    [
+        ("state", "decomposing", RunnerState.EXECUTING, None),
+        (
+            "prior_state",
+            "decomposing",
+            RunnerState.RETRY_WAIT,
+            RunnerState.EXECUTING,
+        ),
+    ],
+)
+def test_ledger_normalizes_only_legacy_split_checkpoint_fields(
+    field: str,
+    value: str,
+    expected_state: RunnerState,
+    expected_prior_state: RunnerState | None,
+) -> None:
+    payload = _record().model_dump(mode="json")
+    payload.update(
+        {
+            field: value,
+            "decomposition_plan": {"slices": []},
+            "decomposition_progress": [],
+        }
+    )
+    if field == "prior_state":
+        payload["state"] = RunnerState.RETRY_WAIT.value
+
+    record = LedgerRecord.model_validate_json(json.dumps(payload))
+
+    assert record.state is expected_state
+    assert record.prior_state is expected_prior_state
+    assert "decomposition_plan" not in record.model_dump()
+    assert "decomposition_progress" not in record.model_dump()
+
+
+def test_ledger_rejects_unknown_extra_alongside_legacy_split_checkpoint() -> None:
+    payload = _record().model_dump(mode="json")
+    payload.update(
+        {
+            "state": "decomposing",
+            "decomposition_plan": {"slices": []},
+            "decomposition_progress": [],
+            "unexpected": True,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="unexpected"):
+        LedgerRecord.model_validate_json(json.dumps(payload))
+
+
+def test_ledger_loads_completed_legacy_split_parent_without_checkpoint_fields() -> None:
+    payload = _record().model_dump(mode="json")
+    payload.update(
+        {
+            "state": RunnerState.COMPLETE.value,
+            "decomposition_plan": {"slices": []},
+            "decomposition_progress": [],
+        }
+    )
+
+    record = LedgerRecord.model_validate_json(json.dumps(payload))
+
+    assert record.state is RunnerState.COMPLETE
+    assert "decomposition_plan" not in record.model_dump()
 
 
 @pytest.mark.parametrize(

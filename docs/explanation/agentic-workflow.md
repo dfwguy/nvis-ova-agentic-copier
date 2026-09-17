@@ -231,7 +231,7 @@ flowchart TD
     retain --> recovery["Controller reconciliation"]
     recovery --> recoveryworkflow["Fresh AI context: applicable full workflow"]
     oversized["Oversized intake"] --> split["Structured split plan"]
-    split --> children["Controller creates or recovers ordered child issues"]
+    split --> children["Controller reuses marker-matched children or creates missing ordered child issues"]
     children --> selection["Later selection of each child"]
     selection --> childworkflow["Fresh AI context: applicable full workflow"]
 ```

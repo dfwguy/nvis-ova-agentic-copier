@@ -20,13 +20,20 @@ import pytest
 
 from agent_work.cli import main
 from agent_work.domain import (
+    RepairAttemptEvidence,
     RunnerState,
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
 )
 from agent_work.ledger import LedgerCorrupt
-from agent_work.models import AgentWorkConfig, LedgerRecord
+from agent_work.models import (
+    AgentWorkConfig,
+    LedgerRecord,
+    MergeRequestDraft,
+    MergeRequestFeedbackCursor,
+    PendingMergeRequestFeedback,
+)
 from agent_work.repository import CommandResult
 from agent_work.runtime import build_worker_result_dependencies
 from agent_work.state_machine import (
@@ -382,6 +389,97 @@ def test_builder_rejects_incomplete_duplicate_or_malformed_receipts(
 
     with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
         build_worker_result(_record(tmp_path), invalid, changed_paths=())
+
+
+@pytest.mark.parametrize(
+    "record_updates",
+    [
+        {
+            "state": RunnerState.REPAIR,
+            "repair_attempt": RepairAttemptEvidence(
+                fingerprint="a" * 64, started_at="2026-09-10T00:00:00+00:00"
+            ),
+        },
+        {
+            "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+            "merge_request_iid": 88,
+            "merge_request_url": "https://gitlab.example.test/mr/88",
+            "merge_request_draft": MergeRequestDraft(
+                title="Existing MR", description="Existing review evidence."
+            ),
+            "publication_sha": "b" * 40,
+        },
+        {"merge_request_iid": 88},
+        {"merge_request_url": "https://gitlab.example.test/mr/88"},
+        {
+            "merge_request_draft": MergeRequestDraft(
+                title="Existing MR", description="Existing review evidence."
+            )
+        },
+        {"publication_sha": "b" * 40},
+        {
+            "feedback_cursor": MergeRequestFeedbackCursor(
+                last_processed_general_note_id=1, feedback_source_sha="a" * 40
+            )
+        },
+        {
+            "pending_feedback": PendingMergeRequestFeedback(
+                target_cursor=MergeRequestFeedbackCursor(
+                    last_processed_general_note_id=1, feedback_source_sha="a" * 40
+                ),
+                source_sha="a" * 40,
+                publication_sha="b" * 40,
+                source="general",
+                note_id=1,
+            )
+        },
+    ],
+    ids=(
+        "repair",
+        "existing-mr",
+        "mr-iid",
+        "mr-url",
+        "mr-draft",
+        "publication-sha",
+        "feedback-cursor",
+        "pending-feedback",
+    ),
+)
+def test_builder_rejects_split_required_outside_fresh_ordinary_intake(
+    tmp_path: Path, record_updates: dict[str, object]
+) -> None:
+    record = _record(tmp_path).model_copy(update=record_updates)
+    split = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "unknown",
+            "result_kind": "split_required",
+            "change_summary": "Split the oversized intake.",
+            "next_action": "Create ordinary children.",
+            "split_plan": {
+                "slices": [
+                    {
+                        "ordinal": 1,
+                        "key": "first",
+                        "title": "First",
+                        "description": "First slice.",
+                        "depends_on": [],
+                    },
+                    {
+                        "ordinal": 2,
+                        "key": "second",
+                        "title": "Second",
+                        "description": "Second slice.",
+                        "depends_on": [1],
+                    },
+                ]
+            },
+        }
+    )
+
+    with pytest.raises(
+        WorkerProtocolError, match="split_required: is limited to fresh ordinary intake"
+    ):
+        build_worker_result(record, split, changed_paths=())
 
 
 @pytest.mark.parametrize(

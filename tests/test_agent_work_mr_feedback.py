@@ -2355,43 +2355,17 @@ def test_consecutive_transient_feedback_sync_retries_preserve_repair_recovery(
     assert repository.successful_syncs == 1
 
 
-@pytest.mark.parametrize("state", [RunnerState.PREPARING, RunnerState.DECOMPOSING])
-def test_identity_drift_blocks_preparation_and_decomposition_before_remote_mutations(
-    tmp_path: Path, state: RunnerState
+def test_identity_drift_blocks_preparation_before_remote_mutations(
+    tmp_path: Path,
 ) -> None:
     """Configured identity is verified before every reachable remote write segment."""
     config = _serial_config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _serial_record(
         tmp_path,
-        state=(RunnerState.EXECUTING if state is RunnerState.DECOMPOSING else state),
+        state=RunnerState.PREPARING,
         phase=WorkflowPhase.WORKFLOW,
     )
-    if state is RunnerState.DECOMPOSING:
-        record = record.model_copy(
-            update={
-                "state": RunnerState.DECOMPOSING,
-                "workflow_lane": WorkflowLane.UNKNOWN,
-                "decomposition_plan": {
-                    "slices": [
-                        {
-                            "ordinal": 1,
-                            "key": "first",
-                            "title": "First slice",
-                            "description": "Independent first work.",
-                            "depends_on": [],
-                        },
-                        {
-                            "ordinal": 2,
-                            "key": "second",
-                            "title": "Second slice",
-                            "description": "Dependent second work.",
-                            "depends_on": [1],
-                        },
-                    ]
-                },
-            }
-        )
     ledger.persist(record)
     gitlab = _FeedbackGitLab()
     gitlab.identity_error_on_check = 1
