@@ -1206,6 +1206,82 @@ def test_agent_loop_wrapper_reemits_each_validated_report_once(
 
 
 @pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+def test_agent_loop_wrapper_yields_after_prerequisite_label_reconciliation(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path
+) -> None:
+    """A label-only applied activation is journaled once and left to the timer."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    report = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "prerequisite_labels_reconciled",
+            "stop_reason": "prerequisite_labels_reconciled",
+        }
+    )
+    calls = _scripted_wrapper_worker(tmp_path, environment, (report,))
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count(report) == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+@pytest.mark.parametrize(
+    "report",
+    (
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"prerequisite_labels_reconciled"}',
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"prerequisite_labels_reconciled","stop_reason":null}',
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"prerequisite_labels_reconciled","stop_reason":"unknown"}',
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"prerequisite_labels_reconciled","stop_reason":"idle"}',
+        '{"schema_version":1,"command":"loop.run","applied":true,"outcome":"activation_complete","stop_reason":"prerequisite_labels_reconciled"}',
+    ),
+)
+def test_agent_loop_wrapper_rejects_invalid_prerequisite_label_reconciliation_reports(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path, report: str
+) -> None:
+    """Only the exact label-reconciliation applied report pair is trusted."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(tmp_path, environment, (report,))
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+@pytest.mark.parametrize(
     "stop_reason", ("awaiting_human", "blocked", "failed", "complete")
 )
 def test_agent_loop_wrapper_terminal_handoff_previews_once_then_yields_on_idle(

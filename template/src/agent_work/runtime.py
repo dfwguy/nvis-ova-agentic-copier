@@ -2625,6 +2625,7 @@ def dispatch(
                 applied=True,
                 outcome="prerequisite_labels_reconciled",
                 project=identity,
+                stop_reason="prerequisite_labels_reconciled",
                 summary="Dynamic prerequisite display labels were reconciled.",
                 next_action="Run the ordinary loop again to select work.",
                 prerequisite_projections=prerequisite_projections,

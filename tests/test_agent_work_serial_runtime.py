@@ -9229,6 +9229,7 @@ def test_apply_reconciles_prerequisite_projection_before_worker_preflight(
     )
 
     assert report.outcome == "prerequisite_labels_reconciled"
+    assert report.stop_reason == "prerequisite_labels_reconciled"
     assert gitlab.inventory_calls == 1
     assert gitlab.transitions == [(38, ("agent-prereq_37",))]
     assert gitlab.eligible_calls == 0
