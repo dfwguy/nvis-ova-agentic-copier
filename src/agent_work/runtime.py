@@ -28,12 +28,16 @@ from .domain import (
     NONTERMINAL_PIPELINE_STATUSES,
     CommandRequest,
     ErrorCode,
+    PrerequisiteLabelProjection,
     RepairAttemptEvidence,
     RunnerState,
     WorkflowPhase,
     WorkKind,
     label_for_state,
     parse_split_marker,
+    prerequisite_label_iid,
+    prerequisite_label_reconciliation,
+    prerequisite_projection_inventory,
     retries_remaining,
 )
 from .gitlab import GitLabError, GitLabGateway
@@ -64,6 +68,7 @@ from .models import (
     MigrationPlan,
     OperationalPlan,
     PipelineEvidence,
+    PrerequisiteLabelProjectionReport,
     RecoveryCandidateReport,
     RecoverySummary,
     TransitionIntentRecord,
@@ -226,6 +231,7 @@ def _report(
     summary: str | None = None,
     next_action: str | None = None,
     operational_plan: OperationalPlan | None = None,
+    prerequisite_projections: tuple[PrerequisiteLabelProjectionReport, ...] = (),
 ) -> CommandReport:
     return CommandReport(
         command=request.command,
@@ -239,6 +245,38 @@ def _report(
         summary=summary,
         next_action=next_action,
         operational_plan=operational_plan,
+        prerequisite_projections=prerequisite_projections,
+    )
+
+
+def _prerequisite_projections(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> tuple[PrerequisiteLabelProjectionReport, ...]:
+    """Convert one validated GitLab snapshot into dynamic-label report evidence."""
+    return _prerequisite_projection_reports(
+        prerequisite_projection_inventory(issues, project_id=project_id)
+    )
+
+
+def _prerequisite_projection_reports(
+    projections: tuple[PrerequisiteLabelProjection, ...],
+) -> tuple[PrerequisiteLabelProjectionReport, ...]:
+    """Convert validated dynamic projections into bounded report evidence."""
+    return tuple(
+        PrerequisiteLabelProjectionReport(
+            issue_iid=item.issue_iid,
+            current_labels=tuple(
+                label
+                for label in item.current_labels
+                if prerequisite_label_iid(label) is not None
+            ),
+            intended_labels=tuple(
+                label
+                for label in item.intended_labels
+                if prerequisite_label_iid(label) is not None
+            ),
+        )
+        for item in projections
     )
 
 
@@ -1550,6 +1588,9 @@ def dispatch(
     if request.command in {"recovery.inventory", "recovery.resolve"}:
         username = recovery_username
         if request.command == "recovery.inventory":
+            prerequisite_projections = _prerequisite_projections(
+                gitlab.prerequisite_projection_inventory(), project_id=project.id
+            )
             records = (
                 ledger.list_records()
                 if request.issue_iid is None
@@ -1717,6 +1758,7 @@ def dispatch(
                     _recovery_candidate_report(candidate, priority=position)
                     for position, candidate in enumerate(visible_candidates)
                 ),
+                prerequisite_projections=prerequisite_projections,
             )
         record = ledger.load(request.issue_iid or 0)
         choice = ResolutionChoice(request.choice or "")
@@ -2467,6 +2509,9 @@ def dispatch(
     if request.command != "loop.run":
         raise RuntimeError("unsupported command")
     if not apply:
+        prerequisite_projections = _prerequisite_projections(
+            gitlab.prerequisite_projection_inventory(), project_id=project.id
+        )
         records = ledger.list_records()
         resumable = resume_candidates(records, now=wired.clock())
         gate = _inspect_pipeline_gate(
@@ -2485,6 +2530,7 @@ def dispatch(
                     outcome="resume_available",
                     records=resumable[:1],
                     project=identity,
+                    prerequisite_projections=prerequisite_projections,
                 )
             return _report(
                 request,
@@ -2494,6 +2540,7 @@ def dispatch(
                 stop_reason=gate.outcome,
                 summary=gate.summary,
                 next_action=gate.next_action,
+                prerequisite_projections=prerequisite_projections,
             )
         if gate.repair_owner is not None:
             if _has_competing_repair_owner(records, gate.repair_owner):
@@ -2505,6 +2552,7 @@ def dispatch(
                     stop_reason="pipeline_blocked",
                     summary="The exact failed pipeline has competing retained work.",
                     next_action="Reconcile the competing retained records before repair.",
+                    prerequisite_projections=prerequisite_projections,
                 )
             if gate.repair_owner.state is RunnerState.REPAIR:
                 return _report(
@@ -2513,6 +2561,7 @@ def dispatch(
                     outcome="resume_available",
                     records=(gate.repair_owner,),
                     project=identity,
+                    prerequisite_projections=prerequisite_projections,
                 )
             if gate.repair_owner.state in {
                 RunnerState.OBSERVING,
@@ -2528,6 +2577,7 @@ def dispatch(
                     stop_reason="repair_ready",
                     summary="An exact retained owner will repair the failed current-source pipeline when applied.",
                     next_action="Run the ordinary loop with --apply.",
+                    prerequisite_projections=prerequisite_projections,
                 )
         if resumable:
             return _report(
@@ -2536,6 +2586,7 @@ def dispatch(
                 outcome="resume_available",
                 records=resumable[:1],
                 project=identity,
+                prerequisite_projections=prerequisite_projections,
             )
         record_iids = {record.issue_iid for record in records}
         eligible = tuple(
@@ -2546,7 +2597,40 @@ def dispatch(
             applied=False,
             outcome="eligible" if eligible else "idle",
             project=identity,
+            prerequisite_projections=prerequisite_projections,
         )
+    with wired.lock():
+        prerequisite_inventory = gitlab.prerequisite_projection_inventory()
+        prerequisite_reconciliation = prerequisite_label_reconciliation(
+            prerequisite_inventory, project_id=project.id
+        )
+        projection_drift = prerequisite_reconciliation.projections
+        prerequisite_projections = _prerequisite_projection_reports(projection_drift)
+        intended_definitions = prerequisite_reconciliation.label_names
+        definitions_changed = (
+            gitlab.ensure_prerequisite_labels(intended_definitions)
+            if intended_definitions
+            else False
+        )
+        if projection_drift or definitions_changed:
+            for projection in projection_drift:
+                gitlab.transition_prerequisite_labels(
+                    projection.issue_iid,
+                    tuple(
+                        label
+                        for label in projection.intended_labels
+                        if prerequisite_label_iid(label) is not None
+                    ),
+                )
+            return _report(
+                request,
+                applied=True,
+                outcome="prerequisite_labels_reconciled",
+                project=identity,
+                summary="Dynamic prerequisite display labels were reconciled.",
+                next_action="Run the ordinary loop again to select work.",
+                prerequisite_projections=prerequisite_projections,
+            )
     wired.invoke.preflight()
     records: list[LedgerRecord] = []
     stop_reason = "idle"

@@ -135,6 +135,16 @@ safety, or unresolved-evidence work, while `agent::failed` remains exceptional
 or unrecoverable. Labels communicate operator-visible ownership; they are not
 the transaction log.
 
+Split prerequisite labels are a separate, derived operator view. For an open
+split child, `agent::prereq_<IID>` means that IID is a currently open trusted
+prerequisite. The validated marker and the prerequisite's live issue state,
+not that label, decide dependency gating. The runner derives a numerically
+ordered intended set, creates or reuses labels with stable presentation, and
+reconciles missing or stale projections idempotently. It removes a projection
+when its prerequisite closes, the marker dependency disappears, or the child
+closes. A failed remote update leaves retryable projection drift; it does not
+change the child's authority, lifecycle, or eligibility.
+
 An automatic exact-pipeline repair is bounded per retained item. An
 unsuccessful attempt creates a durable 20-minute repair eligibility backoff,
 and three unsuccessful automatic attempts quarantine or defer that item for human review.
@@ -225,22 +235,25 @@ handoff:
 6. Treat a failed default-branch or ownerless merge-request pipeline as an
    actionable human block, then continue only when the preceding gate and
    targeted recovery decisions permit fresh selection.
-7. Filter fresh work to open, non-confidential issues with no lifecycle
+7. Reconcile prerequisite-label projections before fresh selection. A pass that
+   changes any projection ends as housekeeping and does not claim work or
+   create a ledger record, worktree, or worker session.
+8. Filter fresh work to open, non-confidential issues with no lifecycle
    projection, ledger record, or open split prerequisite. Rank exact high,
    then normal (no recognized exact priority label), then exact low; within a
    rank compare absolute creation time and IID.
-8. Classify it before claiming it as ordinary issue work, existing-MR
+9. Classify it before claiming it as ordinary issue work, existing-MR
    remediation, merge-conflict repair, or protected policy work that requires
    the manual lane.
-9. Persist transition intent before the corresponding external mutation, then
+10. Persist transition intent before the corresponding external mutation, then
    record the observed result. Reconciliation completes or compensates any
    transition interrupted between those writes.
-10. Run one bounded workflow-owning worker in the issue's durable worktree.
-11. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
+11. Run one bounded workflow-owning worker in the issue's durable worktree.
+12. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
    `needs_human`.
-12. Publish idempotently and verify exact same-project MR, branch, target, tip,
+13. Publish idempotently and verify exact same-project MR, branch, target, tip,
    and closing-issue evidence.
-13. Record one safe, actionable outcome. Continue immediately with the same
+14. Record one safe, actionable outcome. Continue immediately with the same
     issue when progress is safe, or yield when the activation reaches idle,
     no progress or a future external wait, a terminal or human-facing
     state, or its workflow or wall-time bound.
@@ -505,6 +518,8 @@ moved since review. Conflicting active records, a competing owner, or changed
 evidence fail closed rather than allowing the loop to choose a substitute.
 
 The recovery inventory is a concise audit view, not a second recovery engine.
+It reports the current and intended prerequisite-label projections alongside
+the authoritative dependency explanation, but never reconciles either one.
 Terminal evidence has a deliberate no-action precedence: a closed recordless
 split issue and a closed `COMPLETE` record remain settled even when later
 worktree, head, merge-request, or pipeline observations drift. This prevents

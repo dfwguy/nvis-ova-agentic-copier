@@ -761,6 +761,14 @@ class CommandItemReport(BoundaryModel):
     next_action: str = ""
 
 
+class PrerequisiteLabelProjectionReport(BoundaryModel):
+    """Current and intended dynamic prerequisite labels for one issue."""
+
+    issue_iid: int = Field(gt=0)
+    current_labels: tuple[str, ...] = ()
+    intended_labels: tuple[str, ...] = ()
+
+
 class CommandReport(BoundaryModel):
     """Common safe JSON envelope for every CLI action."""
 
@@ -780,6 +788,7 @@ class CommandReport(BoundaryModel):
     operational_plan: OperationalPlan | None = None
     recovery_candidates: tuple[RecoveryCandidateReport, ...] = ()
     recovery_summary: RecoverySummary | None = None
+    prerequisite_projections: tuple[PrerequisiteLabelProjectionReport, ...] = ()
 
 
 class RecoverySummary(BoundaryModel):

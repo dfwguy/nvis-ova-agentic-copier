@@ -48,6 +48,12 @@ either label to return it to normal ordering. Active/resumable work and all
 eligibility checks still take precedence. Do not retroactively label existing
 issues.
 
+The loop creates and maintains `agent::prereq_<IID>` labels only when a
+validated split child has an open trusted prerequisite. These labels are an
+operator-visible projection, not a way to control the queue. Do not add,
+remove, or use them to bypass a dependency: the split markers and the live
+state of prerequisite issues remain authoritative.
+
 ## Check prerequisites and Developer-readable safeguards
 
 Run the loop from the repository it operates on. It uses the configured GitLab
@@ -560,6 +566,16 @@ same marker searches recover children already created. There is no separate
 decomposition state, saved plan or progress record, checkpoint restoration, or
 special queue to repair.
 
+For an open child, the runner projects every open trusted prerequisite as one
+`agent::prereq_<IID>` label, ordered by numeric IID. It removes a projection
+when the prerequisite closes, the dependency is removed from the trusted
+marker, or the child closes. Preview `loop run` and `recovery inventory` show
+the current and intended labels without writing them. An applied `loop run`
+repairs missing or stale labels before normal selection. If it repairs any
+projection drift, that pass does only the repair and does not claim work,
+create a ledger record or worktree, or start a worker. A later run resumes
+normal selection.
+
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or
 close it according to the project's issue practice. If the parent itself was
@@ -572,8 +588,9 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-Do not remove lifecycle labels by hand or increase worker budgets to bypass
-the sizing decision. The explicit retry preserves the durable recovery path;
+Do not remove lifecycle or prerequisite-projection labels by hand or increase
+worker budgets to bypass the sizing decision. The explicit retry preserves the
+durable recovery path;
 the next worker session reassesses the revised scope before mutation.
 
 ## Migrate existing loop evidence

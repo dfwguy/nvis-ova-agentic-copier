@@ -29,6 +29,7 @@ from agent_work.domain import (
     DEFAULT_MAX_ACTIVATION_SECONDS,
     LIFECYCLE_LABELS,
     ErrorCode,
+    render_split_marker,
 )
 from agent_work.gitlab import GitLabError, GitLabGateway
 from agent_work.models import (
@@ -1015,6 +1016,193 @@ def test_gitlab_lifecycle_label_provisioning_is_idempotent_and_numeric_project_s
         command[command.index("-X") + 2] == "projects/310967/labels"
         for command in api.commands
     )
+
+
+def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministically(
+    tmp_path: Path,
+) -> None:
+    """Dynamic labels use a fixed definition and replace only prior prerequisite labels."""
+
+    class PrerequisiteLabelApi:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+            self.issue = _issue_payload(
+                labels=[
+                    "customer::priority",
+                    "agent::running",
+                    "agent::prereq_10",
+                    "agent::prereq_37",
+                ]
+            )
+            self.labels = [
+                {
+                    "name": "agent::prereq_37",
+                    "color": "#000000",
+                    "description": "wrong",
+                }
+            ]
+
+        def __call__(
+            self, command: tuple[str, ...], **_kwargs: object
+        ) -> CommandResult:
+            self.commands.append(command)
+            endpoint = command[command.index("-X") + 2]
+            method = command[command.index("-X") + 1]
+            if endpoint == "projects/310967/labels":
+                if method == "GET":
+                    return CommandResult(0, json.dumps(self.labels), "")
+                fields = {
+                    item.partition("=")[0]: item.partition("=")[2]
+                    for item in command
+                    if "=" in item
+                }
+                label = {
+                    "name": fields["name"],
+                    "color": fields["color"],
+                    "description": fields["description"],
+                }
+                self.labels = [
+                    existing
+                    for existing in self.labels
+                    if existing["name"] != label["name"]
+                ] + [label]
+                return CommandResult(0, json.dumps(label), "")
+            if endpoint == "projects/310967/labels/agent%3A%3Aprereq_37":
+                fields = {
+                    item.partition("=")[0]: item.partition("=")[2]
+                    for item in command
+                    if "=" in item
+                }
+                self.labels[0] |= fields
+                return CommandResult(0, json.dumps(self.labels[0]), "")
+            if endpoint == "projects/310967/issues/12" and method == "GET":
+                return CommandResult(0, json.dumps(self.issue), "")
+            if endpoint == "projects/310967/issues/12" and method == "PUT":
+                fields = {
+                    item.partition("=")[0]: item.partition("=")[2]
+                    for item in command
+                    if "=" in item
+                }
+                removed = set(fields["remove_labels"].split(","))
+                additions = fields["add_labels"].split(",")
+                current_labels = self.issue["labels"]
+                assert isinstance(current_labels, list)
+                self.issue["labels"] = [
+                    label for label in current_labels if label not in removed
+                ] + additions
+                return CommandResult(0, json.dumps(self.issue), "")
+            raise AssertionError((endpoint, method))
+
+    api = PrerequisiteLabelApi()
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    assert gateway.ensure_prerequisite_labels(("agent::prereq_37", "agent::prereq_2"))
+    assert not gateway.ensure_prerequisite_labels(
+        ("agent::prereq_37", "agent::prereq_2")
+    )
+    updated = gateway.transition_prerequisite_labels(
+        12, ("agent::prereq_2", "agent::prereq_37")
+    )
+
+    assert updated.labels == (
+        "customer::priority",
+        "agent::running",
+        "agent::prereq_2",
+        "agent::prereq_37",
+    )
+    definitions = {label["name"]: label for label in api.labels}
+    assert set(definitions) == {"agent::prereq_2", "agent::prereq_37"}
+    assert {label["color"] for label in definitions.values()} == {"#6F42C1"}
+    assert {label["description"] for label in definitions.values()} == {
+        "Open split prerequisites for agent-work issue dependency display."
+    }
+    issue_update = next(
+        command
+        for command in api.commands
+        if command[command.index("-X") + 2] == "projects/310967/issues/12"
+        and command[command.index("-X") + 1] == "PUT"
+    )
+    assert "remove_labels=agent::prereq_10,agent::prereq_37" in issue_update
+    assert "add_labels=agent::prereq_2,agent::prereq_37" in issue_update
+
+
+def test_gitlab_prerequisite_projection_inventory_requests_all_issue_states(
+    tmp_path: Path,
+) -> None:
+    """Reconciliation receives a complete issue snapshot, including closed issues."""
+    commands: list[tuple[str, ...]] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, json.dumps([_issue_payload()]), "")
+
+    inventory = GitLabGateway(
+        _config(tmp_path), api
+    ).prerequisite_projection_inventory()
+
+    assert tuple(issue.iid for issue in inventory) == (12,)
+    assert len(commands) == 1
+    assert "state=all" in commands[0]
+    assert not any(field.startswith("labels=") for field in commands[0])
+
+
+def test_gitlab_prerequisite_transition_rejects_an_unverified_update(
+    tmp_path: Path,
+) -> None:
+    """A successful mutation response cannot substitute for a verified projection."""
+    issue = _issue_payload(labels=["agent::prereq_37"])
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint == "projects/310967/issues/12" and method == "GET":
+            return CommandResult(0, json.dumps(issue), "")
+        if endpoint == "projects/310967/issues/12" and method == "PUT":
+            return CommandResult(
+                0,
+                json.dumps(_issue_payload(labels=["agent::prereq_2"])),
+                "",
+            )
+        raise AssertionError(endpoint)
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    with pytest.raises(GitLabError, match="did not apply"):
+        gateway.transition_prerequisite_labels(12, ("agent::prereq_2",))
+
+
+@pytest.mark.parametrize(
+    ("prerequisite_state", "dependent_labels", "eligible"),
+    [
+        ("opened", (), ()),
+        ("closed", (), (38,)),
+        ("closed", ("agent::prereq_37",), (38,)),
+    ],
+)
+def test_gitlab_eligibility_uses_trusted_marker_and_live_state_not_prerequisite_labels(
+    tmp_path: Path,
+    prerequisite_state: str,
+    dependent_labels: tuple[str, ...],
+    eligible: tuple[int, ...],
+) -> None:
+    """Absent or stale display labels never change the dependency eligibility decision."""
+    dependent = _issue_payload(38, list(dependent_labels)) | {
+        "description": render_split_marker(310967, 1, "dependent", (37,)),
+        "state": "opened",
+    }
+    prerequisite = _issue_payload(
+        37, ["agent::running"] if prerequisite_state == "opened" else []
+    ) | {"state": prerequisite_state}
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        if endpoint != "projects/310967/issues":
+            raise AssertionError(endpoint)
+        return CommandResult(0, json.dumps([dependent, prerequisite]), "")
+
+    result = GitLabGateway(_config(tmp_path), api).list_eligible()
+
+    assert tuple(issue.iid for issue in result) == eligible
 
 
 def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(

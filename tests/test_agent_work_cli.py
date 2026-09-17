@@ -25,6 +25,7 @@ from agent_work.models import (
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
+    PrerequisiteLabelProjectionReport,
     RecoveryCandidateReport,
     RecoverySummary,
 )
@@ -119,6 +120,28 @@ def test_recovery_inventory_v2_json_and_human_output_are_compact_and_sanitized()
     assert "human_action_required=true" in rendered
     assert "next_action=Review issue #12 before selecting one resolution." in rendered
     assert "\n" not in rendered and "recommendation=" not in rendered
+
+
+def test_human_prerequisite_projection_labels_are_single_line() -> None:
+    """GitLab-controlled display labels cannot split human command output."""
+    report = CommandReport(
+        command="loop.run",
+        applied=False,
+        outcome="idle",
+        prerequisite_projections=(
+            PrerequisiteLabelProjectionReport(
+                issue_iid=12,
+                current_labels=("customer::priority\nunsafe",),
+                intended_labels=("agent::prereq_37\r\nunsafe",),
+            ),
+        ),
+    )
+
+    rendered = _render(report, as_json=False)
+
+    assert "\n" not in rendered and "\r" not in rendered
+    assert "current_labels=customer::priority unsafe" in rendered
+    assert "intended_labels=agent::prereq_37 unsafe" in rendered
 
 
 def test_worker_exit_evidence_is_projected_to_json_and_human_output() -> None:

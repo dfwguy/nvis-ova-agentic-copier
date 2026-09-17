@@ -26,6 +26,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from agent_work import domain
 from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
@@ -281,6 +282,21 @@ class FakeGitLab:
             and set(self.issue.labels).intersection(LIFECYCLE_LABELS)
             else ()
         )
+
+    def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+        return (self.issue,)
+
+    def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+        del labels
+        return False
+
+    def transition_prerequisite_labels(
+        self, iid: int, labels: tuple[str, ...]
+    ) -> GitLabIssue:
+        if iid != self.issue.iid:
+            raise AssertionError(iid)
+        self.issue = self.issue.model_copy(update={"labels": labels})
+        return self.issue
 
     def fetch_issue(self, iid: int) -> GitLabIssue:
         self.fetch_issue_calls.append(iid)
@@ -8967,6 +8983,545 @@ def test_run_preview_reports_eligible_unprojected_work(tmp_path: Path) -> None:
     assert report.outcome == "eligible"
 
 
+def test_prerequisite_projection_adds_only_open_trusted_dependencies() -> None:
+    """An open split child projects its still-open prerequisite as a display label."""
+    prerequisite = _issue(iid=37)
+    dependent = _issue(
+        iid=38,
+        description=render_split_marker(310967, 36, "second", (37,)),
+    ).model_copy(update={"labels": ("customer::priority",)})
+
+    projection = domain.prerequisite_projection_inventory(
+        (dependent, prerequisite), project_id=310967
+    )
+
+    assert [
+        (item.issue_iid, item.current_labels, item.intended_labels)
+        for item in projection
+    ] == [
+        (
+            38,
+            ("customer::priority",),
+            ("customer::priority", "agent::prereq_37"),
+        )
+    ]
+
+
+def test_prerequisite_projection_orders_multiple_prerequisites_numerically() -> None:
+    """Projection preserves unrelated labels and orders dynamic labels by IID."""
+    dependent = _issue(
+        iid=38,
+        description=render_split_marker(310967, 1, "dependent", (10, 2)),
+    ).model_copy(
+        update={
+            "labels": (
+                "customer::priority",
+                "agent::running",
+                "agent::prereq_10",
+            )
+        }
+    )
+
+    projection = domain.prerequisite_projection_inventory(
+        (dependent, _issue(iid=10), _issue(iid=2)), project_id=310967
+    )
+
+    assert projection[0].current_labels == dependent.labels
+    assert projection[0].intended_labels == (
+        "customer::priority",
+        "agent::running",
+        "agent::prereq_2",
+        "agent::prereq_10",
+    )
+
+
+def test_prerequisite_projection_ignores_unordered_equivalent_labels() -> None:
+    """GitLab label order alone does not create reconciliation drift."""
+    prerequisite = _issue(iid=37)
+    dependent = _issue(
+        iid=38,
+        description=render_split_marker(310967, 1, "dependent", (37,)),
+    ).model_copy(update={"labels": ("agent::prereq_37", "customer::priority")})
+
+    projection = domain.prerequisite_projection_inventory(
+        (dependent, prerequisite), project_id=310967
+    )
+
+    assert projection == ()
+
+
+def test_prerequisite_projection_rejects_unknown_prerequisite_state() -> None:
+    """An unexpected external state fails closed instead of changing a projection."""
+    prerequisite = _issue(iid=37, state="unknown")
+    dependent = _issue(
+        iid=38,
+        description=render_split_marker(310967, 1, "dependent", (37,)),
+    )
+
+    with pytest.raises(ValueError, match="issue state"):
+        domain.prerequisite_projection_inventory(
+            (dependent, prerequisite), project_id=310967
+        )
+
+
+@pytest.mark.parametrize(
+    "lookalike", ("agent::prereq_0", "agent::prereq_01", "agent::prereq_37x")
+)
+def test_prerequisite_projection_preserves_noncanonical_lookalike_labels(
+    lookalike: str,
+) -> None:
+    """Only an exact canonical dynamic label is managed by reconciliation."""
+    dependent = _issue(iid=38).model_copy(
+        update={"labels": (lookalike, "agent::prereq_37")}
+    )
+    projection = domain.prerequisite_projection_inventory(
+        (dependent,), project_id=310967
+    )
+    assert projection[0].intended_labels == (lookalike,)
+
+
+@given(
+    st.lists(
+        st.sampled_from(
+            (
+                "customer::priority",
+                "agent::prereq_0",
+                "agent::prereq_01",
+                "agent::prereq_37x",
+                "agent::prereq_37",
+            )
+        ),
+        unique=True,
+    )
+)
+def test_prerequisite_projection_only_replaces_exact_dynamic_labels(
+    labels: list[str],
+) -> None:
+    """Arbitrary supported label inventories preserve every noncanonical label."""
+    dependent = _issue(iid=38).model_copy(
+        update={"labels": (*labels, "agent::prereq_37")}
+    )
+    projection = domain.prerequisite_projection_inventory(
+        (dependent,), project_id=310967
+    )
+    expected = tuple(label for label in labels if label != "agent::prereq_37")
+    assert projection[0].intended_labels == expected
+
+
+@pytest.mark.parametrize(
+    ("dependent_state", "description", "labels", "expected"),
+    [
+        (
+            "opened",
+            render_split_marker(310967, 1, "dependent", (37,)),
+            ("agent::prereq_37",),
+            (),
+        ),
+        (
+            "closed",
+            render_split_marker(310967, 1, "dependent", (37,)),
+            ("agent::prereq_37",),
+            (),
+        ),
+        ("opened", "ordinary work", ("agent::prereq_37",), ()),
+    ],
+)
+def test_prerequisite_projection_removes_stale_dynamic_labels(
+    dependent_state: str,
+    description: str,
+    labels: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> None:
+    """Closed prerequisites, closed children, and removed markers clear stale labels."""
+    prerequisite = _issue(iid=37, state="closed")
+    dependent = _issue(
+        iid=38, description=description, state=dependent_state
+    ).model_copy(update={"labels": labels})
+
+    projection = domain.prerequisite_projection_inventory(
+        (prerequisite, dependent), project_id=310967
+    )
+
+    assert projection[0].issue_iid == 38
+    assert projection[0].intended_labels == expected
+
+
+@pytest.mark.parametrize(
+    "issues",
+    [
+        (
+            _issue(
+                iid=38,
+                description=render_split_marker(310967, 1, "self", (38,)),
+            ),
+        ),
+        (
+            _issue(
+                iid=38,
+                description=render_split_marker(310967, 1, "missing", (37,)),
+            ),
+        ),
+        (_issue(iid=38, description="<!-- agent-work-split:v1 malformed -->"),),
+        (_issue(iid=38), _issue(iid=38)),
+    ],
+)
+def test_prerequisite_projection_rejects_invalid_dependency_evidence(
+    issues: tuple[GitLabIssue, ...],
+) -> None:
+    """Malformed, ambiguous, self-referential, and incomplete evidence fails closed."""
+    with pytest.raises(ValueError, match="split|duplicate"):
+        domain.prerequisite_projection_inventory(issues, project_id=310967)
+
+
+def test_apply_reconciles_prerequisite_projection_before_worker_preflight(
+    tmp_path: Path,
+) -> None:
+    """A label-only repair is a housekeeping run, never a claim or activation."""
+
+    class ProjectionGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.inventory_calls = 0
+            self.transitions: list[tuple[int, tuple[str, ...]]] = []
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            self.inventory_calls += 1
+            return (
+                _issue(iid=37),
+                _issue(
+                    iid=38,
+                    description=render_split_marker(310967, 36, "second", (37,)),
+                ),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            assert labels == ("agent::prereq_37",)
+            return False
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            self.transitions.append((iid, labels))
+            return _issue(iid=iid).model_copy(update={"labels": labels})
+
+    class RecordingInvoker(FakeInvoker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preflight_calls = 0
+
+        def preflight(self) -> None:
+            self.preflight_calls += 1
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = ProjectionGitLab()
+    invoker = RecordingInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert report.outcome == "prerequisite_labels_reconciled"
+    assert gitlab.inventory_calls == 1
+    assert gitlab.transitions == [(38, ("agent::prereq_37",))]
+    assert gitlab.eligible_calls == 0
+    assert invoker.preflight_calls == 0
+    assert ledger.list_records() == ()
+
+
+def test_apply_repairs_definition_only_prerequisite_label_drift(
+    tmp_path: Path,
+) -> None:
+    """A stable attachment still repairs its dynamic project-label definition."""
+
+    class DefinitionGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.definition_calls: list[tuple[str, ...]] = []
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (
+                _issue(iid=37),
+                _issue(
+                    iid=38,
+                    description=render_split_marker(310967, 36, "second", (37,)),
+                ).model_copy(update={"labels": ("agent::prereq_37",)}),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            self.definition_calls.append(labels)
+            return True
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            raise AssertionError((iid, labels))
+
+    config = _config(tmp_path)
+    gitlab = DefinitionGitLab()
+    invoker = FakeInvoker()
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=True,
+        dependencies=replace(
+            _dependencies(
+                config,
+                JsonLedger(config.state_root, clock=lambda: NOW),
+                gitlab,
+                FakeRepository(config),
+            ),
+            invoke=invoker,
+        ),
+    )
+
+    assert report.outcome == "prerequisite_labels_reconciled"
+    assert gitlab.definition_calls == [("agent::prereq_37",)]
+    assert gitlab.eligible_calls == 0
+
+
+def test_apply_inventories_prerequisite_projections_under_controller_lock(
+    tmp_path: Path,
+) -> None:
+    """Applied reconciliation captures its complete snapshot only while locked."""
+
+    class RecordingLock:
+        entered = False
+
+        def __enter__(self) -> None:
+            self.entered = True
+
+        def __exit__(self, *_arguments: object) -> None:
+            self.entered = False
+
+    class LockedInventoryGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            assert lock.entered
+            return (
+                _issue(iid=37),
+                _issue(
+                    iid=38,
+                    description=render_split_marker(310967, 1, "dependent", (37,)),
+                ),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            assert labels == ("agent::prereq_37",)
+            return False
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            assert iid == 38
+            return _issue(iid=iid).model_copy(update={"labels": labels})
+
+    config = _config(tmp_path)
+    lock = RecordingLock()
+    dependencies = replace(
+        _dependencies(
+            config,
+            JsonLedger(config.state_root, clock=lambda: NOW),
+            LockedInventoryGitLab(_issue(iid=37)),
+            FakeRepository(config),
+        ),
+        lock=lambda: lock,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert report.outcome == "prerequisite_labels_reconciled"
+
+
+def test_preview_and_recovery_inventory_render_prerequisite_label_projections(
+    tmp_path: Path,
+) -> None:
+    """Both read-only inventories expose deterministic before/after label evidence."""
+
+    class ReportingGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.inventory_calls = 0
+            self.label_mutations = 0
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            self.inventory_calls += 1
+            return (
+                _issue(iid=37),
+                _issue(
+                    iid=38,
+                    description=render_split_marker(310967, 36, "second", (37,)),
+                ),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            del labels
+            self.label_mutations += 1
+            return False
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            del iid, labels
+            self.label_mutations += 1
+            raise AssertionError("read-only inventory must not update labels")
+
+    config = _config(tmp_path)
+    gitlab = ReportingGitLab()
+    dependencies = _dependencies(
+        config,
+        JsonLedger(config.state_root, clock=lambda: NOW),
+        gitlab,
+        FakeRepository(config),
+    )
+    preview = dispatch(
+        CommandRequest(command="loop.run"), apply=False, dependencies=dependencies
+    )
+    recovery = dispatch(
+        CommandRequest(command="recovery.inventory"),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    expected = [
+        {
+            "issue_iid": 38,
+            "current_labels": [],
+            "intended_labels": ["agent::prereq_37"],
+        }
+    ]
+    for report in (preview, recovery):
+        payload = report.model_dump(mode="json")
+        assert payload["prerequisite_projections"] == expected
+        from agent_work.cli import _render
+
+        assert '"current_labels":[]' in _render(report, as_json=True)
+        assert "current_labels=" in _render(report, as_json=False)
+        assert "intended_labels=agent::prereq_37" in _render(report, as_json=False)
+    assert gitlab.inventory_calls == 2
+    assert gitlab.label_mutations == 0
+
+
+def test_applied_prerequisite_reconciliation_rechecks_definitions_after_first_update(
+    tmp_path: Path,
+) -> None:
+    """A repeat rechecks definitions without repeating an issue-label update."""
+
+    class IdempotentGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.dependent_labels: tuple[str, ...] = ()
+            self.definitions: list[tuple[str, ...]] = []
+            self.transitions: list[tuple[int, tuple[str, ...]]] = []
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (
+                _issue(iid=37),
+                _issue(
+                    iid=38,
+                    description=render_split_marker(310967, 36, "second", (37,)),
+                ).model_copy(update={"labels": self.dependent_labels}),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            self.definitions.append(labels)
+            return len(self.definitions) == 1
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            self.transitions.append((iid, labels))
+            self.dependent_labels = labels
+            return _issue(iid=iid).model_copy(update={"labels": labels})
+
+    config = _config(tmp_path)
+    gitlab = IdempotentGitLab()
+    dependencies = _dependencies(
+        config,
+        JsonLedger(config.state_root, clock=lambda: NOW),
+        gitlab,
+        FakeRepository(config),
+    )
+    first = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+    definition_count = len(gitlab.definitions)
+    transition_count = len(gitlab.transitions)
+    second = dispatch(
+        CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+    )
+
+    assert first.outcome == "prerequisite_labels_reconciled"
+    assert gitlab.transitions == [(38, ("agent::prereq_37",))]
+    assert len(gitlab.definitions) == definition_count + 1
+    assert len(gitlab.transitions) == transition_count
+    assert second.outcome != "prerequisite_labels_reconciled"
+
+
+def test_partial_prerequisite_label_failure_preserves_prior_update_for_retry(
+    tmp_path: Path,
+) -> None:
+    """A failed later update leaves the earlier durable update intact and unclaimed."""
+
+    class PartialFailureGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(_issue(iid=37))
+            self.labels_by_iid: dict[int, tuple[str, ...]] = {38: (), 39: ()}
+            self.transitions: list[int] = []
+            self.fail_iid = 39
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (
+                _issue(iid=37),
+                *(
+                    _issue(
+                        iid=iid,
+                        description=render_split_marker(
+                            310967, 36, f"child-{iid}", (37,)
+                        ),
+                    ).model_copy(update={"labels": self.labels_by_iid[iid]})
+                    for iid in (38, 39)
+                ),
+            )
+
+        def ensure_prerequisite_labels(self, labels: tuple[str, ...]) -> bool:
+            assert labels == ("agent::prereq_37",)
+            return False
+
+        def transition_prerequisite_labels(
+            self, iid: int, labels: tuple[str, ...]
+        ) -> GitLabIssue:
+            self.transitions.append(iid)
+            if iid == self.fail_iid:
+                raise GitLabError("temporary prerequisite label failure")
+            self.labels_by_iid[iid] = labels
+            return _issue(iid=iid).model_copy(update={"labels": labels})
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = PartialFailureGitLab()
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+
+    with pytest.raises(GitLabError, match="temporary prerequisite label failure"):
+        dispatch(
+            CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+        )
+    assert gitlab.transitions == [38, 39]
+    assert gitlab.labels_by_iid[38] == ("agent::prereq_37",)
+    assert ledger.list_records() == ()
+    assert gitlab.eligible_calls == 0
+
+    gitlab.fail_iid = 0
+    dispatch(CommandRequest(command="loop.run"), apply=True, dependencies=dependencies)
+
+    assert gitlab.transitions == [38, 39, 39]
+    assert gitlab.labels_by_iid[39] == ("agent::prereq_37",)
+    assert ledger.list_records() == ()
+
+
 def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
     tmp_path: Path,
 ) -> None:
@@ -9115,7 +9670,7 @@ def test_existing_awaiting_human_projection_recovers_missing_handoff_note(
     assert gitlab.handoffs == [(12, 88, "a" * 40)]
 
 
-def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
+def test_applied_run_preflight_failure_follows_locked_projection_inventory(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -9137,8 +9692,11 @@ def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
             self.invoke_calls += 1
             raise AssertionError("invoke must not run after failed preflight")
 
+    lock_entries: list[str] = []
+
     def lock() -> object:
-        raise AssertionError("lock must not run after failed preflight")
+        lock_entries.append("entered")
+        return nullcontext()
 
     invoker = UnsupportedInvoker()
     dependencies = replace(
@@ -9154,15 +9712,16 @@ def test_applied_run_preflight_failure_precedes_lock_and_lifecycle_mutation(
 
     assert invoker.preflight_calls == 1
     assert invoker.invoke_calls == 0
+    assert lock_entries == ["entered"]
     assert gitlab.labels == []
     assert ledger.list_records() == ()
     assert not repository.prepared
 
 
-def test_applied_run_preflight_failure_leaves_every_worker_effect_unreached(
+def test_applied_run_preflight_failure_follows_locked_housekeeping_check(
     tmp_path: Path,
 ) -> None:
-    """The injected capability gate runs before durable or worker boundaries."""
+    """A failed capability gate follows read-only locked housekeeping inventory."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab(_issue())
@@ -9195,7 +9754,7 @@ def test_applied_run_preflight_failure_leaves_every_worker_effect_unreached(
             ),
         )
 
-    assert lock_entries == []
+    assert lock_entries == ["entered"]
     assert ledger.list_records() == ()
     assert gitlab.labels == []
     assert repository.prepared is False
