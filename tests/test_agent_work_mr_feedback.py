@@ -1607,6 +1607,84 @@ def test_feedback_publication_replay_after_push_requires_a_clean_exact_worktree(
     assert repository.prepares == 0
 
 
+def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    """Retained feedback dirt must be republished before it can be acknowledged."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    changed_feedback = SingleSessionInvoker()
+    changed_feedback.changed_paths = repository.paths
+
+    selected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert selected is not None and selected.state is RunnerState.REPAIR
+    publishing = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=changed_feedback,
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert publishing is not None and publishing.state is RunnerState.PUBLISHING
+    assert publishing.audit_evidence != "unknown"
+    assert publishing.audit_evidence is not None
+    assert publishing.audit_evidence.changed_paths == repository.paths
+    observed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert observed is not None and observed.state is RunnerState.OBSERVING
+    post_publication = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+    assert post_publication is not None
+    assert post_publication.state is RunnerState.EXECUTING
+    assert post_publication.phase is WorkflowPhase.POST_PUBLICATION
+    repository.dirty = True
+
+    rerouted = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=SingleSessionInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )  # type: ignore[arg-type]
+
+    assert rerouted is not None
+    assert rerouted.state is RunnerState.PUBLISHING
+    assert rerouted.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert rerouted.pending_feedback is not None
+    assert rerouted.pending_feedback.acknowledgement_ready is False
+    assert gitlab.feedback_outcomes == []
+    assert gitlab.created_merge_requests == 0
+
+
 @pytest.mark.parametrize(
     "repair_error",
     (ErrorCode.MERGE_CONFLICT, ErrorCode.PIPELINE_REJECTED),
