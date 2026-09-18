@@ -2309,6 +2309,41 @@ def _execute(
         and outcome.pending_feedback is not None
         and outcome.pending_feedback.outcome is not None
     ):
+        try:
+            retained_changes = repository.has_changes(record.worktree)
+        except RepositoryTransientError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
+        if retained_changes:
+            return ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.PUBLISHING,
+                    phase=WorkflowPhase.READY_TO_PUBLISH,
+                    workflow_lane=outcome.workflow_lane,
+                    receipts=outcome.receipts,
+                    merge_request_draft=outcome.merge_request_draft,
+                    pending_feedback=outcome.pending_feedback.model_copy(
+                        update={"acknowledgement_ready": False}
+                    ),
+                    publication_sha=None,
+                    summary="Validated feedback changes require publication.",
+                    next_action=(
+                        "Bind and publish the exact validated feedback paths, then "
+                        "observe the exact source-SHA pipeline."
+                    ),
+                    error_code=None,
+                )
+            )
         outcome = outcome.model_copy(
             update={
                 "pending_feedback": outcome.pending_feedback.model_copy(
