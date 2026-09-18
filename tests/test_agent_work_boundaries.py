@@ -1193,6 +1193,92 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
     assert "add_labels=agent-prereq_2,agent-prereq_37" in issue_update
 
 
+def test_gitlab_prerequisite_transition_preserves_retained_dynamic_labels_when_gitlab_removals_win(
+    tmp_path: Path,
+) -> None:
+    """Only stale dynamic labels are removed when GitLab resolves overlaps as removals."""
+    commands: list[tuple[str, ...]] = []
+    issue = _issue_payload(
+        labels=[
+            "customer::priority",
+            "agent-work::manual",
+            "agent-prereq_10",
+            "agent-prereq_37",
+        ]
+    )
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint == "projects/310967/issues/12" and method == "GET":
+            return CommandResult(0, json.dumps(issue), "")
+        if endpoint == "projects/310967/issues/12" and method == "PUT":
+            fields = {
+                item.partition("=")[0]: item.partition("=")[2]
+                for item in command
+                if "=" in item
+            }
+            removed = set(fields["remove_labels"].split(","))
+            additions = set(fields["add_labels"].split(","))
+            current_labels = issue["labels"]
+            assert isinstance(current_labels, list)
+            # GitLab resolves a label in both fields as removed, not re-added.
+            issue["labels"] = [
+                label for label in [*current_labels, *additions] if label not in removed
+            ]
+            return CommandResult(0, json.dumps(issue), "")
+        raise AssertionError((endpoint, method))
+
+    updated = GitLabGateway(_config(tmp_path), api).transition_prerequisite_labels(
+        12, ("agent-prereq_2", "agent-prereq_37")
+    )
+
+    assert updated.labels == (
+        "customer::priority",
+        "agent-work::manual",
+        "agent-prereq_37",
+        "agent-prereq_2",
+    )
+    update = next(command for command in commands if "PUT" in command)
+    fields = {
+        item.partition("=")[0]: item.partition("=")[2] for item in update if "=" in item
+    }
+    assert fields == {
+        "remove_labels": "agent-prereq_10",
+        "add_labels": "agent-prereq_2",
+    }
+
+
+def test_gitlab_prerequisite_transition_skips_update_when_current_dynamic_labels_match(
+    tmp_path: Path,
+) -> None:
+    """An already exact dynamic projection performs no mutation request."""
+    commands: list[tuple[str, ...]] = []
+    issue = _issue_payload(
+        labels=["customer::priority", "agent-work::manual", "agent-prereq_2"]
+    )
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        method = command[command.index("-X") + 1]
+        if endpoint == "projects/310967/issues/12" and method == "GET":
+            return CommandResult(0, json.dumps(issue), "")
+        raise AssertionError((endpoint, method))
+
+    updated = GitLabGateway(_config(tmp_path), api).transition_prerequisite_labels(
+        12, ("agent-prereq_2",)
+    )
+
+    assert updated.labels == (
+        "customer::priority",
+        "agent-work::manual",
+        "agent-prereq_2",
+    )
+    assert len(commands) == 1
+
+
 def test_gitlab_prerequisite_projection_inventory_requests_all_issue_states(
     tmp_path: Path,
 ) -> None:
