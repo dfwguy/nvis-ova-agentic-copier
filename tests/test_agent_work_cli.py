@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,11 +20,16 @@ import pytest
 
 from agent_work.cli import _render, build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
+from agent_work.gitlab import (
+    MergeRequestPublicationReport,
+    render_merge_request_description,
+)
 from agent_work.ledger import LockBusy
 from agent_work.models import (
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
+    MergeRequestEvidence,
     PrerequisiteLabelProjectionReport,
     RecoveryCandidateReport,
     RecoverySummary,
@@ -253,6 +258,424 @@ def test_bare_loop_run_is_a_read_only_preview() -> None:
     )
     assert seen == [False]
     assert json.loads(output[0])["applied"] is False
+
+
+def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boundary() -> (
+    None
+):
+    calls: list[Mapping[str, object]] = []
+
+    def publish_merge_request(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> MergeRequestPublicationReport:
+        kwargs = {
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "title": title,
+            "problem": problem,
+            "outcome": outcome,
+            "validation": validation,
+            "impact": impact,
+            "human_action": human_action,
+            "tracking": tracking,
+            "apply": apply,
+        }
+        calls.append(kwargs)
+        return MergeRequestPublicationReport(
+            apply,
+            "would-create",
+            None,
+            render_merge_request_description(
+                problem=problem,
+                outcome=outcome,
+                validation=validation,
+                impact=impact,
+                human_action=human_action,
+                tracking=tracking,
+            ),
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--json",
+                "--source-branch",
+                "clanker/structured-mr-descriptions",
+                "--target-branch",
+                "main",
+                "--title",
+                "Readable request",
+                "--problem",
+                "Bodies escaped newlines.",
+                "--outcome",
+                "Publish Markdown.",
+                "--validation",
+                "uv run pytest",
+                "--validation",
+                "manual dry run",
+                "--impact",
+                "Review quality suffers.",
+                "--human-action",
+                "Review it.",
+                "--tracking",
+                "Closes #123",
+            ],
+            publish_merge_request=publish_merge_request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "source_branch": "clanker/structured-mr-descriptions",
+            "target_branch": "main",
+            "title": "Readable request",
+            "problem": "Bodies escaped newlines.",
+            "outcome": "Publish Markdown.",
+            "validation": ("uv run pytest", "manual dry run"),
+            "impact": "Review quality suffers.",
+            "human_action": "Review it.",
+            "tracking": "Closes #123",
+            "apply": False,
+        }
+    ]
+    assert json.loads(output[0]) == {
+        "applied": False,
+        "action": "would-create",
+        "description": (
+            "## Problem\nBodies escaped newlines.\n\n"
+            "## Impact\nReview quality suffers.\n\n"
+            "## Outcome\nPublish Markdown.\n\n"
+            "## Human action\nReview it.\n\n"
+            "## Validation\n- uv run pytest\n- manual dry run\n\n"
+            "## Tracking\nCloses #123"
+        ),
+    }
+
+
+def test_merge_request_publish_cli_help_and_argument_errors_use_argparse_statuses() -> (
+    None
+):
+    with pytest.raises(SystemExit) as help_exit:
+        main(["merge-request", "publish", "--help"])
+    assert help_exit.value.code == 0
+
+    with pytest.raises(SystemExit) as invalid_exit:
+        main(["merge-request", "publish", "--source-branch", "topic"])
+    assert invalid_exit.value.code == 2
+
+
+def test_merge_request_publish_cli_returns_one_for_a_publication_boundary_failure() -> (
+    None
+):
+    def failing_publish_merge_request(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> MergeRequestPublicationReport:
+        del source_branch, target_branch, title, problem, outcome, validation, impact
+        del human_action, tracking, apply
+        raise RuntimeError("GitLab did not return the requested merge request")
+
+    errors: list[str] = []
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--source-branch",
+                "clanker/structured-mr-descriptions",
+                "--target-branch",
+                "main",
+                "--title",
+                "Readable request",
+                "--problem",
+                "Bodies escaped newlines.",
+                "--outcome",
+                "Publish Markdown.",
+                "--validation",
+                "uv run pytest",
+            ],
+            publish_merge_request=failing_publish_merge_request,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert errors == ["GitLab did not return the requested merge request"]
+
+
+def test_merge_request_publish_cli_text_preview_includes_rendered_description() -> None:
+    output: list[str] = []
+
+    def publish_merge_request(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> MergeRequestPublicationReport:
+        del source_branch, target_branch, title
+        return MergeRequestPublicationReport(
+            apply,
+            "would-create",
+            None,
+            render_merge_request_description(
+                problem=problem,
+                outcome=outcome,
+                validation=validation,
+                impact=impact,
+                human_action=human_action,
+                tracking=tracking,
+            ),
+        )
+
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--source-branch",
+                "clanker/structured-mr-descriptions",
+                "--target-branch",
+                "main",
+                "--title",
+                "Readable request",
+                "--problem",
+                "Bodies escaped newlines.",
+                "--outcome",
+                "Publish Markdown.",
+                "--validation",
+                "uv run pytest",
+            ],
+            publish_merge_request=publish_merge_request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert "## Problem\nBodies escaped newlines." in output[0]
+
+
+def test_merge_request_publish_cli_apply_passes_mutation_opt_in_to_boundary() -> None:
+    calls: list[bool] = []
+
+    def publish_merge_request(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> MergeRequestPublicationReport:
+        del source_branch, target_branch, title, problem, outcome, validation, impact
+        del human_action, tracking
+        calls.append(apply)
+        evidence = MergeRequestEvidence.model_validate(
+            {
+                "iid": 1,
+                "web_url": "https://gitlab.example.com/mr/1",
+                "state": "opened",
+                "source_project_id": 310967,
+                "target_project_id": 310967,
+                "source_branch": "clanker/structured-mr-descriptions",
+                "target_branch": "main",
+                "sha": "a" * 40,
+                "has_conflicts": False,
+                "description": "description",
+                "title": "Readable request",
+                "draft": False,
+            }
+        )
+        return MergeRequestPublicationReport(True, "create", evidence, "description")
+
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--source-branch",
+                "clanker/structured-mr-descriptions",
+                "--target-branch",
+                "main",
+                "--title",
+                "Readable request",
+                "--problem",
+                "Bodies escaped newlines.",
+                "--outcome",
+                "Publish Markdown.",
+                "--validation",
+                "uv run pytest",
+                "--apply",
+            ],
+            publish_merge_request=publish_merge_request,
+            write_stdout=lambda _value: None,
+        )
+        == 0
+    )
+    assert calls == [True]
+
+
+@pytest.mark.parametrize(
+    ("requested_apply", "returned_apply"), [(False, True), (True, False)]
+)
+def test_merge_request_publish_cli_rejects_mismatched_apply_result(
+    requested_apply: bool,
+    returned_apply: bool,
+) -> None:
+    evidence = MergeRequestEvidence.model_validate(
+        {
+            "iid": 1,
+            "web_url": "https://gitlab.example.com/mr/1",
+            "state": "opened",
+            "source_project_id": 310967,
+            "target_project_id": 310967,
+            "source_branch": "topic",
+            "target_branch": "main",
+            "sha": "a" * 40,
+            "has_conflicts": False,
+            "description": "body",
+            "title": "Title",
+            "draft": False,
+        }
+    )
+
+    def publish_merge_request(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> MergeRequestPublicationReport:
+        del source_branch, target_branch, title, problem, outcome, validation, impact
+        del human_action, tracking, apply
+        return MergeRequestPublicationReport(
+            returned_apply, "create", evidence if returned_apply else None, "body"
+        )
+
+    errors: list[str] = []
+    arguments = [
+        "merge-request",
+        "publish",
+        "--source-branch",
+        "topic",
+        "--target-branch",
+        "main",
+        "--title",
+        "Title",
+        "--problem",
+        "Problem",
+        "--outcome",
+        "Outcome",
+        "--validation",
+        "pytest",
+    ]
+    if requested_apply:
+        arguments.append("--apply")
+    assert (
+        main(
+            arguments,
+            publish_merge_request=publish_merge_request,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert errors == ["publication result did not match requested apply state"]
+
+
+def test_merge_request_publish_cli_default_dry_run_composes_numeric_port_without_mutation() -> (
+    None
+):
+    commands: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, "[]", "")
+
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--json",
+                "--source-branch",
+                "clanker/structured-mr-descriptions",
+                "--target-branch",
+                "main",
+                "--title",
+                "Readable request",
+                "--problem",
+                "Bodies escaped newlines.",
+                "--outcome",
+                "Publish Markdown.",
+                "--validation",
+                "uv run pytest",
+                "--tracking",
+                "Closes #123",
+            ],
+            environment={
+                "GITLAB_HOST": "gitlab.example.com",
+                "GITLAB_PROJECT_ID": "310967",
+            },
+            find_executable=lambda _name: "/dedicated/bin/glab",
+            run_command=run_command,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("-X") + 2] == "projects/310967/merge_requests"
+    assert commands[0][commands[0].index("-X") + 1] == "GET"
+    assert "state=opened" in commands[0]
+    assert "source_branch=clanker/structured-mr-descriptions" in commands[0]
+    assert not any("POST" in command or "PUT" in command for command in commands)
+    assert json.loads(output[0]) == {
+        "applied": False,
+        "action": "would-create",
+        "description": (
+            "## Problem\nBodies escaped newlines.\n\n"
+            "## Outcome\nPublish Markdown.\n\n"
+            "## Validation\n- uv run pytest\n\n"
+            "## Tracking\nCloses #123"
+        ),
+    }
 
 
 @pytest.mark.parametrize(

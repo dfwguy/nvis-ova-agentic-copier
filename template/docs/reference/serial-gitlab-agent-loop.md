@@ -7,6 +7,8 @@ tags: [agent-workflow]
 status: current
 last_reviewed: 2026-09-18
 related:
+  - path: ../how-to/validate-template-changes.md
+    why: Shows how to publish a verified template change for review.
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
   - path: ../how-to/resolve-factory-issues.md
@@ -50,6 +52,11 @@ agent-work recovery resolve --issue-iid IID
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
+agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
+                                 --title TEXT --problem TEXT --outcome TEXT
+                                 --validation TEXT [--validation TEXT ...]
+                                 [--impact TEXT] [--human-action TEXT]
+                                 [--tracking TEXT] [--apply] [--json]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -78,6 +85,26 @@ reads bounded general comments and inline discussion replies. New human feedback
 wakes only that issue for existing-MR remediation; no-change feedback is
 acknowledged once, while code changes reuse the same MR and preserve its title,
 description, and closing reference.
+
+### `merge-request publish`
+
+`merge-request publish` renders a reviewer-facing Markdown description with
+the required Problem, Outcome, and Validation sections. It adds Impact, Human
+action, and Tracking only when their matching flags are supplied. Supply one
+or more `--validation` values. Literal escaped line-break payloads are
+rejected before the command can change GitLab.
+
+Without `--apply`, the command previews the intended description and reports
+whether it would create or update, with no mutation. With `--apply`, it uses the configured numeric GitLab project to
+find zero or one open merge request for `--source-branch`: it creates one when
+there is none, updates it when there is one, and rejects an ambiguous result.
+It then reads that exact merge request back and verifies its IID, source and
+target branches, title, and description.
+
+The command never pushes a branch, approves a merge request, or merges it.
+Push the branch first; see [how to validate template changes](../how-to/validate-template-changes.md#publish-the-verified-branch-for-review)
+for a practical publication sequence. `--json` provides the corresponding
+machine-readable result.
 
 ### `credential rotate`
 

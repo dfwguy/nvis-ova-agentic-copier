@@ -30,8 +30,14 @@ from .credential_rotation import (
 )
 from .credential_rotation import rotate_credential as default_rotate_credential
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
+from .gitlab import (
+    GitLabError,
+    GitLabMergeRequestPublisher,
+    render_merge_request_description,
+)
+from .gitlab import publish_merge_request as default_publish_merge_request
 from .ledger import LockBusy
-from .models import CommandReport, LedgerRecord
+from .models import CommandReport, LedgerRecord, MergeRequestEvidence
 from .ports import CommandRunner
 from .repository import run_subprocess
 from .runtime import dispatch as default_dispatch
@@ -93,6 +99,90 @@ class _ChangedPaths(Protocol):
     """Typed read-only worktree observation boundary."""
 
     def __call__(self, worktree: Path) -> tuple[str, ...]: ...
+
+
+class _MergeRequestPublicationReport(Protocol):
+    """Minimal report shape returned by the injected publication boundary."""
+
+    applied: bool
+    action: str
+    merge_request: MergeRequestEvidence | None
+    description: str
+
+
+class _PublishMergeRequest(Protocol):
+    """Structured publication boundary shared by CLI composition and tests."""
+
+    def __call__(
+        self,
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> _MergeRequestPublicationReport: ...
+
+
+def _configured_merge_request_publisher(
+    *,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+    run_command: CommandRunner,
+) -> _PublishMergeRequest:
+    """Compose the structured publisher at the CLI's external boundaries."""
+    host = environment.get("GITLAB_HOST", "")
+    try:
+        project_id = int(environment.get("GITLAB_PROJECT_ID", ""))
+    except ValueError as error:
+        raise GitLabError("GitLab publication configuration is invalid") from error
+    glab = find_executable("glab")
+    if not host or project_id <= 0 or glab is None or not Path(glab).is_absolute():
+        raise GitLabError("GitLab publication configuration is invalid")
+    port = GitLabMergeRequestPublisher(
+        host=host,
+        project_id=project_id,
+        glab_path=str(Path(glab).resolve()),
+        run_command=run_command,
+    )
+
+    def publish(
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        problem: str,
+        outcome: str,
+        validation: tuple[str, ...],
+        impact: str | None,
+        human_action: str | None,
+        tracking: str | None,
+        apply: bool,
+    ) -> _MergeRequestPublicationReport:
+        """Render then delegate one structured CLI request."""
+        return default_publish_merge_request(
+            project_id=project_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description=render_merge_request_description(
+                problem=problem,
+                outcome=outcome,
+                validation=validation,
+                impact=impact,
+                human_action=human_action,
+                tracking=tracking,
+            ),
+            apply=apply,
+            port=port,
+        )
+
+    return publish
 
 
 def _positive_integer(value: str) -> int:
@@ -324,6 +414,23 @@ def build_parser() -> argparse.ArgumentParser:
         apply_help="accepted for command consistency; worker-result build remains read-only",
         debug_help="retain bounded diagnostics on failure",
     )
+    merge_request = resources.add_parser(
+        "merge-request", help="preview or publish one merge request"
+    )
+    merge_request_actions = merge_request.add_subparsers(dest="action", required=True)
+    publish = merge_request_actions.add_parser(
+        "publish", help="render and publish one reviewable merge request"
+    )
+    publish.add_argument("--source-branch", required=True)
+    publish.add_argument("--target-branch", required=True)
+    publish.add_argument("--title", required=True)
+    publish.add_argument("--problem", required=True)
+    publish.add_argument("--outcome", required=True)
+    publish.add_argument("--validation", action="append", required=True)
+    publish.add_argument("--impact")
+    publish.add_argument("--human-action")
+    publish.add_argument("--tracking")
+    _common(publish, apply_help="create or update the merge request; omit for preview")
     return parser
 
 
@@ -565,6 +672,7 @@ def main(
     current_checkout: Callable[[], Path] = Path.cwd,
     load_record: _LoadRecord | None = None,
     changed_paths: _ChangedPaths | None = None,
+    publish_merge_request: _PublishMergeRequest | None = None,
     rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
     migrate_service_environment: Callable[
         ..., ServiceEnvironmentReport
@@ -575,6 +683,56 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "merge-request" and parsed.action == "publish":
+        try:
+            publisher = publish_merge_request or _configured_merge_request_publisher(
+                environment=environment,
+                find_executable=find_executable,
+                run_command=run_command,
+            )
+            report = publisher(
+                source_branch=parsed.source_branch,
+                target_branch=parsed.target_branch,
+                title=parsed.title,
+                problem=parsed.problem,
+                outcome=parsed.outcome,
+                validation=tuple(parsed.validation),
+                impact=parsed.impact,
+                human_action=parsed.human_action,
+                tracking=parsed.tracking,
+                apply=parsed.apply,
+            )
+        except (GitLabError, RuntimeError, ValueError, OSError) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        if report.applied != parsed.apply:
+            write_stderr("publication result did not match requested apply state")
+            return 1
+        payload: dict[str, object] = {
+            "applied": report.applied,
+            "action": report.action,
+        }
+        if not parsed.apply:
+            payload["description"] = report.description
+        elif (merge_request := report.merge_request) is not None:
+            payload["iid"] = merge_request.iid
+            payload["web_url"] = merge_request.web_url
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else (
+                f"{report.action}: applied={str(report.applied).lower()}\n\n{report.description}"
+                if not parsed.apply
+                else (
+                    f"{report.action}: applied=true iid={merge_request.iid} url={merge_request.web_url}"
+                    if merge_request is not None
+                    else ""
+                )
+            )
+        )
+        return 0
     if parsed.resource == "service-environment" and parsed.action == "migrate":
         try:
             report = migrate_service_environment(
