@@ -1593,6 +1593,63 @@ def _feedback_validated_paths(record: LedgerRecord) -> tuple[str, ...] | None:
     return paths if paths and len(paths) == len(audit.changed_paths) else None
 
 
+def _recover_legacy_preparing_feedback_publication(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord | None:
+    """Route one exact legacy dirty feedback retry through publication first."""
+    pending = record.pending_feedback
+    validated_paths = _feedback_validated_paths(record)
+    if (
+        record.state is not RunnerState.PREPARING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.summary != "Human-directed retry requested."
+        or pending is None
+        or pending.outcome is None
+        or not pending.acknowledgement_ready
+        or validated_paths is None
+    ):
+        return None
+    try:
+        retained_paths = tuple(sorted(set(repository.changed_paths(record.worktree))))
+    except RepositoryTransientError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    if retained_paths != validated_paths:
+        return None
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+            pending_feedback=pending.model_copy(
+                update={"acknowledgement_ready": False}
+            ),
+            intent=None,
+            publication_sha=None,
+            summary="Validated legacy feedback changes require publication.",
+            next_action=(
+                "Bind and publish the exact validated feedback paths, then observe "
+                "the exact source-SHA pipeline."
+            ),
+            error_code=None,
+        )
+    )
+
+
 def _validated_path_evidence(paths: tuple[str, ...]) -> dict[str, str | int | None]:
     """Bind a non-secret stable fingerprint of the exact commit path set."""
     return {
@@ -3158,6 +3215,11 @@ def run_segment(
             error_code=ErrorCode.GITLAB_RETRYABLE,
             allow_remote_exhaustion_side_effects=False,
         )
+    legacy_publication = _recover_legacy_preparing_feedback_publication(
+        record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
+    )
+    if legacy_publication is not None:
+        return legacy_publication
     if (
         record.pending_feedback is not None
         and record.pending_feedback.acknowledgement_ready
