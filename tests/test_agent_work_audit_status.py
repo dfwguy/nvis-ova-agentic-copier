@@ -22,7 +22,14 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from agent_work.domain import RunnerState, StatusProjection, WorkflowPhase, WorkKind
-from agent_work.ledger import JsonLedger, XdgProjectLock, observe_project_lock
+from agent_work.ledger import (
+    JsonLedger,
+    LockBusy,
+    XdgIssueLock,
+    XdgProjectLock,
+    observe_issue_lock,
+    observe_project_lock,
+)
 from agent_work.models import (
     AuditCapacity,
     AuditReceiptSummary,
@@ -386,6 +393,35 @@ def test_project_lock_removes_owner_marker_when_owner_permissions_fail(
     replacement = XdgProjectLock(tmp_path / "project.lock")
     replacement.__enter__()
     replacement.__exit__(None, None, None)
+
+
+def test_issue_locks_exclude_same_issue_but_not_distinct_issues(tmp_path: Path) -> None:
+    first = XdgIssueLock(tmp_path, 12)
+    second = XdgIssueLock(tmp_path, 12)
+    distinct = XdgIssueLock(tmp_path, 13)
+
+    with first:
+        assert (
+            observe_issue_lock(tmp_path, 12, process_alive=lambda _pid: True)
+            == "active"
+        )
+        with pytest.raises(LockBusy), second:
+            pass
+        with distinct:
+            assert (
+                observe_issue_lock(tmp_path, 13, process_alive=lambda _pid: True)
+                == "active"
+            )
+
+
+def test_issue_lock_reports_stale_owner_after_crash_evidence(tmp_path: Path) -> None:
+    lock = XdgIssueLock(tmp_path, 12)
+    lock.__enter__()
+    lock.__exit__(None, None, None)
+    lock._owner_marker.parent.mkdir(parents=True, exist_ok=True)
+    lock._owner_marker.write_text("999", encoding="ascii")
+
+    assert observe_issue_lock(tmp_path, 12, process_alive=lambda _pid: False) == "stale"
 
 
 def test_project_lock_preserves_stale_owner_marker_when_owner_write_fails(

@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -2002,6 +2003,7 @@ def _execute(
     timeout_seconds: int,
     now: datetime,
     remaining_seconds: Callable[[], float] | None = None,
+    issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
 ) -> LedgerRecord | None:
     try:
         _verify_authenticated_user(gitlab)
@@ -2067,7 +2069,9 @@ def _execute(
             gitlab=gitlab,
             summary=f"Feedback selection cannot be rendered safely: {error}",
         )
-    invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
+    lock_factory = issue_lock or (lambda _issue_iid: nullcontext())
+    with lock_factory(record.issue_iid):
+        invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
     if invocation.returncode != 0:
         worker_exit = (
             worker_exit_evidence(
@@ -3072,6 +3076,7 @@ def run_segment(
     now: datetime,
     issue_iid: int | None = None,
     remaining_seconds: Callable[[], float] | None = None,
+    issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     record, issue = select_record(
@@ -3292,6 +3297,7 @@ def run_segment(
             timeout_seconds=timeout_seconds,
             now=now,
             remaining_seconds=remaining_seconds,
+            issue_lock=issue_lock,
         )
     if record.state is RunnerState.PUBLISHING:
         return _publish(

@@ -93,6 +93,29 @@ class XdgProjectLock:
         return False
 
 
+class XdgIssueLock(XdgProjectLock):
+    """Nonblocking advisory lock for one issue workflow invocation."""
+
+    def __init__(self, state_root: Path, issue_iid: int) -> None:
+        if issue_iid <= 0:
+            raise ValueError("issue IID must be positive")
+        super().__init__(state_root / "issues" / f"{issue_iid}.lock")
+
+
+def observe_issue_lock(
+    state_root: Path,
+    issue_iid: int,
+    *,
+    process_alive: Callable[[int], bool | None],
+) -> str:
+    """Passively classify one issue lock owner marker."""
+    if issue_iid <= 0:
+        raise ValueError("issue IID must be positive")
+    return observe_project_lock(
+        state_root / "issues" / f"{issue_iid}.lock", process_alive=process_alive
+    )
+
+
 def observe_project_lock(
     path: Path, *, process_alive: Callable[[int], bool | None]
 ) -> str:

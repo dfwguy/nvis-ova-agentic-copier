@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,7 +53,7 @@ from .human_recovery import (
     build_resolution_plan,
     verify_resolution_plan,
 )
-from .ledger import JsonLedger, XdgProjectLock, observe_project_lock
+from .ledger import JsonLedger, XdgIssueLock, XdgProjectLock, observe_project_lock
 from .migration import build_migration_plan
 from .models import (
     AgentWorkConfig,
@@ -839,6 +840,9 @@ class RuntimeDependencies:
     process_probe: Callable[[], str]
     lifecycle_label_drift: Callable[[], tuple[str, ...]] = lambda: ()
     ensure_lifecycle_labels: Callable[[], None] = lambda: None
+    issue_lock: Callable[[int], AbstractContextManager[None]] = lambda _issue_iid: (
+        nullcontext()
+    )
 
 
 @dataclass(frozen=True)
@@ -1188,6 +1192,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         ),
         invoke=AgentInvoker(run_subprocess, environment=os.environ),
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
+        issue_lock=lambda issue_iid: XdgIssueLock(config.state_root, issue_iid),
         clock=now,
         monotonic=time.monotonic,
         sleep=time.sleep,
@@ -2239,6 +2244,7 @@ def dispatch(
                         timeout_seconds=request.max_activation_seconds,
                         now=wired.clock(),
                         issue_iid=target,
+                        issue_lock=wired.issue_lock,
                         remaining_seconds=lambda: (
                             request.max_activation_seconds
                             - (wired.monotonic() - started)
@@ -2788,6 +2794,7 @@ def dispatch(
                 timeout_seconds=request.max_activation_seconds,
                 now=wired.clock(),
                 issue_iid=issue_iid,
+                issue_lock=wired.issue_lock,
                 remaining_seconds=remaining_activation_seconds,
             )
             if record is None:
