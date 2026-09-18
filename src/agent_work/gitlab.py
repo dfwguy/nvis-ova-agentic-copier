@@ -531,16 +531,20 @@ class GitLabGateway:
     ) -> GitLabIssue:
         """Replace only dynamic prerequisite labels and verify the exact result."""
         issue = self.fetch_issue(iid)
-        removed = tuple(
+        current = tuple(
             label for label in issue.labels if prerequisite_label_iid(label) is not None
         )
+        removed = tuple(label for label in current if label not in labels)
+        additions = tuple(label for label in labels if label not in current)
+        fields = ((f"remove_labels={','.join(removed)}",) if removed else ()) + (
+            (f"add_labels={','.join(additions)}",) if additions else ()
+        )
+        if not fields:
+            return issue
         self._call(
             f"projects/{self._config.project_id}/issues/{iid}",
             method="PUT",
-            fields=(
-                f"remove_labels={','.join(removed)}",
-                f"add_labels={','.join(labels)}",
-            ),
+            fields=fields,
         )
         updated = self.fetch_issue(iid)
         expected = (
