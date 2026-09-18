@@ -115,10 +115,15 @@ Before taking repository action:
 8. Treat project-owned values and workflow policy as human-controlled. Never
    change them merely to clear a validation or pipeline gate; obtain explicit
    human approval for the exact policy or value change first.
-9. Write human-facing workflow statuses, blockers, handoffs, and final reports
-   in plain language. Traceability identifiers may appear only when their
-   meaning is explained in plain language on first use; machine-readable
-   structured audit evidence may retain stable internal identifiers unchanged.
+9. Write human-facing workflow statuses, blockers, handoffs, final reports,
+   and MR or issue descriptions in plain language. Lead with the problem,
+   impact, requested action or intended outcome, and validation; state each
+   fact once. Do not paste role receipts, result envelopes, full correction
+   ledgers, or duplicated summaries, and do not wrap ordinary prose or
+   transcripts in code formatting. Keep machine detail in the durable audit.
+   Traceability identifiers may appear only when their meaning is explained in
+   plain language on first use; machine-readable structured audit evidence may
+   retain stable internal identifiers unchanged.
 
 ## Instruction loading
 
@@ -248,10 +253,14 @@ When correction stops for no progress or a human-judgment blocker, Architect
 routes the mechanically safe diff to Finalizer for a draft-safety verdict. Only
 content/language gates and authority boundaries that are safe permit a clearly
 labeled draft/controversial MR. Its title begins `Draft:` and its description
-lists unresolved findings, evidence and the cycle ledger, exact human decisions
-needed, tests, and unchanged project-owned values. A draft-safety verdict never
-approves merge. Unsafe or unvalidated diffs, or ambiguous publication authority,
-return `needs_human` without publication. Normal clean approval is unchanged.
+states the unresolved human decision, requested action, impact, and enough
+validation to review it. Keep detailed findings, receipts, and the
+correction-cycle ledger in the durable audit. Use Draft only when a real human
+decision remains. If no actionable human decision remains and an approved-scope
+correction exists, correct the work and publish a normal MR. A draft-safety
+verdict never approves merge. Unsafe or unvalidated diffs, or ambiguous
+publication authority, return `needs_human` without publication. Normal clean
+approval is unchanged.
 
 The read-only license-checker is an initial Phase-4 reviewer. It independently
 checks the stable post-Green diff and returns a receipt identifying that checked
