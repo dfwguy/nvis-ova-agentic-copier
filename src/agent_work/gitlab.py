@@ -22,9 +22,10 @@ from pydantic import ValidationError
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
+    CANARY_LABEL_SPECS,
     HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
-    LIFECYCLE_LABEL_SPECS,
     LIFECYCLE_LABELS,
+    MANUAL_TRACKER_LABEL,
     PREREQUISITE_LABEL_COLOR,
     PREREQUISITE_LABEL_DESCRIPTION,
     legacy_prerequisite_label_iid,
@@ -411,6 +412,7 @@ class GitLabGateway:
             for issue in issues
             if issue.state == "opened"
             and not issue.confidential
+            and MANUAL_TRACKER_LABEL not in issue.labels
             and not set(issue.labels).intersection(LIFECYCLE_LABELS)
             and self._split_dependencies_closed(issue, by_iid)
         )
@@ -679,15 +681,10 @@ class GitLabGateway:
         return issue
 
     def ensure_lifecycle_labels(self) -> None:
-        """Idempotently provision the fixed lifecycle labels in this numeric project."""
+        """Idempotently provision the fixed canary labels in this numeric project."""
         endpoint = f"projects/{self._config.project_id}/labels"
         existing = self._label_inventory(endpoint)
-        for name in (
-            "agent::needs_repair",
-            "agent::repair_failed",
-            "agent::suggest_close",
-        ):
-            spec = LIFECYCLE_LABEL_SPECS[name]
+        for name, spec in CANARY_LABEL_SPECS.items():
             current = existing.get(name)
             if current is None:
                 self._call(
@@ -713,20 +710,15 @@ class GitLabGateway:
                 )
 
     def lifecycle_label_drift(self) -> tuple[str, ...]:
-        """Return fixed lifecycle labels missing or differing from their specification."""
+        """Return fixed canary labels missing or differing from their specification."""
         endpoint = f"projects/{self._config.project_id}/labels"
         existing = self._label_inventory(endpoint)
         return tuple(
             name
-            for name in (
-                "agent::needs_repair",
-                "agent::repair_failed",
-                "agent::suggest_close",
-            )
+            for name, spec in CANARY_LABEL_SPECS.items()
             if existing.get(name) is None
-            or existing[name].get("color") != LIFECYCLE_LABEL_SPECS[name]["color"]
-            or existing[name].get("description")
-            != LIFECYCLE_LABEL_SPECS[name]["description"]
+            or existing[name].get("color") != spec["color"]
+            or existing[name].get("description") != spec["description"]
         )
 
     def _label_inventory(self, endpoint: str) -> dict[object, dict[str, object]]:

@@ -167,6 +167,15 @@ LIFECYCLE_LABELS: Final = (
     "agent::suggest_close",
 )
 
+MANUAL_TRACKER_LABEL: Final = "agent-work::manual"
+
+_MANUAL_TRACKER_LABEL_SPEC: Final = MappingProxyType(
+    {
+        "color": "#6B7280",
+        "description": "Human-maintained tracker; excluded from fresh agent-work selection.",
+    }
+)
+
 LIFECYCLE_LABEL_SPECS: Final = MappingProxyType(
     {
         "agent::running": MappingProxyType(
@@ -203,6 +212,18 @@ LIFECYCLE_LABEL_SPECS: Final = MappingProxyType(
             }
         ),
     }
+)
+
+CANARY_LABEL_SPECS: Final = MappingProxyType(
+    {
+        name: LIFECYCLE_LABEL_SPECS[name]
+        for name in (
+            "agent::needs_repair",
+            "agent::repair_failed",
+            "agent::suggest_close",
+        )
+    }
+    | {MANUAL_TRACKER_LABEL: _MANUAL_TRACKER_LABEL_SPEC}
 )
 
 

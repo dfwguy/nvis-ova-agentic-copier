@@ -27,6 +27,7 @@ from pytest_subprocess import FakeProcess
 from agent_work.cli import main
 from agent_work.domain import (
     DEFAULT_MAX_ACTIVATION_SECONDS,
+    LIFECYCLE_LABEL_SPECS,
     LIFECYCLE_LABELS,
     ErrorCode,
     render_split_marker,
@@ -1004,18 +1005,77 @@ def test_gitlab_lifecycle_label_provisioning_is_idempotent_and_numeric_project_s
         for command in api.commands
         if "-X" in command and command[command.index("-X") + 1] == "POST"
     ]
-    assert len(creates) == 3
+    assert len(creates) == 4
     assert {label["name"] for label in api.labels} == {
+        "agent-work::manual",
         "agent::needs_repair",
         "agent::repair_failed",
         "agent::suggest_close",
     }
-    assert {label["color"] for label in api.labels} == {"#D4A72C", "#C91C00", "#6F42C1"}
+    lifecycle_definitions = {
+        label["name"]: label
+        for label in api.labels
+        if label["name"].startswith("agent::")
+    }
+    assert {label["color"] for label in lifecycle_definitions.values()} == {
+        "#D4A72C",
+        "#C91C00",
+        "#6F42C1",
+    }
+    manual_definition = next(
+        label for label in api.labels if label["name"] == "agent-work::manual"
+    )
+    assert manual_definition["color"].startswith("#")
+    assert manual_definition["description"].strip()
+    assert "agent-work::manual" not in LIFECYCLE_LABELS
     assert all(label["description"].strip() for label in api.labels)
     assert all(
         command[command.index("-X") + 2] == "projects/310967/labels"
         for command in api.commands
     )
+
+
+@pytest.mark.parametrize(
+    "manual_definition",
+    (
+        None,
+        {
+            "name": "agent-work::manual",
+            "color": "#000000",
+            "description": "wrong",
+        },
+    ),
+)
+def test_gitlab_lifecycle_label_drift_reports_missing_or_mismatched_manual_tracker_marker(
+    tmp_path: Path, manual_definition: dict[str, str] | None
+) -> None:
+    """The guarded canary includes the fixed manual queue-control label."""
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        if endpoint != "projects/310967/labels":
+            raise AssertionError(endpoint)
+        return CommandResult(
+            0,
+            json.dumps(
+                [
+                    *(
+                        {
+                            "name": name,
+                            "color": spec["color"],
+                            "description": spec["description"],
+                        }
+                        for name, spec in LIFECYCLE_LABEL_SPECS.items()
+                    ),
+                    *(() if manual_definition is None else (manual_definition,)),
+                ]
+            ),
+            "",
+        )
+
+    drift = GitLabGateway(_config(tmp_path), api).lifecycle_label_drift()
+
+    assert drift == ("agent-work::manual",)
 
 
 def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministically(
@@ -1029,6 +1089,7 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
             self.issue = _issue_payload(
                 labels=[
                     "customer::priority",
+                    "agent-work::manual",
                     "agent::running",
                     "agent::prereq_10",
                     "agent::prereq_37",
@@ -1104,6 +1165,7 @@ def test_gitlab_prerequisite_labels_are_normalized_and_transitioned_deterministi
 
     assert updated.labels == (
         "customer::priority",
+        "agent-work::manual",
         "agent::running",
         "agent-prereq_2",
         "agent-prereq_37",
@@ -1249,6 +1311,33 @@ def test_gitlab_eligibility_uses_trusted_marker_and_live_state_not_prerequisite_
     result = GitLabGateway(_config(tmp_path), api).list_eligible()
 
     assert tuple(issue.iid for issue in result) == eligible
+
+
+def test_gitlab_manual_tracker_marker_excludes_only_exact_open_issue_from_selection_and_projection(
+    tmp_path: Path,
+) -> None:
+    """A manual queue marker is neither eligible work nor a lifecycle projection."""
+    manual = _issue_payload(12, ["agent-work::manual"]) | {"state": "opened"}
+    lookalike = _issue_payload(13, ["agent-work::manual-review"]) | {"state": "opened"}
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        if endpoint != "projects/310967/issues":
+            raise AssertionError(endpoint)
+        state = next(
+            field.removeprefix("state=")
+            for field in command
+            if field.startswith("state=")
+        )
+        if state == "closed":
+            return CommandResult(0, json.dumps([]), "")
+        return CommandResult(0, json.dumps([manual, lookalike]), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    assert tuple(issue.iid for issue in gateway.list_eligible()) == (13,)
+    assert gateway.list_projected() == ()
+    assert gateway.list_closed_projected() == ()
 
 
 def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(

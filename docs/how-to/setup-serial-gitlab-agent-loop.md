@@ -5,7 +5,7 @@ summary: Install, inspect, plan recovery, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-18
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -37,16 +37,25 @@ non-confidential issues without a lifecycle projection or ledger record, never
 approves or merges, and never applies or drops a recovery stash.
 
 Before enabling the loop, ensure setup provisions the scoped GitLab priority
-labels `agent-priority::high` and `agent-priority::low`, plus lifecycle labels
-`agent::needs_repair` (`#D4A72C`), `agent::repair_failed` (`#C91C00`), and
-`agent::suggest_close` (`#6F42C1`). Use plain descriptions matching the
-reference meanings; do not repurpose these labels for a local workflow. For
-fresh eligible work, the loop orders exact high, normal (no recognized exact
-priority value), then exact low; within each group it uses absolute creation
-time and IID. Apply high to expedite an issue, low to defer it, or remove
-either label to return it to normal ordering. Active/resumable work and all
-eligibility checks still take precedence. Do not retroactively label existing
-issues.
+labels `agent-priority::high` and `agent-priority::low`, the manual-tracker
+marker `agent-work::manual`, and lifecycle labels `agent::needs_repair`
+(`#D4A72C`), `agent::repair_failed` (`#C91C00`), and `agent::suggest_close`
+(`#6F42C1`). Use the provisioned definitions and the meanings in the reference;
+do not repurpose these labels for a local workflow. For fresh eligible work,
+the loop orders exact high, normal (no recognized exact priority value), then
+exact low; within each group it uses absolute creation time and IID. Apply high
+to expedite an issue, low to defer it, or remove either label to return it to
+normal ordering. Active/resumable work and all eligibility checks still take
+precedence. Do not retroactively label existing issues.
+
+To keep an open issue as a human-maintained tracker or recovery checklist, add
+the exact `agent-work::manual` label in the GitLab UI. The loop excludes that
+issue from fresh selection. This marker is not an `agent::…` lifecycle label:
+it does not create a ledger record or worktree, affect prerequisite handling,
+or become input to orphan reconciliation. Do not use it for an error or
+lifecycle state, or to override a prerequisite. Remove the exact label when
+the tracker is ready for ordinary work; an otherwise eligible open issue then
+returns to normal fresh selection.
 
 The loop creates and maintains `agent-prereq_<IID>` labels only when a
 validated split child has an open trusted prerequisite. These non-scoped
@@ -642,10 +651,11 @@ uv run agent-work loop canary --apply --plan-file agent-work-canary-plan.json --
 uv run agent-work loop status --json
 ```
 
-If the preview reports lifecycle-label provisioning, review that deterministic
-label-spec action and apply it with the same stopped-timer sequence above.
-The apply rechecks the preview, creates missing fixed labels, and corrects
-their color or description; it never assigns an issue label.
+If the preview reports lifecycle-label or manual-tracker-marker provisioning,
+review that deterministic label-spec action and apply it with the same
+stopped-timer sequence above. The apply rechecks the preview, creates missing
+fixed labels or the `agent-work::manual` marker, and corrects their color or
+description; it never assigns an issue label.
 
 When status names a retained item requiring recovery, make a separate plan for
 that IID. Do not use ordinary `loop run` to bypass the targeted evidence check:

@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-18
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures, recovers, and migrates the loop.
@@ -496,10 +496,10 @@ rank it compares absolute timezone-aware `created_at`, then numeric IID; it
 does not trust API ordering or query issue notes/comments. Malformed creation
 time evidence fails safely. Labels do not retroactively change existing issues.
 
-Project setup provisions the lifecycle label specifications below with their
-fixed colors and plain descriptions. Humans can assign high to expedite fresh
-work, remove either priority label for normal ordering, or assign low to defer
-it.
+Project setup provisions the lifecycle and manual-tracker label specifications
+below with their fixed colors and plain descriptions. Humans can assign high to
+expedite fresh work, remove either priority label for normal ordering, or
+assign low to defer it.
 
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
@@ -510,6 +510,15 @@ it.
 | `agent::needs_repair` | needs-repair | A legacy or manually checkpointed repair awaits exact recovery; ordinary exact pipeline failures do not enter this state. |
 | `agent::repair_failed` | repair-failed | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed; it retains the evidence needed for safe follow-up. |
 | `agent::suggest_close` | suggest-close | Corroborated duplicate, superseded, already-satisfied, or no-longer-applicable evidence recommends human closure. |
+
+`agent-work::manual` is an exact marker for an open issue that a human keeps as
+a manual tracker or recovery checklist. It is deliberately outside the
+`agent::…` lifecycle-label namespace. Fresh selection ignores a marked issue;
+removing the exact marker returns an otherwise eligible open issue to normal
+fresh selection. The marker is not a lifecycle projection: it creates no
+ledger record or worktree, cannot become orphan-reconciliation input, and does
+not change prerequisite projection or authority. Do not use it as a lifecycle
+or error state, or to bypass a prerequisite.
 
 `agent::needs_repair` uses `#D4A72C`, `agent::repair_failed` uses `#C91C00`,
 and `agent::suggest_close` uses `#6F42C1`. These three labels are mutually
@@ -523,6 +532,7 @@ evidence decision, and `agent::failed` remains exceptional or unrecoverable.
 | `agent-priority::high` | 0 | Human expedite |
 | no recognized exact value | 1 | Normal; remove a scoped label |
 | `agent-priority::low` | 2 | Human defer |
+| `agent-work::manual` | excluded | Human-maintained tracker or recovery checklist; remove to restore ordinary eligibility. |
 
 The durable sequence is `preparing → executing`; execution may enter
 `retry-wait`, resume execution, or produce `publishing`. Verified publication
