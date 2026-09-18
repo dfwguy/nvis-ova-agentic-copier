@@ -1606,7 +1606,7 @@ def _recover_legacy_preparing_feedback_publication(
     validated_paths = _feedback_validated_paths(record)
     if (
         record.state is not RunnerState.PREPARING
-        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.phase is not WorkflowPhase.POST_PUBLICATION
         or record.summary != "Human-directed retry requested."
         or pending is None
         or pending.outcome is None
@@ -1629,7 +1629,7 @@ def _recover_legacy_preparing_feedback_publication(
             record, ledger=ledger, gitlab=gitlab, summary=str(error)
         )
     if retained_paths != validated_paths:
-        return None
+        return _block_feedback_path_mismatch(record, ledger=ledger, gitlab=gitlab)
     return ledger.persist(
         transition_record(
             record,

@@ -1712,7 +1712,7 @@ def test_legacy_preparing_feedback_retry_publishes_exact_retained_audit_before_a
         _awaiting_feedback_record(tmp_path).model_copy(
             update={
                 "state": RunnerState.PREPARING,
-                "phase": WorkflowPhase.WORKFLOW,
+                "phase": WorkflowPhase.POST_PUBLICATION,
                 "summary": "Human-directed retry requested.",
                 "feedback_cursor": cursor,
                 "pending_feedback": PendingMergeRequestFeedback(
@@ -1830,7 +1830,7 @@ def test_legacy_preparing_feedback_retry_rejects_retained_path_mismatch(
         _awaiting_feedback_record(tmp_path).model_copy(
             update={
                 "state": RunnerState.PREPARING,
-                "phase": WorkflowPhase.WORKFLOW,
+                "phase": WorkflowPhase.POST_PUBLICATION,
                 "summary": "Human-directed retry requested.",
                 "feedback_cursor": cursor,
                 "pending_feedback": PendingMergeRequestFeedback(
@@ -1850,7 +1850,7 @@ def test_legacy_preparing_feedback_retry_rejects_retained_path_mismatch(
     gitlab.existing_mr = _mr()
     repository = FakeRepository(config)
     repository.paths = ("src/unvalidated.py",)
-    repository.dirty = True
+    repository.dirty = False
 
     outcome = run_segment(
         ledger=ledger,
@@ -1862,7 +1862,9 @@ def test_legacy_preparing_feedback_retry_rejects_retained_path_mismatch(
     )  # type: ignore[arg-type]
 
     assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.summary == "durable worktree must be clean"
+    assert outcome.summary == (
+        "Feedback publication paths no longer match validated receipt evidence."
+    )
     assert gitlab.feedback_outcomes == []
     assert repository.pushes == 0
 
