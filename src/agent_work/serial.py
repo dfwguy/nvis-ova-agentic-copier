@@ -675,29 +675,35 @@ def _due(record: LedgerRecord, now: datetime) -> bool:
 
 
 def _can_reconcile_published_ordinary_work(record: LedgerRecord) -> bool:
-    """Return whether a stale ordinary record may already have an opened MR."""
+    """Return whether durable evidence proves an ordinary record was published.
+
+    A PUBLISHING record without ``publication_sha`` still needs `_publish()` to
+    bind and push its repaired work, even when an earlier merge request exists.
+    """
     if (
         record.work_kind is not WorkKind.ORDINARY
         or record.revision == 0
         or record.phase is WorkflowPhase.POST_PUBLICATION
     ):
         return False
-    if record.state in {
-        RunnerState.PREPARING,
-        RunnerState.EXECUTING,
-        RunnerState.PUBLISHING,
-    }:
+    if record.state in {RunnerState.PREPARING, RunnerState.EXECUTING}:
         return True
+    if record.state is RunnerState.PUBLISHING:
+        return record.publication_sha is not None
     if record.state is RunnerState.RETRY_WAIT:
-        return record.prior_state in {
-            RunnerState.PREPARING,
-            RunnerState.EXECUTING,
-            RunnerState.PUBLISHING,
-        }
-    return record.state is RunnerState.BLOCKED and record.error_code in {
-        ErrorCode.RETRY_EXHAUSTED,
-        ErrorCode.STATE_RECONCILIATION_FAILED,
-    }
+        return record.prior_state in {RunnerState.PREPARING, RunnerState.EXECUTING} or (
+            record.prior_state is RunnerState.PUBLISHING
+            and record.publication_sha is not None
+        )
+    return (
+        record.state is RunnerState.BLOCKED
+        and record.error_code
+        in {ErrorCode.RETRY_EXHAUSTED, ErrorCode.STATE_RECONCILIATION_FAILED}
+        and (
+            record.phase is not WorkflowPhase.READY_TO_PUBLISH
+            or record.publication_sha is not None
+        )
+    )
 
 
 def _is_fresh_ordinary_preparation(record: LedgerRecord) -> bool:
