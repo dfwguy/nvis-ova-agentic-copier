@@ -40,6 +40,23 @@ durable state and report its next action. It does not replace
 
 ## Evidence reconciliation
 
+Before any `systemctl --user` or `journalctl --user` check from a non-login or
+API shell, establish and validate the user-systemd bus boundary. Preserve
+explicit `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values; only when a
+value is absent, derive `XDG_RUNTIME_DIR=/run/user/<effective-uid>` and
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<effective-uid>/bus`. Require an
+absolute runtime directory owned by the effective user and an absolute,
+existing bus socket owned by that user, and fail closed on any mismatch. Use
+the complete procedure in [the serial-loop setup guide](../../../docs/how-to/setup-serial-gitlab-agent-loop.md#establish-a-validated-user-bus-boundary).
+
+If the variables were absent but the derived directory and socket validate,
+the shell environment was incomplete; do not report a systemd outage. If
+validation fails because the directory or socket is missing, inaccessible,
+not absolute, not owned by the effective user, or not the expected file type,
+report the user-manager evidence as unavailable or invalid and stop. A
+`Failed to connect to bus: No medium found` message alone does not establish a
+systemd outage; first perform this boundary validation.
+
 Identify the configured bare GitLab host and numeric project ID, then use only
 project-scoped issues and merge requests for that identity. Keep credentials
 out of reports: use the configured authentication route only as needed and

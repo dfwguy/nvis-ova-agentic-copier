@@ -680,6 +680,22 @@ outside the loop.
 
 ## Monitor, restart, or stop the loop
 
+### Diagnose user-systemd access before supervision checks
+
+From a non-login or API shell, apply the validated user-bus boundary before
+each `systemctl --user` or `journalctl --user` command. Preserve explicit
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values; derive
+`/run/user/<effective-uid>` and its `bus` socket only for absent values. Then
+validate absolute paths, effective-user ownership, directory/socket types, and
+fail closed on mismatch. The [software-factory-supervisor skill](../../.agents/skills/software-factory-supervisor/SKILL.md)
+requires this procedure at the point of supervision use.
+
+If the derived values validate, the shell was missing environment variables;
+that is not a systemd outage. If validation fails, report the user-manager
+directory or socket as missing, inaccessible, invalid, or incorrectly owned.
+Do not classify `Failed to connect to bus: No medium found` as an outage until
+this validation has failed.
+
 Inspect the timer, service, and redacted state together. Systemd owns service
 logs through the unit's `SyslogIdentifier`; the application also retains its
 local lifecycle log as `agent-work.log` in the XDG project-state directory.
