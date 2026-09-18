@@ -344,6 +344,14 @@ class MergeRequestDraft(BoundaryModel):
     is_draft: bool = False
     decision_review: DecisionReviewSignal | None = None
 
+    @field_validator("description")
+    @classmethod
+    def reject_escaped_linebreaks(cls, value: str) -> str:
+        """Reject a commonly accidental shell-escaped Markdown body."""
+        if "\\n\\n" in value or "\\r\\n" in value:
+            raise ValueError("merge request description contains escaped linebreaks")
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def infer_legacy_draft_flag(cls, value: object) -> object:

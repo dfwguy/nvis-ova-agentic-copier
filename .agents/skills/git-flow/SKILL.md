@@ -266,55 +266,25 @@ the preflight. One user approval per remote-touching command.
      outcome, and validation; state each fact once
    - `target_branch`: `main` (or the default branch returned by the GitLab target check)
 
-   Construct the intended description once as a literal multiline shell value.
-   It must be passed directly as the `description` field: do not percent- or URI-encode the description or its newlines. GitLab's returned description is
-   the authoritative read-back and must match that intended value exactly.
+   Use the executable publication boundary after the push. It renders real
+   newlines from scalar fields and performs the numeric-project selection,
+   create-or-update, and exact authoritative read-back. Do not construct a
+   multiline shell variable or call GitLab's create/update endpoint directly.
 
    ```bash
    source_branch="$(git rev-parse --abbrev-ref HEAD)"
    target_branch="main"
    title="$(git log -1 --format=%s)"
-mr_description=$(cat <<'MR_DESCRIPTION'
-## Problem
-
-Review handoffs were hard to scan.
-
-## Impact
-
-Reviewers could miss the action needed to move the work forward.
-
-## Outcome
-
-Make the MR description concise and nonduplicative.
-
-## Validation
-
-- `git diff --check`
-MR_DESCRIPTION
-)
    git push --set-upstream origin HEAD
-   created_mr_json="$(glab api --hostname "$GITLAB_HOST" -X POST "projects/$GITLAB_PROJECT_ID/merge_requests" \
-     -f "source_branch=$source_branch" \
-     -f "target_branch=$target_branch" \
-     -f "title=$title" \
-     -f description="$mr_description" \
-     -f remove_source_branch=true \
-     -f squash=true)"
-   mr_iid="$(jq -er 'if (.iid | type) == "number" then .iid else error("created MR IID must be a number") end' <<<"$created_mr_json")" || {
-     printf '%s\n' "Created MR did not return a numeric IID" >&2
-     exit 1
-   }
-   read_back_mr_json="$(glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests/$mr_iid")"
-   if ! jq -e --arg iid "$mr_iid" --arg source_branch "$source_branch" \
-     --arg target_branch "$target_branch" --arg title "$title" --arg description "$mr_description" \
-     '(.iid | type) == "number" and (.source_branch | type) == "string" and (.target_branch | type) == "string" and (.title | type) == "string" and (.description | type) == "string" and (.iid | tostring) == $iid and .source_branch == $source_branch and .target_branch == $target_branch and .title == $title and .description == $description' \
-     <<<"$read_back_mr_json" >/dev/null; then
-     printf '%s\n' "MR read-back did not match the submitted IID, branches, title, or Markdown" >&2
-     exit 1
-   fi
+   agent-work merge-request publish \
+     --source-branch "$source_branch" --target-branch "$target_branch" --title "$title" \
+     --problem "Review handoffs were hard to scan." \
+     --impact "Reviewers could miss the action needed to move work forward." \
+     --outcome "Make the MR description concise and nonduplicative." \
+     --validation "git diff --check" --apply
    ```
-   `remove_source_branch=true` deletes the feature branch when the MR merges;
-   `squash=true` collapses the branch's commits into one on merge.
+   Publication verifies the exact IID, source and target branches, title, and
+   Markdown returned by GitLab. A failure is a blocker.
 
    Keep role receipts, result envelopes, full correction ledgers, and duplicated
    summaries out of the human-facing description; retain them in durable audit
@@ -353,7 +323,10 @@ MR_DESCRIPTION
      exit 1
    fi
    ```
-   GitLab updates the existing MR with the new commits. For normal approval,
+   GitLab updates the existing MR with new commits. To replace its title or
+   description, use `agent-work merge-request publish` with scalar Problem,
+   Outcome, and Validation fields after this push; it updates exactly that
+   source branch and verifies the returned metadata. For normal approval,
    preserve its existing title and description only when they remain current
    and comply with the concise contract; after the shown push and read-back,
    stop when they do. Otherwise, update that same MR once after that verified

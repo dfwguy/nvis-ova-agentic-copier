@@ -14,8 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import cast
+from typing import Protocol, cast
 from urllib.parse import quote
 
 from pydantic import ValidationError
@@ -103,6 +104,7 @@ def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, 
 
 def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
     """Build one canonical description with exactly one closing reference."""
+    _reject_escaped_linebreaks(draft.description)
     body = (
         render_decision_review_notice(draft.decision_review, draft.description)
         if draft.decision_review is not None
@@ -129,6 +131,251 @@ def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
         if "agent-work-feedback-notice:v1" not in line
     )
     return f"{retained.rstrip()}\n\n{notice}\n\n{closing}"
+
+
+def _reject_escaped_linebreaks(description: str) -> None:
+    """Reject accidental literal newlines before an external mutation."""
+    if "\\n\\n" in description or "\\r\\n" in description:
+        raise GitLabError("merge request description contains escaped linebreaks")
+
+
+def render_merge_request_description(
+    *,
+    problem: str,
+    outcome: str,
+    validation: tuple[str, ...],
+    impact: str | None = None,
+    human_action: str | None = None,
+    tracking: str | None = None,
+) -> str:
+    """Render the stable, human-readable ordinary merge-request body."""
+    sections = [("Problem", problem)]
+    if impact:
+        sections.append(("Impact", impact))
+    sections.append(("Outcome", outcome))
+    if human_action:
+        sections.append(("Human action", human_action))
+    sections.append(("Validation", "\n".join(f"- {item}" for item in validation)))
+    if tracking:
+        sections.append(("Tracking", tracking))
+    return "\n\n".join(f"## {heading}\n{body}" for heading, body in sections)
+
+
+class MergeRequestPublicationPort(Protocol):
+    """Direct publication transport for one ordinary merge request."""
+
+    def list_merge_requests(
+        self, *, project_id: int, source_branch: str
+    ) -> tuple[MergeRequestEvidence, ...]: ...
+    def create_merge_request(
+        self,
+        *,
+        project_id: int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> MergeRequestEvidence: ...
+    def update_merge_request(
+        self,
+        *,
+        project_id: int,
+        iid: int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> MergeRequestEvidence: ...
+    def fetch_merge_request(
+        self, *, project_id: int, iid: int
+    ) -> MergeRequestEvidence: ...
+
+
+@dataclass(frozen=True)
+class MergeRequestPublicationReport:
+    """Immutable result of a preview or exact ordinary publication."""
+
+    applied: bool
+    action: str
+    merge_request: MergeRequestEvidence | None
+    description: str
+
+    def __post_init__(self) -> None:
+        """Require authoritative evidence for any applied result."""
+        if self.applied != (self.merge_request is not None):
+            raise GitLabError("publication report evidence does not match apply state")
+
+
+def publish_merge_request(
+    *,
+    project_id: int,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description: str,
+    apply: bool,
+    port: MergeRequestPublicationPort,
+) -> MergeRequestPublicationReport:
+    """Preview or publish exactly one merge request and verify it by read-back."""
+    _reject_escaped_linebreaks(description)
+    candidates = port.list_merge_requests(
+        project_id=project_id, source_branch=source_branch
+    )
+    if len(candidates) > 1:
+        raise GitLabError(
+            "more than one open merge request exists for the source branch"
+        )
+    action = "would-update" if candidates else "would-create"
+    if not apply:
+        return MergeRequestPublicationReport(False, action, None, description)
+    if candidates and (
+        candidates[0].state != "opened"
+        or candidates[0].source_branch != source_branch
+        or candidates[0].target_branch != target_branch
+        or candidates[0].source_project_id != project_id
+        or candidates[0].target_project_id != project_id
+    ):
+        raise GitLabError("listed merge request does not match requested publication")
+    submitted = (
+        port.update_merge_request(
+            project_id=project_id,
+            iid=candidates[0].iid,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description=description,
+        )
+        if candidates
+        else port.create_merge_request(
+            project_id=project_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description=description,
+        )
+    )
+    read_back = port.fetch_merge_request(project_id=project_id, iid=submitted.iid)
+    if (
+        read_back.iid != submitted.iid
+        or read_back.state != "opened"
+        or read_back.source_branch != source_branch
+        or read_back.target_branch != target_branch
+        or read_back.title != title
+        or read_back.description != description
+        or (
+            read_back.source_project_id is not None
+            and read_back.source_project_id != project_id
+        )
+        or (
+            read_back.target_project_id is not None
+            and read_back.target_project_id != project_id
+        )
+    ):
+        raise GitLabError(
+            "merge request read-back does not match the requested publication"
+        )
+    return MergeRequestPublicationReport(
+        True, action.removeprefix("would-"), read_back, description
+    )
+
+
+class GitLabMergeRequestPublisher:
+    """Small numeric-project GitLab transport for ordinary MR publication."""
+
+    def __init__(
+        self, *, host: str, project_id: int, glab_path: str, run_command: CommandRunner
+    ) -> None:
+        self._host, self._project_id, self._glab_path, self._run_command = (
+            host,
+            project_id,
+            glab_path,
+            run_command,
+        )
+
+    def _require_project(self, project_id: int) -> None:
+        if project_id != self._project_id:
+            raise GitLabError("publication project does not match configured project")
+
+    def _call(
+        self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
+    ) -> object:
+        return _call_gitlab(
+            host=self._host,
+            glab_path=self._glab_path,
+            run_command=self._run_command,
+            endpoint=endpoint,
+            method=method,
+            fields=fields,
+        )
+
+    def _mr(self, payload: object) -> MergeRequestEvidence:
+        return _merge_request(payload)
+
+    def list_merge_requests(
+        self, *, project_id: int, source_branch: str
+    ) -> tuple[MergeRequestEvidence, ...]:
+        self._require_project(project_id)
+        payload = self._call(
+            f"projects/{project_id}/merge_requests",
+            fields=("state=opened", f"source_branch={source_branch}"),
+        )
+        if not isinstance(payload, list):
+            raise GitLabError("GitLab returned invalid merge request list")
+        return tuple(self._mr(item) for item in payload)
+
+    def create_merge_request(
+        self,
+        *,
+        project_id: int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> MergeRequestEvidence:
+        self._require_project(project_id)
+        _reject_escaped_linebreaks(description)
+        return self._mr(
+            self._call(
+                f"projects/{project_id}/merge_requests",
+                method="POST",
+                fields=(
+                    f"source_branch={source_branch}",
+                    f"target_branch={target_branch}",
+                    f"title={title}",
+                    f"description={description}",
+                    "remove_source_branch=true",
+                    "squash=true",
+                ),
+            )
+        )
+
+    def update_merge_request(
+        self,
+        *,
+        project_id: int,
+        iid: int,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> MergeRequestEvidence:
+        self._require_project(project_id)
+        _reject_escaped_linebreaks(description)
+        return self._mr(
+            self._call(
+                f"projects/{project_id}/merge_requests/{iid}",
+                method="PUT",
+                fields=(
+                    f"target_branch={target_branch}",
+                    f"title={title}",
+                    f"description={description}",
+                ),
+            )
+        )
+
+    def fetch_merge_request(self, *, project_id: int, iid: int) -> MergeRequestEvidence:
+        self._require_project(project_id)
+        return self._mr(self._call(f"projects/{project_id}/merge_requests/{iid}"))
 
 
 def _require_exact_metadata(
@@ -160,6 +407,55 @@ def _creation_time(issue: GitLabIssue) -> datetime:
     return created_at
 
 
+def _call_gitlab(
+    *,
+    host: str,
+    glab_path: str,
+    run_command: CommandRunner,
+    endpoint: str,
+    method: str = "GET",
+    fields: tuple[str, ...] = (),
+    allow_empty_response: bool = False,
+) -> object:
+    """Run one bounded numeric-project GitLab request and parse JSON."""
+    try:
+        result = run_command(
+            (
+                glab_path,
+                "api",
+                "--hostname",
+                host,
+                "-X",
+                method,
+                endpoint,
+                *(part for field in fields for part in ("-f", field)),
+            ),
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError as error:
+        raise GitLabError("GitLab API request timed out") from error
+    if result.returncode != 0:
+        raise GitLabError("GitLab API request failed")
+    if allow_empty_response and not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GitLabError("GitLab returned invalid JSON") from error
+
+
+def _merge_request(payload: object) -> MergeRequestEvidence:
+    """Validate one GitLab merge-request payload."""
+    if not isinstance(payload, dict):
+        raise GitLabError("GitLab returned invalid merge request data")
+    try:
+        return MergeRequestEvidence.model_validate(
+            _selected(cast(dict[str, object], payload), MR_FIELDS)
+        )
+    except ValidationError as error:
+        raise GitLabError("GitLab returned invalid merge request data") from error
+
+
 class GitLabGateway:
     """Use only the configured numeric GitLab project endpoint."""
 
@@ -170,30 +466,15 @@ class GitLabGateway:
     def _call(
         self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
     ) -> object:
-        command = (
-            str(self._config.glab_path),
-            "api",
-            "--hostname",
-            self._config.host,
-            "-X",
-            method,
-            endpoint,
-            *(part for field in fields for part in ("-f", field)),
+        return _call_gitlab(
+            host=self._config.host,
+            glab_path=str(self._config.glab_path),
+            run_command=self._run_command,
+            endpoint=endpoint,
+            method=method,
+            fields=fields,
+            allow_empty_response=method == "DELETE",
         )
-        try:
-            result = self._run_command(
-                command, timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
-            )
-        except CommandTimeoutError as error:
-            raise GitLabError("GitLab API request timed out") from error
-        if result.returncode != 0:
-            raise GitLabError("GitLab API request failed")
-        if method == "DELETE" and not result.stdout.strip():
-            return None
-        try:
-            return cast(object, json.loads(result.stdout))
-        except json.JSONDecodeError as error:
-            raise GitLabError("GitLab returned invalid JSON") from error
 
     @staticmethod
     def _mapping(payload: object, name: str) -> dict[str, object]:

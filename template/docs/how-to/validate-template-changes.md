@@ -5,12 +5,14 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-18
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
   - path: refresh-ci-image.md
     why: Publishes the dependency image used to accelerate these checks.
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the merge-request publication command.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -87,3 +89,28 @@ For the exact generated-project contract, see the
 [template reference](../reference/template-contract.md). For the distinction
 between this template and its generated output, see
 [the template explanation](../explanation/template-and-generated-project.md).
+
+## Publish the verified branch for review
+
+After the checks pass, push the feature branch. Then preview the merge-request
+description before changing GitLab:
+
+```bash
+uv run agent-work merge-request publish \
+  --source-branch "$(git branch --show-current)" \
+  --target-branch main \
+  --title "Add concise merge-request publication" \
+  --problem "Reviewers need a consistent summary of the change." \
+  --outcome "The branch has a structured merge-request description." \
+  --validation "uv run tox" \
+  --validation "uv run ruff check ."
+```
+
+Review the preview. Run the same command with `--apply` to create a merge
+request or update the one open merge request for that source branch. The
+command does not push, approve, or merge. It rejects more than one open merge
+request for the source branch. Add `--impact`, `--human-action`, or
+`--tracking` only when that information helps the reviewer.
+
+See the [merge-request publication reference](../reference/serial-gitlab-agent-loop.md#merge-request-publish)
+for every option and its verification contract.
