@@ -307,14 +307,23 @@ the documented redacted JSON result. `--debug` adds local diagnostics without
 credentials, issue text, prompts, or worker transcripts. Invalid usage exits `2`.
 
 `upstream-finding preview` validates a manifest against an explicit upstream
-GitLab target through bounded GET-only requests. It never posts an issue or
-writes files. Its successful output contains only structural fields, stable
-fingerprints, counts, and the matching upstream issue IID for an exact marker;
-it never prints project identity, finding text, validation evidence, or evidence
-URLs. Invalid manifests and unreadable files
-exit `1` with sanitized diagnostics.
-`--apply` is accepted only for uniform command syntax and remains a harmless
-no-op for this read-only preview.
+GitLab target. Without `--apply`, it makes bounded GET-only requests and returns
+`match` for an open issue with the exact reserved marker or `would-create` when
+none exists; it never writes files or changes an issue, checkout, ledger,
+labels, assignments, approvals, or merge state. With `--apply`, the command
+first performs that same preview. On `would-create`, it repeats exact-marker
+deduplication immediately before one possible create request. A newly found
+marker returns `match`; otherwise a verified successful create returns
+`created`. `--apply` is the sole mutation switch.
+
+Success output remains redacted: JSON contains only `schema_version`,
+`command`, `outcome`, the three fingerprints, `copied_path_count`,
+`evidence_link_count`, and optional `matching_iid`. Human output contains the
+same outcome, fingerprints, counts, and matching IID when present. Output,
+errors, and debug diagnostics never echo manifest prose, project identity,
+title, body, credentials, or evidence URLs. Invalid manifests, unreadable
+credential files, access/API failures, and response-verification failures exit
+`1` with sanitized diagnostics; invalid usage exits `2`.
 
 `worker-result build` is a read-only worker helper. It reads one strict,
 structured JSON request and the retained ledger and worktree for the supplied
@@ -438,16 +447,41 @@ evidence, and evidence links are mutable metadata and do not affect the
 semantic fingerprint. NFC normalization and harmless surrounding whitespace
 produce the same fingerprints.
 
-JSON success output contains only `schema_version`, `command`, `outcome`, the
-three fingerprints, `copied_path_count`, `evidence_link_count`, and optional
-`matching_iid`; it appears only when an upstream issue description contains
-the exact reserved marker
+The exact reserved marker is
 `<!-- agent-work-upstream-finding:v1 project=<project_fingerprint> revision=<revision_fingerprint> semantic=<semantic_finding_fingerprint> -->`.
-Human success output contains the outcome, three
-fingerprints, the two counts, and that matching IID when present. No manifest
-content is retained or printed. Valid
-previews exit `0`; sanitized read or validation failures exit `1`; argparse
-usage failures exit `2`.
+It is the remote recovery evidence; this standalone command creates no durable
+local ledger or state machine. A preview returns `match` when an open issue has
+that exact marker and `would-create` otherwise. An applied invocation that
+finds the marker at either deduplication point returns `match`; a verified new
+issue returns `created` with its IID.
+
+When applying, the command sends one deterministic redacted title and bounded,
+evidence-backed body containing exactly one canonical marker and explicitly
+sets the issue non-confidential. The body may include validated finding evidence,
+copied paths, reproduction, priority, severity, scope, and canonical
+fingerprints. It may include evidence links only when their manifest entries
+declare `visibility: public`; it omits raw generated-project host, ID, and path,
+raw Copier source and revision, credentials, and injected reserved markers.
+The command does not label or assign the issue.
+
+The returned create response must identify the configured numeric upstream
+project, a positive IID, open and non-confidential state, the exact sent title,
+and a description with exactly one canonical marker. Its URL must be the
+canonical HTTPS issue URL for the verified upstream host, project path, and IID.
+Any mismatch is a sanitized failure. A transport, nonzero, or malformed create
+response can be uncertain, so the invocation never retries its POST. Rerun
+explicitly after such a failure: the marker scan either recovers the issue as
+`match` or, only when no exact marker exists, makes at most one new create.
+This immediate repeat-deduplication and one-POST bound does not promise to
+resolve concurrent cross-host races.
+
+Valid preview, match, and verified-created outcomes exit `0`; sanitized
+validation, access, API, and response failures exit `1`; argparse usage exits
+`2`. A newly created issue is open, non-confidential, unlabelled, and
+unassigned. It enters the explicit upstream project's normal guarded factory
+issue workflow only when that upstream project has one enabled; neither the
+generated/source project nor the upstream template project or factory approves
+or merges. Humans retain approval and merge authority.
 
 `AGENT_WORK_BASE_BRANCH` is required and must name a valid configured
 `agent/...` service branch; the setup uses the canonical `agent/work-base`

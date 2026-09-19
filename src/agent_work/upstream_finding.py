@@ -17,7 +17,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -28,6 +28,8 @@ from yaml.events import AliasEvent
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 _MAX_BYTES = 64 * 1024
+MAX_ISSUE_DESCRIPTION = 10_000
+RESERVED_MARKER_PREFIX = "<!-- agent-work-upstream-finding:"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -311,6 +313,90 @@ class UpstreamFindingPreview:
         )
 
 
+@dataclass(frozen=True)
+class PreparedIssueDraft:
+    """Immutable structured evidence with a canonical derived issue payload."""
+
+    preview: UpstreamFindingPreview
+    expected_behavior: str
+    observed_behavior: str
+    validation_evidence: str
+    priority: Literal["low", "medium", "high", "urgent"]
+    severity: Literal["low", "medium", "high", "critical"]
+    scope: Literal["generated-project", "template", "both"]
+    copied_paths: tuple[str, ...]
+    reproduction: tuple[str, ...]
+    evidence_links: tuple[str, ...]
+    marker: str = field(init=False)
+    title: str = field(init=False)
+    description: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Validate structured evidence and derive the only postable payload."""
+        if (
+            self.priority not in {"low", "medium", "high", "urgent"}
+            or self.severity not in {"low", "medium", "high", "critical"}
+            or self.scope not in {"generated-project", "template", "both"}
+        ):
+            raise ValueError("issue draft is invalid")
+        if (
+            not self.copied_paths
+            or len(self.copied_paths) > 100
+            or not self.reproduction
+            or len(self.reproduction) > 20
+            or len(self.evidence_links) > 20
+        ):
+            raise ValueError("issue draft is invalid")
+        object.__setattr__(
+            self, "expected_behavior", _safe_text(self.expected_behavior, "text")
+        )
+        object.__setattr__(
+            self, "observed_behavior", _safe_text(self.observed_behavior, "text")
+        )
+        object.__setattr__(
+            self, "validation_evidence", _safe_text(self.validation_evidence, "text")
+        )
+        object.__setattr__(
+            self,
+            "copied_paths",
+            tuple(sorted({_safe_path(item) for item in self.copied_paths})),
+        )
+        object.__setattr__(
+            self,
+            "reproduction",
+            tuple(
+                _safe_text(item, "reproduction", maximum=2_000)
+                for item in self.reproduction
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_links",
+            tuple(_safe_link(item) for item in self.evidence_links),
+        )
+        semantic_fingerprint = _fingerprint(
+            {
+                "revision": self.preview.revision_fingerprint,
+                "copied_paths": self.copied_paths,
+                "reproduction": self.reproduction,
+                "expected_behavior": self.expected_behavior,
+                "observed_behavior": self.observed_behavior,
+                "scope": self.scope,
+            }
+        )
+        if (
+            semantic_fingerprint != self.preview.semantic_finding_fingerprint
+            or self.preview.copied_path_count != len(self.copied_paths)
+            or self.preview.evidence_link_count != len(self.evidence_links)
+        ):
+            raise ValueError("issue draft is invalid")
+        marker, title, description = _render_issue_payload(self)
+        object.__setattr__(self, "marker", marker)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "description", description)
+        validate_prepared_issue_draft(self)
+
+
 def render_reserved_marker(preview: UpstreamFindingPreview) -> str:
     """Render the sole canonical marker used to identify an upstream finding."""
     fingerprints = (
@@ -324,6 +410,64 @@ def render_reserved_marker(preview: UpstreamFindingPreview) -> str:
         "<!-- agent-work-upstream-finding:v1 project="
         f"{fingerprints[0]} revision={fingerprints[1]} semantic={fingerprints[2]} -->"
     )
+
+
+def render_issue_title(preview: UpstreamFindingPreview) -> str:
+    """Render the one canonical title paired with a prepared finding."""
+    return f"Upstream generated finding {preview.semantic_finding_fingerprint[:12]}"
+
+
+def _render_issue_payload(draft: PreparedIssueDraft) -> tuple[str, str, str]:
+    """Render the sole canonical title and body from validated structured state."""
+    marker = render_reserved_marker(draft.preview)
+    body = "\n".join(
+        (
+            "## Validated upstream finding",
+            "",
+            marker,
+            "",
+            "## Fingerprint provenance",
+            f"- Project fingerprint: `{draft.preview.project_fingerprint}`",
+            f"- Revision fingerprint: `{draft.preview.revision_fingerprint}`",
+            f"- Semantic finding fingerprint: `{draft.preview.semantic_finding_fingerprint}`",
+            "",
+            "## Finding evidence",
+            f"- Expected behavior: {draft.expected_behavior}",
+            f"- Observed behavior: {draft.observed_behavior}",
+            f"- Validation evidence: {draft.validation_evidence}",
+            f"- Priority: {draft.priority}",
+            f"- Severity: {draft.severity}",
+            f"- Scope: {draft.scope}",
+            "",
+            "## Copied paths",
+            *(f"- `{item}`" for item in draft.copied_paths),
+            "",
+            "## Reproduction",
+            *(f"{index}. {item}" for index, item in enumerate(draft.reproduction, 1)),
+            *(("", "## Public evidence links") if draft.evidence_links else ()),
+            *(f"- {item}" for item in draft.evidence_links),
+        )
+    )
+    return marker, render_issue_title(draft.preview), body
+
+
+def validate_prepared_issue_draft(draft: PreparedIssueDraft) -> None:
+    """Require the producer and direct callers to use one safe draft contract."""
+    marker, expected_title, expected_description = _render_issue_payload(draft)
+    if (
+        draft.marker != marker
+        or draft.title != expected_title
+        or draft.description != expected_description
+        or len(draft.description) > MAX_ISSUE_DESCRIPTION
+        or draft.description.count(RESERVED_MARKER_PREFIX) != 1
+        or draft.description.count(marker) != 1
+        or _SECRET.search(draft.description)
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf"} and character != "\n"
+            for character in draft.description
+        )
+    ):
+        raise ValueError("issue draft is invalid")
 
 
 def _fingerprint(value: object) -> str:
@@ -391,13 +535,11 @@ def preview_manifest(
     path: Path, *, read_bytes: Callable[[Path], bytes]
 ) -> UpstreamFindingPreview:
     """Read through the injected boundary and return a safe local summary."""
-    try:
-        content = read_bytes(path)
-    except (OSError, RuntimeError, TypeError, ValueError):
-        raise ManifestError("manifest file could not be read") from None
-    if not isinstance(content, bytes):
-        raise ManifestError("manifest file could not be read")
-    manifest = _parse(content)
+    return prepare_issue_draft(path, read_bytes=read_bytes).preview
+
+
+def _preview_from_manifest(manifest: _Manifest) -> UpstreamFindingPreview:
+    """Build the content-free preview from an already validated manifest."""
     project = manifest.generated_project
     copier = manifest.copier
     finding = manifest.finding
@@ -436,3 +578,33 @@ def preview_manifest(
         copied_path_count=len(paths),
         evidence_link_count=len(finding.evidence_links),
     )
+
+
+def prepare_issue_draft(
+    path: Path, *, read_bytes: Callable[[Path], bytes]
+) -> PreparedIssueDraft:
+    """Read once and prepare one bounded, redacted upstream issue draft."""
+    try:
+        content = read_bytes(path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ManifestError("manifest file could not be read") from None
+    if not isinstance(content, bytes):
+        raise ManifestError("manifest file could not be read")
+    manifest = _parse(content)
+    preview = _preview_from_manifest(manifest)
+    finding = manifest.finding
+    try:
+        return PreparedIssueDraft(
+            preview=preview,
+            expected_behavior=finding.expected_behavior,
+            observed_behavior=finding.observed_behavior,
+            validation_evidence=finding.validation_evidence,
+            priority=finding.priority,
+            severity=finding.severity,
+            scope=finding.scope,
+            copied_paths=tuple(finding.copied_paths),
+            reproduction=tuple(finding.reproduction),
+            evidence_links=tuple(link.url for link in finding.evidence_links),
+        )
+    except ValueError:
+        raise ManifestError("issue draft is invalid") from None

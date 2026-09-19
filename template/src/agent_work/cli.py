@@ -50,8 +50,8 @@ from .service_environment import (
     migrate_service_environment as default_migrate_service_environment,
 )
 from .status import project_status
-from .upstream_finding import ManifestError, UpstreamFindingPreview
-from .upstream_finding import preview_manifest as default_preview_manifest
+from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
+from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
 from .upstream_gitlab import (
     UpstreamGitLabConfig,
     UpstreamGitLabError,
@@ -65,20 +65,36 @@ from .worker import (
 )
 
 
-class _PreviewManifest(Protocol):
-    """Typed local preview boundary."""
-
-    def __call__(
-        self, path: Path, *, read_bytes: Callable[[Path], bytes]
-    ) -> UpstreamFindingPreview: ...
-
-
 class _PreviewUpstream(Protocol):
     """Typed read-only upstream preview boundary."""
 
     def __call__(
         self,
         preview: UpstreamFindingPreview,
+        *,
+        host: str,
+        project_id: int,
+        credential_file: Path,
+        read_credential: Callable[[Path], bytes],
+        run_command: CommandRunner,
+        environment: Mapping[str, str],
+    ) -> UpstreamFindingPreview: ...
+
+
+class _PrepareIssueDraft(Protocol):
+    """Typed local draft-preparation boundary."""
+
+    def __call__(
+        self, path: Path, *, read_bytes: Callable[[Path], bytes]
+    ) -> PreparedIssueDraft: ...
+
+
+class _ApplyUpstream(Protocol):
+    """Typed upstream apply boundary."""
+
+    def __call__(
+        self,
+        draft: PreparedIssueDraft,
         *,
         host: str,
         project_id: int,
@@ -382,13 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     _common(apply_parser)
     apply_parser.add_argument("--plan-file", type=Path, required=True)
     finding = resources.add_parser(
-        "upstream-finding", help="preview a read-only upstream finding"
+        "upstream-finding", help="preview or file an upstream finding"
     )
     finding_actions = finding.add_subparsers(dest="action", required=True)
     finding_preview = finding_actions.add_parser(
         "preview",
-        help="validate and deduplicate an upstream finding without writes",
-        description="Read-only upstream GitLab preview; it never posts an issue or writes files.",
+        help="preview an upstream finding; use --apply to file one issue",
+        description="Read-only GitLab preview by default; --apply can write one deduplicated upstream issue.",
     )
     finding_preview.add_argument("--manifest-file", type=Path, required=True)
     finding_preview.add_argument("--upstream-host", required=True)
@@ -398,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     finding_preview.add_argument("--upstream-credential-file", type=Path, required=True)
     _common(
         finding_preview,
-        apply_help="accepted for command consistency; preview remains read-only",
+        apply_help="create one deduplicated upstream issue; omit for a read-only preview",
     )
     worker_result = resources.add_parser(
         "worker-result", help="build a read-only validated worker result"
@@ -629,8 +645,7 @@ def _render_service_environment(
     )
 
 
-def _default_preview_upstream(
-    preview: UpstreamFindingPreview,
+def _upstream_reader(
     *,
     host: str,
     project_id: int,
@@ -639,8 +654,8 @@ def _default_preview_upstream(
     run_command: CommandRunner,
     environment: Mapping[str, str],
     find_executable: Callable[[str], str | None],
-) -> UpstreamFindingPreview:
-    """Compose the explicitly configured read-only upstream boundary."""
+) -> UpstreamGitLabReader:
+    """Construct the one configured upstream client for either operation."""
     configured = environment.get("AGENT_WORK_GLAB")
     candidate = configured if configured else find_executable("glab")
     if candidate is None or not Path(candidate).is_absolute():
@@ -652,19 +667,65 @@ def _default_preview_upstream(
     except (OSError, ValueError):
         raise UpstreamGitLabError("upstream configuration is invalid") from None
     return UpstreamGitLabReader(
-        config,
+        config, read_credential=read_credential, run_command=run_command
+    )
+
+
+def _default_preview_upstream(
+    preview: UpstreamFindingPreview,
+    *,
+    host: str,
+    project_id: int,
+    credential_file: Path,
+    read_credential: Callable[[Path], bytes],
+    run_command: CommandRunner,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+) -> UpstreamFindingPreview:
+    """Preview through the shared configured upstream client."""
+    return _upstream_reader(
+        host=host,
+        project_id=project_id,
+        credential_file=credential_file,
         read_credential=read_credential,
         run_command=run_command,
+        environment=environment,
+        find_executable=find_executable,
     ).preview(preview)
+
+
+def _default_apply_upstream(
+    draft: PreparedIssueDraft,
+    *,
+    host: str,
+    project_id: int,
+    credential_file: Path,
+    read_credential: Callable[[Path], bytes],
+    run_command: CommandRunner,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+) -> UpstreamFindingPreview:
+    """Apply through the shared configured upstream client."""
+    return _upstream_reader(
+        host=host,
+        project_id=project_id,
+        credential_file=credential_file,
+        read_credential=read_credential,
+        run_command=run_command,
+        environment=environment,
+        find_executable=find_executable,
+    ).apply(draft.preview, draft)
 
 
 def main(
     arguments: Sequence[str] | None = None,
     *,
     dispatch: Callable[..., CommandReport] = default_dispatch,
-    preview_manifest: _PreviewManifest = default_preview_manifest,
+    prepare_issue_draft: _PrepareIssueDraft = default_prepare_issue_draft,
+    preview_manifest: Callable[..., UpstreamFindingPreview] | None = None,
     read_bytes: Callable[[Path], bytes] = Path.read_bytes,
     preview_upstream: _PreviewUpstream | None = None,
+    apply_upstream: _ApplyUpstream | None = None,
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
     environment: Mapping[str, str] = os.environ,
@@ -826,28 +887,74 @@ def main(
         return 0
     if parsed.resource == "upstream-finding" and parsed.action == "preview":
         try:
-            preview = preview_manifest(parsed.manifest_file, read_bytes=read_bytes)
-            if preview_upstream is None:
-                preview = _default_preview_upstream(
-                    preview,
-                    host=parsed.upstream_host,
-                    project_id=parsed.upstream_project_id,
-                    credential_file=parsed.upstream_credential_file,
-                    read_credential=read_credential,
-                    run_command=run_command,
-                    environment=environment,
-                    find_executable=find_executable,
-                )
+            if preview_manifest is not None:
+                preview = preview_manifest(parsed.manifest_file, read_bytes=read_bytes)
+                if preview_upstream is None:
+                    preview = _default_preview_upstream(
+                        preview,
+                        host=parsed.upstream_host,
+                        project_id=parsed.upstream_project_id,
+                        credential_file=parsed.upstream_credential_file,
+                        read_credential=read_credential,
+                        run_command=run_command,
+                        environment=environment,
+                        find_executable=find_executable,
+                    )
+                else:
+                    preview = preview_upstream(
+                        preview,
+                        host=parsed.upstream_host,
+                        project_id=parsed.upstream_project_id,
+                        credential_file=parsed.upstream_credential_file,
+                        read_credential=read_credential,
+                        run_command=run_command,
+                        environment=environment,
+                    )
             else:
-                preview = preview_upstream(
-                    preview,
-                    host=parsed.upstream_host,
-                    project_id=parsed.upstream_project_id,
-                    credential_file=parsed.upstream_credential_file,
-                    read_credential=read_credential,
-                    run_command=run_command,
-                    environment=environment,
-                )
+                draft = prepare_issue_draft(parsed.manifest_file, read_bytes=read_bytes)
+                if parsed.apply:
+                    if apply_upstream is None:
+                        preview = _default_apply_upstream(
+                            draft,
+                            host=parsed.upstream_host,
+                            project_id=parsed.upstream_project_id,
+                            credential_file=parsed.upstream_credential_file,
+                            read_credential=read_credential,
+                            run_command=run_command,
+                            environment=environment,
+                            find_executable=find_executable,
+                        )
+                    else:
+                        preview = apply_upstream(
+                            draft,
+                            host=parsed.upstream_host,
+                            project_id=parsed.upstream_project_id,
+                            credential_file=parsed.upstream_credential_file,
+                            read_credential=read_credential,
+                            run_command=run_command,
+                            environment=environment,
+                        )
+                elif preview_upstream is None:
+                    preview = _default_preview_upstream(
+                        draft.preview,
+                        host=parsed.upstream_host,
+                        project_id=parsed.upstream_project_id,
+                        credential_file=parsed.upstream_credential_file,
+                        read_credential=read_credential,
+                        run_command=run_command,
+                        environment=environment,
+                        find_executable=find_executable,
+                    )
+                else:
+                    preview = preview_upstream(
+                        draft.preview,
+                        host=parsed.upstream_host,
+                        project_id=parsed.upstream_project_id,
+                        credential_file=parsed.upstream_credential_file,
+                        read_credential=read_credential,
+                        run_command=run_command,
+                        environment=environment,
+                    )
         except (ManifestError, UpstreamGitLabError) as error:
             if parsed.debug:
                 raise
