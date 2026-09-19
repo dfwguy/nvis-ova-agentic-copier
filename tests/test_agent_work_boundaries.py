@@ -1500,6 +1500,163 @@ def test_gitlab_default_branch_pipeline_uses_numeric_project_and_exact_ref(
     assert "per_page=100" in pipeline_call
 
 
+def test_gitlab_failed_job_evidence_uses_exact_numeric_paths_and_redacts_boundary_errors(
+    tmp_path: Path,
+) -> None:
+    """Job inventory and one trace stay bound to the configured project and pipeline."""
+    commands: list[tuple[str, ...]] = []
+    jobs = [
+        {
+            "id": 71,
+            "name": "unit",
+            "stage": "test",
+            "status": "failed",
+            "failure_reason": "script_failure",
+            "retried": False,
+            "pipeline": {"id": 4, "sha": "a" * 40, "status": "failed"},
+        }
+    ]
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        if endpoint == "projects/310967/pipelines/4/jobs":
+            return CommandResult(0, json.dumps(jobs), "")
+        if endpoint == "projects/310967/jobs/71/trace":
+            return CommandResult(0, "Bearer top-secret\x00trace", "")
+        raise AssertionError(endpoint)
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+    inventory = gateway.list_pipeline_jobs(4, "a" * 40)
+    trace = gateway.fetch_job_trace(4, 71)
+
+    assert inventory[0].id == 71
+    assert trace.status == "collected"
+    assert "top-secret" not in trace.text
+    assert "\x00" not in trace.text
+    assert [command[command.index("-X") + 2] for command in commands] == [
+        "projects/310967/pipelines/4/jobs",
+        "projects/310967/jobs/71/trace",
+    ]
+    assert "per_page=100" in commands[0]
+
+
+def test_gitlab_pipeline_jobs_aggregate_two_bounded_pages(
+    tmp_path: Path,
+) -> None:
+    """A full first page continues once and preserves exact job evidence."""
+    commands: list[tuple[str, ...]] = []
+
+    def job(job_id: int) -> dict[str, object]:
+        return {
+            "id": job_id,
+            "name": "unit",
+            "stage": "test",
+            "status": "failed",
+            "retried": False,
+            "pipeline": {"id": 4, "sha": "a" * 40},
+        }
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        page = int(
+            next(
+                part.removeprefix("page=")
+                for part in command
+                if part.startswith("page=")
+            )
+        )
+        payload = [job(job_id) for job_id in range(1, 101)] if page == 1 else [job(101)]
+        return CommandResult(0, json.dumps(payload), "")
+
+    jobs = GitLabGateway(_config(tmp_path), api).list_pipeline_jobs(4, "a" * 40)
+
+    assert [job.id for job in jobs] == list(range(1, 102))
+    assert [
+        next(part for part in command if part.startswith("page="))
+        for command in commands
+    ] == [
+        "page=1",
+        "page=2",
+    ]
+    assert all(
+        command[command.index("-X") + 2] == "projects/310967/pipelines/4/jobs"
+        and "per_page=100" in command
+        and "include_retried=true" in command
+        for command in commands
+    )
+
+
+def test_gitlab_pipeline_jobs_reject_duplicate_ids_across_pages(tmp_path: Path) -> None:
+    """A repeated job identity cannot become ambiguous repair evidence."""
+    calls = 0
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        page = int(
+            next(
+                part.removeprefix("page=")
+                for part in command
+                if part.startswith("page=")
+            )
+        )
+        payload = [
+            {
+                "id": job_id,
+                "name": "unit",
+                "stage": "test",
+                "status": "failed",
+                "retried": False,
+                "pipeline": {"id": 4, "sha": "a" * 40},
+            }
+            for job_id in (range(1, 101) if page == 1 else (1,))
+        ]
+        return CommandResult(0, json.dumps(payload), "")
+
+    with pytest.raises(GitLabError, match="duplicate"):
+        GitLabGateway(_config(tmp_path), api).list_pipeline_jobs(4, "a" * 40)
+
+    assert calls == 2
+
+
+def test_gitlab_pipeline_jobs_fail_closed_at_bounded_page_limit(tmp_path: Path) -> None:
+    """One hundred full pages reject the inventory without reading page 101."""
+    pages: list[int] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        page = int(
+            next(
+                part.removeprefix("page=")
+                for part in command
+                if part.startswith("page=")
+            )
+        )
+        pages.append(page)
+        return CommandResult(
+            0,
+            json.dumps(
+                [
+                    {
+                        "id": page * 100 + job_id,
+                        "name": "unit",
+                        "stage": "test",
+                        "status": "failed",
+                        "retried": False,
+                        "pipeline": {"id": 4, "sha": "a" * 40},
+                    }
+                    for job_id in range(100)
+                ]
+            ),
+            "",
+        )
+
+    with pytest.raises(GitLabError, match="exceeded the bound"):
+        GitLabGateway(_config(tmp_path), api).list_pipeline_jobs(4, "a" * 40)
+
+    assert pages == list(range(1, 101))
+
+
 def test_gitlab_open_merge_requests_reads_bounded_pages_of_validated_inventory(
     tmp_path: Path,
 ) -> None:

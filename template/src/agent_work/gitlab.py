@@ -29,6 +29,8 @@ from .domain import (
     MANUAL_TRACKER_LABEL,
     PREREQUISITE_LABEL_COLOR,
     PREREQUISITE_LABEL_DESCRIPTION,
+    JobTraceEvidence,
+    PipelineJobEvidence,
     legacy_prerequisite_label_iid,
     parse_split_marker,
     prerequisite_label_iid,
@@ -87,12 +89,22 @@ MR_FIELDS = (
     "draft",
 )
 PIPELINE_FIELDS = ("id", "status", "sha", "web_url")
+PIPELINE_JOB_FIELDS = (
+    "id",
+    "name",
+    "stage",
+    "status",
+    "failure_reason",
+    "retried",
+    "pipeline",
+)
 NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
 NOTE_AUTHOR_FIELDS = ("username",)
 _MAX_NOTE_PAGES = 100
 _MAX_ISSUE_PAGES = 100
 _MAX_MERGE_REQUEST_PAGES = 100
 _MAX_LABEL_PAGES = 100
+_MAX_PIPELINE_JOB_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
 
@@ -1227,6 +1239,80 @@ class GitLabGateway:
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid pipeline data") from error
         return pipelines[0] if pipelines else None
+
+    def list_pipeline_jobs(
+        self, pipeline_id: int, source_sha: str
+    ) -> tuple[PipelineJobEvidence, ...]:
+        """Return one bounded validated inventory for an exact failed pipeline."""
+        try:
+            raw_jobs: list[dict[str, object]] = []
+            for page in range(1, _MAX_PIPELINE_JOB_PAGES + 1):
+                batch = self._items(
+                    self._call(
+                        f"projects/{self._config.project_id}/pipelines/{pipeline_id}/jobs",
+                        fields=("per_page=100", "include_retried=true", f"page={page}"),
+                    ),
+                    "pipeline job list",
+                )
+                raw_jobs.extend(batch)
+                if len(batch) < 100:
+                    break
+            else:
+                raise GitLabError("GitLab pipeline job inventory exceeded the bound")
+            jobs = tuple(
+                PipelineJobEvidence.model_validate(
+                    {
+                        key: item[key]
+                        for key in PIPELINE_JOB_FIELDS
+                        if key != "pipeline" and key in item
+                    }
+                    | {
+                        "pipeline_id": self._mapping(
+                            item.get("pipeline"), "job pipeline"
+                        )["id"],
+                        "pipeline_sha": self._mapping(
+                            item.get("pipeline"), "job pipeline"
+                        )["sha"],
+                    }
+                )
+                for item in raw_jobs
+            )
+        except (KeyError, ValidationError) as error:
+            raise GitLabError("GitLab returned invalid pipeline job data") from error
+        if len({job.id for job in jobs}) != len(jobs):
+            raise GitLabError("GitLab returned duplicate pipeline job identities")
+        if any(
+            job.pipeline_id != pipeline_id or job.pipeline_sha != source_sha
+            for job in jobs
+        ):
+            raise GitLabError("GitLab returned jobs from a different exact pipeline")
+        return jobs
+
+    def fetch_job_trace(self, pipeline_id: int, job_id: int) -> JobTraceEvidence:
+        """Fetch a selected job trace only after its pipeline identity is validated."""
+        if pipeline_id <= 0 or job_id <= 0:
+            raise GitLabError("GitLab job trace identity is invalid")
+        try:
+            result = self._run_command(
+                (
+                    str(self._config.glab_path),
+                    "api",
+                    "--hostname",
+                    self._config.host,
+                    "-X",
+                    "GET",
+                    f"projects/{self._config.project_id}/jobs/{job_id}/trace",
+                ),
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+        except CommandTimeoutError as error:
+            raise GitLabError("GitLab job trace request timed out") from error
+        if result.returncode != 0 or not result.stdout.strip():
+            raise GitLabError("GitLab returned an empty job trace")
+        try:
+            return JobTraceEvidence(text=result.stdout)
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid job trace") from error
 
     def open_merge_requests(self) -> tuple[MergeRequestEvidence, ...]:
         """Return every opened merge request from bounded configured-project pages."""

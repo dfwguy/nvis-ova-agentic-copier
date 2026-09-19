@@ -91,8 +91,11 @@ from .repository import (
 )
 from .serial import (
     AUTOMATIC_REPAIR_MAX_ATTEMPTS,
+    SegmentError,
     activate_exact_pipeline_repair,
+    collect_exact_failed_job_diagnostic,
     reconcile_closed_issues,
+    record_failed_job_diagnostic_unavailable,
     resume_candidates,
     run_segment,
 )
@@ -912,11 +915,28 @@ def _activate_pipeline_repair_gate(
         return None
     if _has_competing_repair_owner(records, owner):
         return _RepairActivationDecision(competing_active_owner=True)
+    pipeline = gate.pipeline
+    assert pipeline is not None
+    try:
+        job, trace = collect_exact_failed_job_diagnostic(
+            jobs=gitlab.list_pipeline_jobs(pipeline.id, pipeline.sha),
+            pipeline_id=pipeline.id,
+            source_sha=pipeline.sha,
+            fetch_trace=lambda job_id: gitlab.fetch_job_trace(pipeline.id, job_id),
+        )
+    except (GitLabError, SegmentError):
+        return _RepairActivationDecision(
+            record=record_failed_job_diagnostic_unavailable(
+                owner, ledger=ledger, gitlab=gitlab
+            )
+        )
     return _RepairActivationDecision(
         record=activate_exact_pipeline_repair(
             owner,
             merge_request=gate.merge_request,
-            pipeline=gate.pipeline,
+            pipeline=pipeline,
+            failed_job=job,
+            diagnostic=trace,
             ledger=ledger,
             gitlab=gitlab,
             now=now,

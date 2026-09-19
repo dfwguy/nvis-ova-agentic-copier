@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from .domain import JobTraceEvidence, PipelineJobEvidence
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
@@ -140,6 +141,12 @@ class GitLabPort(Protocol):
     ) -> PipelineEvidence | None: ...
 
     def latest_pipeline_for_ref(self, ref: str) -> PipelineEvidence | None: ...
+
+    def list_pipeline_jobs(
+        self, pipeline_id: int, source_sha: str
+    ) -> tuple[PipelineJobEvidence, ...]: ...
+
+    def fetch_job_trace(self, pipeline_id: int, job_id: int) -> JobTraceEvidence: ...
 
     def open_merge_requests(self) -> tuple[MergeRequestEvidence, ...]: ...
 

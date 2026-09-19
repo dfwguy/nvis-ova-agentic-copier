@@ -680,6 +680,24 @@ a failed merge-request pipeline without one safe exact owner, records an
 actionable human handoff or block instead. It does not claim an unrelated issue,
 invent a repair owner, or weaken the human-only approval and merge boundary.
 
+Before it starts an eligible repair, the controller reads a bounded job
+inventory for the already verified project, merge request, source SHA, and
+pipeline. It includes retry attempts but ignores failed jobs marked
+`retried=true`, because those attempts have been superseded. Exactly one current
+failed job (`retried=false`) must remain. The controller fetches only that job's
+trace, removes control sequences and secret-like content, and caps the retained
+diagnostic. It validates typed evidence that binds the project, merge request,
+source SHA, pipeline identity, pipeline SHA and status, and selected job's ID,
+name, stage, status, failure reason, and trace provenance and status.
+
+The controller persists that validated bounded evidence before invoking the
+repair workflow. A restart reuses it after validation, and the workflow prompt
+receives the same bounded diagnostic. Raw job traces never enter the ledger,
+status report, or workflow prompt. A wrong or drifting identity or status,
+multiple or no current failed jobs, an empty trace, or a schema or API failure
+stops repair without starting a worker. The controller does not retry or cancel
+jobs or pipelines as part of this process.
+
 Post-publication pipeline assessment is a fresh context after terminal
 exact-SHA evidence. It does not edit the published MR or directly enter a
 repair session. A concrete repository-actionable finding creates or reuses a

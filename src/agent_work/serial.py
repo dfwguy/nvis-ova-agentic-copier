@@ -30,6 +30,9 @@ from .domain import (
     LIFECYCLE_LABELS,
     NONTERMINAL_PIPELINE_STATUSES,
     ErrorCode,
+    FailedJobDiagnosticEvidence,
+    JobTraceEvidence,
+    PipelineJobEvidence,
     RunnerState,
     WorkflowLane,
     WorkflowPhase,
@@ -78,6 +81,77 @@ class SegmentError(RuntimeError):
 
 AUTOMATIC_REPAIR_MAX_ATTEMPTS = 3
 AUTOMATIC_REPAIR_BACKOFF_SECONDS = 20 * 60
+
+
+def select_current_failed_pipeline_job(
+    jobs: tuple[PipelineJobEvidence | Mapping[str, object], ...],
+    *,
+    pipeline_id: int,
+    source_sha: str,
+) -> PipelineJobEvidence | None:
+    """Select one non-retried failed job, rejecting any identity drift or ambiguity."""
+    try:
+        validated = tuple(PipelineJobEvidence.model_validate(job) for job in jobs)
+    except ValueError as error:
+        raise SegmentError("exact pipeline job evidence is invalid") from error
+    if any(
+        job.pipeline_id != pipeline_id or job.pipeline_sha != source_sha
+        for job in validated
+    ):
+        raise SegmentError("exact pipeline job identity is invalid")
+    failed = tuple(
+        job for job in validated if job.status == "failed" and not job.retried
+    )
+    if len(failed) > 1:
+        raise SegmentError("exact pipeline failed jobs are ambiguous")
+    return failed[0] if failed else None
+
+
+def collect_exact_failed_job_diagnostic(
+    *,
+    jobs: tuple[PipelineJobEvidence | Mapping[str, object], ...],
+    pipeline_id: int,
+    source_sha: str,
+    fetch_trace: Callable[[int], JobTraceEvidence | Mapping[str, object] | str | None],
+) -> tuple[PipelineJobEvidence, JobTraceEvidence]:
+    """Collect one bounded trace only after exact unique-job selection succeeds."""
+    job = select_current_failed_pipeline_job(
+        jobs, pipeline_id=pipeline_id, source_sha=source_sha
+    )
+    if job is None:
+        raise SegmentError("exact pipeline has no current failed job")
+    try:
+        raw_trace = fetch_trace(job.id)
+        trace = (
+            JobTraceEvidence(text=raw_trace)
+            if isinstance(raw_trace, str)
+            else JobTraceEvidence.model_validate(raw_trace)
+        )
+    except (TypeError, ValueError, GitLabError) as error:
+        raise SegmentError("exact failed-job trace is unavailable") from error
+    if not trace.text.strip():
+        raise SegmentError("exact failed-job trace is unavailable")
+    return job, trace
+
+
+def record_failed_job_diagnostic_unavailable(
+    record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort
+) -> LedgerRecord:
+    """Persist a safe, worker-free status when exact diagnostic collection fails."""
+    if record.state is RunnerState.NEEDS_REPAIR:
+        return record
+    blocked = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.NEEDS_REPAIR,
+            phase=WorkflowPhase.POST_PUBLICATION,
+            error_code=ErrorCode.PIPELINE_REJECTED,
+            summary="The exact failed-job diagnostic is unavailable.",
+            next_action="Restore exact failed-job evidence before starting repair.",
+        )
+    )
+    gitlab.transition_labels(blocked.issue_iid, label_for_state(blocked.state))
+    return blocked
 
 
 class SchedulingScope(str, Enum):
@@ -265,6 +339,8 @@ def activate_exact_pipeline_repair(
     *,
     merge_request: MergeRequestEvidence,
     pipeline: PipelineEvidence,
+    failed_job: PipelineJobEvidence | Mapping[str, object],
+    diagnostic: JobTraceEvidence | Mapping[str, object],
     ledger: LedgerPort,
     gitlab: GitLabPort,
     now: datetime,
@@ -284,6 +360,35 @@ def activate_exact_pipeline_repair(
         or pipeline.sha != record.source_sha
     ):
         raise SegmentError("exact failed pipeline repair evidence is invalid")
+    try:
+        job = PipelineJobEvidence.model_validate(failed_job)
+        trace = JobTraceEvidence.model_validate(diagnostic)
+        failed_diagnostic = FailedJobDiagnosticEvidence(
+            project_id=record.project_id,
+            merge_request_iid=merge_request.iid,
+            source_sha=merge_request.sha,
+            pipeline_id=pipeline.id,
+            pipeline_sha=pipeline.sha,
+            pipeline_status="failed",
+            job_id=job.id,
+            job_name=job.name,
+            job_stage=job.stage,
+            job_status="failed",
+            failure_reason=job.failure_reason,
+            retried=job.retried,
+            trace_provenance=trace.provenance,
+            trace_status=trace.status,
+            trace=trace.text,
+        )
+    except ValueError as error:
+        raise SegmentError("exact failed-job diagnostic evidence is invalid") from error
+    if (
+        job.pipeline_id != pipeline.id
+        or job.pipeline_sha != pipeline.sha
+        or job.status != "failed"
+        or job.retried
+    ):
+        raise SegmentError("exact failed-job diagnostic evidence is invalid")
     snapshot: dict[str, object] = {
         "issue_iid": record.issue_iid,
         "project_id": record.project_id,
@@ -295,6 +400,16 @@ def activate_exact_pipeline_repair(
         "pipeline_sha": pipeline.sha,
         "pipeline_status": pipeline.status,
         "pipeline_url": pipeline.web_url,
+        "failed_job_id": failed_diagnostic.job_id,
+        "trace_provenance": failed_diagnostic.trace_provenance,
+        "trace_status": failed_diagnostic.trace_status,
+        "diagnostic_fingerprint": hashlib.sha256(
+            json.dumps(
+                failed_diagnostic.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
     }
     fingerprint = hashlib.sha256(
         json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
@@ -311,6 +426,7 @@ def activate_exact_pipeline_repair(
                     fingerprint=fingerprint,
                     snapshot=snapshot,
                     origin="automatic-exact-pipeline",
+                    diagnostic=failed_diagnostic,
                     failure_reason="Automatic repair budget exhausted.",
                     started_at=now.isoformat(),
                     elapsed_seconds=0.0,
@@ -330,6 +446,7 @@ def activate_exact_pipeline_repair(
             fingerprint=fingerprint,
             snapshot=snapshot,
             origin="automatic-exact-pipeline",
+            diagnostic=failed_diagnostic,
             evidence_delta={
                 "pipeline_status": "failed",
                 "prior_repair_fingerprint": record.repair_attempt.fingerprint,
@@ -388,6 +505,7 @@ def activate_exact_pipeline_repair(
                 fingerprint=fingerprint,
                 snapshot=snapshot,
                 origin="automatic-exact-pipeline",
+                diagnostic=failed_diagnostic,
                 evidence_delta=(
                     {"prior_repair_failure": prior_failure} if prior_failure else {}
                 ),
@@ -430,6 +548,7 @@ def _record_repair_failure(
         fingerprint=attempt.fingerprint,
         snapshot=attempt.snapshot,
         origin=attempt.origin,
+        diagnostic=attempt.diagnostic,
         evidence_delta=delta,
         failure_reason=failure_reason[:2_048] or "repair failed",
         started_at=attempt.started_at,
@@ -2191,6 +2310,42 @@ def _execute(
             now=now,
             error_code=ErrorCode.GITLAB_RETRYABLE,
         )
+    attempt = record.repair_attempt
+    if attempt is not None and attempt.origin == "automatic-exact-pipeline":
+        diagnostic = attempt.diagnostic
+        snapshot = attempt.snapshot
+        snapshot_fingerprint = hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        diagnostic_fingerprint = hashlib.sha256(
+            json.dumps(
+                None if diagnostic is None else diagnostic.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if (
+            diagnostic is None
+            or diagnostic.project_id != record.project_id
+            or diagnostic.merge_request_iid != record.merge_request_iid
+            or diagnostic.source_sha != record.source_sha
+            or diagnostic.pipeline_sha != record.source_sha
+            or diagnostic.pipeline_status != "failed"
+            or diagnostic.job_status != "failed"
+            or diagnostic.retried
+            or attempt.fingerprint != snapshot_fingerprint
+            or snapshot.get("project_id") != diagnostic.project_id
+            or snapshot.get("merge_request_iid") != diagnostic.merge_request_iid
+            or snapshot.get("source_sha") != diagnostic.source_sha
+            or snapshot.get("pipeline_id") != diagnostic.pipeline_id
+            or snapshot.get("pipeline_sha") != diagnostic.pipeline_sha
+            or snapshot.get("pipeline_status") != diagnostic.pipeline_status
+            or snapshot.get("failed_job_id") != diagnostic.job_id
+            or snapshot.get("diagnostic_fingerprint") != diagnostic_fingerprint
+        ):
+            return record_failed_job_diagnostic_unavailable(
+                record, ledger=ledger, gitlab=gitlab
+            )
     worker_timeout = timeout_seconds
     if remaining_seconds is not None:
         remaining = remaining_seconds()
@@ -3259,10 +3414,23 @@ def _observe(
             )
         )
     if pipeline.status == "failed":
+        try:
+            job, trace = collect_exact_failed_job_diagnostic(
+                jobs=gitlab.list_pipeline_jobs(pipeline.id, pipeline.sha),
+                pipeline_id=pipeline.id,
+                source_sha=pipeline.sha,
+                fetch_trace=lambda job_id: gitlab.fetch_job_trace(pipeline.id, job_id),
+            )
+        except (GitLabError, SegmentError):
+            return record_failed_job_diagnostic_unavailable(
+                record, ledger=ledger, gitlab=gitlab
+            )
         return activate_exact_pipeline_repair(
             record,
             merge_request=mr,
             pipeline=pipeline,
+            failed_job=job,
+            diagnostic=trace,
             ledger=ledger,
             gitlab=gitlab,
             now=now,

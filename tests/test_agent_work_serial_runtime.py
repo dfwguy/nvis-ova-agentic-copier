@@ -26,11 +26,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agent_work import domain
+from agent_work import domain, serial
 from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
     ErrorCode,
+    JobTraceEvidence,
+    PipelineJobEvidence,
     RepairAttemptEvidence,
     RunnerState,
     SuggestCloseEvidence,
@@ -40,7 +42,7 @@ from agent_work.domain import (
     render_split_marker,
 )
 from agent_work.gitlab import GitLabError
-from agent_work.ledger import JsonLedger, LedgerError
+from agent_work.ledger import JsonLedger, LedgerCorrupt, LedgerError
 from agent_work.models import (
     AgentWorkConfig,
     AuditCapacity,
@@ -72,9 +74,19 @@ from agent_work.repository import (
     classify_publication_failure,
 )
 from agent_work.runtime import RuntimeDependencies, dispatch, find_exact_pipeline_owner
-from agent_work.serial import SegmentError, run_segment, select_record
+from agent_work.serial import (
+    SegmentError,
+    activate_exact_pipeline_repair,
+    run_segment,
+    select_record,
+)
 from agent_work.state_machine import WORKFLOW_RECEIPTS
-from agent_work.worker import AgentInvoker, WorkerInvocation, WorkerProtocolError
+from agent_work.worker import (
+    AgentInvoker,
+    WorkerInvocation,
+    WorkerProtocolError,
+    build_worker_prompt,
+)
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
@@ -225,6 +237,32 @@ class FakeGitLab:
         self.identity_error: GitLabError | None = None
         self.project_verifications = 0
         self.identity_verifications = 0
+        self.pipeline_jobs: tuple[dict[str, object], ...] = (
+            {
+                "id": 1,
+                "name": "unit",
+                "stage": "test",
+                "status": "failed",
+                "retried": False,
+                "pipeline_id": 4,
+                "pipeline_sha": "a" * 40,
+            },
+        )
+        self.job_trace = "test failure"
+
+    def list_pipeline_jobs(
+        self, pipeline_id: int, source_sha: str
+    ) -> tuple[PipelineJobEvidence, ...]:
+        return tuple(
+            PipelineJobEvidence.model_validate(
+                job | {"pipeline_id": pipeline_id, "pipeline_sha": source_sha}
+            )
+            for job in self.pipeline_jobs
+        )
+
+    def fetch_job_trace(self, pipeline_id: int, job_id: int) -> JobTraceEvidence:
+        del pipeline_id, job_id
+        return JobTraceEvidence(text=self.job_trace)
 
     def verify_project(self) -> GitLabProject:
         self.project_verifications += 1
@@ -6107,6 +6145,134 @@ def test_failed_exact_pipeline_enters_autonomous_repair_with_bounded_evidence(
     assert gitlab.labels[-1] == "agent::running"
 
 
+def test_failed_pipeline_without_trace_persists_needs_repair_without_worker(
+    tmp_path: Path,
+) -> None:
+    """An unavailable trace fails closed before a repair workflow can start."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.job_trace = ""
+    invoker = FakeInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.NEEDS_REPAIR
+    assert outcome.phase is WorkflowPhase.POST_PUBLICATION
+    assert outcome.error_code is ErrorCode.PIPELINE_REJECTED
+    assert invoker.prompts == []
+
+
+def test_repeated_missing_trace_stays_needs_repair_without_worker(
+    tmp_path: Path,
+) -> None:
+    """Repeated failed-pipeline collection is safe while exact evidence is absent."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.job_trace = ""
+    invoker = FakeInvoker()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+    )
+
+    first = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+    second = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert first.items[-1].state is RunnerState.NEEDS_REPAIR
+    assert second.items[-1].state is RunnerState.NEEDS_REPAIR
+    assert "exact failed-job diagnostic" in second.items[-1].summary.lower()
+    assert invoker.prompts == []
+
+
+@pytest.mark.parametrize(
+    "trace",
+    (
+        'PASSWORD="alpha beta"',
+        "PASSWORD='alpha beta'",
+        'CI_JOB_TOKEN="alpha beta"',
+        'AWS_SECRET_ACCESS_KEY="alpha beta"',
+        "DB_PASSWORD_HASH='alpha beta'",
+    ),
+)
+def test_quoted_trace_secrets_never_reach_repair_evidence_ledger_or_prompt(
+    tmp_path: Path, trace: str
+) -> None:
+    """Quoted credential assignments are wholly redacted at the trace boundary."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.job_trace = trace
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.repair_attempt is not None
+    assert outcome.repair_attempt.diagnostic is not None
+    reloaded = ledger.load(outcome.issue_iid)
+    assert reloaded is not None and reloaded.repair_attempt is not None
+    prompt = build_worker_prompt(
+        reloaded.model_dump(mode="json"),
+        project_id=reloaded.project_id,
+        issue_iid=reloaded.issue_iid,
+        effective_worker_budget_seconds=10,
+    )
+    for secret_fragment in ("alpha", "beta"):
+        assert secret_fragment not in outcome.repair_attempt.diagnostic.trace
+        assert secret_fragment not in json.dumps(reloaded.model_dump(mode="json"))
+        assert secret_fragment not in prompt
+
+
+def test_trace_sanitizer_preserves_ordinary_assignments() -> None:
+    """Credential redaction does not erase unrelated single-line diagnostics."""
+    assert JobTraceEvidence(text="status=alpha beta").text == "status=alpha beta"
+
+
 def test_ordinary_loop_resumes_exact_needs_repair_and_invokes_repair_workflow(
     tmp_path: Path,
 ) -> None:
@@ -10933,6 +11099,322 @@ def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
     assert persisted is not None and persisted.state is RunnerState.REPAIR_FAILED
     assert persisted.phase is WorkflowPhase.POST_PUBLICATION
     assert persisted.error_code is ErrorCode.PIPELINE_REJECTED
+
+
+def test_exact_failed_pipeline_repair_persists_one_current_job_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A repair is bound to one current failed job and its safe trace evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    merge_request = _mr(sha=record.source_sha or "a" * 40)
+    pipeline = PipelineEvidence(
+        id=4, status="failed", sha=merge_request.sha, web_url="https://pipeline/4"
+    )
+    gitlab = FakeGitLab()
+
+    activated = activate_exact_pipeline_repair(
+        record,
+        merge_request=merge_request,
+        pipeline=pipeline,
+        failed_job={
+            "id": 71,
+            "name": "unit",
+            "stage": "test",
+            "status": "failed",
+            "failure_reason": "script_failure",
+            "pipeline_id": pipeline.id,
+            "pipeline_sha": pipeline.sha,
+            "retried": False,
+        },
+        diagnostic={
+            "provenance": "gitlab-job-trace",
+            "status": "collected",
+            "text": "tests failed",
+        },
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        now=NOW,
+    )
+
+    assert activated.state is RunnerState.REPAIR
+    assert activated.repair_attempt is not None
+    assert activated.repair_attempt.diagnostic is not None
+    assert activated.repair_attempt.diagnostic.job_id == 71
+    assert activated.repair_attempt.diagnostic.pipeline_id == pipeline.id
+    reloaded = ledger.load(record.issue_iid)
+    assert reloaded is not None
+    assert reloaded.repair_attempt == activated.repair_attempt
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "diagnostic_pipeline_sha",
+        "diagnostic_pipeline_status",
+        "diagnostic_job_status",
+        "diagnostic_retried",
+        "snapshot_project_id",
+        "snapshot_merge_request_iid",
+        "snapshot_source_sha",
+        "snapshot_pipeline_id",
+        "snapshot_pipeline_sha",
+        "snapshot_pipeline_status",
+        "snapshot_failed_job_id",
+        "snapshot_diagnostic_fingerprint",
+        "attempt_fingerprint",
+    ),
+)
+def test_reloaded_automatic_repair_rejects_tampered_exact_evidence_before_worker(
+    tmp_path: Path, tamper: str
+) -> None:
+    """Reloaded automatic repair never prompts from altered failed-job evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    pipeline = PipelineEvidence(
+        id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    activated = activate_exact_pipeline_repair(
+        record,
+        merge_request=_mr(),
+        pipeline=pipeline,
+        failed_job=gitlab.pipeline_jobs[0],
+        diagnostic=JobTraceEvidence(text="test failure"),
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        now=NOW,
+    )
+    assert activated.repair_attempt is not None
+    attempt = activated.repair_attempt
+    snapshot = dict(attempt.snapshot)
+    diagnostic = attempt.diagnostic
+    assert diagnostic is not None
+    if tamper == "diagnostic_pipeline_sha":
+        diagnostic = diagnostic.model_copy(update={"pipeline_sha": "b" * 40})
+    elif tamper == "diagnostic_pipeline_status":
+        diagnostic = diagnostic.model_copy(update={"pipeline_status": "success"})
+    elif tamper == "diagnostic_job_status":
+        diagnostic = diagnostic.model_copy(update={"job_status": "success"})
+    elif tamper == "diagnostic_retried":
+        diagnostic = diagnostic.model_copy(update={"retried": True})
+    elif tamper == "snapshot_project_id":
+        snapshot["project_id"] = 1
+    elif tamper == "snapshot_merge_request_iid":
+        snapshot["merge_request_iid"] = 1
+    elif tamper == "snapshot_source_sha":
+        snapshot["source_sha"] = "b" * 40
+    elif tamper == "snapshot_pipeline_id":
+        snapshot["pipeline_id"] = 5
+    elif tamper == "snapshot_pipeline_sha":
+        snapshot["pipeline_sha"] = "b" * 40
+    elif tamper == "snapshot_pipeline_status":
+        snapshot["pipeline_status"] = "success"
+    elif tamper == "snapshot_failed_job_id":
+        snapshot["failed_job_id"] = 2
+    elif tamper == "snapshot_diagnostic_fingerprint":
+        snapshot["diagnostic_fingerprint"] = "0" * 64
+    elif tamper == "attempt_fingerprint":
+        attempt = attempt.model_copy(update={"fingerprint": "0" * 64})
+    repaired_attempt = attempt.model_copy(
+        update={"diagnostic": diagnostic, "snapshot": snapshot}
+    )
+    ledger.persist(activated.model_copy(update={"repair_attempt": repaired_attempt}))
+    invoker = FakeInvoker()
+
+    if tamper in {"diagnostic_pipeline_status", "diagnostic_job_status"}:
+        with pytest.raises(LedgerCorrupt):
+            run_segment(
+                ledger=ledger,
+                gitlab=gitlab,  # type: ignore[arg-type]
+                repository=FakeRepository(config),  # type: ignore[arg-type]
+                invoke=invoker,  # type: ignore[arg-type]
+                timeout_seconds=10,
+                now=NOW,
+            )
+    else:
+        outcome = run_segment(
+            ledger=ledger,
+            gitlab=gitlab,  # type: ignore[arg-type]
+            repository=FakeRepository(config),  # type: ignore[arg-type]
+            invoke=invoker,  # type: ignore[arg-type]
+            timeout_seconds=10,
+            now=NOW,
+        )
+        assert outcome is not None and outcome.state is RunnerState.NEEDS_REPAIR
+        assert outcome.phase is WorkflowPhase.POST_PUBLICATION
+    assert invoker.prompts == []
+
+
+@pytest.mark.parametrize(
+    ("jobs", "expected_job_id"),
+    (
+        (
+            (
+                {
+                    "id": 70,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "failed",
+                    "retried": True,
+                },
+                {
+                    "id": 71,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "failed",
+                    "retried": False,
+                },
+            ),
+            71,
+        ),
+        (
+            (
+                {
+                    "id": 70,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "failed",
+                    "retried": True,
+                },
+                {
+                    "id": 71,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "success",
+                    "retried": False,
+                },
+            ),
+            None,
+        ),
+    ),
+)
+def test_select_current_failed_pipeline_job_ignores_superseded_attempts(
+    jobs: tuple[dict[str, object], ...], expected_job_id: int | None
+) -> None:
+    """Only one non-retried failed job from the exact pipeline is actionable."""
+    selected = serial.select_current_failed_pipeline_job(
+        jobs, pipeline_id=4, source_sha="a" * 40
+    )
+
+    assert (None if selected is None else selected.id) == expected_job_id
+
+
+@pytest.mark.parametrize(
+    "jobs",
+    (
+        (
+            {
+                "id": 71,
+                "pipeline_id": 99,
+                "pipeline_sha": "a" * 40,
+                "status": "failed",
+                "retried": False,
+            },
+        ),
+        (
+            {
+                "id": 71,
+                "pipeline_id": 4,
+                "pipeline_sha": "b" * 40,
+                "status": "failed",
+                "retried": False,
+            },
+        ),
+        (
+            {
+                "id": 71,
+                "pipeline_id": 4,
+                "pipeline_sha": "a" * 40,
+                "status": "failed",
+                "retried": False,
+            },
+            {
+                "id": 72,
+                "pipeline_id": 4,
+                "pipeline_sha": "a" * 40,
+                "status": "failed",
+                "retried": False,
+            },
+        ),
+    ),
+)
+def test_select_current_failed_pipeline_job_fails_closed_for_identity_or_ambiguity(
+    jobs: tuple[dict[str, object], ...],
+) -> None:
+    """Drift and multiple current failures cannot select a trace-fetch target."""
+    with pytest.raises(SegmentError):
+        serial.select_current_failed_pipeline_job(
+            jobs, pipeline_id=4, source_sha="a" * 40
+        )
+
+
+@pytest.mark.parametrize("trace", ("", None))
+def test_collect_exact_failed_job_diagnostic_rejects_missing_trace_without_worker(
+    trace: str | None,
+) -> None:
+    """A missing trace closes the repair gate before any worker can launch."""
+    trace_fetches: list[int] = []
+
+    def fetch_trace(job_id: int) -> str | None:
+        trace_fetches.append(job_id)
+        return trace
+
+    with pytest.raises(SegmentError, match="trace"):
+        serial.collect_exact_failed_job_diagnostic(
+            jobs=(
+                {
+                    "id": 71,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "failed",
+                    "retried": False,
+                },
+            ),
+            pipeline_id=4,
+            source_sha="a" * 40,
+            fetch_trace=fetch_trace,
+        )
+
+    assert trace_fetches == [71]
+
+
+def test_collect_exact_failed_job_diagnostic_never_fetches_trace_for_ambiguity() -> (
+    None
+):
+    """Ambiguous candidates fail before the potentially sensitive trace read."""
+    trace_fetches: list[int] = []
+
+    with pytest.raises(SegmentError, match="ambiguous"):
+        serial.collect_exact_failed_job_diagnostic(
+            jobs=tuple(
+                {
+                    "id": job_id,
+                    "pipeline_id": 4,
+                    "pipeline_sha": "a" * 40,
+                    "status": "failed",
+                    "retried": False,
+                }
+                for job_id in (71, 72)
+            ),
+            pipeline_id=4,
+            source_sha="a" * 40,
+            fetch_trace=lambda job_id: trace_fetches.append(job_id),
+        )
+
+    assert trace_fetches == []
 
 
 def test_apply_defers_second_legacy_repair_workflow_to_next_activation(

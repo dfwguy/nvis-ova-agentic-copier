@@ -5,7 +5,7 @@ summary: Understand why bounded workflow sessions use GitLab projection and loca
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-19
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -92,6 +92,17 @@ This intentionally favors visible, attributable recovery over guessing which
 issue should repair shared or ambiguous pipeline evidence. The [reference
 contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate)
 defines the statuses and exact checks.
+
+For an eligible repair, the controller also needs a useful but safe explanation
+of the failure. It first selects exactly one current failed job from the exact
+pipeline, ignoring superseded retry attempts. It then reads only that job's
+trace, removes secret-like text and control sequences, and keeps a bounded
+diagnostic. The controller validates and persists that evidence before starting
+the repair workflow, so a restart can use the same verified context. It does
+not pass a raw trace to the ledger, report, or workflow prompt. Missing,
+ambiguous, stale, or malformed job or trace evidence stops the repair rather
+than letting the workflow guess; it also does not retry or cancel a job or
+pipeline.
 
 ## The work stays inside one AI session
 
