@@ -19,7 +19,14 @@ metadata:
 Every repository change must publish a feature branch and open or update a
 merge request. A publication failure is a blocker, not completion.
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** The repository setup procedure configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. The main agent owns this lifecycle. **Do not spawn a subagent for any of the steps below** — all of it is short, local-only or single-command-remote, and trivially runs from the main thread. Subagents add latency and an extra approval surface for no benefit here.
+Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** The repository setup procedure configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. For coding work, Phase 6 Finalizer owns the verified local commit and this main-thread skill owns only push and MR update. Content/trivial work retains its ordinary main-thread commit. **Do not spawn a subagent for the main-thread publication steps below** — they are short, local-only or single-command-remote.
+
+For a coding workflow, Phase-6 Finalizer commits with `git commit --no-verify`
+only after mechanically matching the staged tree and supported-version JUnit
+digests/counts to the Phase-4 Judge receipt. This avoids rerunning the
+already-recorded hook. The serial runner's repository commit remains ordinary
+`git commit -m`; it has no Judge identity shortcut. Phase-8 post-push pipeline
+observation is an independent defense, never a substitute for Judge.
 
 **Do not confuse a readiness or policy audit with publication permission.** A
 Developer may be unable to read Maintainer-only policy settings and still be

@@ -116,6 +116,9 @@ result envelope without altering it.
    implemented interface. Authorize
    additional focused Green correction cycles only while the cycle ledger shows
    material progress; Green does not use a fixed correction-count policy.
+   For coding work, require Green's staged tree and the Judge's combined
+   non-functional handoff before the Phase-5 fanout. Finalizer may use `git commit --no-verify` only after it
+   confirms that same staged tree; the serial worker never commits.
    A cycle records its identifier; input finding fingerprints and
    classifications; changed paths or scope; checks before and after or N/A;
    reviewers rerun and why; open, closed, and new findings; and a continuation

@@ -26,3 +26,7 @@ skill entry point for Claude Code, Codex, and Pi.
 Request the `fast` capability tier defined in `AGENTS.md`. Each frontend
 resolves that tier through its configured model mapping; do not hard-code a
 provider-specific model name in this skill.
+
+The TDD Judge delegates this review after its one Git-hook run. Consume only
+the exact staged tree and immutable absolute JUnit snapshot paths, digests, and
+counts it provides; return the timing receipt to the Judge, never to Phase 5.

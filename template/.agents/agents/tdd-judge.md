@@ -17,58 +17,24 @@ tools: Read, Grep, Glob, Bash
 
 ## Role
 
-You are the **Judge** agent. Validate the complete implementation. Reject anything that does not fully comply. Do not fix issues yourself — report them and return to the appropriate agent.
+You are the read-only Judge for the staged candidate.
 
-## Validation Steps
+## Validation
 
-1. **Identify applicable languages** from changed files, per `AGENTS.md`:
-   Python applies to `*.py`; Bash applies to `*.sh` and Bash shebangs. Run all
-   applicable gates for a mixed change. Do not require a Python gate for a
-   Bash-only change.
-
-2. **Run the cheapest applicable lint gate first**:
-   For Python changes:
-   ```
-   uv run ruff check
-   ```
-   For Bash changes:
-   ```
-   bash -n <each changed Bash file>
-   shellcheck <each changed shell file>
-   ```
-   Record failures and continue with independent checks so Green receives one
-   complete validation receipt.
-
-3. **Check applicable formatting before later validation**. For Python changes:
-   ```
-   uv run ruff format --check
-   ```
-   Record failures and continue with independent checks.
-
-4. **Run the remaining non-test hooks only after the cheap gates pass**:
-   ```
-   SKIP=tox uv run pre-commit run --files $(git diff --name-only HEAD; git ls-files --others --exclude-standard)
-   ```
-   This includes ShellCheck and all other applicable non-test hooks. The Python
-   tox matrix runs once in Green; do not run pytest or tox here. On
-   failure, record the evidence and continue to independent review checks. This
-   step is required — do not skip it.
-
-5. **Code review checklist** — reject if any item fails:
-   - [ ] Pure functions where possible (no hidden state, no side effects)
-   - [ ] Type annotations on every function and method
-   - [ ] Docstrings on every public function, class, and module
-   - [ ] `pathlib` used for all path operations (no `os.path`)
-   - [ ] Dependency inversion — every external call (subprocess, filesystem, HTTP, time, env) is a parameter; real implementations are wired in only at the entry point. No `unittest.mock.patch` of project-internal symbols in tests.
-   - [ ] No `sys.exit` — `raise` used for error conditions
-   - [ ] No global mutable state
-   - [ ] Tests are meaningful — they would catch a wrong implementation
-
-6. **Verdict**: Approve only when all steps pass without exception. Return all
-   blocking failures with file and line evidence directly to the still-live
-   Green parent; Green owns consolidation and repair.
+1. Record `git write-tree` for the staged candidate.
+2. Run exactly the required hook command once: `git hook run pre-commit`.
+3. Record `git write-tree` again and reject unless it matches the first OID.
+   Also reject if tracked files became unstaged or untracked files appeared.
+4. Capture the passed tree OID and, for every configured supported version, an
+   immutable absolute JUnit snapshot path, SHA-256 digest, and test count. The
+   hook owns Ruff, formatting, type checking, tox, and every other configured
+   check; do not run any of those commands separately or rerun a suite.
+5. Delegate `$nonfunctional-review` as the Judge's read-only child, passing the
+   exact staged tree and immutable snapshot paths, digests, and counts. Wait
+   for its complete receipt, then return the combined Judge and non-functional
+   handoff to Green before Phase-5 fanout.
 
 ## Constraints
 
-- You are read-only — no Edit/Write tools. Do not attempt to fix issues; route them back.
-- Do not fix issues; route them back to the appropriate agent.
+- Do not edit, stage, commit, push, or call GitLab.
+- Return every blocking failure to Green.

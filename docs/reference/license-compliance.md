@@ -35,7 +35,7 @@ License compliance is checked in both local and remote validation:
 | --- | --- |
 | Pre-commit | The `license-check` hook rejects a proposed change with missing, malformed, or unrecognized license information before it is committed. |
 | GitLab CI | The `license-check` gate independently applies the same policy to the submitted repository state. |
-| Final validation | The portable, read-only `$license-checker` is an initial Phase-4 reviewer. It runs concurrently with every other applicable reviewer against the same stable post-Green diff. Green waits for its receipt before consolidating findings, and `$tdd-finalizer` requires a current approving receipt for the final in-scope diff. |
+| Final validation | The portable, read-only `$license-checker` is an initial Phase-5 reviewer. It runs concurrently with every other applicable reviewer after the serial Phase-4 Judge against the same stable post-Green diff. Green waits for its receipt before consolidating findings, and `$tdd-finalizer` requires a current approving receipt for the final in-scope diff. |
 
 The checker does not modify files. A violation is a required correction, not a
 waivable or not-applicable review result. Maintainers correct the file header or

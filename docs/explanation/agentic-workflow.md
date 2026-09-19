@@ -44,8 +44,9 @@ by the manifest is the only identifier an agent may load or delegate.
 Capacity is a workflow precondition, not a repository setting. The active
 frontend reports available live-agent capacity through trusted runtime or
 session metadata, and the manifest compares that total with the lane's widest
-parallel phase. The coding lane needs at most 14 live slots: Main, Architect,
-Green, and 11 initially applicable Phase-4 reviewers. For the setup procedure
+parallel phase. The coding lane needs at most 12 live slots: Main, Architect,
+Green, and 9 initially applicable Phase-5 reviewers. The nested Judge and
+Non-functional Reviewer require five live slots. For the setup procedure
 and the required `needs_human` reporting, see [Configure agent
 capacity](../how-to/configure-agent-capacity.md).
 
@@ -65,6 +66,22 @@ review, validation, and the applicable implementation, test, CI, CLI, and
 filesystem reviews. Red and the Diátaxis Writer prepare disjoint phase-2 test
 and documentation changes in parallel; Green then becomes the sole mutator and
 reconciles the documentation with behavior, tests, and final interfaces.
+
+In Phase 3, Green first runs the fast formatter, lint, and type checks, runs
+focused behavior tests, stages one exact candidate, and records its tree OID.
+In serial Phase 4, the TDD Judge runs the installed pre-commit hook through Git
+against that staged candidate. Its unchanged tree OID and every supported-version
+JUnit artifact's SHA-256 digest and test count are prerequisites for its
+Non-functional Reviewer child and then the nine concurrent Phase-5 reviews. In
+Phase 6, Finalizer may commit with `--no-verify`
+only after matching that exact evidence; the serial runner uses its ordinary
+commit path. Phase-8 pipeline observation after Phase-7 push independently
+checks the exact source commit; it never substitutes for the Judge.
+
+In interactive work Finalizer makes the verified local
+commit, then the main thread pushes and creates or updates the merge request.
+For serial work Finalizer does not commit; the trusted controller's ordinary
+Git commit retains its hook.
 
 The documentation and agent-policy lane is for a whole diff limited to
 documentation and the instructions that govern agent work. It does not invent
@@ -139,9 +156,12 @@ flowchart TD
     architect --> writer
     red --> green["$tdd-green"]
     writer --> green
-    subgraph phase4["Phase 4: initially applicable reviewers run in parallel"]
-        nonfunctional["$nonfunctional-review"]
+    green --> judge["Phase 4: $tdd-judge (serial)"]
+    subgraph phase4["Phase 4: serial Judge evidence"]
         judge["$tdd-judge"]
+        nonfunctional["$nonfunctional-review"]
+    end
+    subgraph phase5["Phase 5: initially applicable reviewers run in parallel"]
         diataxis["$diataxis-judge"]
         quality["$judge-quality"]
         testjudge["$judge-test"]
@@ -152,19 +172,17 @@ flowchart TD
         policy["$agent-policy-judge (conditional)"]
         license["$license-checker"]
     end
-    green --> nonfunctional
-    green --> judge
-    green --> diataxis
-    green --> quality
-    green --> testjudge
-    green --> cicd
-    green --> readme
-    green --> cli
-    green --> filesystem
-    green --> policy
-    green --> license
+    judge --> nonfunctional
+    judge --> diataxis
+    judge --> quality
+    judge --> testjudge
+    judge --> cicd
+    judge --> readme
+    judge --> cli
+    judge --> filesystem
+    judge --> policy
+    judge --> license
     nonfunctional --> reviews["All initially applicable reviews returned"]
-    judge --> reviews
     diataxis --> reviews
     quality --> reviews
     testjudge --> reviews
@@ -174,17 +192,18 @@ flowchart TD
     filesystem --> reviews
     policy --> reviews
     license --> reviews
-    reviews --> phase4outcome{"Concrete, resolvable Phase-4 findings with material progress?"}
-    phase4outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
-    focusedgreen --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
-    selective --> phase4outcome
-    phase4outcome -- "no findings" --> finalizer["$tdd-finalizer"]
-    phase4outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
+    reviews --> phase5outcome{"Concrete, resolvable Phase-5 findings with material progress?"}
+    phase5outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
+    focusedgreen --> correctionjudge["Phase 4: fresh serial Judge and non-functional handoff"]
+    correctionjudge --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
+    selective --> phase5outcome
+    phase5outcome -- "no findings" --> finalizer["Phase 6: $tdd-finalizer"]
+    phase5outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
     finalizer --> decision{"Architect accepts finalizer verdict?"}
-    decision -- "normal approval" --> publish["Main publication"]
+    decision -- "normal approval" --> publish["Phase 7: Main publication"]
     decision -- "needs human" --> humanstop
     publish --> mr["Merge request"]
-    mr --> pipeline["$pipeline-performance-judge"]
+    mr --> pipeline["Phase 8: $pipeline-performance-judge"]
     pipeline --> human["Human review, approval, and merge"]
 ```
 
@@ -237,7 +256,8 @@ flowchart TD
 ```
 
 The coding review fan-out includes the License Checker as an initial,
-read-only Phase-4 reviewer. Every applicable reviewer examines the same stable
+read-only Phase-5 reviewer. The Non-functional Reviewer is instead the TDD
+Judge's read-only Phase-4 child. Every Phase-5 reviewer examines the same stable
 post-Green diff, and Green waits for every initial receipt before consolidating
 findings; a license receipt never depends on another review receipt. A license
 violation re-enters focused correction with the other actionable findings. The

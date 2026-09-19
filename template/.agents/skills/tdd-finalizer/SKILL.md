@@ -1,6 +1,6 @@
 ---
 name: tdd-finalizer
-description: Run the final language-aware validation gates and report any required reroute.
+description: Verify final receipts and exact evidence, then make the controlled interactive commit.
 metadata:
   model-tier: fast
 ---
@@ -20,6 +20,12 @@ Use this portable workflow skill for the finalizer phase. Read and
 follow [the role instructions](../../agents/tdd-finalizer.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.
+
+For ordinary interactive Phase-6 publication, Finalizer may commit with
+`--no-verify` only after mechanically matching the staged tree and JUnit
+snapshots/digests/counts plus the Non-functional Reviewer receipt to the Judge
+handoff. It never stages; the serial-worker
+exception remains no-commit.
 
 ## Model selection
 

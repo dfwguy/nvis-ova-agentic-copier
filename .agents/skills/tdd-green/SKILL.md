@@ -26,3 +26,14 @@ skill entry point for Claude Code, Codex, and Pi.
 The live Architect delegates this phase after both phase-2 receipts and waits
 while Green owns all subsequent worktree mutations and review feedback. Request the `balanced`
 capability tier defined in `AGENTS.md`.
+
+Green stages and captures the Phase-3 candidate tree before delegating the
+serial Phase-4 Judge. The Judge's Git-hook receipt, unchanged tree OID,
+supported-version immutable JUnit snapshots, SHA-256 digests and counts, and
+its `$nonfunctional-review` child receipt are prerequisites for the Phase-5
+review fanout.
+
+After any candidate-tree change, Green stages a new tree and obtains a fresh
+Phase-4 Judge receipt before dependent review or finalization. Every coding
+candidate requires the full hook. Green's fast formatter, lint, and type commands repair;
+the Judge owns the one expensive tox/full-suite verification.

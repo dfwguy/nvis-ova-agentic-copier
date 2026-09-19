@@ -54,6 +54,20 @@ def test_generated_pre_commit_uses_only_local_hooks(generated_project: Path) -> 
     assert "kingfisher-bin" in pyproject
 
 
+def test_tox_hook_runs_for_every_coding_candidate(project_root: Path) -> None:
+    """The Judge's hook refreshes supported-version JUnit for every diff."""
+    config = yaml.safe_load((project_root / ".pre-commit-config.yaml").read_text())
+    tox_hook = next(
+        hook
+        for repository in config["repos"]
+        for hook in repository["hooks"]
+        if hook["id"] == "tox"
+    )
+
+    assert tox_hook["always_run"] is True
+    assert "types" not in tox_hook
+
+
 def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> None:
     """Test that generated projects syntax-check and lint shell scripts."""
     config = (generated_project / ".pre-commit-config.yaml").read_text()
@@ -2581,3 +2595,17 @@ def test_portable_markdown_mirrors_match_generated_output(
     for relative_path in sorted(copied_paths):
         template_content = (template_dir / relative_path).read_bytes()
         assert template_content == (generated_project / relative_path).read_bytes()
+
+
+def test_template_executable_mirrors_match_root(
+    project_root: Path, template_dir: Path
+) -> None:
+    """The generated worker and hook preserve root executable contracts."""
+    for relative_path in (
+        Path(".pre-commit-config.yaml"),
+        Path("src/agent_work/state_machine.py"),
+        Path("src/agent_work/worker.py"),
+    ):
+        assert (project_root / relative_path).read_bytes() == (
+            template_dir / relative_path
+        ).read_bytes()
