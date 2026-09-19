@@ -25,6 +25,6 @@ entry point for Codex, Pi, and Claude Code.
 
 ## Model selection
 
-Request the `balanced` capability tier defined in `AGENTS.md`. Each frontend
+Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
 resolves that tier through its configured model mapping; do not hard-code a
 provider-specific model name in this skill.

@@ -23,4 +23,4 @@ review. Read and follow
 
 ## Model selection
 
-Request the `fast` capability tier defined in `AGENTS.md`.
+Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.

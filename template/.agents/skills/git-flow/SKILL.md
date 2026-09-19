@@ -190,7 +190,7 @@ git rev-parse --abbrev-ref HEAD
 **First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining checks:
 
 1. **Coding-lane baseline tests** — after classifying the whole intended
-   change with `AGENTS.md`, run this only for the coding workflow:
+   change through the `$architect` router, run this only for the coding workflow:
    ```bash
    uv run pytest
    ```
@@ -243,7 +243,7 @@ network path otherwise. The other commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
-- **Non-trivial change** → use the sequence in `AGENTS.md` → "Shared workflow."
+- **Non-trivial change** → activate `$architect` and follow the live router.
 - **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) → the main agent may edit + commit on the feature branch without spawning the TDD subagents. Pre-commit hooks still run at commit time, so quality gates are not bypassed.
 
 Either path lands at a local commit on the feature branch. **Both paths then proceed to Step 3 (push + MR)** — the trivial shortcut skips the TDD subagents, not the merge request.

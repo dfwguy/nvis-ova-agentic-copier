@@ -446,8 +446,8 @@ remain fail-closed before publication. The worker never commits, pushes, or
 creates a merge request.
 
 Architecture, Red/Green, documentation, review, finalization, and
-post-publication assessment remain required according to
-`AGENTS.md`. The Architect carries approved design concurrently to Red and the
+post-publication assessment remain required according to the live
+`$architect` router. The Architect carries approved design concurrently to Red and the
 Diátaxis Writer, waits for both receipts, then gives Green the test evidence
 and documentation draft or no-doc rationale. Green reconciles documentation
 with implemented interfaces, owns subsequent modifications, concurrent
