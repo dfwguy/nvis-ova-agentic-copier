@@ -104,6 +104,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
                 RunnerState.COMPLETE,
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.REPAIR_FAILED,
+                RunnerState.NEEDS_REPAIR,
             }
         ),
         RunnerState.BLOCKED: frozenset(

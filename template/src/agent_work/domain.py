@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -265,6 +266,103 @@ class SuggestCloseEvidence(_Evidence):
         return value
 
 
+_DIAGNOSTIC_MAX_BYTES: Final = 2048
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?:\bbearer\s+|\b(?=[A-Za-z0-9_-]*(?:token|password|secret|api[_-]?key|access[_-]?key)[A-Za-z0-9_-]*\s*[=:])[A-Za-z][A-Za-z0-9_-]*\s*[=:]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\S+)"
+)
+_GLPAT = re.compile(r"\bglpat-[A-Za-z0-9_-]+\b")
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.DOTALL
+)
+
+
+def sanitize_diagnostic(value: str, *, limit: int = _DIAGNOSTIC_MAX_BYTES) -> str:
+    """Return bounded diagnostic text without control characters or common secrets."""
+    normalized = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in value
+    )
+    redacted = _PRIVATE_KEY.sub("[REDACTED]", normalized)
+    redacted = _SECRET_ASSIGNMENT.sub("[REDACTED]", redacted)
+    redacted = _GLPAT.sub("[REDACTED]", redacted)
+    redacted = _JWT.sub("[REDACTED]", redacted)
+    compact = " ".join(redacted.split())
+    encoded = compact.encode("utf-8")
+    if len(encoded) <= limit:
+        return compact
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+class PipelineJobEvidence(_Evidence):
+    """One validated GitLab job from an exact pipeline inventory."""
+
+    id: int = Field(gt=0)
+    name: str = Field(default="unknown", min_length=1, max_length=255)
+    stage: str = Field(default="", max_length=255)
+    status: str = Field(min_length=1, max_length=64)
+    failure_reason: str | None = Field(default=None, max_length=255)
+    retried: bool
+    pipeline_id: int = Field(gt=0)
+    pipeline_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+    @field_validator("name", "stage", "failure_reason", mode="before")
+    @classmethod
+    def sanitize_metadata(cls, value: str | None) -> str | None:
+        """Bound externally supplied job text before retaining it as evidence."""
+        return None if value is None else sanitize_diagnostic(value)
+
+
+class JobTraceEvidence(_Evidence):
+    """Sanitized trace captured from GitLab for one selected job."""
+
+    provenance: Literal["gitlab-job-trace"] = "gitlab-job-trace"
+    status: Literal["collected"] = "collected"
+    text: str = Field(min_length=1, max_length=_DIAGNOSTIC_MAX_BYTES)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        sanitized = sanitize_diagnostic(value)
+        if not sanitized:
+            raise ValueError("trace must contain safe diagnostic text")
+        return sanitized
+
+
+class FailedJobDiagnosticEvidence(_Evidence):
+    """Durable, exact-pipeline evidence supplied to an automatic repair."""
+
+    project_id: int = Field(gt=0)
+    merge_request_iid: int = Field(gt=0)
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    pipeline_id: int = Field(gt=0)
+    pipeline_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    pipeline_status: Literal["failed"]
+    job_id: int = Field(gt=0)
+    job_name: str = Field(min_length=1, max_length=255)
+    job_stage: str = Field(default="", max_length=255)
+    job_status: Literal["failed"]
+    failure_reason: str | None = Field(default=None, max_length=255)
+    retried: bool = False
+    trace_provenance: Literal["gitlab-job-trace"]
+    trace_status: Literal["collected"]
+    trace: str = Field(min_length=1, max_length=_DIAGNOSTIC_MAX_BYTES)
+
+    @field_validator("job_name", "job_stage", "failure_reason", mode="before")
+    @classmethod
+    def sanitize_metadata(cls, value: str | None) -> str | None:
+        """Bound externally supplied job text before durable repair persistence."""
+        return None if value is None else sanitize_diagnostic(value)
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def validate_trace(cls, value: str) -> str:
+        sanitized = sanitize_diagnostic(value)
+        if not sanitized:
+            raise ValueError("diagnostic trace must contain safe text")
+        return sanitized
+
+
 class RepairAttemptEvidence(_Evidence):
     """Bounded evidence retained for one repair attempt."""
 
@@ -277,6 +375,7 @@ class RepairAttemptEvidence(_Evidence):
         validation_alias=AliasChoices("snapshot", "reviewed_snapshot"),
     )
     origin: Literal["reviewed-plan", "automatic-exact-pipeline"] = "reviewed-plan"
+    diagnostic: FailedJobDiagnosticEvidence | None = None
     evidence_delta: dict[str, object] = Field(default_factory=dict)
     failure_reason: str = Field(default="", max_length=2048)
     started_at: str = Field(default="", max_length=128)
