@@ -413,6 +413,22 @@ helper's single output separate from surrounding human prose: return its
 delimited standard output unchanged to the controller, and put any explanatory
 status outside that envelope.
 
+### Worker validation diagnostics
+
+Worker protocol validation reports one safe diagnostic when the builder input
+is malformed, the final worker envelope is malformed, or a controller-derived
+invariant fails. The diagnostic contains only its stable origin, an allowlisted
+field path, and a stable corrective reason. It never includes an unknown
+field name supplied by the worker, any supplied value, raw output, prompts, or
+credentials. It is one line of at most 2,048 UTF-8 bytes.
+
+The controller carries the same safe diagnostic in the condition history,
+status, recovery inventory, and GitLab handoff. On a repeated automatic
+failure in one coarse phase with the same error code and diagnostic, it blocks
+the item and tells the operator to run `agent-work loop retry --issue-iid IID
+--apply` after correcting the condition. A changed error code, diagnostic, or
+phase is changed evidence and follows the existing bounded retry path.
+
 ### Upstream-finding manifest v1
 
 The required YAML top-level mapping has exactly these fields; unknown fields,

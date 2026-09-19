@@ -4053,13 +4053,13 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         (
             "protocol",
             ErrorCode.WORKER_PROTOCOL_INVALID,
-            "protocol_version: must equal 2",
+            "final_envelope.protocol_version: must equal 2",
             "raw-worker-prose-secret",
         ),
         (
             "receipt",
             ErrorCode.WORKER_RECEIPT_INVALID,
-            "audit_summary.changed_paths: does not match observed changed paths",
+            "controller_invariant.audit_summary.changed_paths: does not match observed changed paths",
             "raw-worker-prose-secret",
         ),
     ],
@@ -4144,6 +4144,97 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
     assert sensitive_value not in diagnostic
 
 
+def test_nonfresh_split_envelope_blocks_repeat_and_exposes_safe_recovery(
+    tmp_path: Path,
+) -> None:
+    """A nonfresh split is retryable without retaining worker prose."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"work_kind": WorkKind.EXISTING_MR_REMEDIATION})
+    )
+    payload = {
+        "protocol_version": 2,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "unknown",
+        "result_kind": "split_required",
+        "phase_status": "complete",
+        "completed_phase": "workflow",
+        "receipts": [],
+        "split_plan": {
+            "slices": [
+                {
+                    "ordinal": 1,
+                    "key": "first",
+                    "title": "First slice",
+                    "description": "Independent first work.",
+                    "depends_on": [],
+                },
+                {
+                    "ordinal": 2,
+                    "key": "second",
+                    "title": "Second slice",
+                    "description": "Dependent second work.",
+                    "depends_on": [1],
+                },
+            ]
+        },
+        "change_summary": "raw-worker-prose-secret",
+        "next_action": "Create the durable child issues.",
+    }
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(
+            "<agent-work-result>"
+            f"{json.dumps({**payload, 'ledger_revision': record.revision + 2})}"
+            "</agent-work-result>"
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.retry_count == first.retry_count == 1
+    assert blocked.condition_history[-1].detail == (
+        "controller_invariant.split_required: is limited to fresh ordinary intake"
+    )
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == (
+        "controller_invariant.split_required: is limited to fresh ordinary intake"
+    )
+    assert candidate.next_action == (
+        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
+    )
+    assert "raw-worker-prose-secret" not in candidate.model_dump_json()
+
+
 def test_due_worker_protocol_repeat_blocks_without_consuming_another_retry(
     tmp_path: Path,
 ) -> None:
@@ -4186,13 +4277,349 @@ def test_due_worker_protocol_repeat_blocks_without_consuming_another_retry(
     assert second.retry_count == first.retry_count == 1
     assert second.retry_at is None and second.worktree == original.worktree
     assert second.phase is WorkflowPhase.WORKFLOW
-    assert second.condition_history[-1].detail == "protocol_version: must equal 2"
+    assert (
+        second.condition_history[-1].detail
+        == "final_envelope.protocol_version: must equal 2"
+    )
     assert gitlab.labels == ["agent::running", "agent::running", "agent::blocked"]
     assert len(gitlab.outcome_comments) == 1
     comment = "\n".join(gitlab.outcome_comments[0])
-    assert "protocol_version: must equal 2" in comment
+    assert "final_envelope.protocol_version: must equal 2" in comment
     assert "raw-worker-prose-secret" not in comment
     assert "agent-work loop retry --issue-iid 12 --apply" in comment
+
+
+def test_recovery_inventory_retains_safe_worker_protocol_blocker_after_repeat(
+    tmp_path: Path,
+) -> None:
+    """Read-only inventory exposes the retained safe blocker, never worker output."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    output = (
+        '<agent-work-result>{"protocol_version":1,'
+        '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
+    )
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(output),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(output),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert len(report.recovery_candidates) == 1
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == "final_envelope.protocol_version: must equal 2"
+    assert candidate.next_action == (
+        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
+    )
+    assert "raw-worker-prose-secret" not in candidate.model_dump_json()
+
+
+def test_recovery_inventory_hides_noncanonical_retained_protocol_detail(
+    tmp_path: Path,
+) -> None:
+    """Recovery never projects an unsafe retained protocol detail."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    unsafe = "final_envelope.attacker_secret: invalid type/shape/value"
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail=unsafe,
+                    ),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+
+    assert candidate.blocked_cause is None
+    assert "retry --issue-iid" not in candidate.next_action
+    assert "attacker_secret" not in candidate.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "final_envelope.audit_summary.capacity.required: must equal 2",
+        "final_envelope.audit_summary.tests.00: invalid type/shape/value",
+        "builder_input.protocol_version: invalid type/shape/value",
+        "final_envelope.protocol_version: unsupported field",
+        "final_envelope.audit_summary.capacity.required: unsupported field",
+        "final_envelope.audit_summary.tests.64: invalid type/shape/value",
+        "final_envelope.audit_summary.tests.999: invalid type/shape/value",
+    ),
+)
+def test_recovery_inventory_hides_forged_canonical_looking_detail(
+    tmp_path: Path, detail: str
+) -> None:
+    """Recovery accepts only diagnostics the canonical translator can emit."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value, detail=detail
+                    ),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause is None
+    assert "retry --issue-iid" not in candidate.next_action
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "final_envelope.audit_summary.tests.0: invalid type/shape/value",
+        "controller_invariant.split_required: is required",
+    ),
+)
+def test_recovery_inventory_retains_canonical_bounded_diagnostic(
+    tmp_path: Path, detail: str
+) -> None:
+    """Canonical collection and controller diagnostics remain actionable."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_RECEIPT_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_RECEIPT_INVALID.value, detail=detail
+                    ),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == detail
+    assert "retry --issue-iid 12 --apply" in candidate.next_action
+
+
+def test_recovery_inventory_does_not_fall_back_past_latest_unsafe_detail(
+    tmp_path: Path,
+) -> None:
+    """A later unsafe condition suppresses an earlier safe retry cause."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.protocol_version: must equal 2",
+                    ),
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.secret: invalid type/shape/value",
+                    ),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause is None
+    assert "retry --issue-iid" not in candidate.next_action
+
+
+def test_recovery_inventory_retains_safe_worker_cause_after_retry_exhaustion(
+    tmp_path: Path,
+) -> None:
+    """Retry exhaustion retains the latest safe underlying worker condition."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.RETRY_EXHAUSTED,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.protocol_version: must equal 2",
+                    ),
+                    ConditionEvidence(
+                        code=ErrorCode.RETRY_EXHAUSTED.value,
+                        detail="Automatic retry budget exhausted.",
+                    ),
+                ),
+            }
+        )
+    )
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == "final_envelope.protocol_version: must equal 2"
+    assert "retry --issue-iid" in candidate.next_action
+
+
+def test_recovery_inventory_retry_exhaustion_does_not_fall_back_past_unsafe_worker(
+    tmp_path: Path,
+) -> None:
+    """An unsafe latest underlying cause suppresses an older safe worker detail."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.RETRY_EXHAUSTED,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.protocol_version: must equal 2",
+                    ),
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_RECEIPT_INVALID.value,
+                        detail="final_envelope.secret: invalid type/shape/value",
+                    ),
+                    ConditionEvidence(
+                        code=ErrorCode.RETRY_EXHAUSTED.value,
+                        detail="Automatic retry budget exhausted.",
+                    ),
+                ),
+            }
+        )
+    )
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause is None
+    assert "retry --issue-iid" not in candidate.next_action
+
+
+def test_recovery_inventory_prioritizes_pipeline_contradiction_over_retry(
+    tmp_path: Path,
+) -> None:
+    """A safe retained cause never authorizes retry over failed pipeline evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.protocol_version: must equal 2",
+                    ),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha="a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=2,
+            status="failed",
+            sha=merge_request.sha,
+            web_url="https://pipeline/failed",
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    candidate = report.recovery_candidates[0]
+
+    assert candidate.classification == "needs_human_decision"
+    assert "retry --issue-iid" not in candidate.next_action
 
 
 def test_due_worker_protocol_with_changed_diagnostic_consumes_another_retry(
@@ -4228,7 +4655,10 @@ def test_due_worker_protocol_with_changed_diagnostic_consumes_another_retry(
     assert first is not None and first.retry_count == 1
     assert second is not None and second.state is RunnerState.RETRY_WAIT
     assert second.retry_count == 2
-    assert second.condition_history[-2].detail == "protocol_version: must equal 2"
+    assert (
+        second.condition_history[-2].detail
+        == "final_envelope.protocol_version: must equal 2"
+    )
     assert second.condition_history[-1].detail != first.condition_history[-1].detail
 
 
@@ -4432,10 +4862,23 @@ def test_due_worker_receipt_repeat_blocks_without_consuming_another_retry(
         second.worktree == original.worktree and second.phase is WorkflowPhase.WORKFLOW
     )
     assert second.condition_history[-1].detail == (
-        "audit_summary.changed_paths: does not match observed changed paths"
+        "controller_invariant.audit_summary.changed_paths: does not match observed changed paths"
     )
     assert gitlab.labels[-1:] == ["agent::blocked"]
     assert "raw-worker-prose-secret" not in "\n".join(gitlab.outcome_comments[0])
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == (
+        "controller_invariant.audit_summary.changed_paths: "
+        "does not match observed changed paths"
+    )
+    assert candidate.next_action == (
+        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
+    )
 
 
 def test_explicit_retry_resets_budget_after_repeated_worker_protocol_block(
@@ -4512,6 +4955,13 @@ def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
             config, ledger, FakeGitLab(), FakeRepository(config)
         ),
     )
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
 
     assert outcome is not None and outcome.state is RunnerState.BLOCKED
     assert outcome.error_code is ErrorCode.RETRY_EXHAUSTED
@@ -4522,14 +4972,26 @@ def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
     assert len(outcome.condition_history) == 64
     assert outcome.condition_history[0].code == "prior_condition_1"
     assert outcome.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
-    assert outcome.condition_history[-1].detail == "protocol_version: must equal 2"
+    assert (
+        outcome.condition_history[-1].detail
+        == "final_envelope.protocol_version: must equal 2"
+    )
+    assert inventory.recovery_candidates[0].blocked_cause == (
+        "final_envelope.protocol_version: must equal 2"
+    )
+    assert (
+        "retry --issue-iid 12 --apply" in inventory.recovery_candidates[0].next_action
+    )
     assert status.items[0].current_condition is not None
     assert status.items[0].current_condition.code == ErrorCode.RETRY_EXHAUSTED.value
     assert (
         "Automatic retry budget exhausted." in status.items[0].current_condition.detail
     )
     assert "worker_protocol_invalid" in status.items[0].current_condition.detail
-    assert "protocol_version: must equal 2" in status.items[0].current_condition.detail
+    assert (
+        "final_envelope.protocol_version: must equal 2"
+        in status.items[0].current_condition.detail
+    )
     assert status.items[0].condition_history[-1] == outcome.condition_history[-1]
     assert len(gitlab.outcome_comments) == 1
     comment_code, comment_summary, comment_action = gitlab.outcome_comments[0]
@@ -4539,10 +5001,10 @@ def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
     )
     assert "Automatic retry budget exhausted." in comment_summary
     assert "worker_protocol_invalid" in comment_summary
-    assert "protocol_version: must equal 2" in comment_summary
+    assert "final_envelope.protocol_version: must equal 2" in comment_summary
     comment = f"{comment_code}\n{comment_summary}\n{comment_action}"
     assert "worker_protocol_invalid" in comment
-    assert "protocol_version: must equal 2" in comment
+    assert "final_envelope.protocol_version: must equal 2" in comment
     assert "raw-worker-prose-secret" not in comment
 
 

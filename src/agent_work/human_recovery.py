@@ -71,6 +71,7 @@ class RecoveryObservation:
     pipeline_id: int | None = None
     pipeline_sha: str | None = None
     controller_status: str | None = None
+    blocked_cause: str | None = None
 
 
 @dataclass(frozen=True)

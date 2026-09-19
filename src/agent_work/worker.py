@@ -18,9 +18,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from types import UnionType
+from typing import Literal, Union, get_args, get_origin
 
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -118,12 +119,181 @@ def format_worker_result_diagnostic(error: WorkerProtocolError) -> str:
     return _truncate_utf8(value, _WORKER_DIAGNOSTIC_MAX_BYTES)
 
 
-def _validation_error(error: ValidationError) -> WorkerProtocolError:
-    """Translate Pydantic locations into stable, non-reflective diagnostics."""
-    item = error.errors(include_url=False)[0]
-    location = item["loc"]
-    field = "protocol_version" if location == ("protocol_version",) else "input"
-    reason = "must equal 2" if field == "protocol_version" else "invalid value"
+def _unwrap_schema_annotation(annotation: object) -> object:
+    """Select the model or collection branch from a schema union."""
+    if get_origin(annotation) not in {Union, UnionType}:
+        return annotation
+    candidates = get_args(annotation)
+    return next(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, type) and issubclass(candidate, BaseModel)
+        ),
+        next(
+            (
+                candidate
+                for candidate in candidates
+                if get_origin(candidate) in {list, tuple}
+            ),
+            annotation,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _SchemaPathState:
+    """One immutable step in a model-authored validation-path traversal."""
+
+    annotation: object
+    path: tuple[str, ...] = ()
+    max_items: int | None = None
+
+
+def _schema_path(
+    model: type[BaseModel], components: tuple[object, ...]
+) -> tuple[str, bool, bool, bool]:
+    """Traverse model fields and bounded collections for producer and recognizer."""
+    state = _SchemaPathState(model)
+    for component in components:
+        annotation = _unwrap_schema_annotation(state.annotation)
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            if (
+                not isinstance(component, str)
+                or component not in annotation.model_fields
+            ):
+                return ".".join(state.path), False, bool(state.path), False
+            field = annotation.model_fields[component]
+            max_items = next(
+                (
+                    metadata.max_length
+                    for metadata in field.metadata
+                    if hasattr(metadata, "max_length")
+                ),
+                None,
+            )
+            state = _SchemaPathState(
+                field.annotation, (*state.path, component), max_items
+            )
+            continue
+        origin = get_origin(annotation)
+        arguments = get_args(annotation)
+        index = (
+            component
+            if isinstance(component, int)
+            else int(component)
+            if isinstance(component, str)
+            and component.isdecimal()
+            and component == str(int(component))
+            else -1
+        )
+        if (
+            origin not in {list, tuple}
+            or index < 0
+            or (state.max_items is not None and index >= state.max_items)
+        ):
+            return ".".join(state.path), False, False, False
+        state = _SchemaPathState(
+            arguments[0] if arguments else object, (*state.path, str(index))
+        )
+    terminal = _unwrap_schema_annotation(state.annotation)
+    return (
+        ".".join(state.path),
+        True,
+        False,
+        (isinstance(terminal, type) and issubclass(terminal, BaseModel)),
+    )
+
+
+def _safe_validation_path(model: type[BaseModel], location: tuple[object, ...]) -> str:
+    """Keep only model-authored path components from a Pydantic location."""
+    return _schema_path(model, location)[0]
+
+
+def is_safe_worker_result_diagnostic(value: str) -> bool:
+    """Recognize only diagnostics the worker's canonical translator can emit."""
+    field, separator, reason = value.partition(": ")
+    if (
+        separator != ": "
+        or "\n" in value
+        or "\r" in value
+        or len(value.encode("utf-8")) > _WORKER_DIAGNOSTIC_MAX_BYTES
+    ):
+        return False
+    origin, dot, path = field.partition(".")
+    if origin in {"builder_input", "final_envelope"}:
+        model = (
+            WorkerResultBuildInput
+            if origin == "builder_input"
+            else WorkerResultEnvelope
+        )
+        rendered_path, valid_path, unknown_field, parent_accepts_unknown = _schema_path(
+            model, tuple(path.split(".")) if dot else ()
+        )
+        valid_reason = (
+            valid_path
+            and path != "protocol_version"
+            and reason == "invalid type/shape/value"
+        ) or (
+            (unknown_field or (valid_path and parent_accepts_unknown))
+            and rendered_path == path
+            and reason == "unsupported field"
+        )
+        return (
+            (valid_path and valid_reason)
+            or (
+                path == "protocol_version"
+                and reason
+                == ("must be omitted" if origin == "builder_input" else "must equal 2")
+            )
+            or (
+                origin == "final_envelope"
+                and not dot
+                and reason
+                in {"must contain exactly one result envelope", "is not valid JSON"}
+            )
+        )
+    controller_reasons = {
+        "audit_summary.changed_paths": {"does not match observed changed paths"},
+        "audit_summary.role_receipts": {"does not match worker receipts"},
+        "audit_summary": {"evidence is not represented in worker receipts"},
+        "workflow_lane": {"must be coding or content"},
+        "receipts": {
+            "required receipts are not coherent",
+            "must use each exact required skill once",
+        },
+        "split_required": {"is required", "is limited to fresh ordinary intake"},
+        "identity": {"does not match the segment"},
+    }
+    return origin == "controller_invariant" and reason in controller_reasons.get(
+        path, set()
+    )
+
+
+def _validation_error(
+    error: ValidationError, *, origin: str, model: type[BaseModel]
+) -> WorkerProtocolError:
+    """Translate validation errors to stable, allowlisted diagnostics."""
+    items = error.errors(include_url=False)
+    item = next(
+        (candidate for candidate in items if candidate["loc"] == ("protocol_version",)),
+        max(
+            items,
+            key=lambda candidate: len(
+                _safe_validation_path(model, tuple(candidate["loc"])).split(".")
+            ),
+        ),
+    )
+    location = tuple(item["loc"])
+    path = _safe_validation_path(model, location)
+    if location == ("protocol_version",):
+        return WorkerProtocolError(f"{origin}.protocol_version", "must equal 2")
+    field = origin if not path else f"{origin}.{path}"
+    reason = (
+        "unsupported field"
+        if item["type"] == "extra_forbidden"
+        else "invalid type/shape/value"
+    )
     return WorkerProtocolError(field, reason)
 
 
@@ -132,10 +302,16 @@ def parse_worker_result_build_input(value: str | bytes) -> WorkerResultBuildInpu
     try:
         return WorkerResultBuildInput.model_validate_json(value)
     except ValidationError as error:
-        location = error.errors(include_url=False)[0]["loc"]
-        if location == ("protocol_version",):
-            raise WorkerProtocolError("protocol_version", "must be omitted") from None
-        raise WorkerProtocolError("input", "invalid value") from None
+        if any(
+            item["loc"] == ("protocol_version",)
+            for item in error.errors(include_url=False)
+        ):
+            raise WorkerProtocolError(
+                "builder_input.protocol_version", "must be omitted"
+            ) from None
+        raise _validation_error(
+            error, origin="builder_input", model=WorkerResultBuildInput
+        ) from None
 
 
 def _derived_reviewers(
@@ -175,17 +351,20 @@ def validate_worker_result(
     observed = tuple(sorted(changed_paths))
     if tuple(sorted(audit.changed_paths)) != observed:
         raise WorkerProtocolError(
-            "audit_summary.changed_paths", "does not match observed changed paths"
+            "controller_invariant.audit_summary.changed_paths",
+            "does not match observed changed paths",
         )
     if audit.role_receipts != result.receipts:
         raise WorkerProtocolError(
-            "audit_summary.role_receipts", "does not match worker receipts"
+            "controller_invariant.audit_summary.role_receipts",
+            "does not match worker receipts",
         )
     receipt_text = "\n".join(result.receipts)
     evidence = (*audit.tests, *audit.reviewers, *audit.findings, *audit.corrections)
     if any(item not in receipt_text for item in evidence):
         raise WorkerProtocolError(
-            "audit_summary", "evidence is not represented in worker receipts"
+            "controller_invariant.audit_summary",
+            "evidence is not represented in worker receipts",
         )
 
 
@@ -204,7 +383,9 @@ def build_worker_result(
     if build_input.audit_summary is not None:
         audit_input = build_input.audit_summary
         if build_input.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
-            raise WorkerProtocolError("workflow_lane", "must be coding or content")
+            raise WorkerProtocolError(
+                "controller_invariant.workflow_lane", "must be coding or content"
+            )
         lane = (
             "coding" if build_input.workflow_lane is WorkflowLane.CODING else "content"
         )
@@ -223,7 +404,7 @@ def build_worker_result(
             )
         except ValidationError:
             raise WorkerProtocolError(
-                "receipts", "required receipts are not coherent"
+                "controller_invariant.receipts", "required receipts are not coherent"
             ) from None
     try:
         result = WorkerResultEnvelope(
@@ -247,7 +428,9 @@ def build_worker_result(
             suggest_close_evidence=build_input.suggest_close_evidence,
         )
     except ValidationError as error:
-        raise _validation_error(error) from None
+        raise _validation_error(
+            error, origin="final_envelope", model=WorkerResultEnvelope
+        ) from None
     validate_worker_result(record, result, changed_paths=changed_paths)
     if result.result_kind == "split_required" and (
         record.state is not RunnerState.EXECUTING
@@ -260,7 +443,7 @@ def build_worker_result(
         or record.feedback_cursor is not None
     ):
         raise WorkerProtocolError(
-            "split_required", "is limited to fresh ordinary intake"
+            "controller_invariant.split_required", "is limited to fresh ordinary intake"
         )
     try:
         # Reuse the controller's exact receipt/state coherence authority.
@@ -273,13 +456,14 @@ def build_worker_result(
                 for receipt, skill in zip(result.receipts, required, strict=True)
             ):
                 raise WorkerProtocolError(
-                    "receipts", "must use each exact required skill once"
+                    "controller_invariant.receipts",
+                    "must use each exact required skill once",
                 )
         if result.result_kind != "split_required":
             apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
     except ValueError as error:
         raise WorkerProtocolError(
-            "receipts", "required receipts are not coherent"
+            "controller_invariant.receipts", "required receipts are not coherent"
         ) from error
     return result
 
@@ -303,20 +487,26 @@ def parse_worker_result(
     """Parse and optionally identity-check exactly one result envelope."""
     matches = _RESULT.findall(output)
     if len(matches) != 1:
-        raise WorkerProtocolError("result", "must contain exactly one result envelope")
+        raise WorkerProtocolError(
+            "final_envelope", "must contain exactly one result envelope"
+        )
     try:
         result = WorkerResultEnvelope.model_validate(json.loads(matches[0]))
     except (json.JSONDecodeError, ValidationError) as error:
         if isinstance(error, ValidationError):
-            raise _validation_error(error) from None
-        raise WorkerProtocolError("result", "is not valid JSON") from None
+            raise _validation_error(
+                error, origin="final_envelope", model=WorkerResultEnvelope
+            ) from None
+        raise WorkerProtocolError("final_envelope", "is not valid JSON") from None
     identity = (result.project_id, result.issue_iid, result.ledger_revision)
     expected = (expected_project_id, expected_issue_iid, expected_revision)
     if any(
         value is not None and value != actual
         for actual, value in zip(identity, expected, strict=True)
     ):
-        raise WorkerProtocolError("identity", "does not match the segment")
+        raise WorkerProtocolError(
+            "controller_invariant.identity", "does not match the segment"
+        )
     return result
 
 
