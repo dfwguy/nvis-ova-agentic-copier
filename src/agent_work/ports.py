@@ -210,6 +210,10 @@ class RepositoryPort(Protocol):
         self, worktree: Path, branch: str, old_sha: str, new_sha: str
     ) -> None: ...
 
+    def observe_current_default(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str: ...
+
     def reconcile_default_branch(
         self, worktree: Path, branch: str, expected_head: str
     ) -> str | None: ...

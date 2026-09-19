@@ -5,7 +5,7 @@ summary: Look up the recoverable loop commands, lifecycle, data, and operating c
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-18
+last_reviewed: 2026-09-19
 related:
   - path: ../how-to/validate-template-changes.md
     why: Shows how to publish a verified template change for review.
@@ -1040,12 +1040,22 @@ allowed commit set and records it in the durable publication intent. A missing,
 unexpected, or changed path fails closed before a commit or push with a
 sanitized condition and a clear next action.
 
-The controller commits those paths before it requires the retained worktree to
-be clean. It then pushes that exact commit to the verified existing branch and
-MR. After the push, it verifies the clean worktree, the MR's exact updated
-source SHA, its closing relationship to the issue, and the pipeline for that
-SHA. It does not change the existing MR's human-owned title, description, or
-Draft metadata.
+Before it prepares or binds a feedback commit, the controller verifies the
+exact retained paths and observes the current default target. It commits only
+those paths, then runs the normal current-default reconciliation lifecycle for
+that exact local commit. If the target is already included, it pushes that exact
+validated SHA to the verified existing branch and MR. After the push, it
+verifies the clean worktree, the MR's exact updated source SHA, its closing
+relationship to the issue, and the pipeline for that SHA. It does not change
+the existing MR's human-owned title, description, or Draft metadata.
+
+If the current target changes the effective source or causes a conflict, the
+controller retains the worktree, MR, and pending-feedback identity. It neither
+pushes nor acknowledges the feedback. It persists the exact reconciliation
+target, routes the work through a fresh complete workflow, replaces the stale
+audit with current whole-workflow validation, and publishes only the resulting
+exact newly validated SHA. A transport failure or an unverifiable
+reconciliation retries safely or blocks before publication.
 
 Recovery is idempotent at each durable boundary:
 

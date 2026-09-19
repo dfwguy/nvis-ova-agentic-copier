@@ -654,15 +654,23 @@ class GitRepository:
         self._git("merge", "--ff-only", f"origin/{branch}", cwd=worktree)
         self.verify_worktree(worktree, branch, new_sha)
 
+    def observe_current_default(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str:
+        """Verify the retained baseline and return the freshly fetched default SHA."""
+        self.verify_worktree(worktree, branch, expected_head)
+        self._git(
+            "fetch", "origin", self.config.default_branch, cwd=worktree, transient=True
+        )
+        return self._git(
+            "rev-parse", f"origin/{self.config.default_branch}", cwd=worktree
+        )
+
     def reconcile_default_branch(
         self, worktree: Path, branch: str, expected_head: str
     ) -> str | None:
         """Start or recover the exact merge needed to include current default."""
-        self.verify_worktree(worktree, branch, expected_head)
-        self._git("fetch", "origin", self.config.default_branch, transient=True)
-        default_sha = self._git(
-            "rev-parse", f"origin/{self.config.default_branch}", cwd=worktree
-        )
+        default_sha = self.observe_current_default(worktree, branch, expected_head)
         merge_head = self._merge_head(worktree)
         if merge_head:
             if not self._is_ancestor(merge_head, default_sha, worktree):

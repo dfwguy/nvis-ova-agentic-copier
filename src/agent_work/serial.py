@@ -2682,6 +2682,18 @@ def _publish(
                     return _block_feedback_path_mismatch(
                         record, ledger=ledger, gitlab=gitlab
                     )
+            if record.pending_feedback is not None:
+                default_sha = repository.observe_current_default(
+                    record.worktree, record.source_branch, current_head
+                )
+                # Probe pre-bind ancestry; reconciliation still owns the only
+                # merge decision after the exact commit is bound.
+                _ = repository.is_ancestor(default_sha, current_head, record.worktree)
+            if (
+                replaying
+                and record.pending_feedback is not None
+                and current_head != baseline_sha
+            ):
                 prepared_sha = repository.bind_retained_commit(
                     record.worktree,
                     record.source_branch,
@@ -2729,12 +2741,8 @@ def _publish(
         publication_sha = record.publication_sha
         if publication_sha is None:
             raise SegmentError("publication commit is not durably bound")
-        reconciliation_sha = (
-            None
-            if record.pending_feedback is not None
-            else repository.reconcile_default_branch(
-                record.worktree, record.source_branch, publication_sha
-            )
+        reconciliation_sha = repository.reconcile_default_branch(
+            record.worktree, record.source_branch, publication_sha
         )
         if reconciliation_sha is not None:
             return ledger.persist(
