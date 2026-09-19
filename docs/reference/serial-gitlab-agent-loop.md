@@ -1163,6 +1163,24 @@ publication and closing reconciliation does not schedule a fixed 20-minute
 retry. The activation deadline and outer timeout can still hand off an active
 observation.
 
+### Human merge during observation
+
+If a human merges while the controller observes the exact source pipeline, the
+controller may converge directly to `COMPLETE`. It rereads fresh evidence and
+requires all of the following to agree: the configured project; the recorded
+MR IID; the source and target project identities and branches; the recorded
+exact source SHA; the MR's closing relationship; the closed issue; and a
+successful pipeline for that exact SHA. Unrelated, mismatched, ambiguous,
+missing, or non-successful evidence does not complete the record.
+
+For an open issue, the controller repairs the `OBSERVING` lifecycle-label
+projection before it resumes observation. For a verified completion, it writes
+the durable `COMPLETE` record before clearing lifecycle labels. This order makes
+restarts idempotent: a label-clear failure leaves a completed record and a
+stale label that the next activation can remove. A `BLOCKED` or `RETRY_WAIT`
+wrapper keeps verified publication identity, so later reconciliation of a
+closed issue can still evaluate this exact completion path.
+
 ## Retry, repair deferment, exits, and JSON
 
 The initial workflow attempt plus at most three retry attempts are bounded.

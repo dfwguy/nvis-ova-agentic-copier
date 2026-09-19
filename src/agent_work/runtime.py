@@ -2641,7 +2641,13 @@ def dispatch(
     stop_reason = "idle"
 
     with wired.lock():
-        reconcile_closed_issues(ledger, gitlab, project_id=project.id)
+        reconcile_closed_issues(
+            ledger,
+            gitlab,
+            project_id=project.id,
+            repository=repository,
+            now=wired.clock(),
+        )
         started = wired.monotonic()
 
         def activate_pipeline_repair(
