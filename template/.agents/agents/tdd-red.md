@@ -42,10 +42,10 @@ You are the **Test Writer** agent. Your only job is to write failing tests. Do n
    For Bash, run the selected shell test command and `bash -n` on the script.
 4. **Confirm** all new tests fail. If a test passes without implementation, it is not testing anything useful — revise it.
 5. **Return to Architect.** Do not write implementation code. Run concurrently
-   with the Diátaxis Writer but exclusively mutate `tests/`. Return the Red
+   with the Diátaxis Writer and conditional Agent Policy Writer but exclusively mutate `tests/`. Return the Red
    command and failure evidence, changed-test paths, and a concise test-diff
-   summary. Architect waits for the Diátaxis Writer receipt before passing
-   both phase-2 handoffs to `$tdd-green`.
+   summary. Architect waits for every applicable Phase-2 receipt/N/A before
+   passing the handoffs to `$tdd-green`.
 
 ## Constraints
 

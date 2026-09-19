@@ -29,13 +29,21 @@ from agent_work.domain import (
     WorkKind,
 )
 from agent_work.models import (
+    AuditCapacity,
+    AuditReceiptSummary,
     DecisionReviewSignal,
     LedgerRecord,
     MergeRequestDraft,
     WorkerResultEnvelope,
     render_decision_review_notice,
 )
-from agent_work.state_machine import apply_worker_result, plan_retry
+from agent_work.state_machine import (
+    WORKFLOW_RECEIPTS,
+    WORKFLOW_REVIEWER_SKILLS,
+    apply_worker_result,
+    has_complete_workflow_receipt,
+    plan_retry,
+)
 from agent_work.worker import WorkerProtocolError, parse_worker_result
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
@@ -52,6 +60,24 @@ def _record(*, retry_count: int = 0) -> LedgerRecord:
         source_branch="agent/issue-12",
         worktree=Path("/state/worktrees/12"),
         retry_count=retry_count,
+    )
+
+
+def _coding_audit(receipts: tuple[str, ...]) -> AuditReceiptSummary:
+    """Build coherent protocol-v2 audit evidence for complete coding receipts."""
+    return AuditReceiptSummary(
+        lane="coding",
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
+        role_receipts=receipts,
+        changed_paths=("src/agent_work/state_machine.py",),
+        tests=("uv run pytest tests/test_agent_work_state_machine.py",),
+        reviewers=tuple(
+            receipt
+            for receipt in receipts
+            if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
+        ),
+        findings=(),
+        corrections=(),
     )
 
 
@@ -310,9 +336,10 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
                 "$architect: approved",
                 "$tdd-red: red confirmed",
                 "$diataxis-writer: documentation reconciled",
+                "$agent-policy-writer: policy reconciled",
                 "$tdd-green: green confirmed and findings repaired",
-                "$nonfunctional-review: approved",
                 "$tdd-judge: approved",
+                "$nonfunctional-review: approved",
                 "$diataxis-judge: approved",
                 "$judge-quality: approved",
                 "$judge-test: approved",
@@ -339,9 +366,10 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
                     "$architect: approved",
                     "$tdd-red: red confirmed",
                     "$diataxis-writer: documentation reconciled",
+                    "$agent-policy-writer: policy reconciled",
                     "$tdd-green: green confirmed and findings repaired",
-                    "$nonfunctional-review: approved",
                     "$tdd-judge: approved",
+                    "$nonfunctional-review: approved",
                     "$diataxis-judge: approved",
                     "$judge-quality: approved",
                     "$judge-test: approved",
@@ -356,8 +384,8 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
                 "changed_paths": ("src/agent_work/runtime.py",),
                 "tests": ("uv run tox",),
                 "reviewers": (
-                    "$nonfunctional-review: approved",
                     "$tdd-judge: approved",
+                    "$nonfunctional-review: approved",
                     "$diataxis-judge: approved",
                     "$judge-quality: approved",
                     "$judge-test: approved",
@@ -379,7 +407,6 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
     assert outcome.record.phase is WorkflowPhase.READY_TO_PUBLISH
     assert outcome.record.audit_evidence is not None
     assert outcome.record.audit_evidence != "unknown"
-
     assert isinstance(result.audit_summary, dict)
     incomplete_reviewers = dict(result.audit_summary)
     incomplete_reviewers["reviewers"] = incomplete_reviewers["reviewers"][:-1]
@@ -401,6 +428,71 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
             result.model_copy(update={"audit_summary": forged_reviewers}),
             now=NOW,
         )
+
+
+def test_reordered_complete_coding_receipts_do_not_authorize_publication() -> None:
+    """Durable coding receipts must retain the workflow's exact order."""
+    workflow = WorkflowPhase("workflow")
+    record = _record().model_copy(
+        update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
+    )
+    receipts = tuple(
+        f"{skill}: approved"
+        for skill in reversed(WORKFLOW_RECEIPTS[WorkflowLane.CODING])
+    )
+    result = _result("ready_to_publish").model_copy(
+        update={
+            "expected_phase": workflow,
+            "completed_phase": workflow,
+            "workflow_lane": WorkflowLane.CODING,
+            "protocol_version": 2,
+            "receipts": receipts,
+            "merge_request_draft": MergeRequestDraft(
+                title="Complete issue 12", description="Validated.\n\nCloses #12"
+            ),
+            "audit_summary": _coding_audit(receipts),
+        }
+    )
+
+    with pytest.raises(ValueError, match="receipt is not coherent"):
+        apply_worker_result(record, result, now=NOW)
+
+
+def test_non_policy_coding_receipt_allows_policy_writer_not_applicable() -> None:
+    """A conditional Policy Writer records N/A without blocking ordinary coding."""
+    receipts = tuple(
+        f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
+
+    assert has_complete_workflow_receipt(record)
+
+
+def test_protected_policy_receipt_status_ignores_continuation_na() -> None:
+    """Only an exact policy receipt's header determines protected applicability."""
+    receipts = tuple(
+        (
+            f"{skill}: approved\nsub-check: not applicable — unrelated path"
+            if skill == "$agent-policy-writer"
+            else f"{skill}: approved"
+        )
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
+
+    assert has_complete_workflow_receipt(record, requires_policy_review=True)
+
+
+def test_protected_policy_receipt_rejects_not_applicable_header() -> None:
+    """Protected policy publication requires both policy-role receipts to apply."""
+    receipts = tuple(
+        f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
+        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+    )
+    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
+
+    assert not has_complete_workflow_receipt(record, requires_policy_review=True)
 
 
 def test_nonworkflow_audit_evidence_cannot_replace_final_audit() -> None:

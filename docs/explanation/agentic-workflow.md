@@ -47,8 +47,10 @@ that active launch. It selects the lane, calculates the exact required total,
 and checks the current available total immediately before nested delegation or
 worktree mutation. The coding lane needs at most 12 live slots: Main,
 Architect, Green, and 9 initially applicable Phase-5 reviewers. The nested
-Judge and Non-functional Reviewer require five live slots. The documentation
-and agent-policy lane needs three live slots.
+Judge and Non-functional Reviewer require five live slots. A Phase-2 policy
+writer makes that phase five slots as well: Main, Architect, Red, Diátaxis
+Writer, and Agent-policy Writer. It does not widen the 12-slot coding maximum.
+The documentation and agent-policy lane needs three live slots.
 
 This boundary matters most during recovery. A retained worktree and ledger can
 preserve work and record the previous capacity decision, but they cannot prove
@@ -80,8 +82,10 @@ tests, CI, packaging, configuration, schemas, command contracts, or executable
 automation. It uses the full TDD route: architecture, Red, Green, timing
 review, validation, and the applicable implementation, test, CI, CLI, and
 filesystem reviews. Red and the Diátaxis Writer prepare disjoint phase-2 test
-and documentation changes in parallel; Green then becomes the sole mutator and
-reconciles the documentation with behavior, tests, and final interfaces.
+and documentation changes in parallel. When a mixed coding change also touches
+portable agent policy, the Agent-policy Writer joins them. Green then implements
+the production change and reconciles the documentation with behavior, tests,
+and final interfaces; it does not edit agent-policy paths.
 
 In Phase 3, Green first runs the fast formatter, lint, and type checks, runs
 focused behavior tests, stages one exact candidate, and records its tree OID.
@@ -167,11 +171,14 @@ flowchart TD
     subgraph phase2["Phase 2: parallel preparation"]
         red["$tdd-red"]
         writer["$diataxis-writer"]
+        policywriter["$agent-policy-writer (conditional)"]
     end
     architect --> red
     architect --> writer
+    architect --> policywriter
     red --> green["$tdd-green"]
     writer --> green
+    policywriter --> green
     green --> judge["Phase 4: $tdd-judge (serial)"]
     subgraph phase4["Phase 4: serial Judge evidence"]
         judge["$tdd-judge"]
@@ -209,8 +216,10 @@ flowchart TD
     policy --> reviews
     license --> reviews
     reviews --> phase5outcome{"Concrete, resolvable Phase-5 findings with material progress?"}
-    phase5outcome -- "yes" --> focusedgreen["Focused $tdd-green correction"]
+    phase5outcome -- "non-policy finding" --> focusedgreen["Focused $tdd-green correction"]
+    phase5outcome -- "policy-path finding" --> policycorrection["Architect serializes $agent-policy-writer correction"]
     focusedgreen --> correctionjudge["Phase 4: fresh serial Judge and non-functional handoff"]
+    policycorrection --> correctionjudge
     correctionjudge --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
     selective --> phase5outcome
     phase5outcome -- "no findings" --> finalizer["Phase 6: $tdd-finalizer"]
@@ -298,13 +307,18 @@ frontends resolve only their enabled equivalent; Frontier is never a fallback.
 
 For coding work, the Architect owns one workflow session rather than launching
 an unrelated top-level process for each phase. It hands its design concurrently
-to Red and the Diátaxis Writer. Red exclusively mutates `tests/`; the Diátaxis
-Writer exclusively mutates `docs/`, including required indexes and reciprocal
-links. Architect waits for both receipts before handing Green the design, Red
-test diff, and Diátaxis draft/report or no-doc rationale. Green is then the
-sole mutable owner: it reconciles the draft against the implemented interface,
-fans out concurrent read-only judges when their subjects apply, repairs
-actionable feedback, and consolidates the results for the Architect.
+to Red and the Diátaxis Writer. When portable agent policy is in scope, it also
+hands the approved policy boundary to the conditional Agent-policy Writer. Red
+exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`,
+including required indexes and reciprocal links; and the Agent-policy Writer
+exclusively mutates `AGENTS.md`, `.agents/**`, and their declared portable
+`template/` mirrors. Architect waits for every applicable receipt, or its exact
+not-applicable record, before handing Green the design, Red test diff, Diátaxis
+draft/report or no-doc rationale, and policy-writer receipt. Green implements
+production and test changes, reconciles documentation, fans out the applicable
+read-only judges, repairs its owned actionable feedback, and consolidates the
+results for the Architect. Green never edits agent-policy paths or their
+mirrors.
 
 For coding work, Green makes required README and documentation edits before
 the read-only review fan-out; no second agent mutates the shared worktree. In
@@ -332,6 +346,12 @@ outcome, and a correction that stays within the approved design and authority.
 By contrast, policy or authority ambiguity, conflicting valid requirements or
 reviewers, acceptance controversy, a project-owned value change, and scope
 expansion require human judgment.
+
+Green consolidates every Phase-5 finding before it routes a correction. A
+policy-path finding goes through the still-live Architect to the Agent-policy
+Writer. Architect serializes that correction owner with Green, so Green never
+repairs policy. Every changed candidate then follows the fresh Judge, applicable
+review, and Finalizer sequence.
 
 The Architect may request another focused Green invocation only while the
 cycle ledger demonstrates material progress, not for a fixed number of tries.
@@ -412,8 +432,9 @@ approval and merge boundary.
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
 | Diátaxis Writer | Coding-lane `docs/` owner running alongside Red; drafts documentation for Green to reconcile | Change executable scope, tests, README, or agent policy |
+| Agent-policy Writer | Conditional coding-lane owner for `AGENTS.md`, `.agents/**`, and declared portable template mirrors | Change tests, docs, or production paths; let Green repair policy |
 | Documentation Writer | Architect-delegated editor confined to the content-only documentation and agent-policy lane | Change executable scope or manufacture behavior tests |
-| Implementer | Green's sole mutable owner after Phase 2; implements code and reconciles documentation, reads the diff, and consolidates judge feedback | Waive failed review evidence |
+| Implementer | Green's production, test, and documentation owner after Phase 2; reads the diff and consolidates judge feedback | Edit agent-policy paths or waive failed review evidence |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |

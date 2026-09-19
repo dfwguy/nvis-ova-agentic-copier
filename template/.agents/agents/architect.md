@@ -101,14 +101,13 @@ result envelope without altering it.
 7. **Hand off by lane** — coding designs specify Red tests and implementation;
    documentation/policy designs specify content boundaries, sources of truth,
    mirrors, and structural validation without inventing behavior tests.
-8. **Coordinate coding work** — concurrently delegate `$tdd-red` with the
-   design and acceptance criteria, and `$diataxis-writer` with approved
-   documentation boundaries. Red exclusively mutates `tests/`; the Diátaxis
-   Writer exclusively mutates `docs/`, including required indexes and
-   reciprocal links. Wait for both complete receipts before delegating
-   `$tdd-green`. Give Green the design, Red receipt/test diff, and Diátaxis
-   draft/report or reason no docs update is needed; Green then becomes sole
-   mutator and reconciles the draft against the implemented interface.
+8. **Coordinate coding work** — concurrently delegate `$tdd-red`,
+   `$diataxis-writer`, and conditional `$agent-policy-writer`. Red exclusively
+   mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`; the
+   Policy Writer exclusively mutates root/template agent-policy paths. Wait
+   for all receipts or exact N/A before delegating `$tdd-green`. Green owns
+   production, tests, and docs only. A policy correction returns through
+   Architect to the Policy Writer, serialized with later Green work.
 9. **Converge with evidence** — invoke the applicable finalizer after Green or
    the documentation writer returns approved evidence. For coding, authorize
    finalization only after checking the Diátaxis Judge's comparison verdict,

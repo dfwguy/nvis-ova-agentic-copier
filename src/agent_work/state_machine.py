@@ -176,6 +176,7 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
             "$architect",
             "$tdd-red",
             "$diataxis-writer",
+            "$agent-policy-writer",
             "$tdd-green",
             "$tdd-judge",
             "$nonfunctional-review",
@@ -214,6 +215,17 @@ WORKFLOW_REVIEWER_SKILLS: Final = frozenset(
 )
 
 
+def _has_not_applicable_status(receipt: str, skill: str) -> bool:
+    """Return whether one receipt's header records the named skill as N/A."""
+    header = receipt.split("\n", maxsplit=1)[0]
+    header_skill, separator, status = header.partition(":")
+    return (
+        separator == ":"
+        and header_skill == skill
+        and status.lstrip().casefold().startswith("not applicable")
+    )
+
+
 def has_complete_workflow_receipt(
     record: LedgerRecord, *, requires_policy_review: bool = False
 ) -> bool:
@@ -237,7 +249,7 @@ def has_complete_workflow_receipt(
     receipt_skills = tuple(receipt.partition(":")[0] for receipt in receipt_lines)
     complete = (
         len(receipt_skills) == len(required)
-        and set(receipt_skills) == set(required)
+        and receipt_skills == required
         and len(set(receipt_skills)) == len(receipt_skills)
     )
     if (
@@ -246,12 +258,15 @@ def has_complete_workflow_receipt(
         or record.workflow_lane is not WorkflowLane.CODING
     ):
         return complete
-    policy_receipt = next(
+    policy_receipts = tuple(
         receipt
         for receipt in receipt_lines
-        if receipt.partition(":")[0] == "$agent-policy-judge"
+        if receipt.partition(":")[0] in {"$agent-policy-writer", "$agent-policy-judge"}
     )
-    return "not applicable" not in policy_receipt.casefold()
+    return len(policy_receipts) == 2 and all(
+        not _has_not_applicable_status(receipt, receipt.partition(":")[0])
+        for receipt in policy_receipts
+    )
 
 
 REJECTION_ROUTES: Final = MappingProxyType(
@@ -400,7 +415,7 @@ def apply_worker_result(
     receipt_skills = tuple(receipt.partition(":")[0] for receipt in result.receipts)
     has_receipts = (
         len(receipt_skills) == len(required)
-        and set(receipt_skills) == set(required)
+        and receipt_skills == required
         and len(set(receipt_skills)) == len(receipt_skills)
     )
     if (

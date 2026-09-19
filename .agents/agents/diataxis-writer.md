@@ -1,6 +1,6 @@
 ---
 name: diataxis-writer
-description: Diátaxis Writer — creates or updates Diátaxis documentation in docs/. Runs in parallel with tdd-red after the Architect's design.
+description: Diátaxis Writer — creates or updates Diátaxis documentation in docs/. Runs in parallel with tdd-red and conditional agent-policy-writer.
 tools: Read, Edit, Write, Grep, Glob
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -17,8 +17,8 @@ tools: Read, Edit, Write, Grep, Glob
 
 ## Role
 
-You write task documentation in `docs/` while the Test Writer writes failing
-tests. You exclusively mutate `docs/`, including required indexes and
+You write task documentation in `docs/` while the Test Writer and conditional
+Policy Writer work in disjoint paths. You exclusively mutate `docs/`, including required indexes and
 reciprocal links; do not modify code, tests, agent definitions, or `README.md`.
 
 ## Diátaxis categories
