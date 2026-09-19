@@ -652,6 +652,7 @@ def test_generated_aggregate_dispatches_records_and_reports_license_once(
         '  *ci_gate_report.py*) exec "$REAL_PYTHON" tests/helpers/ci_gate_report.py ;;\n'
         "  *yamllint_to_json.py*) printf '[]\\n' ;;\n"
         '  *check_licenses.py*) exit "$LICENSE_STATUS" ;;\n'
+        "  *agent_work.readability*) exit 0 ;;\n"
         "esac\n"
     )
     fake_uv.chmod(0o755)
@@ -672,6 +673,8 @@ def test_generated_aggregate_dispatches_records_and_reports_license_once(
             "REAL_PYTHON": sys.executable,
             "UV_INVOCATIONS": str(invocations),
             "LICENSE_STATUS": str(license_status),
+            "CI_PIPELINE_SOURCE": "merge_request_event",
+            "CI_MERGE_REQUEST_DIFF_BASE_SHA": "test-base",
         },
         text=True,
     )

@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -82,6 +83,7 @@ _VALIDATION_JOBS = {
     "kingfisher",
     "license-check",
     "pytest-py311",
+    "readability-check",
     "pytest-py314",
     "ruff-check",
     "ruff-format",
@@ -118,7 +120,7 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
     }
 
     assert visible_gates == _VALIDATION_JOBS
-    assert "validation (9 gates)" not in configuration
+    assert "validation (10 gates)" not in configuration
     for job_name in _VALIDATION_JOBS:
         job = configuration[job_name]
         assert "needs" not in job
@@ -214,9 +216,9 @@ def test_portable_ci_keeps_one_shared_setup_job(
     """Generated CI stays portable without repeating setup across jobs."""
     for root in (template_dir, generated_project):
         configuration = _ci_configuration(root)
-        assert "validation (9 gates)" in configuration
+        assert "validation (10 gates)" in configuration
         assert not (_VALIDATION_JOBS & configuration.keys())
-        assert configuration["validation (9 gates)"]["script"] == [
+        assert configuration["validation (10 gates)"]["script"] == [
             "bash tests/helpers/run-ci-checks.sh"
         ]
         assert (root / "tests" / "helpers" / "run-ci-checks.sh").exists()
@@ -286,6 +288,50 @@ def test_ci_jobs_run_one_direct_gate_command(
     for job_name, command in expected_commands.items():
         assert command in "\n".join(_ci_job_script(configuration, job_name))
     assert "tox run" not in str(configuration)
+
+
+def test_readability_hooks_and_ci_use_their_respective_changed_file_scopes(
+    project_root: Path, template_dir: Path
+) -> None:
+    """Local hooks use staged filenames while CI computes its Git diff base."""
+    for root in (project_root, template_dir):
+        hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+        readability_hook = next(
+            hook
+            for repository in hooks["repos"]
+            for hook in repository["hooks"]
+            if hook["id"] == "readability-check"
+        )
+        assert readability_hook["entry"].endswith("--scope files --paths")
+        assert readability_hook["pass_filenames"] is True
+        assert re.fullmatch(readability_hook["files"], "guide.md")
+        assert re.fullmatch(readability_hook["files"], "guide.md.jinja")
+
+    root_ci = _ci_configuration(project_root)
+    readability_script = "\n".join(_ci_job_script(root_ci, "readability-check"))
+    assert "python -m agent_work.readability" in readability_script
+    assert "--scope changed" in readability_script
+    assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" in readability_script
+    assert "CI_DEFAULT_BRANCH" in readability_script
+
+
+def test_readability_dependency_and_template_gate_are_rendered_portably(
+    generated_project: Path, project_root: Path, template_dir: Path
+) -> None:
+    """Both projects install textstat and the portable helper records ten gates."""
+    for root in (project_root, generated_project):
+        configuration = tomllib.loads((root / "pyproject.toml").read_text())
+        assert any(
+            isinstance(dependency, str) and dependency.startswith("textstat>=")
+            for dependency in configuration["dependency-groups"]["dev"]
+        )
+
+    for root in (template_dir, generated_project):
+        helper = (root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
+        assert '"readability-check"' in helper
+        assert "agent_work.readability" in helper
+        assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" in helper
+        assert "CI_DEFAULT_BRANCH" in helper
 
 
 def test_ci_jobs_publish_independent_reports(

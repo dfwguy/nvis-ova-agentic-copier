@@ -496,5 +496,5 @@ def test_portable_template_keeps_its_independent_validation_bootstrap(
     assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
     assert "uv python install 3.14.3 --managed-python" in template_ci
     assert "UV_PROJECT_ENVIRONMENT=/opt/ci" not in template_ci
-    assert "validation (9 gates)" in configuration
+    assert "validation (10 gates)" in configuration
     assert not (_VALIDATION_JOBS & configuration.keys())
