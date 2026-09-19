@@ -12,16 +12,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from . import template_comparison
 from .credential_rotation import (
@@ -39,7 +42,7 @@ from .gitlab import (
     render_merge_request_description,
 )
 from .gitlab import publish_merge_request as default_publish_merge_request
-from .ledger import LockBusy
+from .ledger import LockBusy, state_home
 from .models import CommandReport, LedgerRecord, MergeRequestEvidence
 from .ports import CommandRunner
 from .repository import run_subprocess
@@ -67,6 +70,12 @@ from .upstream_gitlab import (
     UpstreamGitLabConfig,
     UpstreamGitLabError,
     UpstreamGitLabReader,
+)
+from .validation import (
+    JudgeValidationDependencies,
+    JudgeValidationError,
+    observe_judge_validation,
+    run_judge_validation,
 )
 from .worker import (
     WorkerProtocolError,
@@ -98,6 +107,31 @@ class _PrepareIssueDraft(Protocol):
     def __call__(
         self, path: Path, *, read_bytes: Callable[[Path], bytes]
     ) -> PreparedIssueDraft: ...
+
+
+class _ValidationReport(Protocol):
+    """Bounded validation report consumed by CLI rendering."""
+
+    candidate_tree: str
+    applied: bool
+    action: Literal["preview", "ran", "existing", "status"]
+    state: Literal["preview", "running", "terminal-success", "terminal-failure"]
+    terminal: bool
+    exit_code: int | None
+
+
+class _ValidationRunAction(Protocol):
+    """Injected durable validation-run action."""
+
+    def __call__(self, *, candidate_tree: str, apply: bool) -> _ValidationReport: ...
+
+
+class _ValidationStatusAction(Protocol):
+    """Injected durable validation-status action."""
+
+    def __call__(
+        self, *, candidate_tree: str, wait_seconds: int | None
+    ) -> _ValidationReport: ...
 
 
 class _ApplyUpstream(Protocol):
@@ -288,6 +322,15 @@ class _AgentWorkParser(argparse.ArgumentParser):
         ):
             self.error("--apply requires --plan-file")
         return parsed
+
+
+def _candidate_tree(value: str) -> str:
+    """Require the exact staged-tree identifier at the CLI boundary."""
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise argparse.ArgumentTypeError(
+            "candidate tree must be 40 lowercase hexadecimal characters"
+        )
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -497,6 +540,28 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--tracking")
     publish.add_argument("--issue-iid", type=_positive_integer)
     _common(publish, apply_help="create or update the merge request; omit for preview")
+    validation = resources.add_parser(
+        "validation", help="run or observe one durable Judge validation"
+    )
+    validation_actions = validation.add_subparsers(dest="action", required=True)
+    validation_run = validation_actions.add_parser(
+        "run", help="preview or apply one exact candidate validation"
+    )
+    validation_run.add_argument("--candidate-tree", type=_candidate_tree, required=True)
+    _common(
+        validation_run, apply_help="run the fixed validation hook for this staged tree"
+    )
+    validation_status = validation_actions.add_parser(
+        "status", help="read one candidate validation without running it"
+    )
+    validation_status.add_argument(
+        "--candidate-tree", type=_candidate_tree, required=True
+    )
+    validation_status.add_argument("--wait-seconds", type=_positive_integer)
+    _common(
+        validation_status,
+        apply_help="accepted for command consistency; validation status remains read-only",
+    )
     return parser
 
 
@@ -817,11 +882,108 @@ def main(
     template_private_repository: Callable[
         [], AbstractContextManager[Path]
     ] = template_comparison.private_repository,
+    validation_run: _ValidationRunAction | None = None,
+    validation_status: _ValidationStatusAction | None = None,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "validation":
+        try:
+            if (parsed.action == "run" and validation_run is None) or (
+                parsed.action == "status" and validation_status is None
+            ):
+                import fcntl
+
+                def git_read(command: tuple[str, ...]) -> str:
+                    result = run_command(command)
+                    if result.returncode != 0:
+                        raise RuntimeError("validation Git probe failed")
+                    return result.stdout.strip()
+
+                state_root = (
+                    state_home(environment=environment)
+                    / "agent-work-validation"
+                    / hashlib.sha256(
+                        str(
+                            Path(git_read(("git", "rev-parse", "--git-dir"))).resolve()
+                        ).encode()
+                    ).hexdigest()
+                )
+
+                def read_record(tree: str) -> dict[str, object] | None:
+                    path = state_root / f"{tree}.json"
+                    if not path.exists():
+                        return None
+                    record = json.loads(path.read_text())
+                    if not isinstance(record, dict):
+                        raise JudgeValidationError("validation record is malformed")
+                    return record
+
+                def write_record(tree: str, record: dict[str, object]) -> None:
+                    state_root.mkdir(parents=True, exist_ok=True)
+                    path = state_root / f"{tree}.json"
+                    atomic_write(
+                        path,
+                        json.dumps(record, separators=(",", ":")).encode(),
+                    )
+
+                @contextmanager
+                def candidate_lock(tree: str) -> Iterator[None]:
+                    state_root.mkdir(parents=True, exist_ok=True)
+                    with (state_root / f"{tree}.lock").open("w") as handle:
+                        fcntl.flock(handle, fcntl.LOCK_EX)
+                        yield
+
+                validation_dependencies = JudgeValidationDependencies(
+                    current_staged_tree=lambda: git_read(("git", "write-tree")),
+                    read_record=read_record,
+                    atomic_write_record=write_record,
+                    candidate_lock=candidate_lock,
+                    run_command=run_command,
+                    monotonic_clock=time.monotonic,
+                    sleeper=time.sleep,
+                )
+                if parsed.action == "run":
+                    validation_run = partial(
+                        run_judge_validation, dependencies=validation_dependencies
+                    )
+                else:
+                    validation_status = partial(
+                        observe_judge_validation, dependencies=validation_dependencies
+                    )
+            if parsed.action == "run":
+                assert validation_run is not None
+                report = validation_run(
+                    candidate_tree=parsed.candidate_tree,
+                    apply=getattr(parsed, "apply", False),
+                )
+            else:
+                assert validation_status is not None
+                report = validation_status(
+                    candidate_tree=parsed.candidate_tree,
+                    wait_seconds=getattr(parsed, "wait_seconds", None),
+                )
+        except (JudgeValidationError, OSError, RuntimeError, ValueError) as error:
+            write_stderr(str(error))
+            return 1
+        payload = {
+            "candidate_tree": report.candidate_tree,
+            "applied": report.applied,
+            "action": report.action,
+            "state": report.state,
+            "terminal": report.terminal,
+            "exit_code": report.exit_code if report.terminal else None,
+        }
+        write_stdout(
+            json.dumps(payload, separators=(",", ":"))
+            if parsed.json
+            else " ".join(f"{key}={value}" for key, value in payload.items())
+        )
+        if parsed.action == "run" and not getattr(parsed, "apply", False):
+            return 0
+        return 0 if report.terminal and report.exit_code == 0 else 1
     if parsed.resource == "template" and parsed.action == "preview":
         try:
             runner = template_run_command

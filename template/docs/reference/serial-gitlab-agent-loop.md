@@ -17,6 +17,8 @@ related:
     why: Explains the architecture behind this contract.
   - path: ../explanation/serial-agent-loop-recovery-design.md
     why: Explains the recoverable state machine in detail.
+  - path: ../explanation/agentic-workflow.md
+    why: Explains the Judge role that owns validation sessions.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -58,6 +60,9 @@ agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  [--impact TEXT] [--human-action TEXT]
                                  [--tracking TEXT] [--issue-iid IID]
                                  [--apply] [--json]
+agent-work validation run --candidate-tree TREE [--apply] [--json]
+agent-work validation status --candidate-tree TREE
+                             [--wait-seconds SECONDS] [--apply] [--json]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -116,6 +121,35 @@ The command never pushes a branch, approves a merge request, or merges it.
 Push the branch first; see [how to validate template changes](../how-to/validate-template-changes.md#publish-the-verified-branch-for-review)
 for a practical publication sequence. `--json` provides the corresponding
 machine-readable result.
+
+### `validation run` and `validation status`
+
+The Judge validates one staged candidate through a durable session keyed by
+its `TREE` value. Use `validation run --candidate-tree TREE` to preview the
+action. It does not mutate state or start a hook without `--apply`.
+
+With `--apply`, `validation run` first verifies that `TREE` is the current
+staged tree. It records the session as running before it invokes exactly one
+`git hook run pre-commit` command, then records that command's terminal exit
+code atomically. It returns only after the hook reaches a terminal result.
+The session retains no hook output or secrets. A terminal zero is the only
+outcome that permits inspection of the unchanged tree and JUnit evidence; a
+terminal nonzero blocks validation. The command never starts a second suite
+for the same candidate-tree session.
+
+`validation status --candidate-tree TREE` is read-only and never launches a
+hook. It reports `running`, `terminal-success`, or `terminal-failure`. With
+`--wait-seconds`, it polls a running session for at most that bounded interval
+until it becomes terminal. Use it after a yielded or lost frontend command
+handle, and continue to query the same `TREE` rather than starting another
+validation run. It accepts `--apply` for command consistency, but remains
+read-only.
+
+Exit code `0` means a preview or terminal success. An applied run that remains
+running, a terminal failure, a missing or malformed session, or an operational
+failure exits `1`; invalid usage exits `2`. JSON reports at least the candidate
+tree, whether the action was applied, the action, state, whether it is
+terminal, and the final exit code only after the session is terminal.
 
 ### `credential rotate`
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -258,6 +259,163 @@ def test_bare_loop_run_is_a_read_only_preview() -> None:
     )
     assert seen == [False]
     assert json.loads(output[0])["applied"] is False
+
+
+def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
+    calls: list[tuple[str, bool, int | None]] = []
+
+    def validation_run(
+        *, candidate_tree: str, apply: bool, wait_seconds: int | None = None
+    ) -> SimpleNamespace:
+        calls.append((candidate_tree, apply, wait_seconds))
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=apply,
+            action="preview",
+            state="preview",
+            terminal=False,
+            exit_code=None,
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            ["validation", "run", "--candidate-tree", "a" * 40, "--json"],
+            validation_run=validation_run,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert calls == [("a" * 40, False, None)]
+    assert json.loads(output[0]) == {
+        "candidate_tree": "a" * 40,
+        "applied": False,
+        "action": "preview",
+        "state": "preview",
+        "terminal": False,
+        "exit_code": None,
+    }
+
+
+def test_validation_status_cli_never_treats_running_as_success() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    def validation_status(
+        *, candidate_tree: str, wait_seconds: int | None = None
+    ) -> SimpleNamespace:
+        calls.append((candidate_tree, wait_seconds))
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=False,
+            action="status",
+            state="running",
+            terminal=False,
+            exit_code=None,
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "validation",
+                "status",
+                "--candidate-tree",
+                "a" * 40,
+                "--wait-seconds",
+                "3",
+                "--apply",
+                "--json",
+            ],
+            validation_status=validation_status,
+            write_stdout=output.append,
+        )
+        == 1
+    )
+    assert calls == [("a" * 40, 3)]
+    assert json.loads(output[0])["terminal"] is False
+    assert json.loads(output[0])["exit_code"] is None
+
+
+def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def validation_run(
+        *, candidate_tree: str, apply: bool, **_kwargs: object
+    ) -> SimpleNamespace:
+        calls.append((candidate_tree, apply))
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=True,
+            action="ran",
+            state="terminal-success",
+            terminal=True,
+            exit_code=0,
+        )
+
+    assert (
+        main(
+            ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
+            validation_run=validation_run,
+        )
+        == 0
+    )
+    assert calls == [("a" * 40, True)]
+
+
+def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
+    calls: list[str] = []
+
+    def validation_run(*, candidate_tree: str, apply: bool) -> SimpleNamespace:
+        calls.append(f"run:{candidate_tree}:{apply}")
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=apply,
+            action="preview",
+            state="preview",
+            terminal=False,
+            exit_code=None,
+        )
+
+    def validation_status(
+        *, candidate_tree: str, wait_seconds: int | None
+    ) -> SimpleNamespace:
+        calls.append(f"status:{candidate_tree}:{wait_seconds}")
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=False,
+            action="status",
+            state="terminal-success",
+            terminal=True,
+            exit_code=0,
+        )
+
+    assert (
+        main(
+            ["validation", "run", "--candidate-tree", "a" * 40],
+            validation_run=validation_run,
+            validation_status=validation_status,
+        )
+        == 0
+    )
+    assert (
+        main(
+            ["validation", "status", "--candidate-tree", "a" * 40],
+            validation_run=validation_run,
+            validation_status=validation_status,
+        )
+        == 0
+    )
+    assert calls == [f"run:{'a' * 40}:False", f"status:{'a' * 40}:None"]
+
+
+def test_validation_cli_help_and_argument_errors_use_argparse_statuses() -> None:
+    with pytest.raises(SystemExit) as help_exit:
+        main(["validation", "run", "--help"])
+    assert help_exit.value.code == 0
+
+    with pytest.raises(SystemExit) as invalid_exit:
+        main(["validation", "run", "--candidate-tree", "not-a-tree"])
+    assert invalid_exit.value.code == 2
 
 
 def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boundary() -> (

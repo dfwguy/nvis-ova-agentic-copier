@@ -5,7 +5,7 @@ summary: Understand how explicit skill routing keeps every supported agent front
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-19
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -13,6 +13,8 @@ related:
     why: Describes the issue workflow that uses these roles.
   - path: ../reference/license-compliance.md
     why: Defines the license review performed before finalization.
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the durable validation-session commands used by the Judge.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -89,11 +91,17 @@ and final interfaces; it does not edit agent-policy paths.
 
 In Phase 3, Green first runs the fast formatter, lint, and type checks, runs
 focused behavior tests, stages one exact candidate, and records its tree OID.
-In serial Phase 4, the TDD Judge runs the installed pre-commit hook through Git
-against that staged candidate. Its unchanged tree OID and every supported-version
-JUnit artifact's SHA-256 digest and test count are prerequisites for its
-Non-functional Reviewer child and then the nine concurrent Phase-5 reviews. In
-Phase 6, Finalizer may commit with `--no-verify`
+In serial Phase 4, the TDD Judge uses an applied, durable validation session
+keyed by that staged tree. The session records itself as running before it runs
+exactly one `git hook run pre-commit` command, then records its terminal exit
+code. Only terminal success permits the Judge to inspect the unchanged tree
+and every supported-version JUnit artifact's SHA-256 digest and test count;
+terminal failure blocks the workflow. If a frontend loses or yields the command
+handle, the Judge observes the same tree's session until it is terminal rather
+than starting another hook. These checks are prerequisites for its
+Non-functional Reviewer child and then the nine concurrent Phase-5 reviews.
+The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
+defines the run and read-only status commands. In Phase 6, Finalizer may commit with `--no-verify`
 only after matching that exact evidence; the serial runner uses its ordinary
 commit path. Phase-8 pipeline observation after Phase-7 push independently
 checks the exact source commit; it never substitutes for the Judge.
