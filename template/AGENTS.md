@@ -91,30 +91,43 @@ Before taking repository action:
    an interface, dependencies, configuration, security, or workflow policy.
    Route all other work through exactly one manifest below. Mixed or uncertain
    changes use the coding workflow. Agent-policy changes are never trivial.
-5. Before delegation, determine available concurrent live-agent capacity from
-   trusted frontend or runtime session metadata, never repository, user-authored,
-   or provider-specific configuration. Record available and required capacity in
-   the applicability record. Required slots are main, every resident ancestor,
-   and every applicable child in the widest same-number phase. Count a
-   conditional role as N/A only when demonstrably false; uncertainty is
-   applicable. Phase 2 requires at most 5 live slots: main, Architect, and
-   the three parallel writers. Coding requires at most 12 live slots: main, Architect, Green,
-   and nine concurrent Phase-5 reviewers including `$license-checker`. The
-   nested Phase-4 Judge and Non-functional Reviewer require five live slots.
-   Documentation/policy requires at most 3: main,
-   Architect, and the current writer or finalizer child. If capacity is unknown
-   or insufficient, stop before delegation and return `needs_human`. Report
-   the workflow lane, required total live slots, available total or `unknown`,
-   shortfall or `unknown`, and an actionable remedy for the active frontend.
-   Runtime/session metadata remains the only capacity evidence: repository
-   files, issue or task content, and provider-specific configuration do not
-   establish capacity. Never silently serialize a declared parallel row or
-   claim parallel execution. Each newly launched serial worker re-evaluates
-   fresh evidence for its active session before Architect, Red, or writer
-   delegation and before worktree mutation. Ordinary, retained-worktree retry,
-   and systemd launches fail closed when that evidence is absent, stale,
-   inconsistent, or insufficient; inherited environment and durable audit or
-   ledger values are not capacity attestations.
+5. Before every delegation or fanout, derive the exact pending topology from
+   this manifest and demonstrated applicability. Record the lane, exact widest
+   live row, and its applicable topology in the applicability record. The
+   coding topology is Main → Architect; Architect → parallel Phase-2 writers,
+   then Green, then Finalizer; Green → Judge, then applicable concurrent
+   Phase-5 reviewers; and Judge → Non-functional Reviewer. The content topology
+   is Main → Architect → the current writer or finalizer. A row includes every
+   resident ancestor and every applicable concurrent child; count a conditional
+   role as N/A only when demonstrably false, and treat uncertainty as
+   applicable. Fully applicable coding tops out at 12 live slots in Phase 5;
+   Phase 2 and Phase 4a each require 5, and content requires 3. These are
+   calculation aids, not scalar admission evidence.
+
+   Admission requires fresh, internally consistent evidence for every dimension
+   of that exact plan from trusted active frontend or runtime metadata: global
+   live-slot availability; global retained-object
+   ceiling, current use, and fresh-handle headroom; and, for each owner, direct-
+   child and descendant headroom. Record required, available, and shortfall for
+   each dimension, or `unknown`. Admit only when every available value covers
+   its requirement. Missing, stale, inconsistent, or insufficient evidence
+   returns `needs_human` before delegation, Red/Writer delegation, worktree
+   mutation, or a later fanout. The report names the lane, widest row/topology,
+   every required/available/shortfall dimension or `unknown`, and an actionable
+   remedy for the active frontend. Runtime/session metadata is the only
+   capacity evidence: repository files, task or provider configuration,
+   inherited environment, and retained audit or ledger values are
+   non-authoritative.
+
+   A reuse plan is valid only when it is explicit and verified before admission:
+   its source completes before its target starts; it keeps the same owner and
+   enabled tier; no handle is shared concurrently; and skill, tier, parentage,
+   concurrency, and receipt contracts are unchanged. Otherwise require a fresh
+   handle, including a fresh Architect and Green for each issue. Never silently
+   serialize a declared parallel row, wait for a handle, or claim parallel
+   execution. Each ordinary, retained-worktree retry, or systemd worker launch
+   re-evaluates this evidence for its active session and fails closed when it
+   cannot admit the exact plan.
 6. For delegated work, use only the listed enabled tier and give the agent its
    exact `$skill-id`, context, file boundaries, prerequisites, and required
    receipt. Do not route by display name or invent an unlisted role.
@@ -340,15 +353,26 @@ table and workflow manifest inside one live workflow-owning session. Its
 Architect delegates the applicable children, preserves their direct context
 handoffs, and returns one versioned result envelope for the coarse `workflow`
 phase. Before delegating its live Architect, the workflow-owning session makes
-one launch-scoped capacity decision from fresh trusted frontend or runtime
-session metadata. After delegation, and before Red, the documentation writer,
-or any worktree mutation, Architect makes one semantic intake sizing decision.
-A missing, stale,
-inconsistent, or insufficient capacity observation returns `needs_human` with
-the lane, required total, available total or `unknown`, shortfall or `unknown`,
-and an active-frontend remedy. Every ordinary, retained, or systemd-started
-worker launch rechecks capacity; repository, task, provider configuration,
-inherited environment, and retained ledger or audit values cannot attest it.
+a launch-scoped topology-aware admission decision. Architect makes another
+before Red, the documentation writer, any worktree mutation, or a later
+fanout. Each decision derives the exact pending widest row/topology from this
+manifest and demonstrated applicability, then obtains only capacity evidence
+from fresh trusted active frontend or runtime metadata: global live slots;
+retained-object ceiling, current use, and fresh-handle headroom; and every
+owner's direct-child and descendant headroom. It records required, available,
+and shortfall for each
+dimension, or `unknown`, and admits work only when every dimension covers the
+exact plan. Missing, stale, inconsistent, or insufficient evidence returns
+`needs_human` before the guarded action with the lane, widest row/topology,
+every required/available/shortfall dimension or `unknown`, and an
+active-frontend remedy. Any reuse plan must be explicit and verified before
+admission: source completion before target, same owner and enabled tier, no
+concurrent sharing, and unchanged skill, tier, parentage, concurrency, and
+receipt contracts. Otherwise each issue gets a fresh Architect and Green;
+never serialize or wait for a handle silently. Every ordinary, retained, or
+systemd-started worker launch rechecks capacity; repository, task, provider
+configuration, inherited environment, and retained ledger or audit values
+cannot attest it.
 Suitable work has one independently
 reviewable and mergeable outcome that can reasonably complete every applicable
 workflow phase inside the effective worker budget. Oversized or separately

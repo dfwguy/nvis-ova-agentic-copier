@@ -7,6 +7,8 @@ tags: [agent-workflow]
 status: current
 last_reviewed: 2026-09-19
 related:
+  - path: ../how-to/configure-agent-capacity.md
+    why: Explains how to prepare capacity evidence before a worker launch.
   - path: ../how-to/validate-template-changes.md
     why: Shows how to publish a verified template change for review.
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
@@ -1032,19 +1034,31 @@ Repository data, issue and task text, user or provider configuration, service
 environment values, and retained ledger or audit values are not capacity
 evidence.
 
+The admission check records the exact applicable manifest topology and its
+widest concurrent row. For coding, Main owns Architect; Architect owns the
+Phase-2 writers, Green, and Finalizer; Green owns Judge and every applicable
+Phase-5 reviewer; and Judge owns Non-functional Reviewer. A conditional role
+reduces this topology only when its condition is demonstrably false.
+
 The check reports one coherent set of values:
 
 | Value | Contract |
 | --- | --- |
 | Lane | `coding` or `content`, according to the whole proposed change |
-| Required total | `12` for coding; `3` for content |
+| Topology and widest row | The applicable ownership tree and the exact row that sets the requirement |
+| Required total | `12` for fully applicable coding; `3` for content |
 | Available total | Current total live slots from trusted launch metadata, or `unknown` |
 | Shortfall | `max(required - available, 0)`, or `unknown` when availability is not trustworthy |
+| Retained-object admission | Global object ceiling, current use, and fresh-object headroom for the planned topology |
+| Owner admission | Direct-child and descendant headroom for every planned owner |
+| Handle plan | A fresh handle for each role, or a verified same-owner, same-tier, non-overlapping reuse plan that preserves skill, parentage, concurrency, and receipt |
 | Decision | Run only when current evidence is internally consistent and available is at least required |
 
 The conditional Agent-policy Writer makes the widest Phase-2 row five live
 slots: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer. The
-nine-reviewer Phase-5 row remains wider, so the coding requirement stays 12.
+nine-reviewer Phase-5 row remains wider, so the fully applicable coding
+requirement stays 12. Architect and Green are fresh per issue unless the
+verified handle plan proves that reuse is safe.
 
 Evidence is fresh only when it describes the active worker session. Evidence
 from an earlier invocation is stale even when that invocation used the same
@@ -1054,19 +1068,20 @@ available total and shortfall unknown. A changed, internally consistent
 observation for the active launch replaces an earlier observation; values are
 never averaged or recovered from durable state.
 
-Absent, stale, inconsistent, or insufficient evidence returns `needs_human`
-before nested delegation or worker mutation. The handoff names the lane,
-required total, available total or `unknown`, shortfall or `unknown`, and an
-actionable remedy for the active frontend. The runner preserves the retained
-worktree and existing recovery evidence. It does not serialize a parallel
-phase, weaken a gate, change a model tier, or infer authority from the
-capacity failure.
+Absent, stale, inconsistent, or insufficient live-slot, object, or owner
+evidence returns `needs_human` before nested delegation, fanout, or worker
+mutation. The handoff names the lane, topology and widest row, required total,
+available total or `unknown`, shortfall or `unknown`, and an actionable remedy
+for the active frontend. The runner preserves the retained worktree and
+existing recovery evidence. It does not serialize a parallel phase, weaken a
+gate, change a model tier, or infer authority from the capacity failure.
 
 Ordinary interactive launches, retained-worktree retries, and systemd-started
 workers use the same contract. Each new session rechecks the runtime metadata;
 a prior successful audit cannot authorize it. A successful worker result
-retains the checked lane, required total, available total, zero shortfall, and
-run decision as one coherent capacity audit. See [Configure agent
+retains the checked lane, topology, widest row, live-slot and object evidence,
+owner headroom, any reuse plan, and run decision as one coherent capacity audit.
+See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
 
 ### Intake sizing contract

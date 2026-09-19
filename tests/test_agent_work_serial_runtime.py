@@ -91,6 +91,115 @@ from agent_work.worker import (
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
 
+def _current_workflow_capacity(
+    lane: str, receipts: tuple[str, ...]
+) -> dict[str, object]:
+    """Build current topology evidence for successful fake-worker workflows."""
+    metadata = {
+        "$architect": ("main", "1", "most_capable"),
+        "$tdd-red": ("$architect", "2a", "balanced"),
+        "$diataxis-writer": ("$architect", "2b", "balanced"),
+        "$agent-policy-writer": ("$architect", "2c", "balanced"),
+        "$tdd-green": ("$architect", "3", "balanced"),
+        "$tdd-judge": ("$tdd-green", "4", "balanced"),
+        "$nonfunctional-review": ("$tdd-judge", "4a", "fast"),
+        "$diataxis-judge": ("$tdd-green", "5b", "fast"),
+        "$judge-quality": ("$tdd-green", "5c", "most_capable"),
+        "$judge-test": ("$tdd-green", "5d", "balanced"),
+        "$judge-cicd": ("$tdd-green", "5e", "balanced"),
+        "$tdd-document": ("$tdd-green", "5f", "balanced"),
+        "$cli-syntax-judge": ("$tdd-green", "5g", "fast"),
+        "$filesystem-structure-judge": ("$tdd-green", "5h", "fast"),
+        "$agent-policy-judge": ("$tdd-green", "5i", "fast"),
+        "$license-checker": ("$tdd-green", "5j", "fast"),
+        "$tdd-finalizer": ("$architect", "6", "fast"),
+    }
+    if lane == "content":
+        roles = [
+            ("$architect", "main", "1", "most_capable"),
+            ("$documentation-writer", "$architect", "2", "balanced"),
+            ("$documentation-finalizer", "$architect", "3", "fast"),
+        ]
+        row = ["main", "$architect", "$documentation-writer"]
+    else:
+        skipped = {
+            receipt.partition(":")[0]
+            for receipt in receipts
+            if ": not applicable" in receipt
+        }
+        roles = [
+            (skill, *detail)
+            for skill, detail in metadata.items()
+            if skill not in skipped
+        ]
+        row = [
+            "main",
+            "$architect",
+            "$tdd-green",
+            *(skill for skill, _owner, phase, _tier in roles if phase.startswith("5")),
+        ]
+    role_items = [
+        {
+            "skill": skill,
+            "owner": owner,
+            "phase": phase,
+            "tier": tier,
+            **({"reuse_from": "$tdd-judge"} if skill == "$judge-test" else {}),
+        }
+        for skill, owner, phase, tier in roles
+    ]
+    fresh = [item for item in role_items if "reuse_from" not in item]
+    owners = (
+        ["main", "$architect"]
+        if lane == "content"
+        else ["main", "$architect", "$tdd-green", "$tdd-judge"]
+    )
+
+    def descendant(item: dict[str, str], owner: str) -> bool:
+        current = item
+        while current["owner"] != "main":
+            if current["owner"] == owner:
+                return True
+            current = next(
+                candidate
+                for candidate in role_items
+                if candidate["skill"] == current["owner"]
+            )
+        return owner == "main"
+
+    headroom = [
+        {
+            "owner": owner,
+            "direct_children_required": sum(item["owner"] == owner for item in fresh),
+            "direct_children_headroom": 16,
+            "descendants_required": sum(descendant(item, owner) for item in fresh),
+            "descendants_headroom": 16,
+        }
+        for owner in owners
+    ]
+    return {
+        "capacity": {
+            "required": len(row),
+            "available": 16,
+            "shortfall": 0,
+            "decision": "run",
+        },
+        "topology": {
+            "widest_live_row": row,
+            "required_live_slots": len(row),
+            "available_live_slots": 16,
+            "roles": role_items,
+            "owner_headroom": headroom,
+        },
+        "retained_objects": {
+            "ceiling": 16,
+            "current": 0,
+            "required_fresh_handles": len(fresh),
+            "fresh_headroom": 16 - len(fresh),
+        },
+    }
+
+
 def _config(tmp_path: Path) -> AgentWorkConfig:
     return AgentWorkConfig(
         host="gitlab.example.com",
@@ -1017,6 +1126,7 @@ class BatchingInvoker:
                             "shortfall": 0,
                             "decision": "run",
                         },
+                        **_current_workflow_capacity(self.lane, self.receipts[phase]),
                         "role_receipts": list(self.receipts[phase]),
                         "changed_paths": [],
                         "tests": ["uv run tox"],
@@ -1126,6 +1236,7 @@ class SingleSessionInvoker:
                     "shortfall": 0,
                     "decision": "run",
                 },
+                **_current_workflow_capacity(self.lane, receipts),
                 "role_receipts": list(receipts),
                 "changed_paths": list(audit_paths),
                 "tests": ["uv run tox"] if self.lane == "coding" else [],
@@ -4143,6 +4254,7 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
                 "shortfall": 0,
                 "decision": "run",
             },
+            **_current_workflow_capacity("coding", receipts),
             "role_receipts": receipts,
             "changed_paths": ["src/example.py"],
             "tests": ["uv run pytest"],
@@ -4156,7 +4268,7 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
         payload["change_summary"] = sensitive_value
     else:
         payload["audit_summary"] = {
-            **cast(dict[str, object], payload["audit_summary"]),
+            **payload["audit_summary"],
             "changed_paths": [sensitive_value],
         }
 
@@ -4783,6 +4895,7 @@ def test_due_worker_validation_with_changed_code_consumes_another_retry(
                 "shortfall": 0,
                 "decision": "run",
             },
+            **_current_workflow_capacity("coding", receipts),
             "role_receipts": receipts,
             "changed_paths": ["not-an-observed-path"],
             "tests": ["uv run pytest"],
@@ -4861,6 +4974,7 @@ def test_due_worker_receipt_repeat_blocks_without_consuming_another_retry(
                     "shortfall": 0,
                     "decision": "run",
                 },
+                **_current_workflow_capacity("coding", receipts),
                 "role_receipts": receipts,
                 "changed_paths": ["raw-worker-prose-secret"],
                 "tests": ["uv run pytest"],

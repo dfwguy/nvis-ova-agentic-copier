@@ -490,11 +490,160 @@ class AuditCapacity(BoundaryModel):
         return self
 
 
+class AuditTopologyRole(BoundaryModel):
+    """One manifest role in a launch-scoped capacity topology."""
+
+    skill: str = Field(pattern=r"^\$[a-z0-9-]+$")
+    owner: str = Field(min_length=1)
+    phase: str = Field(min_length=1, max_length=8)
+    tier: Literal["most_capable", "balanced", "fast"]
+    reuse_from: str | None = Field(default=None, pattern=r"^\$[a-z0-9-]+$")
+
+
+class AuditOwnerHeadroom(BoundaryModel):
+    """Fresh child and descendant capacity available to one topology owner."""
+
+    owner: str = Field(min_length=1)
+    direct_children_required: int = Field(ge=0)
+    direct_children_headroom: int = Field(ge=0)
+    descendants_required: int = Field(ge=0)
+    descendants_headroom: int = Field(ge=0)
+
+
+def _is_topology_descendant(
+    role: AuditTopologyRole,
+    owner: str,
+    roles: dict[str, AuditTopologyRole],
+) -> bool:
+    """Return whether a role is below an owner in the declared role tree."""
+    current = role
+    while current.owner != "main":
+        if current.owner == owner:
+            return True
+        parent = roles.get(current.owner)
+        if parent is None:
+            return False
+        current = parent
+    return owner == "main"
+
+
+class AuditTopology(BoundaryModel):
+    """Exact manifest ownership and live-row evidence for one launch."""
+
+    widest_live_row: tuple[str, ...] = Field(min_length=1, max_length=32)
+    required_live_slots: int = Field(ge=1)
+    available_live_slots: int = Field(ge=0)
+    roles: tuple[AuditTopologyRole, ...] = Field(min_length=1, max_length=32)
+    owner_headroom: tuple[AuditOwnerHeadroom, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_topology(self) -> AuditTopology:
+        """Reject incomplete, overlapping, or arithmetically unsafe topology data."""
+        if len(set(self.widest_live_row)) != len(self.widest_live_row):
+            raise ValueError("widest live row must not repeat roles")
+        if self.required_live_slots != len(self.widest_live_row):
+            raise ValueError("required live slots must match widest live row")
+        if self.available_live_slots < self.required_live_slots:
+            raise ValueError("available live slots must cover widest live row")
+        roles = {role.skill: role for role in self.roles}
+        if len(roles) != len(self.roles):
+            raise ValueError("topology roles must be unique")
+        for role in self.roles:
+            seen = {role.skill}
+            owner = role.owner
+            while owner != "main":
+                parent = roles.get(owner)
+                if parent is None:
+                    raise ValueError("topology owner must name main or a topology role")
+                if parent.skill in seen:
+                    raise ValueError("topology ownership must not contain a cycle")
+                seen.add(parent.skill)
+                owner = parent.owner
+        phase_order = {
+            "1": 1,
+            "2a": 2,
+            "2b": 2,
+            "2c": 2,
+            "3": 3,
+            "4": 4,
+            "4a": 4,
+            "5b": 5,
+            "5c": 5,
+            "5d": 5,
+            "5e": 5,
+            "5f": 5,
+            "5g": 5,
+            "5h": 5,
+            "5i": 5,
+            "5j": 5,
+            "6": 6,
+        }
+        source_counts: dict[str, int] = {}
+        for role in self.roles:
+            if role.reuse_from is None:
+                continue
+            source = roles.get(role.reuse_from)
+            if source is None:
+                raise ValueError("reuse_from must name a topology role")
+            if source.owner != role.owner or source.tier != role.tier:
+                raise ValueError("reuse_from requires the same owner and tier")
+            if phase_order.get(source.phase, 0) >= phase_order.get(role.phase, 0):
+                raise ValueError("reuse_from source phase must complete before target")
+            source_counts[source.skill] = source_counts.get(source.skill, 0) + 1
+        if any(count > 1 for count in source_counts.values()):
+            raise ValueError("reuse_from must not overlap concurrent targets")
+        owners = {entry.owner: entry for entry in self.owner_headroom}
+        if len(owners) != len(self.owner_headroom):
+            raise ValueError("owner_headroom owners must be unique")
+        children: dict[str, list[AuditTopologyRole]] = {}
+        for role in self.roles:
+            children.setdefault(role.owner, []).append(role)
+        for owner, entry in owners.items():
+            direct = sum(role.reuse_from is None for role in children.get(owner, ()))
+            descendants = sum(
+                role.reuse_from is None and _is_topology_descendant(role, owner, roles)
+                for role in self.roles
+            )
+            if (
+                entry.direct_children_required != direct
+                or entry.descendants_required != descendants
+                or entry.direct_children_headroom < direct
+                or entry.descendants_headroom < descendants
+            ):
+                raise ValueError("owner_headroom must match topology requirements")
+        if set(owners) != set(children):
+            raise ValueError("owner_headroom must cover every topology owner")
+        return self
+
+
+class AuditRetainedObjects(BoundaryModel):
+    """Global fresh-handle evidence retained with a successful workflow audit."""
+
+    ceiling: int = Field(ge=1)
+    current: int = Field(ge=0)
+    required_fresh_handles: int = Field(ge=1)
+    fresh_headroom: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_retained_objects(self) -> AuditRetainedObjects:
+        """Require global retained-object arithmetic to cover fresh handles."""
+        if self.current + self.required_fresh_handles > self.ceiling:
+            raise ValueError("retained_objects ceiling must cover current and fresh")
+        if (
+            self.fresh_headroom
+            != self.ceiling - self.current - self.required_fresh_handles
+        ):
+            raise ValueError("retained_objects fresh_headroom must match arithmetic")
+        return self
+
+
 class AuditReceiptSummary(BoundaryModel):
     """Compact, bounded evidence for a completed whole workflow."""
 
     lane: Literal["coding", "content"]
     capacity: AuditCapacity
+    topology: AuditTopology | None = None
+    retained_objects: AuditRetainedObjects | None = None
     role_receipts: tuple[str, ...] = Field(max_length=32)
     changed_paths: tuple[str, ...] = Field(max_length=128)
     tests: tuple[str, ...] = Field(max_length=64)

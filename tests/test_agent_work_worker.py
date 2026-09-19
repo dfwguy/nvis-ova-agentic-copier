@@ -465,6 +465,33 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     assert "must exactly match" in normalized
 
 
+def test_workflow_prompt_requires_current_topology_and_retained_object_admission() -> (
+    None
+):
+    """Worker instructions fail closed on missing live, owner, or object evidence."""
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "widest live row" in prompt
+    assert "retained-object" in prompt
+    assert "required fresh handles" in prompt
+    assert "per-owner" in prompt
+    assert "direct-child" in prompt
+    assert "descendant" in prompt
+    assert "reuse" in prompt
+    assert "same owner and tier" in prompt
+    assert "source phase completes before target" in prompt
+    assert "topology" in prompt
+
+
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (
     None
 ):
