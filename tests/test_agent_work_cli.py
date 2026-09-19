@@ -1451,7 +1451,7 @@ def test_upstream_finding_preview_composes_the_default_read_only_boundary() -> N
     def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
         calls.append((command, kwargs))
         response = (
-            '{"id":77,"issues_enabled":true,"permissions":'
+            '{"id":77,"path_with_namespace":"group/project","issues_enabled":true,"permissions":'
             '{"project_access":{"access_level":20},"group_access":null}}'
             if command[-1] == "projects/77"
             else "[]"

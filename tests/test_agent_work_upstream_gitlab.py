@@ -54,7 +54,7 @@ def _config() -> UpstreamGitLabConfig:
 def _project(*, identifier: int = 77, access: int = 20, enabled: bool = True) -> str:
     """Return the smallest valid project preflight response."""
     return (
-        f'{{"id":{identifier},"issues_enabled":{str(enabled).lower()},'
+        f'{{"id":{identifier},"path_with_namespace":"group/project","issues_enabled":{str(enabled).lower()},'
         f'"permissions":{{"project_access":{{"access_level":{access}}},'
         '"group_access":null}}'
     )
@@ -382,12 +382,12 @@ def test_credential_reader_failure_is_sanitized_before_any_subprocess() -> None:
     "project",
     [
         pytest.param(
-            '{"id":77,"issues_enabled":true,"permissions":'
+            '{"id":77,"path_with_namespace":"group/project","issues_enabled":true,"permissions":'
             '{"project_access":null,"group_access":{"access_level":20}}}',
             id="group-reporter",
         ),
         pytest.param(
-            '{"id":77,"issues_enabled":true,"permissions":'
+            '{"id":77,"path_with_namespace":"group/project","issues_enabled":true,"permissions":'
             '{"project_access":{"access_level":20},"group_access":null}}',
             id="project-reporter",
         ),

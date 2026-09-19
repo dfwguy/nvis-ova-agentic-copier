@@ -5,7 +5,7 @@ summary: Install, inspect, plan recovery, and enable one serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-18
+last_reviewed: 2026-09-19
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -205,17 +205,38 @@ recurring Maintainer attestation. The observable branch and global approval
 checks above must pass; the runtime independently never approves or merges.
 The parentheses isolate strict shell options and preserve the block's status.
 
-## Preview an upstream finding
+## Preview or file an upstream finding
 
 Validate a supplied upstream-finding manifest against an explicit upstream
-target using a dedicated credential file. The command is read-only: it performs
-GET-only checks: no issue is posted and it never changes the checkout.
+target using a dedicated credential file. Start with the harmless preview: it
+performs strict local validation and bounded GET-only exact-marker deduplication,
+but does not create an issue or change the checkout.
 
 ```bash
 uv run agent-work upstream-finding preview --manifest-file finding.yaml \
   --upstream-host gitlab.example.com --upstream-project-id 123 \
-  --upstream-credential-file /secure/upstream-token --json
+  --upstream-credential-file /secure/upstream-token
 ```
+
+Review a `would-create` result before explicitly filing the finding. The only
+mutation switch is `--apply`; it repeats exact-marker deduplication immediately
+before making at most one create request.
+
+```bash
+uv run agent-work upstream-finding preview --manifest-file finding.yaml \
+  --upstream-host gitlab.example.com --upstream-project-id 123 \
+  --upstream-credential-file /secure/upstream-token --apply
+```
+
+Interpret `would-create` as a dry-run finding with no matching open issue,
+`match` as an existing or recovered exact marker, and `created` as one verified
+new upstream issue. If an applied command reports a sanitized uncertain create
+failure, rerun the same explicit command: the next marker scan recovers a
+created issue as `match`, or creates at most one issue only when no exact marker
+exists. Do not expect this command to create a checkout, local ledger, labels,
+assignments, approvals, or merges. The new open, non-confidential issue enters
+the upstream project's normal guarded workflow only if that project has enabled
+one; a human still approves and merges any resulting merge request.
 
 See the complete syntax and exit behavior in the
 [reference](../reference/serial-gitlab-agent-loop.md).

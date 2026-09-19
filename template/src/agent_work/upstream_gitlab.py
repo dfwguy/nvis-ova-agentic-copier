@@ -7,7 +7,7 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
-"""Read-only, redacted GitLab boundary for upstream-finding previews."""
+"""Redacted GitLab boundary for upstream-finding preview and explicit apply."""
 
 from __future__ import annotations
 
@@ -15,15 +15,21 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .ports import CommandResult, CommandRunner
-from .upstream_finding import UpstreamFindingPreview, render_reserved_marker
+from .upstream_finding import (
+    MAX_ISSUE_DESCRIPTION,
+    RESERVED_MARKER_PREFIX,
+    PreparedIssueDraft,
+    UpstreamFindingPreview,
+    render_reserved_marker,
+    validate_prepared_issue_draft,
+)
 
-_RESERVED = "<!-- agent-work-upstream-finding:"
 _MAX_TOKEN_BYTES = 4096
-_MAX_DESCRIPTION = 10_000
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
 
@@ -53,9 +59,26 @@ def _is_hostname(value: str) -> bool:
     )
 
 
+def _is_project_path(value: str) -> bool:
+    """Return whether value is a bounded, canonical GitLab namespace path."""
+    segments = value.split("/")
+    return (
+        bool(value)
+        and len(value) <= 512
+        and all(
+            segment not in {"", ".", ".."}
+            and all(
+                character.isascii() and (character.isalnum() or character in "._-")
+                for character in segment
+            )
+            for segment in segments
+        )
+    )
+
+
 @dataclass(frozen=True)
 class UpstreamGitLabConfig:
-    """Explicit, separate connection values for a read-only upstream."""
+    """Explicit, separate connection values for an upstream boundary."""
 
     host: str
     project_id: int
@@ -63,8 +86,10 @@ class UpstreamGitLabConfig:
     glab_path: Path
 
     def __post_init__(self) -> None:
-        if not _is_hostname(self.host):
+        canonical_host = self.host.lower()
+        if not _is_hostname(canonical_host):
             raise ValueError("upstream host is invalid")
+        object.__setattr__(self, "host", canonical_host)
         if isinstance(self.project_id, bool) or self.project_id <= 0:
             raise ValueError("upstream project ID is invalid")
         if not self.credential_file.is_absolute():
@@ -87,8 +112,17 @@ class _Permissions(BaseModel):
 class _Project(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
     id: int
+    path_with_namespace: str
     issues_enabled: bool
     permissions: _Permissions
+
+    @field_validator("path_with_namespace")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        """Require one safe canonical GitLab namespace path."""
+        if not _is_project_path(value):
+            raise ValueError("path is invalid")
+        return value
 
 
 class _Issue(BaseModel):
@@ -104,6 +138,19 @@ class _Issue(BaseModel):
         return "" if value is None else value
 
 
+class _CreatedIssue(BaseModel):
+    """Strictly projected fields required to verify a created issue."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+    project_id: int
+    iid: int = Field(gt=0)
+    state: str
+    confidential: bool
+    title: str
+    description: str
+    web_url: str
+
+
 def _parse(payload: str, model: type[_Project | _Issue] | None) -> object:
     """Decode a bounded API payload without retaining rejected content."""
     try:
@@ -117,8 +164,45 @@ def _parse(payload: str, model: type[_Project | _Issue] | None) -> object:
         raise UpstreamGitLabError("upstream response is invalid") from None
 
 
+def _parse_create(payload: str) -> _CreatedIssue:
+    """Decode only the response fields required for strict create verification."""
+    try:
+        return _CreatedIssue.model_validate(json.loads(payload))
+    except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
+        raise UpstreamGitLabError("upstream response is invalid") from None
+
+
+def _verify_created(
+    created: _CreatedIssue,
+    draft: PreparedIssueDraft,
+    config: UpstreamGitLabConfig,
+    project_path: str,
+) -> None:
+    """Reject any create response that is not the exact safe issue projection."""
+    try:
+        parsed = urlsplit(created.web_url)
+    except ValueError:
+        raise UpstreamGitLabError("upstream response is invalid") from None
+    expected_url = f"https://{config.host}/{project_path}/-/issues/{created.iid}"
+    if (
+        created.project_id != config.project_id
+        or created.state != "opened"
+        or created.confidential
+        or created.title != draft.title
+        or created.description != draft.description
+        or parsed.scheme != "https"
+        or parsed.hostname != config.host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or created.web_url != expected_url
+    ):
+        raise UpstreamGitLabError("upstream response is invalid")
+
+
 class UpstreamGitLabReader:
-    """Find exact reserved markers without sending inherited identity or secrets."""
+    """Preview or explicitly apply upstream findings with isolated credentials."""
 
     def __init__(
         self,
@@ -172,9 +256,36 @@ class UpstreamGitLabReader:
             raise UpstreamGitLabError("upstream request unavailable")
         return result.stdout
 
-    def preview(self, preview: UpstreamFindingPreview) -> UpstreamFindingPreview:
-        """Return a match or would-create result after bounded GET-only reads."""
-        token = self._token()
+    def _post(self, draft: PreparedIssueDraft, token: str) -> str:
+        command = (
+            str(self._config.glab_path),
+            "api",
+            "--hostname",
+            self._config.host,
+            "-X",
+            "POST",
+            "-f",
+            f"title={draft.title}",
+            "-f",
+            f"description={draft.description}",
+            "-f",
+            "confidential=false",
+            f"projects/{self._config.project_id}/issues",
+        )
+        try:
+            result: CommandResult = self._run_command(
+                command, environment={"GITLAB_TOKEN": token}
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise UpstreamGitLabError("upstream request unavailable") from None
+        if result.returncode != 0:
+            raise UpstreamGitLabError("upstream request unavailable")
+        return result.stdout
+
+    def _preflight_and_scan(
+        self, preview: UpstreamFindingPreview, token: str
+    ) -> tuple[UpstreamFindingPreview, _Project]:
+        """Perform full project validation and one bounded exact-marker scan."""
         project = _parse(
             self._get(f"projects/{self._config.project_id}", token), _Project
         )
@@ -193,6 +304,12 @@ class UpstreamGitLabReader:
             raise UpstreamGitLabError("upstream issues are unavailable")
         if max(levels, default=0) < 20:
             raise UpstreamGitLabError("upstream project access is invalid")
+        return self._scan(preview, token), project
+
+    def _scan(
+        self, preview: UpstreamFindingPreview, token: str
+    ) -> UpstreamFindingPreview:
+        """Perform one bounded exact-marker scan after project preflight."""
         marker = render_reserved_marker(preview)
         seen: dict[int, _Issue] = {}
         matches: list[int] = []
@@ -207,7 +324,7 @@ class UpstreamGitLabReader:
             assert isinstance(issues, tuple)
             for issue in issues:
                 assert isinstance(issue, _Issue)
-                if len(issue.description) > _MAX_DESCRIPTION:
+                if len(issue.description) > MAX_ISSUE_DESCRIPTION:
                     raise UpstreamGitLabError("upstream response is invalid")
                 previous = seen.get(issue.iid)
                 if previous is not None:
@@ -219,7 +336,7 @@ class UpstreamGitLabReader:
                 seen[issue.iid] = issue
                 if issue.state != "opened":
                     continue
-                reserved_count = issue.description.count(_RESERVED)
+                reserved_count = issue.description.count(RESERVED_MARKER_PREFIX)
                 exact_count = issue.description.count(marker)
                 if reserved_count != exact_count or exact_count > 1:
                     raise UpstreamGitLabError("upstream issue evidence is ambiguous")
@@ -236,3 +353,30 @@ class UpstreamGitLabReader:
             outcome="match" if matches else "would-create",
             matching_iid=matches[0] if matches else None,
         )
+
+    def preview(self, preview: UpstreamFindingPreview) -> UpstreamFindingPreview:
+        """Return a match or would-create result after bounded GET-only reads."""
+        token = self._token()
+        result, _ = self._preflight_and_scan(preview, token)
+        return result
+
+    def apply(
+        self, preview: UpstreamFindingPreview, draft: PreparedIssueDraft
+    ) -> UpstreamFindingPreview:
+        """Create one verified issue only after two full exact-marker scans."""
+        try:
+            validate_prepared_issue_draft(draft)
+        except ValueError:
+            raise UpstreamGitLabError("upstream draft is invalid") from None
+        if draft.preview != preview:
+            raise UpstreamGitLabError("upstream draft is invalid")
+        token = self._token()
+        first, project = self._preflight_and_scan(preview, token)
+        if first.outcome == "match":
+            return first
+        second = self._scan(preview, token)
+        if second.outcome == "match":
+            return second
+        created = _parse_create(self._post(draft, token))
+        _verify_created(created, draft, self._config, project.path_with_namespace)
+        return replace(preview, outcome="created", matching_iid=created.iid)
