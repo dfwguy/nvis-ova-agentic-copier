@@ -26,4 +26,4 @@ skill entry point for Claude Code, Codex, and Pi.
 The live Architect delegates this phase concurrently with `$diataxis-writer`
 and conditional `$agent-policy-writer`, then waits for every applicable
 phase-2 receipt/N/A before Green starts.
-Request the `balanced` capability tier defined in `AGENTS.md`.
+Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.

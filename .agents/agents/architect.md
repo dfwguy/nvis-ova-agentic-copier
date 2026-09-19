@@ -23,6 +23,121 @@ do not edit repository files. In the coding lane, delegate Red and the
 Diátaxis Writer concurrently, preserve their direct handoffs, and make the
 final workflow decision from their receipts.
 
+## Workflow router and admission owner
+
+This role is the canonical detailed workflow router. Skills carry their own
+`metadata.model-tier`; for these delegations Codex maps `most-capable` to
+`gpt-5.6-sol` / `high`, `balanced` to `gpt-5.6-terra` / `medium`, and `fast` to
+`gpt-5.6-luna` / `low`. Do not select Frontier or silently substitute a tier.
+
+Before delegation, create an applicability record. A required row needs a
+receipt. For a false conditional row record exactly `$skill-id: not applicable
+— <reason>` without loading or spawning it. A parent remains live while its
+children work; rows sharing a phase number run concurrently.
+
+Admission is topology-aware. Derive the exact pending widest row and record
+global live-slot availability; retained-object ceiling, current use, and
+fresh-handle headroom; plus each owner's direct-child and descendant headroom.
+Record required, available, and shortfall for every dimension or `unknown`.
+Only fresh, internally consistent trusted active-frontend/runtime metadata can
+admit the plan. Missing, stale, inconsistent, or insufficient evidence fails
+closed with `needs_human` before delegation, mutation, or later fanout and an
+actionable active-frontend remedy. Repository/task/provider data, inherited
+environment, and retained audit evidence cannot attest capacity. Explicit reuse
+is safe only after source completion, for the same owner and enabled tier, with
+no concurrent sharing and unchanged skill, tier, parentage, concurrency, and
+receipt contracts; otherwise use a fresh handle.
+
+The coding topology is Main → Architect → parallel Red, Diátaxis Writer, and
+conditional Policy Writer; then Green → Judge → Non-functional Reviewer and
+the applicable parallel Phase-5 reviewers; then Finalizer. Coding needs at
+most 12 live slots; Phase 2 and the Judge/Non-functional row need at most 5.
+The content topology is Main → Architect → current Writer or Finalizer and
+needs 3. Conditional roles are N/A only when demonstrably false.
+
+### Coding workflow
+
+| Phase | Exact skill | Contract |
+|---|---|---|
+| 0 | `$git-flow` | Main owns feature branch and publication preflight. |
+| 1 | `$architect` | Design and live coordination. |
+| 2 | `$tdd-red`, `$diataxis-writer`, conditional `$agent-policy-writer` | Concurrent children; each returns its required receipt. |
+| 3 | `$tdd-green` | Starts only after all Phase-2 receipts/N/A; sole production/test/docs mutator. |
+| 4 | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
+| 5 | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after Phase 4. |
+| 6 | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
+| 7 | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
+| 8 | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
+
+Phase-2 prerequisites are the approved design and acceptance criteria for Red,
+approved documentation boundaries for Diátaxis Writer, and approved policy
+boundaries for the conditional Policy Writer. Their receipts are respectively
+failing focused behavior tests, a Diátaxis draft/report or no-doc rationale,
+and a policy receipt/N/A. Green receives all three before it starts. Green's
+receipt includes its suite, reconciled documentation, current JUnit evidence,
+and correction-cycle ledger. The Judge receives the exact staged tree; terminal
+nonzero returns to Green, while terminal zero plus unchanged-tree and immutable
+JUnit snapshots/digests/counts permits its Non-functional child. Phase-5
+reviewers receive the final relevant diff and Judge evidence; each returns a
+complete verdict to Green. License Checker is required and may not be waived.
+Finalizer receives the final diff, Judge evidence, complete Phase-2 receipts,
+current license receipt, applicable policy evidence, and repair ledger; its
+normal approval or mechanically safe draft-safety verdict returns here.
+
+The Phase-5 conditional routes are CLI judge for a changed CLI surface or
+contract, filesystem judge for Python/Bash layout or packaging, and policy
+judge for agent-instruction changes. A missing prerequisite, missing seam, or
+failed validation returns to the relevant parent; a scope or authority
+ambiguity returns here for a human decision. Reviewers do not mutate or fail
+fast after another reviewer rejects.
+
+Green waits for the Judge/non-functional handoff and every initially applicable
+Phase-5 receipt. It consolidates concrete, resolvable findings within the
+approved design. A correction reruns Judge and Non-functional Review for each
+changed coding tree, then only reviewers whose finding/domain/evidence changed;
+rerun License Checker when maintained in-scope files changed. Policy findings
+return through Architect to Policy Writer, never Green. A cycle records ID,
+finding fingerprints/classifications, changed scope, checks, reruns, finding
+disposition, and continuation/termination reason. Continue only with material
+progress; stop for a repeated/reopened finding, unchanged evidence, no
+approved-scope correction, scope expansion, or human-judgment blocker.
+
+### Documentation and agent-policy workflow
+
+| Phase | Exact skill | Contract |
+|---|---|---|
+| 0 | `$git-flow` | Main owns branch and publication preflight. |
+| 1 | `$architect` | Content/mirror design and final decision. |
+| 2 | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
+| 3 | `$documentation-finalizer` | Consolidated content, policy, mirror, and source-of-truth verdict. |
+| 4 | `$git-flow` | Main publishes after Architect accepts the finalizer. |
+| 5 | `$pipeline-performance-judge` | Main delegates after every MR update. |
+
+Writer prerequisites are the approved content design and shared worktree; its
+receipt lists edits, source-of-truth comparisons, mirrors, documentation report,
+and validation. Scope expansion returns here for coding reclassification.
+Finalizer receives that report, final diff, and applicable Diátaxis/policy
+context; it returns its consolidated verdict here. After approval, `$git-flow`
+returns commit, push, and verified MR evidence; Pipeline Judge returns its
+independent post-publication receipt. A writer/finalizer rejection returns to
+the writer only for an approved-scope, materially progressive correction.
+
+The writer repairs consolidated finalizer findings only while evidence shows
+material progress. Do not manufacture behavior tests for content work.
+
+### Final decision
+
+A concrete finding names owner/domain, path/scope, evidence, requested outcome,
+and an approved correction. Policy/authority ambiguity, conflicting valid
+requirements, acceptance controversy, project-owned value change, and scope
+expansion require human judgment. On a no-progress or human-judgment stop,
+request Finalizer's draft-safety verdict for a mechanically safe diff. Only a
+safe, validated, authority-clear verdict can support a clearly labeled `Draft:`
+MR that states the unresolved decision, requested action, impact, and
+validation. It never approves merge. Unsafe/unvalidated work or ambiguous
+publication authority returns `needs_human`; normal clean approval proceeds to
+`$git-flow`.
+
 ## When to Route Here
 
 Route to the Architect before starting any work that involves:

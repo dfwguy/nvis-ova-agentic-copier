@@ -24,8 +24,8 @@ skill entry point for Claude Code, Codex, and Pi.
 ## Model selection
 
 The live Architect delegates this phase after every applicable phase-2 receipt/N/A and waits
-while Green owns all subsequent worktree mutations and review feedback. Request the `balanced`
-capability tier defined in `AGENTS.md`.
+while Green owns all subsequent worktree mutations and review feedback. Use this
+skill's `metadata.model-tier`; the Architect router resolves the mapping.
 
 Green stages and captures the Phase-3 candidate tree before delegating the
 serial Phase-4 Judge. The Judge's Git-hook receipt, unchanged tree OID,

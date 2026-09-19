@@ -30,8 +30,9 @@ related:
 
 This page explains how the generated multi-agent workflow turns a change into
 a human-reviewed merge request without leaving role selection to a frontend's
-interpretation. It is an explanation of the routing model; the authoritative
-step-by-step manifest is `AGENTS.md`.
+interpretation. It is an explanation of the routing model; `AGENTS.md` is the
+portable bootstrap, while the live `$architect` router in
+`.agents/agents/architect.md` owns the authoritative step-by-step workflow.
 
 The workflow separates design, test design, documentation, implementation, and
 review so every step has a clear purpose and an independent check. It has two
@@ -83,12 +84,13 @@ the declared parallel phase instead of silently serializing it. For the
 operator procedure and examples, see [Configure agent
 capacity](../how-to/configure-agent-capacity.md).
 
-`AGENTS.md` is intentionally a concise routing manifest rather than a second
-copy of every role procedure. It says which file or skill to read, when it
-applies, who owns the work, which capability tier to use, what evidence the
-phase produces, and where a rejection goes. The selected skill then links to
-the detailed role reference. This division keeps the portable decision visible
-at session start while keeping role procedures in one maintained location.
+`AGENTS.md` is intentionally a concise portable bootstrap rather than a second
+copy of workflow procedure. It establishes universal authority and safety,
+classification, conditional loading, and the route to `$architect`. The live
+Architect router owns lane manifests, model mapping, admission, parentage,
+receipts, correction, and final decisions. Individual skills own their phase
+procedure and capability metadata; `$git-flow` owns publication, and
+`$work-item-runner` owns the serial controller/worker exception.
 
 ## Two lanes keep validation proportional
 
@@ -320,7 +322,7 @@ controller reserves `agent/issue-<iid>` for its issue worktrees. These names
 identify the two contexts; this explanation does not claim a separate runtime
 branch-enforcement mechanism.
 
-For non-trivial coding work, the manifest names every phase rather than rolling
+For non-trivial coding work, the Architect router names every phase rather than rolling
 them up as “final judges.” Each manifest records phase applicability, ownership,
 prerequisites, receipts, and reroutes. Delegated phases use the exact tier
 and Codex model/effort named by their row. In Codex those tiers resolve to
@@ -404,7 +406,8 @@ Finalizer approval and a draft-safety verdict are distinct handoffs: Architect
 can accept the latter only to publish or update the labeled Draft: proposal for
 human judgment. Existing merge requests retain their required closing content
 and are read back after their title and description are updated. The normative
-routing and publication rules remain in `AGENTS.md` and `git-flow`.
+routing rules remain in the Architect router and publication rules remain in
+`git-flow`.
 
 The CLI and filesystem judges are conditional only because their subjects can
 be absent. Skipping either requires an explicit receipt in the applicability

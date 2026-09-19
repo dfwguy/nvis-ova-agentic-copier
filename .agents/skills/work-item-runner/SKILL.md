@@ -1,6 +1,8 @@
 ---
 name: work-item-runner
 description: Route one eligible GitLab issue through a dedicated checkout to a human-gated merge request.
+metadata:
+  model-tier: balanced
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -36,36 +38,24 @@ The deterministic controller, AI workflow, and required nested agents use the
 same scoped Developer GitLab credential. Humans provide product and policy
 inputs and alone approve or merge.
 
-Classify the whole change, then use either the Coding workflow manifest or the
-Documentation and agent-policy workflow manifest in `AGENTS.md` as the routing
-contract. Mixed or uncertain work uses the coding workflow. For each phase,
-read and activate the exact `$skill-id`.
-Do not infer a skill from a display name or from a rolled-up label such as
-"final judges."
-Delegate one live `$architect`. For coding, Architect concurrently delegates
-`$tdd-red` and `$diataxis-writer`, then waits for both receipts before
-`$tdd-green`; Red exclusively mutates `tests/`, the Diátaxis Writer exclusively
-mutates `docs/`, and Green alone mutates thereafter, reconciles the draft with
-the implemented interface, and fans out all applicable
-read-only judges concurrently, repairs their consolidated findings while
-material progress exists, and
-returns to Architect for finalization. Architect may authorize further focused
-Green cycles while a recorded cycle ledger shows material progress. The ledger records cycle ID,
-input finding fingerprints/classifications, changed scope, checks before/after
-or N/A, rerun reviewers and reasons, finding disposition, and a continuation or
-termination reason. A fingerprint is reviewer/owner plus path/scope plus stable
-summary/requested outcome. Stop on a repeated/reopened identical finding,
-unchanged relevant evidence, no approved-scope repair, scope expansion, or a
-human-judgment blocker; never waive/relabel findings to manufacture progress.
-For a no-progress or controversy stop, Architect obtains Finalizer's
-draft-safety verdict. Only a mechanically safe, validated, authority-clear
-diff may publish a `Draft:` MR that concisely states the human decision and
-requested action, impact, and validation. Keep detailed findings, receipts,
-and the correction-cycle ledger in the result envelope and durable audit; this
-is never merge approval. For content, Architect delegates one
-sole-mutator `$documentation-writer`, then `$documentation-finalizer`. Keep
-every required or not-applicable receipt in the single result envelope. The
-worker exception changes who publishes; it does not weaken either workflow.
+Classify the whole change and delegate one live `$architect`. The exact coding
+and documentation/policy routing, admission, parentage, phase contracts,
+receipts, correction cycles, and normal/Draft/`needs_human` decisions are in
+the live Architect router, `.agents/agents/architect.md`. Mixed or uncertain
+work uses the coding route. Read and activate each exact `$skill-id`; never
+infer a skill from a display name or rolled-up label. Keep every required or
+not-applicable receipt in the single result envelope.
+
+The worker makes a launch-scoped capacity decision before it delegates the
+Architect; Architect makes another before Red, the documentation writer,
+worktree mutation, or later fanout. Both use the router's topology-aware
+admission rule and fail closed with its actionable `needs_human` report.
+
+The worker exception changes who publishes but does not weaken the workflow.
+For no-progress or controversy, preserve the Architect/Finalizer Draft versus
+proceed decision and detailed findings, receipts, and correction ledger in the
+result envelope and durable audit. The trusted runner alone owns publication,
+exact pipeline observation, and recovery.
 
 ## MR remediation issue exception
 

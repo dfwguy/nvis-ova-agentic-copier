@@ -23,5 +23,5 @@ before acting.
 ## Model selection
 
 The live Architect delegates this phase and waits while the writer remains the
-sole mutable-worktree owner. Request the `balanced` capability tier in
-`AGENTS.md`.
+sole mutable-worktree owner. Use this skill's `metadata.model-tier`; the
+Architect router resolves the delegation mapping.
