@@ -2464,6 +2464,7 @@ esac""",
         "src/agent_work/cli.py",
         "src/agent_work/upstream_finding.py",
         "src/agent_work/upstream_gitlab.py",
+        "src/agent_work/validation.py",
     ),
 )
 def test_serial_runner_assets_have_exact_root_template_and_generated_parity(

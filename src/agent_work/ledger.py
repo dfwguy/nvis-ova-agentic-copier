@@ -145,9 +145,14 @@ def project_state_path(
     *, host: str, project_id: int, environment: Mapping[str, str]
 ) -> Path:
     """Return the XDG project-state directory without creating it."""
-    base = Path(environment.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    base = state_home(environment=environment)
     host_hash = hashlib.sha256(host.encode()).hexdigest()[:12]
     return base / "agent-work" / "projects" / f"{project_id}-{host_hash}"
+
+
+def state_home(*, environment: Mapping[str, str]) -> Path:
+    """Return the XDG state home, treating an empty value as unset."""
+    return Path(environment.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
 
 
 class JsonLedger:

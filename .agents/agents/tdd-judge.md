@@ -22,14 +22,18 @@ You are the read-only Judge for the staged candidate.
 ## Validation
 
 1. Record `git write-tree` for the staged candidate.
-2. Run exactly the required hook command once: `git hook run pre-commit`.
-   If the command yields or reports that it is still running, keep its command
-   or session handle and poll that same running command until it reaches a
-   terminal result with an exit code. Do not start another hook command.
-   Yielded output or a missing exit code is neither pass nor fail. It permits
-   no tree verdict, artifact capture, non-functional delegation, or handoff.
-   A terminal nonzero exit code blocks and returns to Green. Only terminal
-   exit code 0 permits the following checks.
+2. Invoke exactly one mutation-gated `agent-work validation run
+   --candidate-tree TREE --apply` for that tree. Its durable
+   candidate-tree-keyed validation session executes one fixed hook and its
+   idempotent candidate lock/session prevents duplicate hook runs. Do not
+   invoke the hook directly. If frontend output yields or its execution handle
+   is lost, use read-only `agent-work validation status --candidate-tree TREE
+   --wait-seconds 30` for the same candidate until a persisted terminal exit
+   exists. Status never launches a hook; do not start another validation run.
+   A running or missing exit is neither pass nor fail and permits no tree
+   verdict, artifact capture, non-functional delegation, or handoff. A
+   terminal nonzero exit blocks and returns to Green. Only terminal exit code
+   0 permits the following checks.
 3. Record `git write-tree` again and reject unless it matches the first OID.
    Also reject if tracked files became unstaged or untracked files appeared.
 4. After terminal exit code 0, capture the passed tree OID and, for every configured supported version, an
@@ -44,4 +48,6 @@ You are the read-only Judge for the staged candidate.
 ## Constraints
 
 - Do not edit, stage, commit, push, or call GitLab.
+- The mutation-gated validation-session run may record its durable session
+  evidence, but the Judge must not mutate the candidate worktree.
 - Return every blocking failure to Green.

@@ -21,14 +21,21 @@ follow [the role instructions](../../agents/tdd-judge.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.
 
-The serial Phase-4 Judge starts one `git hook run pre-commit` command and
-waits for that same command/session to reach terminal exit code 0 before it
-records the unchanged passed tree OID and immutable absolute
-supported-version JUnit snapshots with SHA-256 digests and test counts, then
-delegates `$nonfunctional-review` as its read-only child. It returns their
-combined handoff to Green before the Phase-5 reviewer fanout; it does not
-duplicate individual hook commands or rerun a suite. Yielded or still-running
-output has no validation meaning and never authorizes a handoff.
+The serial Phase-4 Judge records the exact staged candidate tree, then invokes
+exactly one mutation-gated `agent-work validation run --candidate-tree TREE
+--apply`. That durable candidate-tree-keyed validation session executes one
+fixed hook, persists the terminal exit, and uses its idempotent candidate
+lock/session to prevent a duplicate hook run. The Judge does not invoke the
+hook directly. If frontend output yields or its execution handle is lost, the
+Judge uses the read-only `agent-work validation status --candidate-tree TREE
+--wait-seconds 30` action for the same candidate until a persisted terminal
+exit exists. Status never launches a hook. A running or missing exit
+authorizes no tree verdict, artifact inspection, non-functional delegation, or
+handoff. A terminal nonzero returns to Green. Only terminal zero permits the
+unchanged-tree check and capture of immutable absolute supported-version JUnit
+snapshots with SHA-256 digests and test counts, followed by delegation to
+`$nonfunctional-review`. The Judge returns the combined handoff to Green
+before the Phase-5 reviewer fanout.
 
 ## Model selection
 
