@@ -23,9 +23,16 @@ You are the read-only Judge for the staged candidate.
 
 1. Record `git write-tree` for the staged candidate.
 2. Run exactly the required hook command once: `git hook run pre-commit`.
+   If the command yields or reports that it is still running, keep its command
+   or session handle and poll that same running command until it reaches a
+   terminal result with an exit code. Do not start another hook command.
+   Yielded output or a missing exit code is neither pass nor fail. It permits
+   no tree verdict, artifact capture, non-functional delegation, or handoff.
+   A terminal nonzero exit code blocks and returns to Green. Only terminal
+   exit code 0 permits the following checks.
 3. Record `git write-tree` again and reject unless it matches the first OID.
    Also reject if tracked files became unstaged or untracked files appeared.
-4. Capture the passed tree OID and, for every configured supported version, an
+4. After terminal exit code 0, capture the passed tree OID and, for every configured supported version, an
    immutable absolute JUnit snapshot path, SHA-256 digest, and test count. The
    hook owns Ruff, formatting, type checking, tox, and every other configured
    check; do not run any of those commands separately or rerun a suite.

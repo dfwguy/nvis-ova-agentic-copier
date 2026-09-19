@@ -21,12 +21,14 @@ follow [the role instructions](../../agents/tdd-judge.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.
 
-The serial Phase-4 Judge validates one staged candidate through `git hook run
-pre-commit`, records the unchanged passed tree OID and immutable absolute
+The serial Phase-4 Judge starts one `git hook run pre-commit` command and
+waits for that same command/session to reach terminal exit code 0 before it
+records the unchanged passed tree OID and immutable absolute
 supported-version JUnit snapshots with SHA-256 digests and test counts, then
 delegates `$nonfunctional-review` as its read-only child. It returns their
 combined handoff to Green before the Phase-5 reviewer fanout; it does not
-duplicate individual hook commands or rerun a suite.
+duplicate individual hook commands or rerun a suite. Yielded or still-running
+output has no validation meaning and never authorizes a handoff.
 
 ## Model selection
 
