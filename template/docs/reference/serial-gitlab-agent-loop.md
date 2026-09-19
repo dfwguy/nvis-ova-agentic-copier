@@ -133,11 +133,23 @@ action. It does not mutate state or start a hook without `--apply`.
 With `--apply`, `validation run` first verifies that `TREE` is the current
 staged tree. It records the session as running before it invokes exactly one
 `git hook run pre-commit` command, then records that command's terminal exit
-code atomically. It returns only after the hook reaches a terminal result.
-The session retains no hook output or secrets. A terminal zero is the only
-outcome that permits inspection of the unchanged tree and JUnit evidence; a
-terminal nonzero blocks validation. The command never starts a second suite
-for the same candidate-tree session.
+code atomically. A terminal-failure record also has an optional bounded,
+canonical `diagnostic`. The command returns only after the hook reaches a
+terminal result.
+
+When fixed supported-version JUnit artifacts are usable, the diagnostic
+contains only their aggregate numeric failure and error counts. Otherwise, it
+uses a fixed generic diagnostic that identifies `git hook run pre-commit` and
+its nonzero exit code. Neither the record nor command output contains test-case
+names or messages, raw JUnit XML, hook standard output or standard error,
+prompts, credentials, environment values, secrets, or other unbounded text.
+
+A terminal zero is the only outcome that permits inspection of the unchanged
+tree and JUnit evidence; a terminal nonzero blocks validation. An existing
+record for the same candidate tree is authoritative: another applied run
+returns it without running the hook again or rewriting the record. This also
+applies to a legacy record that predates `diagnostic`; the command does not
+backfill the field.
 
 `validation status --candidate-tree TREE` is read-only and never launches a
 hook. It reports `running`, `terminal-success`, or `terminal-failure`. With
@@ -145,13 +157,17 @@ hook. It reports `running`, `terminal-success`, or `terminal-failure`. With
 until it becomes terminal. Use it after a yielded or lost frontend command
 handle, and continue to query the same `TREE` rather than starting another
 validation run. It accepts `--apply` for command consistency, but remains
-read-only.
+read-only. Human output includes the optional diagnostic when available, and
+JSON exposes `diagnostic` as its canonical string or `null`. Status continues
+to read legacy records that omit the field; absence has the same meaning as
+`null`: no diagnostic is available.
 
 Exit code `0` means a preview or terminal success. An applied run that remains
 running, a terminal failure, a missing or malformed session, or an operational
 failure exits `1`; invalid usage exits `2`. JSON reports at least the candidate
 tree, whether the action was applied, the action, state, whether it is
-terminal, and the final exit code only after the session is terminal.
+terminal, the final exit code only after the session is terminal, and the
+optional diagnostic.
 
 ### `credential rotate`
 
