@@ -390,7 +390,7 @@ def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
         effective_worker_budget_seconds=1800,
     ).casefold()
 
-    assert "red and diátaxis writer concurrently" in prompt
+    assert "conditional $agent-policy-writer concurrently" in prompt
     assert (
         "reconciles documentation against final implemented code, configuration, and interfaces"
         in prompt
@@ -527,7 +527,8 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     )
     feedback = prompt.index("returns all receipts and unresolved findings")
     assert architect < red < green < judge < nonfunctional < fan_out < repair < feedback
-    assert "Green is the sole mutable owner" in prompt
+    assert "conditional $agent-policy-writer" in prompt
+    assert "Green owns production, tests, and docs" in prompt
     assert "Quality Judge receives the architecture" in prompt
     assert "Test Judge receives the Red receipt" in prompt
     assert "still-live Architect" in prompt
@@ -553,7 +554,7 @@ def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:
     architect = normalized.index("delegate architect")
     sizing = normalized.index("intake sizing decision")
     red = normalized.index("delegates red")
-    mutation = normalized.index("sole mutable owner")
+    mutation = normalized.index("green owns production, tests, and docs")
     assert architect < sizing < red < mutation
     assert "behavioral boundaries" in normalized
     assert "dependency/order boundaries" in normalized

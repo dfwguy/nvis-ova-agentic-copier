@@ -38,6 +38,7 @@ from agent_work.models import (
 from agent_work.repository import CommandResult
 from agent_work.runtime import build_worker_result_dependencies
 from agent_work.state_machine import (
+    REQUIRED_RECEIPTS,
     WORKFLOW_RECEIPTS,
     apply_worker_result,
     has_complete_workflow_receipt,
@@ -102,6 +103,39 @@ def _completed_input() -> WorkerResultBuildInput:
     )
 
 
+_CODING_RECEIPTS_WITH_POLICY_WRITER = (
+    "$architect",
+    "$tdd-red",
+    "$diataxis-writer",
+    "$agent-policy-writer",
+    "$tdd-green",
+    "$tdd-judge",
+    "$nonfunctional-review",
+    "$diataxis-judge",
+    "$judge-quality",
+    "$judge-test",
+    "$judge-cicd",
+    "$tdd-document",
+    "$cli-syntax-judge",
+    "$filesystem-structure-judge",
+    "$agent-policy-judge",
+    "$license-checker",
+    "$tdd-finalizer",
+)
+
+
+def _completed_coding_input_with_policy_writer() -> WorkerResultBuildInput:
+    """Build the complete protocol-v2 coding receipt input."""
+    return _completed_input().model_copy(
+        update={
+            "receipts": tuple(
+                f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
+                for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
+            )
+        }
+    )
+
+
 def test_builder_derives_trusted_identity_and_validates_completed_workflow(
     tmp_path: Path,
 ) -> None:
@@ -137,6 +171,65 @@ def test_builder_derives_trusted_identity_and_validates_completed_workflow(
     ).record
     assert transitioned.state is RunnerState.PUBLISHING
     assert transitioned.phase is WorkflowPhase.READY_TO_PUBLISH
+
+
+def test_builder_accepts_complete_coding_receipts_with_the_policy_writer(
+    tmp_path: Path,
+) -> None:
+    """Protocol-v2 accepts the complete ordered coding receipt contract."""
+    result = build_worker_result(
+        _record(tmp_path),
+        _completed_coding_input_with_policy_writer(),
+        changed_paths=(),
+    )
+
+    assert result.receipts == tuple(
+        f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
+        for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
+    )
+
+
+@pytest.mark.parametrize(
+    "receipts",
+    (
+        tuple(
+            skill
+            for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
+            if skill != "$agent-policy-writer"
+        ),
+        (
+            "$architect",
+            "$tdd-red",
+            "$diataxis-writer",
+            "$agent-policy-judge",
+            *_CODING_RECEIPTS_WITH_POLICY_WRITER[4:],
+        ),
+    ),
+    ids=("missing-policy-writer", "wrong-policy-writer"),
+)
+def test_builder_rejects_coding_receipts_without_the_policy_writer(
+    tmp_path: Path, receipts: tuple[str, ...]
+) -> None:
+    """Protocol-v2 rejects a missing or incorrect phase-two policy receipt."""
+    build_input = _completed_coding_input_with_policy_writer().model_copy(
+        update={
+            "receipts": tuple(
+                f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
+                for skill in receipts
+            )
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
+        build_worker_result(_record(tmp_path), build_input, changed_paths=())
+
+
+def test_legacy_coding_red_docs_receipts_exclude_the_policy_writer() -> None:
+    """Recorded legacy phase evidence retains its original completion contract."""
+    assert REQUIRED_RECEIPTS[WorkflowPhase.CODING_RED_DOCS] == (
+        "$tdd-red",
+        "$diataxis-writer",
+    )
 
 
 @pytest.mark.parametrize(
@@ -719,6 +812,22 @@ def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(
     fanout = prompt.index("Phase-5 reviewer")
 
     assert judge < nonfunctional < fanout
+
+
+def test_worker_prompt_requires_all_applicable_phase_two_receipts(
+    tmp_path: Path,
+) -> None:
+    """Mixed coding work preserves the Policy Writer's separate ownership."""
+    prompt = build_worker_prompt(
+        _record(tmp_path).model_dump(mode="json"),
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+    )
+
+    assert "conditional $agent-policy-writer" in prompt
+    assert "Policy Writer exclusively owns policy paths" in prompt
+    assert "Green owns production, tests, and docs" in prompt
 
 
 def test_coding_receipts_put_the_judge_before_every_phase_five_reviewer() -> None:

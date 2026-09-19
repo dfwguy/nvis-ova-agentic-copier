@@ -37,7 +37,8 @@ next action, then exits. The AI starts only after issue selection and worktree
 preparation. The controller is not a second workflow engine.
 
 Keep AI work under the live Architect. In the coding lane, the Architect
-delegates Red behavior tests and the Diátaxis Writer in parallel. Green then
+delegates Red behavior tests, the Diátaxis Writer, and when agent-policy paths
+change, the Agent Policy Writer in parallel. Green then
 implements and reconciles their results, runs every applicable parallel review
 including license review, and gets final validation. In the
 documentation and agent-policy lane, the Architect instead delegates the
@@ -96,7 +97,8 @@ Before taking repository action:
    the applicability record. Required slots are main, every resident ancestor,
    and every applicable child in the widest same-number phase. Count a
    conditional role as N/A only when demonstrably false; uncertainty is
-   applicable. Coding requires at most 12 live slots: main, Architect, Green,
+   applicable. Phase 2 requires at most 5 live slots: main, Architect, and
+   the three parallel writers. Coding requires at most 12 live slots: main, Architect, Green,
    and nine concurrent Phase-5 reviewers including `$license-checker`. The
    nested Phase-4 Judge and Non-functional Reviewer require five live slots.
    Documentation/policy requires at most 3: main,
@@ -210,7 +212,8 @@ check, if any, is project-local context defined in `.agents/project.md`.
 | 1 `$architect` | Required; remains live through finalization | Delegated | Most capable / `gpt-5.6-sol` `high` | Classified request | Design, context boundaries, and final decision; ambiguity → user |
 | 2a `$tdd-red` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
 | 2b `$diataxis-writer` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and documentation boundaries | Diátaxis draft/report, required index and reciprocal-link updates, or a reason no docs update is needed → Architect |
-| 3 `$tdd-green` | Required; child of Architect and sole mutator after Phase 2 | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt/test diff, Diátaxis draft/report or no-doc rationale, and shared worktree | Green suite, reconciled documentation, current JUnit evidence, and correction-cycle ledger |
+| 2c `$agent-policy-writer` | Agent instructions changed in a coding diff | Delegated in parallel; child of Architect | Balanced / `gpt-5.6-terra` `medium` | Approved policy boundaries | Policy receipt or exact N/A → Architect |
+| 3 `$tdd-green` | Required; child of Architect and sole production/test/docs mutator after Phase 2 | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt/test diff, Diátaxis draft/report or no-doc rationale, and policy-writer receipt/N/A | Green suite, reconciled documentation, current JUnit evidence, and correction-cycle ledger |
 | 4 `$tdd-judge` | Required; child of Green after staging | Delegated serially before Phase 5; delegates Non-functional Reviewer | Balanced / `gpt-5.6-terra` `medium` | Exact staged tree | One hook command reaches terminal exit code 0, then unchanged tree OID, immutable supported-version JUnit snapshots, SHA-256 digests/counts, and non-functional receipt → Green; yielded/running output or terminal nonzero returns to Green |
 | 4a `$nonfunctional-review` | Required; child of TDD Judge | Delegated serially by Judge after its hook | Fast / `gpt-5.6-luna` `low` | Exact staged tree and immutable Judge JUnit snapshots/digests/counts | Complete timing verdict → Judge → Green |
 | 5b `$diataxis-judge` | Required; child of Green | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Architect design, Diátaxis Writer receipt/report, final docs diff, and final implemented interface/source diff | Comparison-based documentation verdict → Green |
@@ -222,7 +225,7 @@ check, if any, is project-local context defined in `.agents/project.md`.
 | 5h `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
 | 5i `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
 | 5j `$license-checker` | Required; child of Green | Delegated in parallel after Phase 4; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and Judge JUnit evidence | License-policy receipt identifying the checked in-scope diff → Green |
-| 6 `$tdd-finalizer` | Required; child of Architect after Green consolidates Phase-5 review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, Judge-passed staged tree OID and JUnit digests/counts, complete applicability record including Phase-2 writer evidence and Phase-5 comparison verdict, license receipt, and repair summary/cycle ledger | Finalizer commit SHA with normal approval or mechanically safe draft-safety verdict → Architect |
+| 6 `$tdd-finalizer` | Required; child of Architect after Green consolidates Phase-5 review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, Judge-passed staged tree OID and JUnit digests/counts, complete Phase-2 writer evidence/N/A, independent policy-judge and license receipts, and repair summary/cycle ledger | Finalizer commit SHA with normal approval or mechanically safe draft-safety verdict → Architect |
 | 7 `$git-flow` | Coding: required after Architect accepts Finalizer | Main; never delegate | Current enabled | Finalizer commit receipt | Push, update/create MR, and verified URL; content/trivial main still owns its ordinary commit and publication |
 | 8 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Independent pipeline-defense receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
 
@@ -247,10 +250,13 @@ Stop for an identical repeated or reopened finding, unchanged relevant
 evidence, no approved-scope correction, scope expansion, or genuine
 controversy; never waive or relabel a finding to manufacture progress.
 
-After a correction, stage the new candidate and rerun the serial Phase-4 Judge
+After a non-policy correction, Green stages the new candidate and reruns the serial Phase-4 Judge
 and its Non-functional Reviewer child for every changed tree before dependent
 review or finalization. Every coding candidate requires the full Judge hook and
-current immutable JUnit evidence. Rerun only a Phase-5 reviewer whose finding
+current immutable JUnit evidence. A policy-path finding returns through Architect
+to the Agent Policy Writer; Green never edits agent-policy paths or their
+mirrors. That serialized correction also requires a fresh Judge before dependent
+review. Rerun only a Phase-5 reviewer whose finding
 was addressed or whose owned domain or evidence changed; rerun license review
 if and only if maintained in-scope files changed after its approval.
 Green returns receipts, the ledger, repairs, and unresolved findings to the

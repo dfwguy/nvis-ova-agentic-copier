@@ -369,11 +369,11 @@ instead of advancing that handoff.
 
 For a completed ordinary workflow, use `coding` or `content` as the lane and
 provide the exact `WORKFLOW_RECEIPTS` set for that lane. The coding set is
-`$architect`, `$tdd-red`, `$diataxis-writer`, `$tdd-green`,
-`$nonfunctional-review`, `$tdd-judge`, `$diataxis-judge`, `$judge-quality`,
+`$architect`, `$tdd-red`, `$diataxis-writer`, `$agent-policy-writer`, `$tdd-green`,
+`$tdd-judge`, `$nonfunctional-review`, `$diataxis-judge`, `$judge-quality`,
 `$judge-test`, `$judge-cicd`, `$tdd-document`, `$cli-syntax-judge`,
 `$filesystem-structure-judge`, `$agent-policy-judge`, `$license-checker`, and
-`$tdd-finalizer`; all 16 are required for a coding
+`$tdd-finalizer`; all 17 are required for a coding
 `ready_to_publish` result. The content set is `$architect`,
 `$documentation-writer`, and `$documentation-finalizer`; all three are
 required for a completed content `ready_to_publish` result. Every receipt starts with its exact skill name
@@ -381,6 +381,9 @@ and may include full multiline nested-role evidence. A conditionally
 inapplicable role uses exactly
 `$skill: not applicable — reason`. Arbitrary, omitted, duplicated, or invented
 receipts cannot advance the workflow.
+
+The 17-receipt coding set applies to new coarse `WORKFLOW` results. A legacy
+recorded phased route remains compatible and finishes its recorded route.
 
 `ready_to_publish` completes a coherent ordinary workflow and needs the exact
 receipts, a successful audit (including capacity, and tests for coding), and a
@@ -648,16 +651,22 @@ the same activation. A durable record resumes from its coarse `WORKFLOW`
 boundary and durable worktree; the first rollout does not add a sidecar
 checkpoint for every role or phase. Existing legacy phase-ledger values finish
 their recorded route; new work uses `WORKFLOW`. Within that session, Architect
-hands the approved design concurrently to Red and the Diátaxis Writer. Red
-exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`.
-Architect waits for both receipts before Green starts with the design, Red test
-diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
-draft with the final interface, then runs the serial Phase-4 TDD Judge against
-its staged tree. The Judge's unchanged tree OID and supported-version JUnit
-digests and counts are prerequisites for every applicable concurrent Phase-5
-reviewer, including `$license-checker`, against the same stable post-Green diff.
-Green waits for every initial receipt before consolidating feedback and returns
-that result to Architect for the final decision.
+hands the approved design concurrently to Red and the Diátaxis Writer. When
+portable agent policy is in scope, the conditional Agent-policy Writer joins
+them. Red exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates
+`docs/`; and the Agent-policy Writer exclusively mutates `AGENTS.md`,
+`.agents/**`, and their declared portable `template/` mirrors. Architect waits
+for every applicable receipt, or its exact not-applicable record, before Green
+starts. Green reconciles the documentation draft with the final interface but
+never edits agent-policy paths or their mirrors. It then runs the serial Phase-4
+TDD Judge against its staged tree. The Judge's unchanged tree OID and
+supported-version JUnit digests and counts are prerequisites for every
+applicable concurrent Phase-5 reviewer, including `$license-checker`, against
+the same stable post-Green diff. Green consolidates every initial finding.
+Policy-path corrections return through the still-live Architect to the
+Agent-policy Writer; Green cannot repair policy. Every changed candidate follows
+the fresh Judge, applicable review, and Finalizer sequence before Architect
+makes the final decision.
 
 ### Preselection pipeline gate
 
@@ -961,11 +970,13 @@ diagnostic, and next action. The trusted runner validates it against the
 ledger, configured numeric project, Git evidence, and required workflow
 receipts before changing state.
 For coding work, the final audit names every mandatory role: Architect, Red,
-Diátaxis Writer, Green, all applicable reviews including the initial
-`$license-checker`, and Finalizer. The finalizer requires a current approving
-license receipt for the final in-scope diff. On correction, the checker reruns
-only if maintained files in its checked scope changed; a violation cannot be
-waived or marked not applicable. Content work retains its separate role set.
+Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable
+reviews including the initial `$license-checker`, and Finalizer. The finalizer
+requires a current approving license receipt for the final in-scope diff. On
+correction, the checker reruns only if maintained files in its checked scope
+changed; a violation cannot be waived or marked not applicable. Policy-path
+findings return through Architect to the Agent-policy Writer, not Green.
+Content work retains its separate role set.
 
 ### Live-agent capacity launch contract
 
@@ -985,6 +996,10 @@ The check reports one coherent set of values:
 | Available total | Current total live slots from trusted launch metadata, or `unknown` |
 | Shortfall | `max(required - available, 0)`, or `unknown` when availability is not trustworthy |
 | Decision | Run only when current evidence is internally consistent and available is at least required |
+
+The conditional Agent-policy Writer makes the widest Phase-2 row five live
+slots: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer. The
+nine-reviewer Phase-5 row remains wider, so the coding requirement stays 12.
 
 Evidence is fresh only when it describes the active worker session. Evidence
 from an earlier invocation is stale even when that invocation used the same

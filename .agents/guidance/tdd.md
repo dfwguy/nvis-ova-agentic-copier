@@ -27,7 +27,8 @@ Work in explicit phases with distinct roles:
 
 - **Test Writer** — concurrently writes failing tests that define the desired behavior; stops when tests are confirmed Red
 - **Diátaxis Writer** — concurrently drafts required `docs/` updates or records why none are needed; exclusively mutates `docs/`
-- **Implementer** — starts only after both phase-2 receipts, writes minimal code to pass failing tests, and reconciles the draft against final interfaces
+- **Agent Policy Writer** — when applicable, concurrently edits only approved root/template agent-policy paths
+- **Implementer** — starts only after all applicable phase-2 receipts/N/A, writes production, tests, and docs, and reconciles drafts against final interfaces; it never edits agent-policy paths
 - **Judge** — validates the full cycle: meaningful tests, clean implementation, all tooling passing, conventions followed
 
 In Phase 3, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
@@ -42,6 +43,10 @@ concurrent Phase-5 read-only reviews. Phase 6
 Finalizer verifies that evidence and makes the interactive `--no-verify` commit;
 Phase 7 main publishes, and Phase 8 independently observes the exact-source
 pipeline.
+
+Policy findings return through Architect to the Agent Policy Writer. Green
+consolidates the finding but does not repair policy; every correction gets a
+fresh Judge before dependent review.
 
 ## Never
 

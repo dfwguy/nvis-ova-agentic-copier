@@ -25,7 +25,8 @@ ordinary interactive work you may make the one verified commit described below.
 
 1. Confirm the Judge's current non-functional child receipt and every applicable
    Phase-5 receipt, including the current approving license receipt, are
-   present. Confirm the Diátaxis Writer and Judge comparison receipts,
+   present. Confirm the applicable Policy Writer receipt or exact N/A and the
+   independent Policy Judge receipt matching the final policy diff, plus the Diátaxis Writer and Judge comparison receipts,
    correction ledger, and permitted N/A records are complete.
 2. Confirm the TDD Judge receipt names every current supported-version JUnit
    artifact with its SHA-256 digest and test count, and the exact staged tree

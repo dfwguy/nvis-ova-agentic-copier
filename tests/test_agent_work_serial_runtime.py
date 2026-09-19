@@ -1083,9 +1083,10 @@ class SingleSessionInvoker:
                 "$architect: approved",
                 "$tdd-red: red confirmed",
                 "$diataxis-writer: documentation reconciled",
+                "$agent-policy-writer: policy reconciled",
                 "$tdd-green: green confirmed and findings repaired; uv run tox",
-                "$nonfunctional-review: approved",
                 "$tdd-judge: approved",
+                "$nonfunctional-review: approved",
                 "$diataxis-judge: approved",
                 "$judge-quality: approved",
                 "$judge-test: approved",
@@ -9241,6 +9242,18 @@ def test_protected_policy_publication_with_invalid_receipts_fails_closed(
                 verdict="complete",
                 detail="\n".join(
                     f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-judge' else 'approved'}"
+                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+                ),
+            ),
+            MergeRequestDraft(title="Policy update", description="Validated."),
+        ),
+        (
+            WorkflowLane.CODING,
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="\n".join(
+                    f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
                     for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
                 ),
             ),

@@ -38,5 +38,6 @@ missing skill references, weakened human boundaries, or root/template drift.
 ## Verdict
 
 Return `Overall: Approve` or `Overall: Reject` with every blocking file. In a
-coding workflow, return directly to Green; in a content workflow, return to the
-documentation writer through Architect.
+coding workflow, return findings in Green's consolidated handoff to Architect,
+which routes a policy correction to the Policy Writer; Green never repairs
+policy. In a content workflow, return to the documentation writer through Architect.
