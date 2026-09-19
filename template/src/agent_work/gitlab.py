@@ -151,6 +151,34 @@ def _reject_escaped_linebreaks(description: str) -> None:
         raise GitLabError("merge request description contains escaped linebreaks")
 
 
+def _validated_issue_iid(issue_iid: int | None) -> int | None:
+    """Return an optional positive issue IID while rejecting bools and malformed values."""
+    if issue_iid is None:
+        return None
+    if isinstance(issue_iid, bool) or not isinstance(issue_iid, int) or issue_iid <= 0:
+        raise GitLabError("merge request issue IID must be a positive integer")
+    return issue_iid
+
+
+_CLOSING_KEYWORD = (
+    r"(?:clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing)|"
+    r"implement(?:s|ed|ing)?)"
+)
+_CLOSING_REFERENCE = (
+    r"(?:(?:[\w.-]+/)*[\w.-]*#\d+|https?://\S+/(?:issues|work_items)/\d+)"
+)
+_CLOSING_DIRECTIVE = re.compile(
+    rf"\b{_CLOSING_KEYWORD}\s*:?(?:\s+issues?)?\s+{_CLOSING_REFERENCE}",
+    re.IGNORECASE,
+)
+
+
+def _reject_user_closing_directives(values: tuple[str | None, ...]) -> None:
+    """Reserve GitLab closing directives for the single structured issue option."""
+    if any(value is not None and _CLOSING_DIRECTIVE.search(value) for value in values):
+        raise GitLabError("use --issue-iid for a merge request closing issue IID")
+
+
 def render_merge_request_description(
     *,
     problem: str,
@@ -159,8 +187,13 @@ def render_merge_request_description(
     impact: str | None = None,
     human_action: str | None = None,
     tracking: str | None = None,
+    issue_iid: int | None = None,
 ) -> str:
     """Render the stable, human-readable ordinary merge-request body."""
+    issue_iid = _validated_issue_iid(issue_iid)
+    _reject_user_closing_directives(
+        (problem, outcome, *validation, impact, human_action, tracking)
+    )
     sections = [("Problem", problem)]
     if impact:
         sections.append(("Impact", impact))
@@ -170,7 +203,8 @@ def render_merge_request_description(
     sections.append(("Validation", "\n".join(f"- {item}" for item in validation)))
     if tracking:
         sections.append(("Tracking", tracking))
-    return "\n\n".join(f"## {heading}\n{body}" for heading, body in sections)
+    description = "\n\n".join(f"## {heading}\n{body}" for heading, body in sections)
+    return description if issue_iid is None else f"{description}\n\nCloses #{issue_iid}"
 
 
 class MergeRequestPublicationPort(Protocol):
@@ -201,6 +235,9 @@ class MergeRequestPublicationPort(Protocol):
     def fetch_merge_request(
         self, *, project_id: int, iid: int
     ) -> MergeRequestEvidence: ...
+    def fetch_closing_issues(
+        self, *, project_id: int, iid: int
+    ) -> tuple[tuple[int, int], ...]: ...
 
 
 @dataclass(frozen=True)
@@ -225,10 +262,12 @@ def publish_merge_request(
     target_branch: str,
     title: str,
     description: str,
+    issue_iid: int | None = None,
     apply: bool,
     port: MergeRequestPublicationPort,
 ) -> MergeRequestPublicationReport:
     """Preview or publish exactly one merge request and verify it by read-back."""
+    issue_iid = _validated_issue_iid(issue_iid)
     _reject_escaped_linebreaks(description)
     candidates = port.list_merge_requests(
         project_id=project_id, source_branch=source_branch
@@ -286,6 +325,10 @@ def publish_merge_request(
         raise GitLabError(
             "merge request read-back does not match the requested publication"
         )
+    if issue_iid is not None and port.fetch_closing_issues(
+        project_id=project_id, iid=read_back.iid
+    ) != ((project_id, issue_iid),):
+        raise GitLabError("merge request closing issue projection is not exact")
     return MergeRequestPublicationReport(
         True, action.removeprefix("would-"), read_back, description
     )
@@ -388,6 +431,37 @@ class GitLabMergeRequestPublisher:
     def fetch_merge_request(self, *, project_id: int, iid: int) -> MergeRequestEvidence:
         self._require_project(project_id)
         return self._mr(self._call(f"projects/{project_id}/merge_requests/{iid}"))
+
+    def fetch_closing_issues(
+        self, *, project_id: int, iid: int
+    ) -> tuple[tuple[int, int], ...]:
+        """Return the validated GitLab closing-issue projection for one MR."""
+        self._require_project(project_id)
+        payload = self._call(
+            f"projects/{project_id}/merge_requests/{iid}/closes_issues"
+        )
+        if not isinstance(payload, list):
+            raise GitLabError("GitLab returned invalid closing issue list")
+        projection: list[tuple[int, int]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise GitLabError("GitLab returned invalid closing issue list")
+            closing = cast("dict[str, object]", item)
+            closing_project_id, closing_iid = (
+                closing.get("project_id"),
+                closing.get("iid"),
+            )
+            if (
+                isinstance(closing_project_id, bool)
+                or not isinstance(closing_project_id, int)
+                or closing_project_id <= 0
+                or isinstance(closing_iid, bool)
+                or not isinstance(closing_iid, int)
+                or closing_iid <= 0
+            ):
+                raise GitLabError("GitLab returned invalid closing issue list")
+            projection.append((closing_project_id, closing_iid))
+        return tuple(projection)
 
 
 def _require_exact_metadata(

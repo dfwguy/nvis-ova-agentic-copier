@@ -103,14 +103,23 @@ uv run agent-work merge-request publish \
   --problem "Reviewers need a consistent summary of the change." \
   --outcome "The branch has a structured merge-request description." \
   --validation "uv run tox" \
-  --validation "uv run ruff check ."
+  --validation "uv run ruff check ." \
+  --issue-iid 139
 ```
 
 Review the preview. Run the same command with `--apply` to create a merge
 request or update the one open merge request for that source branch. The
 command does not push, approve, or merge. It rejects more than one open merge
-request for the source branch. Add `--impact`, `--human-action`, or
-`--tracking` only when that information helps the reviewer.
+request for the source branch. With `--issue-iid`, the preview ends with
+`Closes #139`. After create or update, the command reads the merge request
+back and requires GitLab to project exactly that configured-project issue as
+closing. A missing or conflicting projection fails closed. Omit `--issue-iid`
+for an issue-less merge request.
+
+Add `--impact`, `--human-action`, or `--tracking` only when that information
+helps the reviewer. `--tracking` may accompany `--issue-iid`, but it must not
+contain a closing directive. Do not put a closing directive in any structured
+text; use `--issue-iid` for the one closing issue.
 
 See the [merge-request publication reference](../reference/serial-gitlab-agent-loop.md#merge-request-publish)
 for every option and its verification contract.
