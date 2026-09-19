@@ -43,6 +43,8 @@ from agent_work.gitlab import GitLabError
 from agent_work.ledger import JsonLedger, LedgerError
 from agent_work.models import (
     AgentWorkConfig,
+    AuditCapacity,
+    AuditReceiptSummary,
     CommandReport,
     ConditionEvidence,
     DecisionReviewSignal,
@@ -637,6 +639,12 @@ class FakeRepository:
         self.current_head = "a" * 40
         self.ancestry = True
         self.reconciliation_sha: str | None = None
+        self.observed_default_sha = "b" * 40
+        self.observe_default_error: RepositoryError | None = None
+        self.observed_defaults: list[str] = []
+        self.observed_heads: list[str] = []
+        self.ancestry_queries: list[tuple[str, str]] = []
+        self.publication_events: list[str] = []
         self.inventory_result: tuple[
             tuple[str, ...], tuple[str, ...], tuple[str, ...]
         ] = (
@@ -694,6 +702,7 @@ class FakeRepository:
         del worktree
         self.publication_changed_paths_calls += 1
         self.publication_targets.append(target_sha)
+        self.publication_events.append("verify-committed-paths")
         if self.changed_paths_error is not None:
             raise self.changed_paths_error
         return self.paths if self.publication_paths is None else self.publication_paths
@@ -720,6 +729,7 @@ class FakeRepository:
     def is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
         """Model trusted Git ancestry for controller fast-forward recovery."""
         del worktree
+        self.ancestry_queries.append((ancestor, descendant))
         return self.ancestry and ancestor != "0" * 40 and descendant != "0" * 40
 
     def sync_feedback_worktree(
@@ -738,6 +748,18 @@ class FakeRepository:
         del worktree, branch, expected_head
         return self.reconciliation_sha
 
+    def observe_current_default(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str:
+        """Model an injected current-default observation before feedback commit creation."""
+        del worktree, branch
+        self.publication_events.append("observe-default")
+        if self.observe_default_error is not None:
+            raise self.observe_default_error
+        self.observed_defaults.append(self.observed_default_sha)
+        self.observed_heads.append(expected_head)
+        return self.observed_default_sha
+
     def prepare_commit(
         self,
         worktree: Path,
@@ -747,6 +769,7 @@ class FakeRepository:
         validated_paths: tuple[str, ...] | None = None,
     ) -> str:
         del worktree, branch, issue_iid, expected_head
+        self.publication_events.append("prepare")
         self.prepares += 1
         self.prepared_paths = validated_paths
         if self.prepare_error is not None:
@@ -766,6 +789,7 @@ class FakeRepository:
         self, worktree: Path, branch: str, issue_iid: int, baseline_sha: str
     ) -> str:
         del worktree, branch, issue_iid, baseline_sha
+        self.publication_events.append("bind")
         self.binds += 1
         return self.bound_sha
 
@@ -1121,6 +1145,42 @@ def _record(
         source_sha="a" * 40,
         repair_attempt=repair_attempt,
         suggest_close_evidence=suggest_close_evidence,
+    )
+
+
+def _pending_feedback_publication_record(tmp_path: Path) -> LedgerRecord:
+    """Build a dirty existing-MR feedback publication with exact audit paths."""
+    feedback_sha = "a" * 40
+    paths = ("src/review_fix.py",)
+    audit = AuditReceiptSummary(
+        lane="coding",
+        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        role_receipts=("$tdd-finalizer: approved",),
+        changed_paths=paths,
+        tests=("uv run tox",),
+        reviewers=("$tdd-judge: approved",),
+        findings=(),
+        corrections=(),
+    )
+    cursor = MergeRequestFeedbackCursor(
+        last_processed_general_note_id=31, feedback_source_sha=feedback_sha
+    )
+    return _record(
+        tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+    ).model_copy(
+        update={
+            "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+            "merge_request_iid": 88,
+            "merge_request_url": _mr(sha=feedback_sha).web_url,
+            "pending_feedback": PendingMergeRequestFeedback(
+                target_cursor=cursor,
+                source_sha=feedback_sha,
+                source="general",
+                note_id=31,
+                outcome="The reviewed fix is ready to publish.",
+            ),
+            "audit_evidence": audit,
+        }
     )
 
 
@@ -7304,6 +7364,183 @@ def test_fresh_publication_persists_sha_before_push(tmp_path: Path) -> None:
         now=NOW,
     )  # type: ignore[arg-type]
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
+
+
+def test_dirty_feedback_observes_current_default_before_commit_and_reroutes_conflict(
+    tmp_path: Path,
+) -> None:
+    """A stale feedback baseline is retained for full reconciliation, never pushed."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_pending_feedback_publication_record(tmp_path))
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(sha=original.source_sha or "")
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    repository.reconciliation_sha = "b" * 40
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.WORKFLOW
+    assert outcome.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
+    assert outcome.pending_feedback == original.pending_feedback
+    assert outcome.publication_sha is None and outcome.intent is None
+    assert outcome.main_sha == "b" * 40
+    assert repository.observed_defaults == ["b" * 40]
+    assert repository.ancestry_queries == [("b" * 40, "a" * 40)]
+    assert repository.publication_events[:3] == [
+        "verify-committed-paths",
+        "observe-default",
+        "prepare",
+    ]
+    assert repository.prepared_paths == ("src/review_fix.py",)
+    assert repository.pushes == 0
+
+
+def test_dirty_feedback_on_current_default_commits_and_publishes_same_mr(
+    tmp_path: Path,
+) -> None:
+    """Current feedback is committed only after observation and remains on its MR."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_pending_feedback_publication_record(tmp_path))
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(sha=record.source_sha or "")
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert outcome.merge_request_iid == record.merge_request_iid
+    assert repository.observed_defaults == ["b" * 40]
+    assert repository.publication_events[:3] == [
+        "verify-committed-paths",
+        "observe-default",
+        "prepare",
+    ]
+    assert repository.prepared_paths == ("src/review_fix.py",)
+    assert repository.pushes == 1
+    assert gitlab.created_merge_requests == 0
+
+
+def test_dirty_feedback_replay_observes_retained_head_before_binding(
+    tmp_path: Path,
+) -> None:
+    """A retained feedback commit is observed before its exact binding replay."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_pending_feedback_publication_record(tmp_path))
+    validated_paths = ("src/review_fix.py",)
+    ledger.persist(
+        original.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=f"{original.issue_iid}:publish:{original.revision}",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": original.source_branch,
+                        "baseline_sha": original.source_sha,
+                        "validated_path_count": len(validated_paths),
+                        "validated_paths_fingerprint": hashlib.sha256(
+                            b"src/review_fix.py\0"
+                        ).hexdigest(),
+                    },
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(sha=original.source_sha or "")
+    repository = FakeRepository(config)
+    repository.current_head = "c" * 40
+    repository.bound_sha = "c" * 40
+    repository.paths = ()
+    repository.publication_paths = ("src/review_fix.py",)
+    repository.push_observer = lambda sha: setattr(gitlab, "existing_mr", _mr(sha=sha))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert repository.observed_heads == ["c" * 40]
+    assert repository.publication_events[:3] == [
+        "verify-committed-paths",
+        "observe-default",
+        "bind",
+    ]
+    assert repository.binds == 1 and repository.prepares == 0
+    assert repository.ancestry_queries == [("b" * 40, "c" * 40)]
+
+
+@pytest.mark.parametrize(
+    ("error", "state", "error_code"),
+    [
+        (
+            RepositoryTransientError("temporary default fetch failure"),
+            RunnerState.RETRY_WAIT,
+            ErrorCode.GIT_TRANSPORT_RETRYABLE,
+        ),
+        (
+            RepositoryError("default identity cannot be verified"),
+            RunnerState.BLOCKED,
+            ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+        ),
+    ],
+)
+def test_dirty_feedback_default_observation_failure_stops_before_commit_or_push(
+    tmp_path: Path,
+    error: RepositoryError,
+    state: RunnerState,
+    error_code: ErrorCode,
+) -> None:
+    """Unverifiable current-default evidence cannot create or publish feedback work."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_pending_feedback_publication_record(tmp_path))
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr()
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    repository.observe_default_error = error
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is state
+    assert outcome.error_code is error_code
+    assert repository.publication_events == [
+        "verify-committed-paths",
+        "observe-default",
+    ]
+    assert repository.prepares == repository.pushes == 0
 
 
 def test_replay_without_durable_publication_sha_blocks_without_git_mutation(
