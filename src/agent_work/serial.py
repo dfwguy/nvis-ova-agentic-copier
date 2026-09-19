@@ -2489,7 +2489,9 @@ def _execute(
                 )
                 if result.result_kind == "split_required":
                     if result.split_plan is None:
-                        raise WorkerProtocolError("split_plan", "is required")
+                        raise WorkerProtocolError(
+                            "controller_invariant.split_required", "is required"
+                        )
                     if (
                         record.state is not RunnerState.EXECUTING
                         or record.work_kind is not WorkKind.ORDINARY
@@ -2501,7 +2503,8 @@ def _execute(
                         or record.feedback_cursor is not None
                     ):
                         raise WorkerProtocolError(
-                            "split_required", "is limited to fresh ordinary intake"
+                            "controller_invariant.split_required",
+                            "is limited to fresh ordinary intake",
                         )
                     return _fulfill_split(
                         record,
@@ -2570,7 +2573,7 @@ def _execute(
                     detail=(
                         format_worker_result_diagnostic(error)
                         if isinstance(error, WorkerProtocolError)
-                        else "receipts: required receipts are not coherent"
+                        else "controller_invariant.receipts: required receipts are not coherent"
                     ),
                     stop_on_unchanged_condition=True,
                 )

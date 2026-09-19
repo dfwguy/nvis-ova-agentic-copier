@@ -101,7 +101,7 @@ from .serial import (
 )
 from .state_machine import transition_record
 from .status import project_status
-from .worker import AgentInvoker
+from .worker import AgentInvoker, is_safe_worker_result_diagnostic
 
 
 def _item(
@@ -483,6 +483,34 @@ def _recovery_observation(
         if not exists or record is None or repository is None
         else repository.changed_paths(record.worktree)
     )
+    blocked_cause = None
+    if (
+        record is not None
+        and record.state is RunnerState.BLOCKED
+        and record.error_code
+        in {
+            ErrorCode.WORKER_PROTOCOL_INVALID,
+            ErrorCode.WORKER_RECEIPT_INVALID,
+            ErrorCode.RETRY_EXHAUSTED,
+        }
+    ):
+        latest = record.condition_history[-1] if record.condition_history else None
+        if (
+            latest is not None
+            and latest.code == ErrorCode.RETRY_EXHAUSTED.value
+            and len(record.condition_history) >= 2
+        ):
+            latest = record.condition_history[-2]
+        if (
+            latest is not None
+            and latest.code
+            in {
+                ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                ErrorCode.WORKER_RECEIPT_INVALID.value,
+            }
+            and _is_safe_worker_protocol_diagnostic(latest.detail)
+        ):
+            blocked_cause = latest.detail
     return RecoveryObservation(
         issue_iid=issue_iid,
         issue_state=observed_issue.state,
@@ -511,7 +539,13 @@ def _recovery_observation(
         pipeline_id=pipeline_id,
         pipeline_sha=pipeline_sha,
         controller_status=controller_status,
+        blocked_cause=blocked_cause,
     )
+
+
+def _is_safe_worker_protocol_diagnostic(value: str) -> bool:
+    """Keep the recovery boundary aligned with worker diagnostic generation."""
+    return is_safe_worker_result_diagnostic(value)
 
 
 def _recovery_split_dependencies(
@@ -1363,6 +1397,7 @@ def _recovery_candidate_report(
         "pipeline_sha": observation.pipeline_sha,
         "split_dependencies": observation.split_dependencies,
         "controller_status": observation.controller_status,
+        "blocked_cause": observation.blocked_cause,
         "stale": observation.stale,
         "ambiguous": observation.ambiguous,
     }
@@ -1400,7 +1435,12 @@ def _recovery_candidate_report(
         active=active,
         human_action_required=human_action,
         blocked_cause=(
-            "pipeline evidence disagrees"
+            observation.blocked_cause
+            if (
+                observation.blocked_cause is not None
+                and candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
+            )
+            else "pipeline evidence disagrees"
             if observation.pipeline_status == "failed"
             else "retained evidence requires review"
             if observation.ambiguous or observation.stale
@@ -1416,7 +1456,13 @@ def _recovery_candidate_report(
             else None
         ),
         next_action=(
-            f"Review issue #{candidate.issue_iid} before selecting one resolution."
+            "Resolve the blocker, then run agent-work loop retry "
+            f"--issue-iid {candidate.issue_iid} --apply."
+            if (
+                observation.blocked_cause is not None
+                and candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
+            )
+            else f"Review issue #{candidate.issue_iid} before selecting one resolution."
             if human_action
             else "Monitor the active retained work; do not recover it."
             if active

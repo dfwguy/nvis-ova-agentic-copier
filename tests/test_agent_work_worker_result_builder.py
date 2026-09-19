@@ -49,6 +49,7 @@ from agent_work.worker import (
     build_worker_result,
     format_worker_result_diagnostic,
     parse_worker_result_build_input,
+    validate_worker_result,
 )
 
 
@@ -340,7 +341,7 @@ def test_builder_input_forbids_worker_control_of_derived_phase_status() -> None:
         "next_action": "Do not accept derived fields.",
     }
 
-    with pytest.raises(WorkerProtocolError, match="input: invalid value"):
+    with pytest.raises(WorkerProtocolError, match="builder_input: unsupported field"):
         parse_worker_result_build_input(json.dumps(payload))
 
 
@@ -348,7 +349,7 @@ def test_builder_input_forbids_worker_control_of_derived_phase_status() -> None:
     ("field", "untrusted_value"),
     [
         ("protocol_version", "99: super-secret-token"),
-        ("receipts.0", "x" * 10_000),
+        ("unknown_secret_field", "x" * 10_000),
     ],
 )
 def test_builder_diagnostic_is_field_specific_bounded_and_never_echoes_input(
@@ -360,13 +361,134 @@ def test_builder_diagnostic_is_field_specific_bounded_and_never_echoes_input(
     diagnostic = format_worker_result_diagnostic(captured.value)
 
     expected = (
-        "protocol_version: must be omitted"
+        "builder_input.protocol_version: must be omitted"
         if field == "protocol_version"
-        else "input: invalid value"
+        else "builder_input: unsupported field"
     )
     assert diagnostic == expected
     assert len(diagnostic.encode("utf-8")) <= 2048
     assert untrusted_value not in diagnostic
+
+
+def test_builder_diagnostic_keeps_known_nested_path_and_redacts_value() -> None:
+    secret = "builder-nested-secret"
+    payload = {
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "change_summary": "A valid summary.",
+        "next_action": "A valid next action.",
+        "audit_summary": {
+            "capacity": {
+                "required": secret,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            }
+        },
+    }
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    diagnostic = format_worker_result_diagnostic(captured.value)
+
+    assert diagnostic == (
+        "builder_input.audit_summary.capacity.required: invalid type/shape/value"
+    )
+    assert secret not in diagnostic
+
+
+def test_builder_diagnostic_keeps_safe_numeric_position_for_known_list_field() -> None:
+    payload = {
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "change_summary": "A valid summary.",
+        "next_action": "A valid next action.",
+        "audit_summary": {
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "tests": [42],
+        },
+    }
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    assert format_worker_result_diagnostic(captured.value) == (
+        "builder_input.audit_summary.tests.0: invalid type/shape/value"
+    )
+
+
+def test_builder_diagnostic_hides_nested_unknown_field() -> None:
+    secret_name = "nested_builder_secret"
+    secret_value = "nested-builder-value"
+    payload = {
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "change_summary": "A valid summary.",
+        "next_action": "A valid next action.",
+        "audit_summary": {
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+                secret_name: secret_value,
+            }
+        },
+    }
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    diagnostic = format_worker_result_diagnostic(captured.value)
+
+    assert diagnostic == "builder_input.audit_summary.capacity: unsupported field"
+    assert secret_name not in diagnostic and secret_value not in diagnostic
+
+
+def test_builder_protocol_version_outranks_an_earlier_validation_error() -> None:
+    payload = {
+        "workflow_lane": 42,
+        "protocol_version": 2,
+        "result_kind": "ready_to_publish",
+        "change_summary": "A valid summary.",
+        "next_action": "A valid next action.",
+    }
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    assert format_worker_result_diagnostic(captured.value) == (
+        "builder_input.protocol_version: must be omitted"
+    )
+
+
+def test_controller_invariant_diagnostic_keeps_exact_corrective_reason(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path)
+    result = build_worker_result(record, _completed_input(), changed_paths=())
+    assert result.audit_summary is not None
+    tampered_result = result.model_copy(
+        update={
+            "audit_summary": result.audit_summary.model_copy(
+                update={"changed_paths": ("src/changed.py",)}
+            )
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        validate_worker_result(record, tampered_result, changed_paths=())
+
+    assert format_worker_result_diagnostic(captured.value) == (
+        "controller_invariant.audit_summary.changed_paths: "
+        "does not match observed changed paths"
+    )
 
 
 @pytest.mark.parametrize(

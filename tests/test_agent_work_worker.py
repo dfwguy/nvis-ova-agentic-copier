@@ -22,6 +22,7 @@ from agent_work.models import GitLabIssueNote, GitLabNoteAuthor
 from agent_work.worker import (
     WorkerProtocolError,
     build_worker_prompt,
+    format_worker_result_diagnostic,
     parse_worker_result,
 )
 
@@ -83,8 +84,72 @@ def test_parse_worker_result_exposes_a_bounded_field_specific_protocol_reason() 
     with pytest.raises(WorkerProtocolError) as raised:
         parse_worker_result(output)
 
-    assert str(raised.value) == "protocol_version: must equal 2"
-    assert len(str(raised.value).encode("utf-8")) <= 2048
+    diagnostic = format_worker_result_diagnostic(raised.value)
+
+    assert diagnostic == "final_envelope.protocol_version: must equal 2"
+    assert len(diagnostic.encode("utf-8")) <= 2048
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            _envelope(audit_summary={"capacity": {"required": "secret-value"}}),
+            "final_envelope.audit_summary.capacity.required: invalid type/shape/value",
+        ),
+        (
+            _envelope(untrusted_extra_field="worker-secret-value"),
+            "final_envelope: unsupported field",
+        ),
+    ],
+    ids=("known-nested-path", "unknown-extra-field"),
+)
+def test_parse_worker_result_reports_safe_final_envelope_paths_without_input(
+    payload: dict[str, object], expected: str
+) -> None:
+    output = "<agent-work-result>" + json.dumps(payload) + "</agent-work-result>"
+
+    with pytest.raises(WorkerProtocolError) as raised:
+        parse_worker_result(output)
+
+    diagnostic = format_worker_result_diagnostic(raised.value)
+
+    assert diagnostic == expected
+    assert "secret-value" not in diagnostic
+    assert "untrusted_extra_field" not in diagnostic
+
+
+def test_parse_worker_result_hides_nested_unknown_final_envelope_field() -> None:
+    secret_name = "nested_final_secret"
+    secret_value = "nested-final-value"
+    payload = _envelope(
+        audit_summary={
+            "lane": "coding",
+            "capacity": {
+                "required": 13,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+                secret_name: secret_value,
+            },
+            "role_receipts": ["architect: accepted"],
+            "changed_paths": ["src/agent_work/runtime.py"],
+            "tests": ["uv run pytest"],
+            "reviewers": ["tdd-judge: approved"],
+            "findings": [],
+            "corrections": [],
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError) as raised:
+        parse_worker_result(
+            "<agent-work-result>" + json.dumps(payload) + "</agent-work-result>"
+        )
+
+    diagnostic = format_worker_result_diagnostic(raised.value)
+
+    assert diagnostic == "final_envelope.audit_summary.capacity: unsupported field"
+    assert secret_name not in diagnostic and secret_value not in diagnostic
 
 
 def test_completed_v2_workflow_receipt_accepts_required_compact_audit_summary() -> None:
