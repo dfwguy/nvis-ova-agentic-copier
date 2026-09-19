@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tempfile
 import unicodedata
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,14 +31,28 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _SCP_ORIGIN = re.compile(r"^git@(?P<host>[^:/@]+):(?P<path>[^/].*)$")
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
+_SAFE_STAGES = frozenset(
+    {
+        "input",
+        "answers",
+        "temporary-repository",
+        "init",
+        "current-fetch",
+        "resolve-current",
+        "candidate-fetch",
+        "resolve-candidate",
+        "diff",
+    }
+)
 
 
 class TemplateComparisonError(RuntimeError):
     """A comparison boundary rejected untrusted input or failed safely."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, stage: str = "input") -> None:
         """Create an error that never includes untrusted boundary data."""
         super().__init__(_ERROR_MESSAGE)
+        self.stage = stage if stage in _SAFE_STAGES else "input"
 
 
 @dataclass(frozen=True)
@@ -61,7 +77,58 @@ class BinaryCommandRunner(Protocol):
 class TemplateComparison:
     """Deterministic changed paths between two resolved template commits."""
 
+    current_commit: str
+    candidate_commit: str
     paths: tuple[str, ...]
+
+
+@contextmanager
+def private_repository() -> Iterator[Path]:
+    """Create one private ephemeral bare-repository location."""
+    with tempfile.TemporaryDirectory(prefix="agent-work-template-preview-") as path:
+        yield Path(path) / "template.git"
+
+
+def run_git_command(
+    argv: tuple[str, ...],
+    *,
+    timeout_seconds: float,
+    git_executable: Path,
+    run_process: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    environment: Mapping[str, str] = os.environ,
+) -> CommandResult:
+    """Run Git with a fixed binary argv and benign transport environment only."""
+    allowed_environment = {
+        key: environment[key]
+        for key in ("HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSH_AUTH_SOCK")
+        if key in environment
+    }
+    allowed_environment.update(
+        {
+            "GCM_INTERACTIVE": "never",
+            "GIT_ASKPASS": "/bin/false",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "SSH_ASKPASS": "/bin/false",
+        }
+    )
+    if not argv or argv[0] != "git":
+        raise ValueError("invalid Git command")
+    if not git_executable.is_absolute():
+        raise ValueError("invalid Git executable")
+    command = (str(git_executable), *argv[1:])
+    result = run_process(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
+        check=False,
+        shell=False,
+        env=allowed_environment,
+    )
+    return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
 class _CopierMetadata(BaseModel):
@@ -143,6 +210,7 @@ def _run(
     run_command: BinaryCommandRunner,
     argv: tuple[str, ...],
     timeout_seconds: float,
+    stage: str,
 ) -> CommandResult:
     """Run one injected command and reject any nonzero result."""
     try:
@@ -155,23 +223,23 @@ def _run(
         ValueError,
         subprocess.SubprocessError,
     ):
-        raise TemplateComparisonError from None
+        raise TemplateComparisonError(stage=stage) from None
     if result.returncode != 0:
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage=stage)
     return result
 
 
-def _resolved_commit(result: CommandResult) -> str:
+def _resolved_commit(result: CommandResult, *, stage: str) -> str:
     """Return an exact lowercase SHA from rev-parse's binary output."""
     try:
         resolved = result.stdout.decode("ascii")
     except UnicodeDecodeError:
-        raise TemplateComparisonError from None
+        raise TemplateComparisonError(stage=stage) from None
     if not resolved.endswith("\n") or resolved.count("\n") != 1:
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage=stage)
     commit = resolved[:-1]
     if _SHA.fullmatch(commit) is None:
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage=stage)
     return commit
 
 
@@ -195,13 +263,13 @@ def _changed_paths(result: CommandResult) -> tuple[str, ...]:
     if not result.stdout:
         return ()
     if not result.stdout.endswith(b"\x00"):
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage="diff")
     try:
         paths = result.stdout[:-1].decode("utf-8").split("\x00")
     except UnicodeDecodeError:
-        raise TemplateComparisonError from None
+        raise TemplateComparisonError(stage="diff") from None
     if not all(_safe_path(path) for path in paths):
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage="diff")
     return tuple(sorted(set(paths)))
 
 
@@ -216,12 +284,28 @@ def compare_template_revisions(
 ) -> TemplateComparison:
     """Compare a Copier template's recorded commit to a candidate revision."""
     if answers_path.name != ".copier-answers.yml" or not _valid_ref(candidate_revision):
-        raise TemplateComparisonError
+        raise TemplateComparisonError(stage="input")
     try:
-        metadata = _load_metadata(read_text(answers_path))
+        try:
+            metadata = _load_metadata(read_text(answers_path))
+        except (
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            UnicodeError,
+            ValueError,
+            subprocess.SubprocessError,
+            TemplateComparisonError,
+        ):
+            raise TemplateComparisonError(stage="answers") from None
         with private_repository() as repository:
             location = str(repository)
-            _run(run_command, ("git", "init", "--bare", location), timeout_seconds)
+            _run(
+                run_command,
+                ("git", "init", "--bare", location),
+                timeout_seconds,
+                "init",
+            )
             _run(
                 run_command,
                 (
@@ -234,6 +318,7 @@ def compare_template_revisions(
                     f"+{metadata.commit}:refs/agent-work/current",
                 ),
                 timeout_seconds,
+                "current-fetch",
             )
             current = _resolved_commit(
                 _run(
@@ -247,7 +332,9 @@ def compare_template_revisions(
                         "refs/agent-work/current^{commit}",
                     ),
                     timeout_seconds,
-                )
+                    "resolve-current",
+                ),
+                stage="resolve-current",
             )
             _run(
                 run_command,
@@ -261,6 +348,7 @@ def compare_template_revisions(
                     f"+{candidate_revision}:refs/agent-work/candidate",
                 ),
                 timeout_seconds,
+                "candidate-fetch",
             )
             candidate = _resolved_commit(
                 _run(
@@ -274,7 +362,9 @@ def compare_template_revisions(
                         "refs/agent-work/candidate^{commit}",
                     ),
                     timeout_seconds,
-                )
+                    "resolve-candidate",
+                ),
+                stage="resolve-candidate",
             )
             changed = _run(
                 run_command,
@@ -290,6 +380,7 @@ def compare_template_revisions(
                     "--",
                 ),
                 timeout_seconds,
+                "diff",
             )
             paths = _changed_paths(changed)
     except TemplateComparisonError:
@@ -302,5 +393,5 @@ def compare_template_revisions(
         ValueError,
         subprocess.SubprocessError,
     ):
-        raise TemplateComparisonError from None
-    return TemplateComparison(paths)
+        raise TemplateComparisonError(stage="temporary-repository") from None
+    return TemplateComparison(current, candidate, paths)

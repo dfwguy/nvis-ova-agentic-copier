@@ -190,9 +190,12 @@ def test_comparison_rejects_invalid_copier_metadata_without_running_commands(
 ) -> None:
     runner = FakeRunner()
 
-    with pytest.raises(TemplateComparisonError, match="^template comparison failed$"):
+    with pytest.raises(
+        TemplateComparisonError, match="^template comparison failed$"
+    ) as raised:
         compare(lambda _path: contents, runner)
 
+    assert raised.value.stage == "answers"
     assert runner.calls == []
 
 
@@ -287,9 +290,12 @@ def test_comparison_rejects_invalid_candidate_revision_before_any_command(
 ) -> None:
     runner = FakeRunner()
 
-    with pytest.raises(TemplateComparisonError, match="^template comparison failed$"):
+    with pytest.raises(
+        TemplateComparisonError, match="^template comparison failed$"
+    ) as raised:
         compare(lambda _path: answers(), runner, candidate_revision=revision)
 
+    assert raised.value.stage == "input"
     assert runner.calls == []
 
 
@@ -382,13 +388,29 @@ def test_comparison_sanitizes_read_and_process_start_failures(
         compare(failing_read, FakeRunner())
 
     assert str(raised.value) == "template comparison failed"
+    assert raised.value.stage == "answers"
     assert "super-secret" not in str(raised.value)
     assert "super-secret" not in "".join(traceback.format_exception(raised.value))
 
 
-@pytest.mark.parametrize("failure_index", range(6))
+@pytest.mark.parametrize(
+    ("failure_index", "stage"),
+    list(
+        enumerate(
+            (
+                "init",
+                "current-fetch",
+                "resolve-current",
+                "candidate-fetch",
+                "resolve-candidate",
+                "diff",
+            )
+        )
+    ),
+)
 def test_comparison_sanitizes_nonzero_command_stderr_at_every_protocol_step(
     failure_index: int,
+    stage: str,
 ) -> None:
     class FailingRunner(FakeRunner):
         def __call__(
@@ -404,6 +426,7 @@ def test_comparison_sanitizes_nonzero_command_stderr_at_every_protocol_step(
         compare(lambda _path: answers(), runner)
 
     assert str(raised.value) == "template comparison failed"
+    assert raised.value.stage == stage
     assert "secret" not in str(raised.value)
     assert len(runner.calls) == failure_index + 1
 
@@ -422,12 +445,14 @@ def test_comparison_sanitizes_timeout_and_cleanup_failure() -> None:
         yield Path("/private/repository")
         raise OSError("cleanup-secret")
 
-    for runner, repository in (
-        (TimeoutRunner(), private_repository),
-        (FakeRunner(), failing_cleanup),
+    for runner, repository, stage in (
+        (TimeoutRunner(), private_repository, "init"),
+        (FakeRunner(), failing_cleanup, "temporary-repository"),
     ):
         with pytest.raises(TemplateComparisonError) as raised:
             compare(lambda _path: answers(), runner, repository=repository)
+
+        assert raised.value.stage == stage
         assert str(raised.value) == "template comparison failed"
         assert "secret" not in str(raised.value)
         assert "secret" not in "".join(traceback.format_exception(raised.value))

@@ -24,6 +24,7 @@ practical work in a generated project or this template repository.
 
 ### Template maintenance
 - [Update a generated project](update-a-generated-project.md) — Bring template improvements into an existing generated project.
+- [How to preview a template revision](preview-template-revision.md) — Compare a generated project's recorded template commit with an upstream candidate before updating.
 - [How to refresh the CI dependency image](refresh-ci-image.md) — Publish, pin, and verify the project-only CI image that root validation consumes.
 - [How to validate template changes](validate-template-changes.md) — Run the checks required before proposing a template change.
 
