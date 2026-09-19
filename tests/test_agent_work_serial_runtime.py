@@ -114,6 +114,7 @@ def _project() -> GitLabProject:
 
 def _mr(
     *,
+    iid: int = 88,
     state: Literal["opened", "closed", "merged", "locked"] = "opened",
     source_project_id: int = 310967,
     target_project_id: int = 310967,
@@ -126,7 +127,7 @@ def _mr(
     description: str = "Closes #12",
 ) -> MergeRequestEvidence:
     return MergeRequestEvidence(
-        iid=88,
+        iid=iid,
         web_url="https://gitlab.example.com/group/project/-/merge_requests/88",
         state=state,
         source_project_id=source_project_id,
@@ -8956,6 +8957,420 @@ def test_closed_issue_is_reconciled_and_lifecycle_label_removed(tmp_path: Path) 
     assert gitlab.labels[-1] is None
 
 
+@pytest.mark.parametrize(
+    ("wrapped_state", "prior_state", "phase"),
+    [
+        (RunnerState.OBSERVING, None, WorkflowPhase.PIPELINE_WAIT),
+        (RunnerState.BLOCKED, RunnerState.OBSERVING, WorkflowPhase.PIPELINE_WAIT),
+        (RunnerState.RETRY_WAIT, RunnerState.OBSERVING, WorkflowPhase.PIPELINE_WAIT),
+        (RunnerState.OBSERVING, None, WorkflowPhase.POST_PUBLICATION),
+    ],
+)
+def test_closed_published_issue_completes_only_after_fresh_exact_success(
+    tmp_path: Path,
+    wrapped_state: RunnerState,
+    prior_state: RunnerState | None,
+    phase: WorkflowPhase,
+) -> None:
+    """Merged publication completion rechecks its exact MR and source-SHA pipeline."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(tmp_path, state=wrapped_state, phase=phase).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+                "prior_state": prior_state,
+                "prior_phase": (phase if prior_state is not None else None),
+                "retry_at": NOW - timedelta(seconds=1)
+                if wrapped_state is RunnerState.RETRY_WAIT
+                else None,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+    gitlab.pipeline_by_merge_request[(88, source_sha)] = PipelineEvidence(
+        id=91,
+        status="success",
+        sha=source_sha,
+        web_url="https://pipeline/91",
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.COMPLETE
+    assert gitlab.preselection_calls == [f"pipeline_for_sha:88:{source_sha}"]
+    assert gitlab.labels == [None]
+    completed = ledger.load(12)
+    assert completed is not None and completed.state is RunnerState.COMPLETE
+
+
+@pytest.mark.parametrize("wrapped_state", (RunnerState.BLOCKED, RunnerState.RETRY_WAIT))
+def test_closed_published_wrapper_preserves_state_on_transport_failure(
+    tmp_path: Path, wrapped_state: RunnerState
+) -> None:
+    """Closed published wrappers retain durable state when fresh evidence is unavailable."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    original = ledger.persist(
+        _record(
+            tmp_path, state=wrapped_state, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+                "prior_state": RunnerState.OBSERVING,
+                "prior_phase": WorkflowPhase.PIPELINE_WAIT,
+                "retry_at": NOW + timedelta(minutes=1)
+                if wrapped_state is RunnerState.RETRY_WAIT
+                else None,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.fetch_merge_request_error = GitLabError("temporary MR read failure")
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    if wrapped_state is RunnerState.RETRY_WAIT:
+        assert outcome is None
+    else:
+        assert outcome == original
+    assert ledger.load(12) == original
+    assert gitlab.labels == []
+
+
+def test_closed_published_completion_persists_before_label_clear_failure(
+    tmp_path: Path,
+) -> None:
+    """A label failure leaves durable completion for idempotent later projection repair."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+    gitlab.pipeline_by_merge_request[(88, source_sha)] = PipelineEvidence(
+        id=96,
+        status="success",
+        sha=source_sha,
+        web_url="https://pipeline/96",
+    )
+    gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        run_segment(
+            ledger=ledger,
+            gitlab=gitlab,  # type: ignore[arg-type]
+            repository=FakeRepository(config),  # type: ignore[arg-type]
+            invoke=FakeInvoker(),  # type: ignore[arg-type]
+            timeout_seconds=10,
+            now=NOW,
+        )
+
+    completed = ledger.load(12)
+    assert completed is not None and completed.state is RunnerState.COMPLETE
+    assert gitlab.labels == []
+
+
+def test_closed_housekeeping_renews_a_due_retry_for_missing_pipeline_evidence(
+    tmp_path: Path,
+) -> None:
+    """Closed housekeeping cannot spin when a due published retry lacks a pipeline."""
+    from agent_work.serial import reconcile_closed_issues
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+                "prior_state": RunnerState.OBSERVING,
+                "prior_phase": WorkflowPhase.PIPELINE_WAIT,
+                "retry_at": NOW - timedelta(seconds=1),
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+
+    reconcile_closed_issues(
+        ledger,
+        gitlab,  # type: ignore[arg-type]
+        project_id=config.project_id,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        now=NOW,
+    )
+
+    renewed = ledger.load(12)
+    assert renewed is not None and renewed.state is RunnerState.RETRY_WAIT
+    assert renewed.retry_at == NOW + timedelta(minutes=20)
+    assert gitlab.labels == []
+
+
+def test_loop_housekeeping_defers_renewed_closed_retry_before_identity_preflight(
+    tmp_path: Path,
+) -> None:
+    """A renewed closed retry cannot reenter identity retry during the same activation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+                "prior_state": RunnerState.OBSERVING,
+                "prior_phase": WorkflowPhase.PIPELINE_WAIT,
+                "retry_at": NOW - timedelta(seconds=1),
+            }
+        )
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.identity_error = GitLabError("temporary identity failure")
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=10),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    renewed = ledger.load(12)
+    assert renewed is not None and renewed.state is RunnerState.RETRY_WAIT
+    assert renewed.retry_at == NOW + timedelta(minutes=20)
+    assert report.segments_run == 0
+
+
+def test_observing_merge_race_repairs_label_before_fresh_closed_completion(
+    tmp_path: Path,
+) -> None:
+    """A merged reread cannot bypass the open observation label repair."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+            }
+        )
+    )
+    opened = _issue().model_copy(update={"labels": ("agent::blocked",)})
+    closed = opened.model_copy(update={"state": "closed"})
+
+    class MergeRaceGitLab(FakeGitLab):
+        def fetch_issue(self, iid: int) -> GitLabIssue:
+            self.fetch_issue_calls.append(iid)
+            return opened if len(self.fetch_issue_calls) == 1 else closed
+
+    gitlab = MergeRaceGitLab(opened)
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+    gitlab.pipeline_by_merge_request[(88, source_sha)] = PipelineEvidence(
+        id=94,
+        status="success",
+        sha=source_sha,
+        web_url="https://pipeline/94",
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.COMPLETE
+    assert gitlab.fetch_issue_calls == [12, 12]
+    assert gitlab.labels == ["agent::running", None]
+
+
+def test_observing_merge_race_completes_with_a_current_lifecycle_label(
+    tmp_path: Path,
+) -> None:
+    """A merge reread also completes when no lifecycle-label repair is needed."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+            }
+        )
+    )
+    opened = _issue().model_copy(update={"labels": ("agent::running",)})
+    closed = opened.model_copy(update={"state": "closed"})
+
+    class MergeRaceGitLab(FakeGitLab):
+        def fetch_issue(self, iid: int) -> GitLabIssue:
+            self.fetch_issue_calls.append(iid)
+            return opened if len(self.fetch_issue_calls) == 1 else closed
+
+    gitlab = MergeRaceGitLab(opened)
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+    gitlab.pipeline_by_merge_request[(88, source_sha)] = PipelineEvidence(
+        id=95,
+        status="success",
+        sha=source_sha,
+        web_url="https://pipeline/95",
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.COMPLETE
+    assert gitlab.fetch_issue_calls == [12, 12]
+    assert gitlab.labels == [None]
+
+
+@pytest.mark.parametrize(
+    ("merge_request", "pipeline", "closes_issue"),
+    [
+        (_mr(state="merged", sha="d" * 40), None, True),
+        (_mr(iid=89, state="merged", sha="c" * 40), None, True),
+        (_mr(state="merged", source_project_id=310968, sha="c" * 40), None, True),
+        (_mr(state="merged", target_project_id=310968, sha="c" * 40), None, True),
+        (_mr(state="merged", source_branch="agent/issue-13", sha="c" * 40), None, True),
+        (_mr(state="merged", target_branch="other", sha="c" * 40), None, True),
+        (_mr(state="opened", sha="c" * 40), None, True),
+        (_mr(state="closed", sha="c" * 40), None, True),
+        (_mr(state="merged", sha="c" * 40), None, False),
+        (
+            _mr(state="merged", sha="c" * 40),
+            PipelineEvidence(
+                id=92,
+                status="failed",
+                sha="c" * 40,
+                web_url="https://pipeline/92",
+            ),
+            True,
+        ),
+        (
+            _mr(state="merged", sha="c" * 40),
+            PipelineEvidence(
+                id=93,
+                status="success",
+                sha="d" * 40,
+                web_url="https://pipeline/93",
+            ),
+            True,
+        ),
+    ],
+)
+def test_closed_published_issue_fails_closed_when_completion_evidence_is_not_exact(
+    tmp_path: Path,
+    merge_request: MergeRequestEvidence,
+    pipeline: PipelineEvidence | None,
+    closes_issue: bool,
+) -> None:
+    """Closed issues retain their lifecycle marker until publication proof is exact."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.existing_mr = merge_request
+    gitlab.closing_results = [closes_issue]
+    if pipeline is not None:
+        gitlab.pipeline_by_merge_request[(88, source_sha)] = pipeline
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is not RunnerState.COMPLETE
+    assert gitlab.labels != [None]
+    assert ledger.load(12) == outcome
+
+
 def test_closed_terminal_record_is_reconciled_before_new_selection(
     tmp_path: Path,
 ) -> None:
@@ -9037,6 +9452,45 @@ def test_apply_reconciles_closed_records_and_orphans_before_one_open_segment(
     assert record_14 is not None and record_14.state is RunnerState.COMPLETE
     assert ledger.load(13) is None
     assert repository.prepared
+
+
+def test_loop_housekeeping_requires_exact_published_completion_evidence(
+    tmp_path: Path,
+) -> None:
+    """Closed projected publications stay blocked when their exact pipeline is absent."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+                "prior_state": RunnerState.OBSERVING,
+                "prior_phase": WorkflowPhase.PIPELINE_WAIT,
+            }
+        )
+    )
+    gitlab = ClosedInventoryGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=10),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    completed = ledger.load(12)
+    assert completed is not None and completed.state is RunnerState.BLOCKED
+    assert gitlab.transitions == []
+    assert f"pipeline_for_sha:88:{source_sha}" in gitlab.preselection_calls
+    assert report.segments_run == 1
 
 
 def test_closed_housekeeping_does_not_consume_activation_budget(tmp_path: Path) -> None:

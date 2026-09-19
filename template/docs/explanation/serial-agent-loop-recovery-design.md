@@ -5,7 +5,7 @@ summary: Understand the recoverable state machine for unattended agent work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-19
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -103,6 +103,7 @@ stateDiagram-v2
     Executing --> Publishing: worker result is ready_to_publish
     Publishing --> Observing: exact MR evidence verified
     Observing --> Repair: eligible exact failed current-source MR pipeline has one corroborated retained owner
+    Observing --> Complete: human merge has fresh exact-success evidence
     Observing --> Executing: terminal exact-SHA pipeline starts fresh assessment
     Repair --> Publishing: repair result is ready_to_publish
     Executing --> AwaitingHuman: Pipeline Performance Judge receipt is complete
@@ -363,6 +364,18 @@ remain a fail-closed ambiguity.
   a second MR.
 - A transition is replayable: its intent is durable before an external write,
   and reconciliation is safe after interruption at either side of that write.
+- During exact-source pipeline observation, a human merge can complete the
+  record only after fresh evidence corroborates the configured project, the
+  recorded MR IID, both MR project identities and branches, the recorded exact
+  source SHA, the closing relationship, the now-closed issue, and that SHA's
+  successful pipeline. Mismatched, unrelated, ambiguous, missing, or
+  non-successful evidence remains fail-closed.
+- The controller persists `COMPLETE` before it clears lifecycle labels. A
+  restart can therefore retry only the label projection after the durable
+  completion record exists. A `BLOCKED` or `RETRY_WAIT` wrapper retains verified
+  publication identity, so later closed-issue reconciliation can still make
+  this exact completion decision. When the issue is open, it repairs the
+  `OBSERVING` lifecycle-label projection before observation continues.
 - Publication is idempotent and accepted only from exact GitLab and Git
   evidence.
 - Protected-policy applicability is determined from the prospective

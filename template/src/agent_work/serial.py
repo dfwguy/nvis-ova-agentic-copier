@@ -1398,7 +1398,12 @@ def _completed_closed_record(record: LedgerRecord) -> LedgerRecord:
 
 
 def reconcile_closed_issues(
-    ledger: LedgerPort, gitlab: GitLabPort, *, project_id: int
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    *,
+    project_id: int,
+    repository: RepositoryPort | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Persist closed records before clearing their lifecycle-label projections."""
     inventory = gitlab.list_closed_projected()
@@ -1407,6 +1412,16 @@ def reconcile_closed_issues(
         if record is not None:
             if record.project_id != project_id:
                 raise ValueError("ledger record project does not match")
+            if repository is not None and now is not None:
+                published = _reconcile_closed_published_issue(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    repository=repository,
+                    now=now,
+                )
+                if published is not None:
+                    continue
             completed = _completed_closed_record(record)
             if completed != record:
                 ledger.persist(completed)
@@ -1535,16 +1550,102 @@ def _mr_publication_identity_is_exact(
     *,
     repository: RepositoryPort,
     source_sha: str,
+    merged: bool = False,
 ) -> bool:
     """Verify required merge-request publication identity and state."""
     return (
-        mr.state == "opened"
+        (record.merge_request_iid is None or mr.iid == record.merge_request_iid)
+        and mr.state == ("merged" if merged else "opened")
         and mr.source_project_id == record.project_id
         and mr.target_project_id == record.project_id
         and mr.source_branch == record.source_branch
         and mr.target_branch == repository.config.default_branch
         and mr.sha == source_sha
     )
+
+
+def _is_published_completion_candidate(record: LedgerRecord) -> bool:
+    """Return whether closed-issue completion requires exact publication proof."""
+    return (
+        record.state is not RunnerState.COMPLETE
+        and record.phase
+        in {WorkflowPhase.PIPELINE_WAIT, WorkflowPhase.POST_PUBLICATION}
+        and record.merge_request_iid is not None
+        and record.source_sha is not None
+        and record.publication_sha == record.source_sha
+    )
+
+
+def _preserve_closed_published_wrapper(
+    record: LedgerRecord, *, ledger: LedgerPort, now: datetime
+) -> LedgerRecord:
+    """Keep a closed completion wrapper fail-closed without a due retry spin."""
+    if record.state is RunnerState.RETRY_WAIT and _due(record, now):
+        return ledger.persist(
+            record.model_copy(update={"retry_at": now + timedelta(minutes=20)})
+        )
+    return record
+
+
+def _reconcile_closed_published_issue(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    now: datetime,
+) -> LedgerRecord | None:
+    """Complete a closed published issue only from fresh exact success evidence."""
+    if not _is_published_completion_candidate(record):
+        return None
+    merge_request_iid = record.merge_request_iid
+    source_sha = record.source_sha
+    assert merge_request_iid is not None
+    assert source_sha is not None
+    try:
+        _verify_authenticated_user(gitlab)
+        mr = gitlab.fetch_merge_request(merge_request_iid)
+        exact = _mr_publication_identity_is_exact(
+            record,
+            mr,
+            repository=repository,
+            source_sha=source_sha,
+            merged=True,
+        )
+        closes_issue = exact and gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+        pipeline = (
+            gitlab.latest_pipeline_for_sha(mr.iid, source_sha) if closes_issue else None
+        )
+    except GitLabIdentityError as error:
+        if record.state in {RunnerState.BLOCKED, RunnerState.RETRY_WAIT}:
+            return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+        return _block_identity_drift(record, ledger=ledger, summary=str(error))
+    except IdentityVerificationTransportError:
+        if record.state in {RunnerState.BLOCKED, RunnerState.RETRY_WAIT}:
+            return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+        return _record_identity_retry(record, ledger=ledger, gitlab=gitlab, now=now)
+    except GitLabError:
+        if record.state in {RunnerState.BLOCKED, RunnerState.RETRY_WAIT}:
+            return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    if not exact or not closes_issue:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Closed issue lacks exact published merge request evidence.",
+        )
+    if pipeline is None or pipeline.status != "success" or pipeline.sha != source_sha:
+        return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+    complete = ledger.persist(_completed_closed_record(record))
+    gitlab.transition_labels(record.issue_iid, None)
+    return complete
 
 
 def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> bool:
@@ -3074,6 +3175,18 @@ def _observe(
     try:
         _verify_authenticated_user(gitlab)
         mr = merge_request or gitlab.fetch_merge_request(record.merge_request_iid)
+        if mr.state == "merged":
+            refreshed_issue = gitlab.fetch_issue(record.issue_iid)
+            if refreshed_issue.state != "opened":
+                published = _reconcile_closed_published_issue(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    repository=repository,
+                    now=now,
+                )
+                if published is not None:
+                    return published
         exact = _mr_publication_identity_is_exact(
             record, mr, repository=repository, source_sha=record.source_sha
         )
@@ -3208,6 +3321,8 @@ def run_segment(
     resumed_from_retry = record.state is RunnerState.RETRY_WAIT and _due(record, now)
     if resumed_from_retry:
         record = _resume_due_retry(record, ledger=ledger)
+    if record.state is RunnerState.RETRY_WAIT and not _due(record, now):
+        return None
     try:
         _verify_authenticated_user(gitlab)
     except GitLabIdentityError as error:
@@ -3249,6 +3364,15 @@ def run_segment(
         if record.state is RunnerState.COMPLETE:
             gitlab.transition_labels(issue.iid, None)
             return record
+        published = _reconcile_closed_published_issue(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            repository=repository,
+            now=now,
+        )
+        if published is not None:
+            return published
         complete = ledger.persist(
             transition_record(
                 record,
@@ -3378,6 +3502,18 @@ def run_segment(
         {expected_label} if expected_label else set()
     ):
         issue = gitlab.transition_labels(issue.iid, expected_label)
+        if _is_published_completion_candidate(record):
+            refreshed_issue = gitlab.fetch_issue(record.issue_iid)
+            if refreshed_issue.state != "opened":
+                published = _reconcile_closed_published_issue(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    repository=repository,
+                    now=now,
+                )
+                if published is not None:
+                    return published
     if record.state not in ACTIVE_STATES:
         return record
     if resumed_from_retry and not reexecute_due_worker_retry:
