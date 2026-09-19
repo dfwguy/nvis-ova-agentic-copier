@@ -1700,7 +1700,7 @@ def test_legacy_preparing_feedback_retry_publishes_exact_retained_audit_before_a
     )
     audit = AuditReceiptSummary(
         lane="coding",
-        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
         role_receipts=("$tdd-finalizer: approved",),
         changed_paths=paths,
         tests=("uv run tox",),
@@ -1818,7 +1818,7 @@ def test_legacy_preparing_feedback_retry_rejects_retained_path_mismatch(
     )
     audit = AuditReceiptSummary(
         lane="coding",
-        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
         role_receipts=("$tdd-finalizer: approved",),
         changed_paths=("src/review_fix.py",),
         tests=("uv run tox",),

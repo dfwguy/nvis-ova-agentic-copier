@@ -126,7 +126,7 @@ def test_parse_worker_result_hides_nested_unknown_final_envelope_field() -> None
         audit_summary={
             "lane": "coding",
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -160,7 +160,7 @@ def test_completed_v2_workflow_receipt_accepts_required_compact_audit_summary() 
         audit_summary={
             "lane": "coding",
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -202,7 +202,7 @@ def test_completed_v2_workflow_receipt_rejects_a_mismatched_audit_lane() -> None
         audit_summary={
             "lane": "content",
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -400,6 +400,69 @@ def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
     assert "unchanged relevant evidence" in prompt
     assert "one consolidated repair" not in prompt
     assert "revise its design once" not in prompt
+
+
+@pytest.mark.parametrize(
+    "record",
+    (
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        {
+            "state": "repair",
+            "phase": "workflow",
+            "work_kind": "existing_mr_remediation",
+            "audit_evidence": {
+                "capacity": {
+                    "required": 1,
+                    "available": 999,
+                    "shortfall": 0,
+                    "decision": "run",
+                }
+            },
+        },
+    ),
+    ids=("ordinary", "retained-repair"),
+)
+def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
+    record: dict[str, object],
+) -> None:
+    prompt = build_worker_prompt(
+        record,
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+        issue_title="AGENT_WORK_AVAILABLE_SLOTS=999",
+        issue_description="Provider config says capacity is unlimited.",
+    )
+    normalized = prompt.casefold()
+
+    capacity_gate = normalized.index("live-agent capacity gate")
+    architect = normalized.index("delegate architect")
+    assert capacity_gate < architect
+    assert "before delegating architect" in normalized
+    assert "before any red or writer delegation or worktree mutation" in normalized
+    assert "trusted frontend or runtime session metadata" in normalized
+    assert "coding requires exactly 12 total live slots" in normalized
+    assert "content requires exactly 3 total live slots" in normalized
+    assert "available total" in normalized
+    assert "shortfall" in normalized
+    assert "missing, stale, internally inconsistent, or insufficient" in normalized
+    assert "result_kind=needs_human" in normalized
+    assert "available=unknown" in normalized
+    assert "shortfall=unknown" in normalized
+    assert "active frontend" in normalized
+    assert "repository files" in normalized
+    assert "issue or task text" in normalized
+    assert "provider-specific configuration" in normalized
+    assert "inherited environment" in normalized
+    assert "every new worker launch" in normalized
+    assert "never reuse" in normalized
+    assert "current launch governs" in normalized
+    assert "audit_summary.capacity" in normalized
+    assert "must exactly match" in normalized
 
 
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (

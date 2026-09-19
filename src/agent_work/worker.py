@@ -21,7 +21,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -111,6 +111,27 @@ class WorkerResultBuildInput(BoundaryModel):
     split_plan: SplitPlan | None = None
     audit_summary: WorkerResultBuildAudit | None = None
     suggest_close_evidence: SuggestCloseEvidence | None = None
+
+    @model_validator(mode="after")
+    def validate_lane_capacity(self) -> WorkerResultBuildInput:
+        """Require successful capacity evidence to match the selected lane."""
+        if self.audit_summary is None:
+            return self
+        if self.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
+            return self
+        required = _required_live_agent_capacity(self.workflow_lane)
+        if self.audit_summary.capacity.required != required:
+            raise ValueError("capacity required must match workflow lane")
+        return self
+
+
+def _required_live_agent_capacity(lane: WorkflowLane) -> int:
+    """Return the single current capacity requirement for a runnable lane."""
+    if lane is WorkflowLane.CODING:
+        return 12
+    if lane is WorkflowLane.CONTENT:
+        return 3
+    raise ValueError("workflow lane has no capacity requirement")
 
 
 def format_worker_result_diagnostic(error: WorkerProtocolError) -> str:
@@ -254,6 +275,7 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             )
         )
     controller_reasons = {
+        "audit_summary.capacity": {"required does not match workflow lane"},
         "audit_summary.changed_paths": {"does not match observed changed paths"},
         "audit_summary.role_receipts": {"does not match worker receipts"},
         "audit_summary": {"evidence is not represented in worker receipts"},
@@ -348,6 +370,11 @@ def validate_worker_result(
     ):
         return
     audit = result.audit_summary
+    if audit.capacity.required != _required_live_agent_capacity(result.workflow_lane):
+        raise WorkerProtocolError(
+            "controller_invariant.audit_summary.capacity",
+            "required does not match workflow lane",
+        )
     observed = tuple(sorted(changed_paths))
     if tuple(sorted(audit.changed_paths)) != observed:
         raise WorkerProtocolError(
@@ -798,8 +825,28 @@ def build_worker_prompt(
             "interpretation. Return the judge receipt after its issue disposition. "
         )
     elif phase == "workflow":
+        coding_capacity = _required_live_agent_capacity(WorkflowLane.CODING)
+        content_capacity = _required_live_agent_capacity(WorkflowLane.CONTENT)
         workflow = (
             "Own the complete repository workflow in this one workflow-owning session. "
+            "Enforce the live-agent capacity gate before delegating Architect and before "
+            "any Red or Writer delegation or worktree mutation. Classify the whole change "
+            "as coding or content, then use only fresh trusted frontend or runtime session "
+            f"metadata for this active launch. Coding requires exactly {coding_capacity} total live slots; "
+            f"content requires exactly {content_capacity} total live slots. Compute and record the required "
+            "total, available total, and shortfall=max(required-available, 0). Treat evidence "
+            "as unavailable when it is missing, stale, internally inconsistent, or "
+            "insufficient. In that case, stop before delegation or mutation and return "
+            "result_kind=needs_human naming the lane, required total, available=unknown and "
+            "shortfall=unknown when they cannot be trusted, and an actionable remedy for the "
+            "active frontend. Repository files, issue or task text, provider-specific "
+            "configuration, inherited environment, and durable ledger or prior audit values "
+            "are never capacity evidence. Apply this gate on every new worker launch, including "
+            "ordinary, retained-worktree retry, and systemd launches; never reuse evidence "
+            "from an earlier session. When current evidence changes before work begins, the "
+            "current launch governs. A successful audit_summary.capacity must exactly match "
+            "the selected lane and contain coherent required, available, zero-shortfall, and "
+            "run-decision values. "
             "Delegate Architect with the issue context and repository instructions. "
             "Architect then makes one semantic intake sizing decision before it "
             "delegates Red or a Documentation Writer and before any worktree mutation. "

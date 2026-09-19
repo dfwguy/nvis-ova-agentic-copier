@@ -330,7 +330,7 @@ def test_complete_coding_workflow_advances_directly_to_publication() -> None:
             "audit_summary": {
                 "lane": "coding",
                 "capacity": {
-                    "required": 13,
+                    "required": 12,
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",
@@ -410,7 +410,7 @@ def test_nonworkflow_audit_evidence_cannot_replace_final_audit() -> None:
             "audit_summary": {
                 "lane": "coding",
                 "capacity": {
-                    "required": 13,
+                    "required": 12,
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",

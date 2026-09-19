@@ -45,7 +45,7 @@ from agent_work.status import project_status
 def test_audit_receipt_accepts_bounded_typed_workflow_evidence() -> None:
     summary = AuditReceiptSummary(
         lane="coding",
-        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
         role_receipts=("architect: accepted", "green: passed"),
         changed_paths=("src/agent_work/runtime.py",),
         tests=("uv run pytest tests/test_agent_work_audit_status.py",),
@@ -56,6 +56,39 @@ def test_audit_receipt_accepts_bounded_typed_workflow_evidence() -> None:
 
     assert summary.lane == "coding"
     assert summary.changed_paths == ("src/agent_work/runtime.py",)
+
+
+def test_ledger_loads_a_prior_capacity_audit_for_fresh_reassessment(
+    tmp_path: Path,
+) -> None:
+    prior_audit = AuditReceiptSummary(
+        lane="coding",
+        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        role_receipts=("architect: accepted",),
+        changed_paths=(),
+        tests=("uv run tox",),
+        reviewers=("tdd-judge: approved",),
+        findings=(),
+        corrections=(),
+    )
+    record = LedgerRecord(
+        project_id=310967,
+        issue_iid=12,
+        state=RunnerState.PREPARING,
+        phase=WorkflowPhase.DISCOVERY,
+        work_kind=WorkKind.ORDINARY,
+        source_branch="agent/issue-12",
+        worktree=tmp_path / "worktrees" / "12",
+        audit_evidence=prior_audit,
+    )
+    target = tmp_path / "records" / "12.json"
+    target.parent.mkdir()
+    target.write_text(json.dumps(record.model_dump(mode="json")))
+
+    loaded = JsonLedger(tmp_path, clock=lambda: datetime.now(UTC)).load(12)
+
+    assert loaded is not None
+    assert loaded.audit_evidence == prior_audit
 
 
 @pytest.mark.parametrize(
@@ -72,7 +105,7 @@ def test_audit_receipt_rejects_prohibited_or_unbounded_evidence(
     base = {
         "lane": "coding",
         "capacity": {
-            "required": 13,
+            "required": 12,
             "available": 16,
             "shortfall": 0,
             "decision": "run",

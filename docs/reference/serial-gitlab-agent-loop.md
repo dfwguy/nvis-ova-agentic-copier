@@ -967,6 +967,48 @@ license receipt for the final in-scope diff. On correction, the checker reruns
 only if maintained files in its checked scope changed; a violation cannot be
 waived or marked not applicable. Content work retains its separate role set.
 
+### Live-agent capacity launch contract
+
+Every newly launched workflow-owning worker checks live-agent capacity before
+it delegates a nested role or mutates the retained worktree. The evidence must
+come from trusted frontend or runtime session metadata for that active launch.
+Repository data, issue and task text, user or provider configuration, service
+environment values, and retained ledger or audit values are not capacity
+evidence.
+
+The check reports one coherent set of values:
+
+| Value | Contract |
+| --- | --- |
+| Lane | `coding` or `content`, according to the whole proposed change |
+| Required total | `12` for coding; `3` for content |
+| Available total | Current total live slots from trusted launch metadata, or `unknown` |
+| Shortfall | `max(required - available, 0)`, or `unknown` when availability is not trustworthy |
+| Decision | Run only when current evidence is internally consistent and available is at least required |
+
+Evidence is fresh only when it describes the active worker session. Evidence
+from an earlier invocation is stale even when that invocation used the same
+issue, retained worktree, controller process, service, or frontend
+configuration. Conflicting current observations are inconsistent and make the
+available total and shortfall unknown. A changed, internally consistent
+observation for the active launch replaces an earlier observation; values are
+never averaged or recovered from durable state.
+
+Absent, stale, inconsistent, or insufficient evidence returns `needs_human`
+before nested delegation or worker mutation. The handoff names the lane,
+required total, available total or `unknown`, shortfall or `unknown`, and an
+actionable remedy for the active frontend. The runner preserves the retained
+worktree and existing recovery evidence. It does not serialize a parallel
+phase, weaken a gate, change a model tier, or infer authority from the
+capacity failure.
+
+Ordinary interactive launches, retained-worktree retries, and systemd-started
+workers use the same contract. Each new session rechecks the runtime metadata;
+a prior successful audit cannot authorize it. A successful worker result
+retains the checked lane, required total, available total, zero shortfall, and
+run decision as one coherent capacity audit. See [Configure agent
+capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
+
 ### Intake sizing contract
 
 At the start of a fresh coarse `workflow` session, the trusted wrapper first
