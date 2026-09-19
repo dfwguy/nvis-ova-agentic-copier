@@ -45,14 +45,26 @@ by the manifest is the only identifier an agent may load or delegate.
 
 Capacity is a launch-scoped workflow precondition, not a repository setting.
 Each new workflow-owning session uses trusted frontend or runtime metadata for
-that active launch. It selects the lane, calculates the exact required total,
-and checks the current available total immediately before nested delegation or
-worktree mutation. The coding lane needs at most 12 live slots: Main,
-Architect, Green, and 9 initially applicable Phase-5 reviewers. The nested
+that active launch. It records the manifest topology and exact widest concurrent
+row, then checks current live slots, retained-agent-object headroom, and every
+owner's direct-child and descendant headroom before delegation, fanout, or
+worktree mutation. The coding lane's fully applicable widest row needs at most
+12 live slots: Main, Architect, Green, and nine Phase-5 reviewers. The nested
 Judge and Non-functional Reviewer require five live slots. A Phase-2 policy
 writer makes that phase five slots as well: Main, Architect, Red, Diátaxis
 Writer, and Agent-policy Writer. It does not widen the 12-slot coding maximum.
 The documentation and agent-policy lane needs three live slots.
+
+The coding topology is deliberate: Main owns Architect; Architect owns the
+Phase-2 writers, Green, and Finalizer; Green owns Judge and the applicable
+Phase-5 reviewers; and Judge owns Non-functional Reviewer. A conditional role
+reduces the topology only when its condition is demonstrably false. A live-slot
+total alone is not enough: the retained-object ceiling, current use, and each
+owner's limits must all admit that topology. Handle reuse is allowed only under
+an explicit verified plan for the same owner and tier with non-overlapping
+work; it must preserve the skill, parentage, concurrency, and receipt.
+Architect and Green start fresh for each issue unless that plan proves reuse is
+safe.
 
 This boundary matters most during recovery. A retained worktree and ledger can
 preserve work and record the previous capacity decision, but they cannot prove
@@ -63,12 +75,13 @@ evidence stops before nested work and produces a `needs_human` handoff with the
 lane, required total, available total or `unknown`, shortfall or `unknown`, and
 a remedy for the active frontend.
 
-Repository files, task or issue text, user settings, and provider-specific
-configuration remain non-authoritative. They can describe or configure a
-limit, but only the active frontend or runtime can attest what the current
-session can use. This fail-closed check preserves the declared parallel phase
-instead of silently serializing it. For the operator procedure and examples,
-see [Configure agent capacity](../how-to/configure-agent-capacity.md).
+Repository files, task or issue text, user settings, provider-specific
+configuration, and retained ledger or audit records remain non-authoritative.
+They can describe or configure a limit, but only the active frontend or runtime
+can attest what the current session can use. This fail-closed check preserves
+the declared parallel phase instead of silently serializing it. For the
+operator procedure and examples, see [Configure agent
+capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` is intentionally a concise routing manifest rather than a second
 copy of every role procedure. It says which file or skill to read, when it
@@ -184,10 +197,11 @@ flowchart TD
     architect --> red
     architect --> writer
     architect --> policywriter
-    red --> green["$tdd-green"]
+    architect -. owns .-> green["$tdd-green"]
+    red --> green
     writer --> green
     policywriter --> green
-    green --> judge["Phase 4: $tdd-judge (serial)"]
+    green --> judge
     subgraph phase4["Phase 4: serial Judge evidence"]
         judge["$tdd-judge"]
         nonfunctional["$nonfunctional-review"]
@@ -204,15 +218,15 @@ flowchart TD
         license["$license-checker"]
     end
     judge --> nonfunctional
-    judge --> diataxis
-    judge --> quality
-    judge --> testjudge
-    judge --> cicd
-    judge --> readme
-    judge --> cli
-    judge --> filesystem
-    judge --> policy
-    judge --> license
+    green --> diataxis
+    green --> quality
+    green --> testjudge
+    green --> cicd
+    green --> readme
+    green --> cli
+    green --> filesystem
+    green --> policy
+    green --> license
     nonfunctional --> reviews["All initially applicable reviews returned"]
     diataxis --> reviews
     quality --> reviews
@@ -231,6 +245,7 @@ flowchart TD
     correctionjudge --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
     selective --> phase5outcome
     phase5outcome -- "no findings" --> finalizer["Phase 6: $tdd-finalizer"]
+    architect -. owns .-> finalizer
     phase5outcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
     finalizer --> decision{"Architect accepts finalizer verdict?"}
     decision -- "normal approval" --> publish["Phase 7: Main publication"]

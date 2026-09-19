@@ -37,6 +37,8 @@ from .domain import (
 from .models import (
     AuditCapacity,
     AuditReceiptSummary,
+    AuditRetainedObjects,
+    AuditTopology,
     BoundaryModel,
     GitLabIssueNote,
     LedgerRecord,
@@ -86,6 +88,8 @@ class WorkerResultBuildAudit(BoundaryModel):
     """Worker-supplied audit evidence excluding controller-derived fields."""
 
     capacity: AuditCapacity
+    topology: AuditTopology | None = None
+    retained_objects: AuditRetainedObjects | None = None
     tests: tuple[str, ...] = ()
     findings: tuple[str, ...] = ()
     corrections: tuple[str, ...] = ()
@@ -119,9 +123,14 @@ class WorkerResultBuildInput(BoundaryModel):
             return self
         if self.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
             return self
-        required = _required_live_agent_capacity(self.workflow_lane)
-        if self.audit_summary.capacity.required != required:
-            raise ValueError("capacity required must match workflow lane")
+        topology = self.audit_summary.topology
+        if topology is None:
+            if self.audit_summary.capacity.required != _required_live_agent_capacity(
+                self.workflow_lane
+            ):
+                raise ValueError("capacity required must match workflow lane")
+        elif self.audit_summary.capacity.required != topology.required_live_slots:
+            raise ValueError("capacity required must match topology")
         return self
 
 
@@ -132,6 +141,96 @@ def _required_live_agent_capacity(lane: WorkflowLane) -> int:
     if lane is WorkflowLane.CONTENT:
         return 3
     raise ValueError("workflow lane has no capacity requirement")
+
+
+_ROLE_METADATA = {
+    "$architect": ("main", "1", "most_capable"),
+    "$tdd-red": ("$architect", "2a", "balanced"),
+    "$diataxis-writer": ("$architect", "2b", "balanced"),
+    "$agent-policy-writer": ("$architect", "2c", "balanced"),
+    "$tdd-green": ("$architect", "3", "balanced"),
+    "$tdd-judge": ("$tdd-green", "4", "balanced"),
+    "$nonfunctional-review": ("$tdd-judge", "4a", "fast"),
+    "$diataxis-judge": ("$tdd-green", "5b", "fast"),
+    "$judge-quality": ("$tdd-green", "5c", "most_capable"),
+    "$judge-test": ("$tdd-green", "5d", "balanced"),
+    "$judge-cicd": ("$tdd-green", "5e", "balanced"),
+    "$tdd-document": ("$tdd-green", "5f", "balanced"),
+    "$cli-syntax-judge": ("$tdd-green", "5g", "fast"),
+    "$filesystem-structure-judge": ("$tdd-green", "5h", "fast"),
+    "$agent-policy-judge": ("$tdd-green", "5i", "fast"),
+    "$license-checker": ("$tdd-green", "5j", "fast"),
+    "$tdd-finalizer": ("$architect", "6", "fast"),
+    "$documentation-writer": ("$architect", "2", "balanced"),
+    "$documentation-finalizer": ("$architect", "3", "fast"),
+}
+
+
+def _validate_current_capacity_admission(
+    lane: WorkflowLane,
+    receipts: tuple[str, ...],
+    audit: WorkerResultBuildAudit | AuditReceiptSummary,
+) -> None:
+    """Require new successful results to carry exact current capacity evidence."""
+    if audit.topology is None or audit.retained_objects is None:
+        raise ValueError("topology and retained_objects are required for a new success")
+    topology = audit.topology
+    retained = audit.retained_objects
+    conditional_skills = frozenset(
+        {
+            "$agent-policy-writer",
+            "$cli-syntax-judge",
+            "$filesystem-structure-judge",
+            "$agent-policy-judge",
+        }
+    )
+    not_applicable = {
+        skill
+        for skill in WORKFLOW_RECEIPTS[lane]
+        if any(receipt.startswith(f"{skill}: not applicable") for receipt in receipts)
+    }
+    if not_applicable - conditional_skills:
+        raise ValueError("mandatory manifest roles must not be not applicable")
+    expected_skills = tuple(
+        skill for skill in WORKFLOW_RECEIPTS[lane] if skill not in not_applicable
+    )
+    role_skills = tuple(role.skill for role in topology.roles)
+    if set(role_skills) != set(expected_skills):
+        raise ValueError("topology roles must match applicable manifest roles")
+    for role in topology.roles:
+        if _ROLE_METADATA.get(role.skill) != (role.owner, role.phase, role.tier):
+            raise ValueError("topology role ownership, phase, or tier is invalid")
+    if (
+        next(role for role in topology.roles if role.skill == "$architect").reuse_from
+        is not None
+    ):
+        raise ValueError("architect requires a fresh handle")
+    expected_row = (
+        ("main", "$architect", "$documentation-writer")
+        if lane is WorkflowLane.CONTENT
+        else (
+            "main",
+            "$architect",
+            "$tdd-green",
+            *(
+                skill
+                for skill in role_skills
+                if _ROLE_METADATA[skill][1].startswith("5")
+            ),
+        )
+    )
+    if topology.widest_live_row != expected_row:
+        raise ValueError("widest live row must match applicable manifest topology")
+    if topology.required_live_slots != len(expected_row):
+        raise ValueError("topology required live slots must match widest live row")
+    if (
+        audit.capacity.available != topology.available_live_slots
+        or audit.capacity.required != topology.required_live_slots
+    ):
+        raise ValueError("scalar capacity must match topology live-slot evidence")
+    fresh_handles = sum(role.reuse_from is None for role in topology.roles)
+    if retained.required_fresh_handles != fresh_handles:
+        raise ValueError("retained_objects required fresh handles must match topology")
 
 
 def format_worker_result_diagnostic(error: WorkerProtocolError) -> str:
@@ -278,7 +377,18 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
         "audit_summary.capacity": {"required does not match workflow lane"},
         "audit_summary.changed_paths": {"does not match observed changed paths"},
         "audit_summary.role_receipts": {"does not match worker receipts"},
-        "audit_summary": {"evidence is not represented in worker receipts"},
+        "audit_summary": {
+            "evidence is not represented in worker receipts",
+            "topology and retained_objects are required for a new success",
+            "mandatory manifest roles must not be not applicable",
+            "topology roles must match applicable manifest roles",
+            "topology role ownership, phase, or tier is invalid",
+            "architect requires a fresh handle",
+            "widest live row must match applicable manifest topology",
+            "topology required live slots must match widest live row",
+            "scalar capacity must match topology live-slot evidence",
+            "retained_objects required fresh handles must match topology",
+        },
         "workflow_lane": {"must be coding or content"},
         "receipts": {
             "required receipts are not coherent",
@@ -308,6 +418,12 @@ def _validation_error(
     )
     location = tuple(item["loc"])
     path = _safe_validation_path(model, location)
+    semantic_error = str(item.get("ctx", {}).get("error", ""))
+    if path.endswith("topology"):
+        if "owner_headroom" in semantic_error:
+            path = f"{path}.owner_headroom"
+        elif "reuse_from" in semantic_error:
+            path = f"{path}.roles.reuse_from"
     if location == ("protocol_version",):
         return WorkerProtocolError(f"{origin}.protocol_version", "must equal 2")
     field = origin if not path else f"{origin}.{path}"
@@ -370,11 +486,14 @@ def validate_worker_result(
     ):
         return
     audit = result.audit_summary
-    if audit.capacity.required != _required_live_agent_capacity(result.workflow_lane):
-        raise WorkerProtocolError(
-            "controller_invariant.audit_summary.capacity",
-            "required does not match workflow lane",
+    try:
+        _validate_current_capacity_admission(
+            result.workflow_lane, result.receipts, audit
         )
+    except ValueError as error:
+        raise WorkerProtocolError(
+            "controller_invariant.audit_summary", str(error)
+        ) from None
     observed = tuple(sorted(changed_paths))
     if tuple(sorted(audit.changed_paths)) != observed:
         raise WorkerProtocolError(
@@ -416,10 +535,21 @@ def build_worker_result(
         lane = (
             "coding" if build_input.workflow_lane is WorkflowLane.CODING else "content"
         )
+        if build_input.result_kind == "ready_to_publish":
+            try:
+                _validate_current_capacity_admission(
+                    build_input.workflow_lane, build_input.receipts, audit_input
+                )
+            except ValueError as error:
+                raise WorkerProtocolError(
+                    "controller_invariant.audit_summary", str(error)
+                ) from None
         try:
             audit = AuditReceiptSummary(
                 lane=lane,
                 capacity=audit_input.capacity,
+                topology=audit_input.topology,
+                retained_objects=audit_input.retained_objects,
                 role_receipts=build_input.receipts,
                 changed_paths=tuple(sorted(changed_paths)),
                 tests=audit_input.tests,
@@ -829,12 +959,16 @@ def build_worker_prompt(
         content_capacity = _required_live_agent_capacity(WorkflowLane.CONTENT)
         workflow = (
             "Own the complete repository workflow in this one workflow-owning session. "
-            "Enforce the live-agent capacity gate before delegating Architect and before "
+            "Enforce the live-agent capacity gate with topology-aware evidence before delegating Architect and before "
             "any Red or Writer delegation or worktree mutation. Classify the whole change "
             "as coding or content, then use only fresh trusted frontend or runtime session "
-            f"metadata for this active launch. Coding requires exactly {coding_capacity} total live slots; "
-            f"content requires exactly {content_capacity} total live slots. Compute and record the required "
-            "total, available total, and shortfall=max(required-available, 0). Treat evidence "
+            "metadata for this active launch. Record the exact topology and widest live row, "
+            f"including coding requires exactly {coding_capacity} total live slots when fully applicable, and "
+            f"content requires exactly {content_capacity} total live slots. Compute and record the required total, available total, "
+            "and shortfall=max(required-available, 0), the retained-object ceiling/current use/required "
+            "fresh handles, and per-owner direct-child and descendant headroom. A handle may be reused "
+            "only with verified same owner and tier evidence after its source phase completes before target; "
+            "never reuse it concurrently. Treat evidence "
             "as unavailable when it is missing, stale, internally inconsistent, or "
             "insufficient. In that case, stop before delegation or mutation and return "
             "result_kind=needs_human naming the lane, required total, available=unknown and "
@@ -844,9 +978,8 @@ def build_worker_prompt(
             "are never capacity evidence. Apply this gate on every new worker launch, including "
             "ordinary, retained-worktree retry, and systemd launches; never reuse evidence "
             "from an earlier session. When current evidence changes before work begins, the "
-            "current launch governs. A successful audit_summary.capacity must exactly match "
-            "the selected lane and contain coherent required, available, zero-shortfall, and "
-            "run-decision values. "
+            "current launch governs. A successful audit_summary.capacity must exactly match its topology and audit_summary must include matching topology, retained-object, "
+            "and scalar capacity evidence with coherent required, available, zero-shortfall, and run-decision values. "
             "Delegate Architect with the issue context and repository instructions. "
             "Architect then makes one semantic intake sizing decision before it "
             "delegates Red or a Documentation Writer and before any worktree mutation. "
@@ -925,7 +1058,7 @@ def build_worker_prompt(
         "authority or credentials, irreconcilable requirements, or exact unapproved "
         "project-owned values. "
         "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
-        "audit_summary with lane, capacity, receipts, changed paths, tests, reviewers, findings, and corrections. "
+        "audit_summary with lane, capacity, topology, retained_objects, receipts, changed paths, tests, reviewers, findings, and corrections. "
         "Use `agent-work worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
         "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. Its strict input must not include identity, "

@@ -15,6 +15,7 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -93,6 +94,7 @@ def _completed_input() -> WorkerResultBuildInput:
                     "shortfall": 0,
                     "decision": "run",
                 },
+                **_topology_audit(),
                 "tests": [
                     "uv run pytest tests/test_agent_work_worker_result_builder.py"
                 ],
@@ -134,6 +136,261 @@ def _completed_coding_input_with_policy_writer() -> WorkerResultBuildInput:
             )
         }
     )
+
+
+def _topology_audit() -> dict[str, Any]:
+    """Build the complete current-launch topology evidence for coding work."""
+    role_details = {
+        "$architect": ("main", "1", "most_capable"),
+        "$tdd-red": ("$architect", "2a", "balanced"),
+        "$diataxis-writer": ("$architect", "2b", "balanced"),
+        "$agent-policy-writer": ("$architect", "2c", "balanced"),
+        "$tdd-green": ("$architect", "3", "balanced"),
+        "$tdd-judge": ("$tdd-green", "4", "balanced"),
+        "$nonfunctional-review": ("$tdd-judge", "4a", "fast"),
+        "$diataxis-judge": ("$tdd-green", "5b", "fast"),
+        "$judge-quality": ("$tdd-green", "5c", "most_capable"),
+        "$judge-test": ("$tdd-green", "5d", "balanced"),
+        "$judge-cicd": ("$tdd-green", "5e", "balanced"),
+        "$tdd-document": ("$tdd-green", "5f", "balanced"),
+        "$cli-syntax-judge": ("$tdd-green", "5g", "fast"),
+        "$filesystem-structure-judge": ("$tdd-green", "5h", "fast"),
+        "$agent-policy-judge": ("$tdd-green", "5i", "fast"),
+        "$license-checker": ("$tdd-green", "5j", "fast"),
+        "$tdd-finalizer": ("$architect", "6", "fast"),
+    }
+    return {
+        "topology": {
+            "widest_live_row": [
+                "main",
+                "$architect",
+                "$tdd-green",
+                "$diataxis-judge",
+                "$judge-quality",
+                "$judge-test",
+                "$judge-cicd",
+                "$tdd-document",
+                "$cli-syntax-judge",
+                "$filesystem-structure-judge",
+                "$agent-policy-judge",
+                "$license-checker",
+            ],
+            "required_live_slots": 12,
+            "available_live_slots": 16,
+            "roles": [
+                {
+                    "skill": skill,
+                    "owner": owner,
+                    "phase": phase,
+                    "tier": tier,
+                    **({"reuse_from": "$tdd-judge"} if skill == "$judge-test" else {}),
+                }
+                for skill, (owner, phase, tier) in role_details.items()
+            ],
+            "owner_headroom": [
+                {
+                    "owner": "main",
+                    "direct_children_required": 1,
+                    "direct_children_headroom": 16,
+                    "descendants_required": 16,
+                    "descendants_headroom": 16,
+                },
+                {
+                    "owner": "$architect",
+                    "direct_children_required": 5,
+                    "direct_children_headroom": 16,
+                    "descendants_required": 15,
+                    "descendants_headroom": 16,
+                },
+                {
+                    "owner": "$tdd-green",
+                    "direct_children_required": 9,
+                    "direct_children_headroom": 16,
+                    "descendants_required": 10,
+                    "descendants_headroom": 16,
+                },
+                {
+                    "owner": "$tdd-judge",
+                    "direct_children_required": 1,
+                    "direct_children_headroom": 16,
+                    "descendants_required": 1,
+                    "descendants_headroom": 16,
+                },
+            ],
+        },
+        "retained_objects": {
+            "ceiling": 16,
+            "current": 0,
+            "required_fresh_handles": 16,
+            "fresh_headroom": 0,
+        },
+    }
+
+
+def test_builder_requires_complete_current_topology_and_retained_object_evidence(
+    tmp_path: Path,
+) -> None:
+    """A new successful workflow records validated topology, not scalar capacity."""
+    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
+    audit = payload["audit_summary"]
+    assert isinstance(audit, dict)
+    audit.update(_topology_audit())
+    build_input = WorkerResultBuildInput.model_validate(payload)
+
+    result = build_worker_result(_record(tmp_path), build_input, changed_paths=())
+
+    assert result.audit_summary is not None
+    summary = result.audit_summary.model_dump(mode="json", exclude_none=True)
+    assert summary["topology"] == _topology_audit()["topology"]
+    assert summary["retained_objects"] == _topology_audit()["retained_objects"]
+
+
+def test_builder_rejects_new_success_with_legacy_scalar_only_capacity_audit(
+    tmp_path: Path,
+) -> None:
+    """Recovery-compatible scalar history cannot authorize a fresh workflow result."""
+    completed = _completed_coding_input_with_policy_writer()
+    assert completed.audit_summary is not None
+    legacy = completed.model_copy(
+        update={
+            "audit_summary": completed.audit_summary.model_copy(
+                update={"topology": None, "retained_objects": None}
+            )
+        }
+    )
+    with pytest.raises(WorkerProtocolError, match=r"topology|retained"):
+        build_worker_result(
+            _record(tmp_path),
+            legacy,
+            changed_paths=(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("audit_update", "expected_diagnostic"),
+    (
+        (
+            {
+                "retained_objects": {
+                    "ceiling": 16,
+                    "current": 1,
+                    "required_fresh_handles": 16,
+                    "fresh_headroom": 0,
+                }
+            },
+            "retained_objects",
+        ),
+        (
+            {
+                "topology": {
+                    **_topology_audit()["topology"],
+                    "owner_headroom": [
+                        {
+                            **_topology_audit()["topology"]["owner_headroom"][0],
+                            "descendants_headroom": 15,
+                        },
+                        *_topology_audit()["topology"]["owner_headroom"][1:],
+                    ],
+                }
+            },
+            "owner_headroom",
+        ),
+        (
+            {
+                "topology": {
+                    **_topology_audit()["topology"],
+                    "roles": [
+                        *(_topology_audit()["topology"]["roles"][:9]),
+                        {
+                            **_topology_audit()["topology"]["roles"][9],
+                            "reuse_from": "$tdd-red",
+                        },
+                        *(_topology_audit()["topology"]["roles"][10:]),
+                    ],
+                }
+            },
+            "reuse_from",
+        ),
+        (
+            {
+                "topology": {
+                    **_topology_audit()["topology"],
+                    "roles": [
+                        *(_topology_audit()["topology"]["roles"][:10]),
+                        {
+                            **_topology_audit()["topology"]["roles"][11],
+                            "reuse_from": "$tdd-judge",
+                        },
+                        *(_topology_audit()["topology"]["roles"][12:]),
+                    ],
+                }
+            },
+            "reuse_from",
+        ),
+    ),
+    ids=(
+        "global-object-shortfall",
+        "owner-headroom-shortfall",
+        "unsafe-cross-owner-reuse",
+        "unsafe-overlapping-reuse",
+    ),
+)
+def test_builder_rejects_incoherent_topology_admission_evidence(
+    audit_update: dict[str, object], expected_diagnostic: str
+) -> None:
+    """Live-slot success cannot mask global, owner, or reuse unsafety."""
+    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
+    audit = payload["audit_summary"]
+    assert isinstance(audit, dict)
+    audit.update(_topology_audit())
+    audit.update(audit_update)
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    assert expected_diagnostic in format_worker_result_diagnostic(captured.value)
+
+
+def test_builder_rejects_valid_global_arithmetic_with_too_few_fresh_handles(
+    tmp_path: Path,
+) -> None:
+    """Global arithmetic cannot replace the topology's fresh-handle requirement."""
+    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
+    audit = payload["audit_summary"]
+    assert isinstance(audit, dict)
+    audit["retained_objects"] = {
+        "ceiling": 16,
+        "current": 0,
+        "required_fresh_handles": 15,
+        "fresh_headroom": 1,
+    }
+
+    build_input = parse_worker_result_build_input(json.dumps(payload))
+
+    with pytest.raises(WorkerProtocolError, match="fresh handles"):
+        build_worker_result(_record(tmp_path), build_input, changed_paths=())
+
+
+@pytest.mark.parametrize("owner", ("$missing-owner", "$tdd-green"))
+def test_builder_rejects_malformed_or_cyclic_topology_ownership(owner: str) -> None:
+    """Untrusted ownership chains fail closed before descendant traversal."""
+    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
+    audit = payload["audit_summary"]
+    assert isinstance(audit, dict)
+    topology = audit["topology"]
+    assert isinstance(topology, dict)
+    roles = topology["roles"]
+    assert isinstance(roles, list)
+    roles[0] = {**roles[0], "owner": owner}
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        parse_worker_result_build_input(json.dumps(payload))
+
+    diagnostic = format_worker_result_diagnostic(captured.value)
+    assert (
+        diagnostic == "builder_input.audit_summary.topology: invalid type/shape/value"
+    )
+    assert len(diagnostic.encode()) <= 2048
 
 
 def test_builder_derives_trusted_identity_and_validates_completed_workflow(
@@ -635,9 +892,26 @@ def test_controller_rejects_current_capacity_that_disagrees_with_lane(
         validate_worker_result(record, tampered_result, changed_paths=())
 
     assert format_worker_result_diagnostic(captured.value) == (
-        "controller_invariant.audit_summary.capacity: "
-        "required does not match workflow lane"
+        "controller_invariant.audit_summary: "
+        "scalar capacity must match topology live-slot evidence"
     )
+
+
+def test_controller_rejects_scalar_only_direct_workflow_result(tmp_path: Path) -> None:
+    """A direct envelope cannot use recovery-compatible scalar evidence to publish."""
+    record = _record(tmp_path)
+    result = build_worker_result(record, _completed_input(), changed_paths=())
+    assert result.audit_summary is not None
+    scalar_only = result.model_copy(
+        update={
+            "audit_summary": result.audit_summary.model_copy(
+                update={"topology": None, "retained_objects": None}
+            )
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError, match="topology"):
+        validate_worker_result(record, scalar_only, changed_paths=())
 
 
 @pytest.mark.parametrize(
@@ -1114,6 +1388,57 @@ def test_builder_derives_no_content_reviewers(tmp_path: Path) -> None:
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",
+                },
+                "topology": {
+                    "widest_live_row": [
+                        "main",
+                        "$architect",
+                        "$documentation-writer",
+                    ],
+                    "required_live_slots": 3,
+                    "available_live_slots": 16,
+                    "roles": [
+                        {
+                            "skill": "$architect",
+                            "owner": "main",
+                            "phase": "1",
+                            "tier": "most_capable",
+                        },
+                        {
+                            "skill": "$documentation-writer",
+                            "owner": "$architect",
+                            "phase": "2",
+                            "tier": "balanced",
+                        },
+                        {
+                            "skill": "$documentation-finalizer",
+                            "owner": "$architect",
+                            "phase": "3",
+                            "tier": "fast",
+                        },
+                    ],
+                    "owner_headroom": [
+                        {
+                            "owner": "main",
+                            "direct_children_required": 1,
+                            "direct_children_headroom": 3,
+                            "descendants_required": 3,
+                            "descendants_headroom": 3,
+                        },
+                        {
+                            "owner": "$architect",
+                            "direct_children_required": 2,
+                            "direct_children_headroom": 2,
+                            "descendants_required": 2,
+                            "descendants_headroom": 2,
+                        },
+                    ],
+                },
+                "retained_objects": {
+                    "ceiling": 3,
+                    "current": 0,
+                    "required_fresh_handles": 3,
+                    "fresh_headroom": 0,
                 },
             },
         }
