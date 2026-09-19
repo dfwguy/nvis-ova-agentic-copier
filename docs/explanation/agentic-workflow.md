@@ -41,14 +41,30 @@ configuration. A display name such as “Test Writer” helps a reader understan
 the phase, but it is never a routing identifier. The exact `$skill-id` named
 by the manifest is the only identifier an agent may load or delegate.
 
-Capacity is a workflow precondition, not a repository setting. The active
-frontend reports available live-agent capacity through trusted runtime or
-session metadata, and the manifest compares that total with the lane's widest
-parallel phase. The coding lane needs at most 12 live slots: Main, Architect,
-Green, and 9 initially applicable Phase-5 reviewers. The nested Judge and
-Non-functional Reviewer require five live slots. For the setup procedure
-and the required `needs_human` reporting, see [Configure agent
-capacity](../how-to/configure-agent-capacity.md).
+Capacity is a launch-scoped workflow precondition, not a repository setting.
+Each new workflow-owning session uses trusted frontend or runtime metadata for
+that active launch. It selects the lane, calculates the exact required total,
+and checks the current available total immediately before nested delegation or
+worktree mutation. The coding lane needs at most 12 live slots: Main,
+Architect, Green, and 9 initially applicable Phase-5 reviewers. The nested
+Judge and Non-functional Reviewer require five live slots. The documentation
+and agent-policy lane needs three live slots.
+
+This boundary matters most during recovery. A retained worktree and ledger can
+preserve work and record the previous capacity decision, but they cannot prove
+capacity for a new session. An ordinary relaunch, retained-worktree retry, or
+systemd-started worker must recheck current metadata. New consistent evidence
+replaces the earlier observation. Missing, stale, conflicting, or insufficient
+evidence stops before nested work and produces a `needs_human` handoff with the
+lane, required total, available total or `unknown`, shortfall or `unknown`, and
+a remedy for the active frontend.
+
+Repository files, task or issue text, user settings, and provider-specific
+configuration remain non-authoritative. They can describe or configure a
+limit, but only the active frontend or runtime can attest what the current
+session can use. This fail-closed check preserves the declared parallel phase
+instead of silently serializing it. For the operator procedure and examples,
+see [Configure agent capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` is intentionally a concise routing manifest rather than a second
 copy of every role procedure. It says which file or skill to read, when it

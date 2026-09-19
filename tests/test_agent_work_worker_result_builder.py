@@ -29,6 +29,7 @@ from agent_work.domain import (
 from agent_work.ledger import LedgerCorrupt
 from agent_work.models import (
     AgentWorkConfig,
+    AuditCapacity,
     LedgerRecord,
     MergeRequestDraft,
     MergeRequestFeedbackCursor,
@@ -86,7 +87,7 @@ def _completed_input() -> WorkerResultBuildInput:
             },
             "audit_summary": {
                 "capacity": {
-                    "required": 13,
+                    "required": 12,
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",
@@ -136,6 +137,35 @@ def test_builder_derives_trusted_identity_and_validates_completed_workflow(
     ).record
     assert transitioned.state is RunnerState.PUBLISHING
     assert transitioned.phase is WorkflowPhase.READY_TO_PUBLISH
+
+
+@pytest.mark.parametrize(
+    ("lane", "wrong_required"),
+    (("coding", 11), ("content", 4)),
+)
+def test_builder_rejects_capacity_required_that_disagrees_with_lane(
+    lane: str, wrong_required: int
+) -> None:
+    payload = {
+        "workflow_lane": lane,
+        "result_kind": "ready_to_publish",
+        "change_summary": "Completed the workflow.",
+        "next_action": "Publish for human review.",
+        "audit_summary": {
+            "capacity": {
+                "required": wrong_required,
+                "available": 16,
+                "shortfall": 0,
+                "decision": "run",
+            },
+            "tests": ["uv run pytest"],
+            "findings": [],
+            "corrections": [],
+        },
+    }
+
+    with pytest.raises(WorkerProtocolError):
+        parse_worker_result_build_input(json.dumps(payload))
 
 
 def test_builder_produces_a_structured_human_only_close_suggestion(
@@ -406,7 +436,7 @@ def test_builder_diagnostic_keeps_safe_numeric_position_for_known_list_field() -
         "next_action": "A valid next action.",
         "audit_summary": {
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -433,7 +463,7 @@ def test_builder_diagnostic_hides_nested_unknown_field() -> None:
         "next_action": "A valid next action.",
         "audit_summary": {
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -488,6 +518,32 @@ def test_controller_invariant_diagnostic_keeps_exact_corrective_reason(
     assert format_worker_result_diagnostic(captured.value) == (
         "controller_invariant.audit_summary.changed_paths: "
         "does not match observed changed paths"
+    )
+
+
+def test_controller_rejects_current_capacity_that_disagrees_with_lane(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path)
+    result = build_worker_result(record, _completed_input(), changed_paths=())
+    assert result.audit_summary is not None
+    prior_capacity = AuditCapacity(
+        required=13, available=16, shortfall=0, decision="run"
+    )
+    tampered_result = result.model_copy(
+        update={
+            "audit_summary": result.audit_summary.model_copy(
+                update={"capacity": prior_capacity}
+            )
+        }
+    )
+
+    with pytest.raises(WorkerProtocolError) as captured:
+        validate_worker_result(record, tampered_result, changed_paths=())
+
+    assert format_worker_result_diagnostic(captured.value) == (
+        "controller_invariant.audit_summary.capacity: "
+        "required does not match workflow lane"
     )
 
 

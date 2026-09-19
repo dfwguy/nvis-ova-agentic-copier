@@ -107,7 +107,12 @@ Before taking repository action:
    Runtime/session metadata remains the only capacity evidence: repository
    files, issue or task content, and provider-specific configuration do not
    establish capacity. Never silently serialize a declared parallel row or
-   claim parallel execution.
+   claim parallel execution. Each newly launched serial worker re-evaluates
+   fresh evidence for its active session before Architect, Red, or writer
+   delegation and before worktree mutation. Ordinary, retained-worktree retry,
+   and systemd launches fail closed when that evidence is absent, stale,
+   inconsistent, or insufficient; inherited environment and durable audit or
+   ledger values are not capacity attestations.
 6. For delegated work, use only the listed enabled tier and give the agent its
    exact `$skill-id`, context, file boundaries, prerequisites, and required
    receipt. Do not route by display name or invent an unlisted role.
@@ -328,9 +333,17 @@ A worker invoked by `agent-work loop run --apply` follows the same loading
 table and workflow manifest inside one live workflow-owning session. Its
 Architect delegates the applicable children, preserves their direct context
 handoffs, and returns one versioned result envelope for the coarse `workflow`
-phase. After the trusted wrapper delegates its live Architect, and before Red,
-the documentation writer, or any worktree mutation, Architect makes one
-semantic intake sizing decision. Suitable work has one independently
+phase. Before delegating its live Architect, the workflow-owning session makes
+one launch-scoped capacity decision from fresh trusted frontend or runtime
+session metadata. After delegation, and before Red, the documentation writer,
+or any worktree mutation, Architect makes one semantic intake sizing decision.
+A missing, stale,
+inconsistent, or insufficient capacity observation returns `needs_human` with
+the lane, required total, available total or `unknown`, shortfall or `unknown`,
+and an active-frontend remedy. Every ordinary, retained, or systemd-started
+worker launch rechecks capacity; repository, task, provider configuration,
+inherited environment, and retained ledger or audit values cannot attest it.
+Suitable work has one independently
 reviewable and mergeable outcome that can reasonably complete every applicable
 workflow phase inside the effective worker budget. Oversized or separately
 deliverable work returns `result_kind=split_required` with a validated, ordered

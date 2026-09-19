@@ -1012,7 +1012,7 @@ class BatchingInvoker:
                     "audit_summary": {
                         "lane": self.lane,
                         "capacity": {
-                            "required": 13,
+                            "required": 12 if self.lane == "coding" else 3,
                             "available": 16,
                             "shortfall": 0,
                             "decision": "run",
@@ -1120,7 +1120,7 @@ class SingleSessionInvoker:
             payload["audit_summary"] = {
                 "lane": self.lane,
                 "capacity": {
-                    "required": 13,
+                    "required": 12 if self.lane == "coding" else 3,
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",
@@ -1193,7 +1193,7 @@ def _pending_feedback_publication_record(tmp_path: Path) -> LedgerRecord:
     paths = ("src/review_fix.py",)
     audit = AuditReceiptSummary(
         lane="coding",
-        capacity=AuditCapacity(required=13, available=16, shortfall=0, decision="run"),
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
         role_receipts=("$tdd-finalizer: approved",),
         changed_paths=paths,
         tests=("uv run tox",),
@@ -3845,6 +3845,41 @@ def test_agent_invoker_worker_exit_redacts_prompt_credentials_and_controls(
     assert len(invocation.stderr.encode()) <= 2_048
 
 
+def test_agent_invoker_preserves_capacity_gate_for_systemd_style_launch(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        captured["command"] = command
+        captured["stdin"] = kwargs["stdin"]
+        captured["environment"] = kwargs["environment"]
+        return cast(
+            CommandResult,
+            type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        )
+
+    prompt = build_worker_prompt(
+        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    )
+    invocation = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "AGENT_WORK_AVAILABLE_SLOTS": "999",
+        },
+    ).invoke(tmp_path, prompt, 1800)
+
+    assert invocation.returncode == 0
+    assert captured["stdin"] == prompt
+    assert "live-agent capacity gate" in str(captured["stdin"]).casefold()
+    assert "inherited environment" in str(captured["stdin"]).casefold()
+
+
 def test_worker_exit_evidence_uses_a_deterministic_fallback_for_blank_stderr(
     tmp_path: Path,
 ) -> None:
@@ -4102,7 +4137,7 @@ def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
         "audit_summary": {
             "lane": "coding",
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -4742,7 +4777,7 @@ def test_due_worker_validation_with_changed_code_consumes_another_retry(
         "audit_summary": {
             "lane": "coding",
             "capacity": {
-                "required": 13,
+                "required": 12,
                 "available": 16,
                 "shortfall": 0,
                 "decision": "run",
@@ -4820,7 +4855,7 @@ def test_due_worker_receipt_repeat_blocks_without_consuming_another_retry(
             "audit_summary": {
                 "lane": "coding",
                 "capacity": {
-                    "required": 13,
+                    "required": 12,
                     "available": 16,
                     "shortfall": 0,
                     "decision": "run",
