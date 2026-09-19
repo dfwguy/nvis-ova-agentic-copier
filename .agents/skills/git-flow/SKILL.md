@@ -277,21 +277,34 @@ the preflight. One user approval per remote-touching command.
    newlines from scalar fields and performs the numeric-project selection,
    create-or-update, and exact authoritative read-back. Do not construct a
    multiline shell variable or call GitLab's create/update endpoint directly.
+   For ordinary issue-backed work, pass the already validated positive issue
+   IID with `--issue-iid`. The boundary renders exactly one `Closes #IID` and
+   read-back verifies that exact issue in the configured project. Never derive
+   the IID from issue or MR text. Issue-less publication may omit this option.
 
    ```bash
    source_branch="$(git rev-parse --abbrev-ref HEAD)"
    target_branch="main"
    title="$(git log -1 --format=%s)"
+   issue_iid="<validated-positive-issue-IID>"
+   [[ "$issue_iid" =~ ^[1-9][0-9]*$ ]] || {
+     printf '%s\n' "A validated positive issue IID is required" >&2
+     exit 1
+   }
    git push --set-upstream origin HEAD
    agent-work merge-request publish \
      --source-branch "$source_branch" --target-branch "$target_branch" --title "$title" \
      --problem "Review handoffs were hard to scan." \
      --impact "Reviewers could miss the action needed to move work forward." \
      --outcome "Make the MR description concise and nonduplicative." \
-     --validation "git diff --check" --apply
+     --validation "git diff --check" --issue-iid "$issue_iid" --apply
    ```
-   Publication verifies the exact IID, source and target branches, title, and
-   Markdown returned by GitLab. A failure is a blocker.
+   Publication verifies the configured-project issue, source and target
+   branches, title, and Markdown returned by GitLab. A failure is a blocker.
+   Use free-form structured fields and `--tracking` only for non-closing
+   relationships. They must contain no GitLab closing pattern, including
+   `Closes`, `Fixes`, `Resolves`, Implement variants, or issue/work-item URLs.
+   `--issue-iid` is the sole closing association.
 
    Keep role receipts, result envelopes, full correction ledgers, and duplicated
    summaries out of the human-facing description; retain them in durable audit
@@ -333,7 +346,10 @@ the preflight. One user approval per remote-touching command.
    GitLab updates the existing MR with new commits. To replace its title or
    description, use `agent-work merge-request publish` with scalar Problem,
    Outcome, and Validation fields after this push; it updates exactly that
-   source branch and verifies the returned metadata. For normal approval,
+   source branch and verifies the returned metadata. For issue-backed updates,
+   pass the validated `--issue-iid`; free-form fields and `--tracking` must
+   contain no GitLab closing pattern.
+   For normal approval,
    preserve its existing title and description only when they remain current
    and comply with the concise contract; after the shown push and read-back,
    stop when they do. Otherwise, update that same MR once after that verified

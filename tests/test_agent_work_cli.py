@@ -277,6 +277,7 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> MergeRequestPublicationReport:
         kwargs = {
             "source_branch": source_branch,
@@ -289,6 +290,7 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
             "human_action": human_action,
             "tracking": tracking,
             "apply": apply,
+            "issue_iid": issue_iid,
         }
         calls.append(kwargs)
         return MergeRequestPublicationReport(
@@ -302,6 +304,7 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
                 impact=impact,
                 human_action=human_action,
                 tracking=tracking,
+                issue_iid=issue_iid,
             ),
         )
 
@@ -331,7 +334,7 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
                 "--human-action",
                 "Review it.",
                 "--tracking",
-                "Closes #123",
+                "Relates to #123",
             ],
             publish_merge_request=publish_merge_request,
             write_stdout=output.append,
@@ -348,8 +351,9 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
             "validation": ("uv run pytest", "manual dry run"),
             "impact": "Review quality suffers.",
             "human_action": "Review it.",
-            "tracking": "Closes #123",
+            "tracking": "Relates to #123",
             "apply": False,
+            "issue_iid": None,
         }
     ]
     assert json.loads(output[0]) == {
@@ -361,7 +365,7 @@ def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boun
             "## Outcome\nPublish Markdown.\n\n"
             "## Human action\nReview it.\n\n"
             "## Validation\n- uv run pytest\n- manual dry run\n\n"
-            "## Tracking\nCloses #123"
+            "## Tracking\nRelates to #123"
         ),
     }
 
@@ -375,6 +379,76 @@ def test_merge_request_publish_cli_help_and_argument_errors_use_argparse_statuse
 
     with pytest.raises(SystemExit) as invalid_exit:
         main(["merge-request", "publish", "--source-branch", "topic"])
+    assert invalid_exit.value.code == 2
+
+
+def test_merge_request_preview_forwards_issue_iid_and_renders_one_canonical_close() -> (
+    None
+):
+    calls: list[int | None] = []
+
+    def publisher(
+        *, issue_iid: int | None = None, **_kwargs: object
+    ) -> MergeRequestPublicationReport:
+        calls.append(issue_iid)
+        return MergeRequestPublicationReport(
+            False, "would-create", None, "Body\n\nCloses #123"
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--json",
+                "--source-branch",
+                "topic",
+                "--target-branch",
+                "main",
+                "--title",
+                "Title",
+                "--problem",
+                "Problem",
+                "--outcome",
+                "Outcome",
+                "--validation",
+                "pytest",
+                "--issue-iid",
+                "123",
+            ],
+            publish_merge_request=publisher,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert calls == [123]
+    assert json.loads(output[0])["description"].splitlines()[-1] == "Closes #123"
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "not-a-number"))
+def test_merge_request_publish_cli_rejects_malformed_issue_iid(value: str) -> None:
+    with pytest.raises(SystemExit) as invalid_exit:
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--source-branch",
+                "topic",
+                "--target-branch",
+                "main",
+                "--title",
+                "Title",
+                "--problem",
+                "Problem",
+                "--outcome",
+                "Outcome",
+                "--validation",
+                "pytest",
+                "--issue-iid",
+                value,
+            ]
+        )
     assert invalid_exit.value.code == 2
 
 
@@ -393,9 +467,10 @@ def test_merge_request_publish_cli_returns_one_for_a_publication_boundary_failur
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> MergeRequestPublicationReport:
         del source_branch, target_branch, title, problem, outcome, validation, impact
-        del human_action, tracking, apply
+        del human_action, tracking, apply, issue_iid
         raise RuntimeError("GitLab did not return the requested merge request")
 
     errors: list[str] = []
@@ -440,6 +515,7 @@ def test_merge_request_publish_cli_text_preview_includes_rendered_description() 
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> MergeRequestPublicationReport:
         del source_branch, target_branch, title
         return MergeRequestPublicationReport(
@@ -453,6 +529,7 @@ def test_merge_request_publish_cli_text_preview_includes_rendered_description() 
                 impact=impact,
                 human_action=human_action,
                 tracking=tracking,
+                issue_iid=issue_iid,
             ),
         )
 
@@ -497,9 +574,10 @@ def test_merge_request_publish_cli_apply_passes_mutation_opt_in_to_boundary() ->
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> MergeRequestPublicationReport:
         del source_branch, target_branch, title, problem, outcome, validation, impact
-        del human_action, tracking
+        del human_action, tracking, issue_iid
         calls.append(apply)
         evidence = MergeRequestEvidence.model_validate(
             {
@@ -582,9 +660,10 @@ def test_merge_request_publish_cli_rejects_mismatched_apply_result(
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> MergeRequestPublicationReport:
         del source_branch, target_branch, title, problem, outcome, validation, impact
-        del human_action, tracking, apply
+        del human_action, tracking, apply, issue_iid
         return MergeRequestPublicationReport(
             returned_apply, "create", evidence if returned_apply else None, "body"
         )
@@ -648,7 +727,9 @@ def test_merge_request_publish_cli_default_dry_run_composes_numeric_port_without
                 "--validation",
                 "uv run pytest",
                 "--tracking",
-                "Closes #123",
+                "Relates to #123",
+                "--issue-iid",
+                "123",
             ],
             environment={
                 "GITLAB_HOST": "gitlab.example.com",
@@ -673,7 +754,7 @@ def test_merge_request_publish_cli_default_dry_run_composes_numeric_port_without
             "## Problem\nBodies escaped newlines.\n\n"
             "## Outcome\nPublish Markdown.\n\n"
             "## Validation\n- uv run pytest\n\n"
-            "## Tracking\nCloses #123"
+            "## Tracking\nRelates to #123\n\nCloses #123"
         ),
     }
 

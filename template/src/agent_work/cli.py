@@ -153,6 +153,7 @@ class _PublishMergeRequest(Protocol):
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> _MergeRequestPublicationReport: ...
 
 
@@ -210,6 +211,7 @@ def _configured_merge_request_publisher(
         human_action: str | None,
         tracking: str | None,
         apply: bool,
+        issue_iid: int | None = None,
     ) -> _MergeRequestPublicationReport:
         """Render then delegate one structured CLI request."""
         return default_publish_merge_request(
@@ -224,7 +226,9 @@ def _configured_merge_request_publisher(
                 impact=impact,
                 human_action=human_action,
                 tracking=tracking,
+                issue_iid=issue_iid,
             ),
+            issue_iid=issue_iid,
             apply=apply,
             port=port,
         )
@@ -491,6 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--impact")
     publish.add_argument("--human-action")
     publish.add_argument("--tracking")
+    publish.add_argument("--issue-iid", type=_positive_integer)
     _common(publish, apply_help="create or update the merge request; omit for preview")
     return parser
 
@@ -867,6 +872,7 @@ def main(
                 human_action=parsed.human_action,
                 tracking=parsed.tracking,
                 apply=parsed.apply,
+                issue_iid=parsed.issue_iid,
             )
         except (GitLabError, RuntimeError, ValueError, OSError) as error:
             if parsed.debug:

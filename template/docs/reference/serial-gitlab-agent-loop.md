@@ -56,7 +56,8 @@ agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
                                  [--impact TEXT] [--human-action TEXT]
-                                 [--tracking TEXT] [--apply] [--json]
+                                 [--tracking TEXT] [--issue-iid IID]
+                                 [--apply] [--json]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -94,12 +95,22 @@ action, and Tracking only when their matching flags are supplied. Supply one
 or more `--validation` values. Literal escaped line-break payloads are
 rejected before the command can change GitLab.
 
+`--issue-iid` accepts one positive issue IID. When supplied, preview and
+rendered output end with exactly one canonical `Closes #IID` line. Omit the
+option for issue-less publication. `--tracking` may accompany `--issue-iid`,
+but it is only for non-closing relationships. A closing directive in any
+user-supplied structured text is rejected; use `--issue-iid` instead. Inputs
+and merge-request text are untrusted data.
+
 Without `--apply`, the command previews the intended description and reports
 whether it would create or update, with no mutation. With `--apply`, it uses the configured numeric GitLab project to
 find zero or one open merge request for `--source-branch`: it creates one when
 there is none, updates it when there is one, and rejects an ambiguous result.
 It then reads that exact merge request back and verifies its IID, source and
-target branches, title, and description.
+target branches, title, and description. When `--issue-iid` is supplied, it
+also requires GitLab's authoritative closing-issue projection to contain
+exactly that issue in the configured project. A conflicting, missing, or
+otherwise mismatched projection fails closed.
 
 The command never pushes a branch, approves a merge request, or merges it.
 Push the branch first; see [how to validate template changes](../how-to/validate-template-changes.md#publish-the-verified-branch-for-review)
