@@ -20,6 +20,7 @@ serial agent loop. They describe the available interfaces rather than a path.
 <!-- BEGIN GENERATED -->
 ### Template
 - [Template contract](template-contract.md) — Look up template inputs, generated files, setup tasks, and update behavior.
+- [Template revision preview](template-revision-preview.md) — Look up the read-only command that compares a recorded template commit with an upstream candidate.
 - [License compliance](license-compliance.md) — Look up the read-only NVIDIA license policy checker.
 
 ### Agent workflow

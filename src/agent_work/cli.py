@@ -18,9 +18,12 @@ import os
 import shutil
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from . import template_comparison
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -50,6 +53,14 @@ from .service_environment import (
     migrate_service_environment as default_migrate_service_environment,
 )
 from .status import project_status
+from .template_comparison import (
+    BinaryCommandRunner,
+    TemplateComparison,
+    TemplateComparisonError,
+)
+from .template_comparison import (
+    compare_template_revisions as default_compare_template_revisions,
+)
 from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
 from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
 from .upstream_gitlab import (
@@ -143,6 +154,26 @@ class _PublishMergeRequest(Protocol):
         tracking: str | None,
         apply: bool,
     ) -> _MergeRequestPublicationReport: ...
+
+
+class _CompareTemplateRevisions(Protocol):
+    """Typed template-preview composition boundary."""
+
+    def __call__(
+        self,
+        answers_path: Path,
+        candidate_revision: str,
+        *,
+        read_text: Callable[[Path], str],
+        run_command: BinaryCommandRunner,
+        private_repository: Callable[[], AbstractContextManager[Path]],
+        timeout_seconds: float,
+    ) -> TemplateComparison: ...
+
+
+def _read_template_text(path: Path) -> str:
+    """Read Copier answers with deterministic text decoding."""
+    return path.read_text(encoding="utf-8")
 
 
 def _configured_merge_request_publisher(
@@ -397,6 +428,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common(apply_parser)
     apply_parser.add_argument("--plan-file", type=Path, required=True)
+    template = resources.add_parser(
+        "template", help="inspect Copier template revisions"
+    )
+    template_actions = template.add_subparsers(dest="action", required=True)
+    template_preview = template_actions.add_parser(
+        "preview", help="compare a recorded template commit with a candidate revision"
+    )
+    template_preview.add_argument("--candidate-revision", required=True)
+    template_preview.add_argument("--project-root", type=Path, default=Path("."))
+    _common(
+        template_preview,
+        apply=False,
+        debug_help="show a safe failure stage on failure",
+    )
     finding = resources.add_parser(
         "upstream-finding", help="preview or file an upstream finding"
     )
@@ -611,6 +656,28 @@ def _render_finding_preview(preview: UpstreamFindingPreview, *, as_json: bool) -
     return " ".join(details)
 
 
+def _render_template_preview(result: TemplateComparison, *, as_json: bool) -> str:
+    """Render the stable template-preview result without project details."""
+    outcome = "changed" if result.paths else "unchanged"
+    if as_json:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "command": "template.preview",
+                "outcome": outcome,
+                "current_commit": result.current_commit,
+                "candidate_commit": result.candidate_commit,
+                "paths": list(result.paths),
+            },
+            separators=(",", ":"),
+        )
+    header = (
+        f"outcome={outcome} current_commit={result.current_commit} "
+        f"candidate_commit={result.candidate_commit} paths={len(result.paths)}"
+    )
+    return "\n".join((header, *(f"path={path}" for path in result.paths)))
+
+
 def _render_rotation(report: CredentialRotationReport, *, as_json: bool) -> str:
     """Render only the stable, non-secret credential-rotation result."""
     if as_json:
@@ -739,11 +806,49 @@ def main(
         ..., ServiceEnvironmentReport
     ] = default_migrate_service_environment,
     atomic_write: Callable[[Path, bytes], None] = atomic_write_environment,
+    compare_template_revisions: _CompareTemplateRevisions = default_compare_template_revisions,
+    template_read_text: Callable[[Path], str] = _read_template_text,
+    template_run_command: BinaryCommandRunner | None = None,
+    template_private_repository: Callable[
+        [], AbstractContextManager[Path]
+    ] = template_comparison.private_repository,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "template" and parsed.action == "preview":
+        try:
+            runner = template_run_command
+            if runner is None:
+                try:
+                    resolved_git = find_executable("git")
+                except (OSError, RuntimeError, ValueError):
+                    raise TemplateComparisonError(stage="input") from None
+                if resolved_git is None or not Path(resolved_git).is_absolute():
+                    raise TemplateComparisonError(stage="input")
+                runner = partial(
+                    template_comparison.run_git_command,
+                    git_executable=Path(resolved_git),
+                    environment=environment,
+                )
+
+            result = compare_template_revisions(
+                parsed.project_root / ".copier-answers.yml",
+                parsed.candidate_revision,
+                read_text=template_read_text,
+                run_command=(runner),
+                private_repository=template_private_repository,
+                timeout_seconds=30,
+            )
+        except TemplateComparisonError as error:
+            message = str(error)
+            if parsed.debug:
+                message = f"{message} stage={error.stage}"
+            write_stderr(message)
+            return 1
+        write_stdout(_render_template_preview(result, as_json=parsed.json))
+        return 0
     if parsed.resource == "merge-request" and parsed.action == "publish":
         try:
             publisher = publish_merge_request or _configured_merge_request_publisher(

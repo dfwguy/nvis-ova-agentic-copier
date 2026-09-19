@@ -49,4 +49,6 @@ detailed procedure and source of truth for installation and operation.
 
 The [documentation index](docs/index.md) organizes tutorials, how-to guides,
 reference, and explanations. Template contributors should use [Validate
-template changes](docs/how-to/validate-template-changes.md).
+template changes](docs/how-to/validate-template-changes.md). Generated-project
+maintainers can [preview a template revision](docs/how-to/preview-template-revision.md)
+before deciding whether to update.

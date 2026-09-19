@@ -17,6 +17,6 @@ Diátaxis process is defined in the repository's [documentation structure
 rules](../DIATAXIS.md).
 
 - [Tutorials](tutorials/index.md) — Repeatable lessons for learning the template. (1)
-- [How-to guides](how-to/index.md) — Goal-oriented guidance for practical tasks. (8)
-- [Reference](reference/index.md) — Complete facts about the template and agent loop. (3)
+- [How-to guides](how-to/index.md) — Goal-oriented guidance for practical tasks. (9)
+- [Reference](reference/index.md) — Complete facts about the template and agent loop. (4)
 - [Explanation](explanation/index.md) — Context, rationale, and design trade-offs. (6)
