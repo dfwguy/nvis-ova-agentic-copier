@@ -118,6 +118,7 @@ class _ValidationReport(Protocol):
     state: Literal["preview", "running", "terminal-success", "terminal-failure"]
     terminal: bool
     exit_code: int | None
+    diagnostic: str | None
 
 
 class _ValidationRunAction(Protocol):
@@ -573,6 +574,12 @@ def _stderr(message: str) -> None:
     sys.stderr.write(f"{message}\n")
 
 
+def _read_validation_artifact(path: Path) -> bytes:
+    """Read at most one bounded fixed validation artifact."""
+    with path.open("rb") as handle:
+        return handle.read(1_048_577)
+
+
 def _sanitize_human_value(value: object) -> str:
     """Render one bounded value on a single human-readable line."""
     return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
@@ -884,6 +891,9 @@ def main(
     ] = template_comparison.private_repository,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
+    read_validation_artifact: Callable[[Path], bytes | None] = (
+        _read_validation_artifact
+    ),
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
@@ -944,6 +954,7 @@ def main(
                     run_command=run_command,
                     monotonic_clock=time.monotonic,
                     sleeper=time.sleep,
+                    read_artifact=read_validation_artifact,
                 )
                 if parsed.action == "run":
                     validation_run = partial(
@@ -975,6 +986,7 @@ def main(
             "state": report.state,
             "terminal": report.terminal,
             "exit_code": report.exit_code if report.terminal else None,
+            "diagnostic": report.diagnostic,
         }
         write_stdout(
             json.dumps(payload, separators=(",", ":"))

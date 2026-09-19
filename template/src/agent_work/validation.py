@@ -15,13 +15,30 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
+from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandRunner
 
 _TREE = re.compile(r"^[0-9a-f]{40}$")
+_NONNEGATIVE_INTEGER = re.compile(r"^[0-9]+$")
+_DIAGNOSTIC = re.compile(
+    r"^git hook run pre-commit failed with exit code (?P<returncode>-?[0-9]+); "
+    r"(?:no failing JUnit summary available|JUnit "
+    r"(?:(?:py311 failures=[0-9]+ errors=[0-9]+)"
+    r"(?:; py314 failures=[0-9]+ errors=[0-9]+)?|"
+    r"py314 failures=[0-9]+ errors=[0-9]+))$"
+)
+_JUNIT_ARTIFACTS = (
+    ("py311", Path("test-results-py311.xml")),
+    ("py314", Path("test-results-py314.xml")),
+)
+_MAX_ARTIFACT_BYTES = 1_048_576
+_MAX_COUNTER = 999_999_999
+_MAX_DIAGNOSTIC_BYTES = 512
 
 
 class JudgeValidationError(RuntimeError):
@@ -35,6 +52,7 @@ class _Record(BaseModel):
     candidate_tree: str = Field(pattern=r"^[0-9a-f]{40}$")
     state: Literal["running", "terminal-success", "terminal-failure"]
     returncode: int | None = Field(default=None, strict=True)
+    diagnostic: str | None = None
 
     def model_post_init(self, _context: object) -> None:
         terminal = self.state in {"terminal-success", "terminal-failure"}
@@ -44,6 +62,26 @@ class _Record(BaseModel):
             raise ValueError("success requires zero exit")
         if self.state == "terminal-failure" and self.returncode == 0:
             raise ValueError("failure requires nonzero exit")
+        if self.diagnostic is not None:
+            match = _DIAGNOSTIC.fullmatch(self.diagnostic)
+            numeric_values = re.findall(
+                r"(?:failures=|errors=)([0-9]+)", self.diagnostic
+            )
+            if (
+                self.state != "terminal-failure"
+                or match is None
+                or not self.diagnostic.isprintable()
+                or len(self.diagnostic.encode("utf-8")) > _MAX_DIAGNOSTIC_BYTES
+                or int(match.group("returncode")) != self.returncode
+                or str(int(match.group("returncode"))) != match.group("returncode")
+                or int(match.group("returncode")) == 0
+                or abs(int(match.group("returncode"))) > _MAX_COUNTER
+                or any(
+                    str(int(value)) != value or int(value) > _MAX_COUNTER
+                    for value in numeric_values
+                )
+            ):
+                raise ValueError("invalid validation diagnostic")
 
 
 @dataclass(frozen=True)
@@ -56,6 +94,7 @@ class JudgeValidationReport:
     state: Literal["preview", "running", "terminal-success", "terminal-failure"]
     terminal: bool
     returncode: int | None
+    diagnostic: str | None
 
     @property
     def exit_code(self) -> int | None:
@@ -74,6 +113,7 @@ class JudgeValidationDependencies:
     run_command: CommandRunner
     monotonic_clock: Callable[[], float]
     sleeper: Callable[[float], None]
+    read_artifact: Callable[[Path], bytes | None] = lambda _path: None
 
 
 def _valid_tree(value: str) -> bool:
@@ -94,6 +134,77 @@ def _record(candidate_tree: str, value: object | None) -> _Record | None:
     return record
 
 
+def _bounded_counter(value: str | None) -> int | None:
+    if value is None or _NONNEGATIVE_INTEGER.fullmatch(value) is None:
+        return None
+    parsed = int(value)
+    return parsed if str(parsed) == value and parsed <= _MAX_COUNTER else None
+
+
+def _suite_counts(element: ElementTree.Element) -> tuple[int, int] | None:
+    failures = _bounded_counter(element.get("failures"))
+    errors = _bounded_counter(element.get("errors"))
+    if failures is None or errors is None:
+        return None
+    return failures, errors
+
+
+def _junit_failure_counts(artifact: bytes | None) -> tuple[int, int] | None:
+    """Return bounded aggregate failure counts from one fixed JUnit artifact."""
+    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+        return None
+    try:
+        root = ElementTree.fromstring(artifact)
+    except ElementTree.ParseError:
+        return None
+    root_name = root.tag.rsplit("}", 1)[-1]
+    if root_name == "testsuite":
+        counts = _suite_counts(root)
+    elif root_name == "testsuites":
+        counts = _suite_counts(root)
+        if counts is None:
+            children = tuple(
+                _suite_counts(child)
+                for child in root
+                if child.tag.rsplit("}", 1)[-1] == "testsuite"
+            )
+            if not children or any(child is None for child in children):
+                return None
+            failures = sum(child[0] for child in children if child is not None)
+            errors = sum(child[1] for child in children if child is not None)
+            counts = (
+                (failures, errors)
+                if failures <= _MAX_COUNTER and errors <= _MAX_COUNTER
+                else None
+            )
+    else:
+        return None
+    if counts is None or sum(counts) == 0:
+        return None
+    return counts
+
+
+def _failure_diagnostic(
+    returncode: int, read_artifact: Callable[[Path], bytes | None]
+) -> str:
+    if returncode == 0 or abs(returncode) > _MAX_COUNTER:
+        raise JudgeValidationError("validation hook returned an invalid exit code")
+    summaries: list[str] = []
+    for label, path in _JUNIT_ARTIFACTS:
+        try:
+            counts = _junit_failure_counts(read_artifact(path))
+        except OSError:
+            counts = None
+        if counts is not None:
+            summaries.append(f"{label} failures={counts[0]} errors={counts[1]}")
+    suffix = (
+        f"JUnit {'; '.join(summaries)}"
+        if summaries
+        else "no failing JUnit summary available"
+    )
+    return f"git hook run pre-commit failed with exit code {returncode}; {suffix}"
+
+
 def _report(
     candidate_tree: str,
     *,
@@ -103,7 +214,13 @@ def _report(
 ) -> JudgeValidationReport:
     terminal = record.state in {"terminal-success", "terminal-failure"}
     return JudgeValidationReport(
-        candidate_tree, applied, action, record.state, terminal, record.returncode
+        candidate_tree,
+        applied,
+        action,
+        record.state,
+        terminal,
+        record.returncode,
+        record.diagnostic,
     )
 
 
@@ -115,7 +232,7 @@ def run_judge_validation(
         raise JudgeValidationError("candidate tree is malformed")
     if not apply:
         return JudgeValidationReport(
-            candidate_tree, False, "preview", "preview", False, None
+            candidate_tree, False, "preview", "preview", False, None, None
         )
     if dependencies.current_staged_tree() != candidate_tree:
         raise JudgeValidationError("candidate tree is not the current staged tree")
@@ -134,7 +251,14 @@ def run_judge_validation(
             "terminal-success" if result.returncode == 0 else "terminal-failure"
         )
         terminal = _Record(
-            candidate_tree=candidate_tree, state=state, returncode=result.returncode
+            candidate_tree=candidate_tree,
+            state=state,
+            returncode=result.returncode,
+            diagnostic=(
+                _failure_diagnostic(result.returncode, dependencies.read_artifact)
+                if state == "terminal-failure"
+                else None
+            ),
         )
         dependencies.atomic_write_record(
             candidate_tree, terminal.model_dump(exclude_none=True)

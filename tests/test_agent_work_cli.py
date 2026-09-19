@@ -275,6 +275,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
             state="preview",
             terminal=False,
             exit_code=None,
+            diagnostic=None,
         )
 
     output: list[str] = []
@@ -294,6 +295,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
         "state": "preview",
         "terminal": False,
         "exit_code": None,
+        "diagnostic": None,
     }
 
 
@@ -311,6 +313,7 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
             state="running",
             terminal=False,
             exit_code=None,
+            diagnostic=None,
         )
 
     output: list[str] = []
@@ -350,6 +353,7 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
             state="terminal-success",
             terminal=True,
             exit_code=0,
+            diagnostic=None,
         )
 
     assert (
@@ -360,6 +364,55 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
         == 0
     )
     assert calls == [("a" * 40, True)]
+
+
+@pytest.mark.parametrize("action", ("run", "status"))
+@pytest.mark.parametrize("as_json", (False, True), ids=("human", "json"))
+def test_validation_cli_projects_terminal_failure_diagnostic(
+    *, action: str, as_json: bool
+) -> None:
+    diagnostic = (
+        "git hook run pre-commit failed with exit code 5; "
+        "JUnit py311 failures=2 errors=1"
+    )
+
+    def validation_action(
+        *,
+        candidate_tree: str,
+        apply: bool = False,
+        wait_seconds: int | None = None,
+    ) -> SimpleNamespace:
+        del wait_seconds
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=apply,
+            action="ran" if apply else "status",
+            state="terminal-failure",
+            terminal=True,
+            exit_code=5,
+            diagnostic=diagnostic,
+        )
+
+    output: list[str] = []
+    arguments = ["validation", action, "--candidate-tree", "a" * 40]
+    if action == "run":
+        arguments.append("--apply")
+    if as_json:
+        arguments.append("--json")
+
+    assert (
+        main(
+            arguments,
+            validation_run=validation_action,
+            validation_status=validation_action,
+            write_stdout=output.append,
+        )
+        == 1
+    )
+    if as_json:
+        assert json.loads(output[0])["diagnostic"] == diagnostic
+    else:
+        assert f"diagnostic={diagnostic}" in output[0]
 
 
 def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
@@ -374,6 +427,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             state="preview",
             terminal=False,
             exit_code=None,
+            diagnostic=None,
         )
 
     def validation_status(
@@ -387,6 +441,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             state="terminal-success",
             terminal=True,
             exit_code=0,
+            diagnostic=None,
         )
 
     assert (
