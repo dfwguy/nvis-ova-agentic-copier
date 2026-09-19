@@ -96,8 +96,9 @@ Before taking repository action:
    the applicability record. Required slots are main, every resident ancestor,
    and every applicable child in the widest same-number phase. Count a
    conditional role as N/A only when demonstrably false; uncertainty is
-   applicable. Coding requires at most 14 live slots: main, Architect, Green,
-   and eleven concurrent Phase-4 reviewers including `$license-checker`.
+   applicable. Coding requires at most 12 live slots: main, Architect, Green,
+   and nine concurrent Phase-5 reviewers including `$license-checker`. The
+   nested Phase-4 Judge and Non-functional Reviewer require five live slots.
    Documentation/policy requires at most 3: main,
    Architect, and the current writer or finalizer child. If capacity is unknown
    or insufficient, stop before delegation and return `needs_human`. Report
@@ -205,22 +206,22 @@ check, if any, is project-local context defined in `.agents/project.md`.
 | 2a `$tdd-red` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and acceptance criteria | Failing focused behavior tests and changed-test paths; missing seam → Architect |
 | 2b `$diataxis-writer` | Required; child of Architect | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Approved design and documentation boundaries | Diátaxis draft/report, required index and reciprocal-link updates, or a reason no docs update is needed → Architect |
 | 3 `$tdd-green` | Required; child of Architect and sole mutator after Phase 2 | Delegated | Balanced / `gpt-5.6-terra` `medium` | Design, Red receipt/test diff, Diátaxis draft/report or no-doc rationale, and shared worktree | Green suite, reconciled documentation, current JUnit evidence, and correction-cycle ledger |
-| 4a `$nonfunctional-review` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Current JUnit evidence | Complete timing verdict → Green |
-| 4b `$tdd-judge` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final diff and validation evidence | Complete validation verdict → Green |
-| 4c `$diataxis-judge` | Required; child of Green | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Architect design, Diátaxis Writer receipt/report, final docs diff, and final implemented interface/source diff | Comparison-based documentation verdict → Green |
-| 4d `$judge-quality` | Required; child of Green | Delegated in parallel | Most capable / `gpt-5.6-sol` `high` | Production diff and design | Complete severity report → Green |
-| 4e `$judge-test` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Test diff, Red receipt, and JUnit evidence | Complete test report → Green |
-| 4f `$judge-cicd` | Required; child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | CI/config diff and validation evidence | Complete CI report → Green |
-| 4g `$tdd-document` | Required; read-only child of Green | Delegated in parallel | Balanced / `gpt-5.6-terra` `medium` | Final user-facing diff | Complete README verdict → Green |
-| 4h `$cli-syntax-judge` | CLI surface or contract changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | CLI diff and tests or N/A reason | Complete CLI verdict → Green |
-| 4i `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
-| 4j `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
-| 4k `$license-checker` | Required; child of Green | Delegated in parallel; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and current test/JUnit evidence | License-policy receipt identifying the checked in-scope diff → Green |
-| 5 `$tdd-finalizer` | Required; child of Architect after Green consolidates review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, complete applicability record including Phase-2 writer evidence and Phase-4 comparison verdict, license receipt, repair summary/cycle ledger, and current JUnit evidence | Normal approval or draft-safety verdict → Architect |
-| 6 `$git-flow` | Required after Architect accepts normal approval, or accepts an explicit draft-safety verdict solely for Draft: human handoff | Main; never delegate | Current enabled | Architect's accepted finalizer verdict and, for draft safety, required draft metadata | Commit, push, and verified MR URL plus branch tip |
-| 7 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Judge receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
+| 4 `$tdd-judge` | Required; child of Green after staging | Delegated serially before Phase 5; delegates Non-functional Reviewer | Balanced / `gpt-5.6-terra` `medium` | Exact staged tree | Hook verdict, unchanged tree OID, immutable supported-version JUnit snapshots, SHA-256 digests/counts, and non-functional receipt → Green |
+| 4a `$nonfunctional-review` | Required; child of TDD Judge | Delegated serially by Judge after its hook | Fast / `gpt-5.6-luna` `low` | Exact staged tree and immutable Judge JUnit snapshots/digests/counts | Complete timing verdict → Judge → Green |
+| 5b `$diataxis-judge` | Required; child of Green | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Architect design, Diátaxis Writer receipt/report, final docs diff, and final implemented interface/source diff | Comparison-based documentation verdict → Green |
+| 5c `$judge-quality` | Required; child of Green | Delegated in parallel after Phase 4 | Most capable / `gpt-5.6-sol` `high` | Production diff and design | Complete severity report → Green |
+| 5d `$judge-test` | Required; child of Green | Delegated in parallel after Phase 4 | Balanced / `gpt-5.6-terra` `medium` | Test diff, Red receipt, and Judge JUnit evidence | Complete test report → Green |
+| 5e `$judge-cicd` | Required; child of Green | Delegated in parallel after Phase 4 | Balanced / `gpt-5.6-terra` `medium` | CI/config diff and Judge evidence | Complete CI report → Green |
+| 5f `$tdd-document` | Required; read-only child of Green | Delegated in parallel after Phase 4 | Balanced / `gpt-5.6-terra` `medium` | Final user-facing diff | Complete README verdict → Green |
+| 5g `$cli-syntax-judge` | CLI surface or contract changed | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | CLI diff and tests or N/A reason | Complete CLI verdict → Green |
+| 5h `$filesystem-structure-judge` | Python/Bash layout or packaging changed | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Changed paths and project deviations or N/A reason | Complete layout verdict → Green |
+| 5i `$agent-policy-judge` | Agent instructions changed in a coding diff | Delegated in parallel after Phase 4 | Fast / `gpt-5.6-luna` `low` | Policy diff and mirrors or N/A reason | Complete policy verdict → Green |
+| 5j `$license-checker` | Required; child of Green | Delegated in parallel after Phase 4; read-only | Fast / `gpt-5.6-luna` `low` | Final diff and Judge JUnit evidence | License-policy receipt identifying the checked in-scope diff → Green |
+| 6 `$tdd-finalizer` | Required; child of Architect after Green consolidates Phase-5 review | Delegated | Fast / `gpt-5.6-luna` `low` | Final diff, Judge-passed staged tree OID and JUnit digests/counts, complete applicability record including Phase-2 writer evidence and Phase-5 comparison verdict, license receipt, and repair summary/cycle ledger | Finalizer commit SHA with normal approval or mechanically safe draft-safety verdict → Architect |
+| 7 `$git-flow` | Coding: required after Architect accepts Finalizer | Main; never delegate | Current enabled | Finalizer commit receipt | Push, update/create MR, and verified URL; content/trivial main still owns its ordinary commit and publication |
+| 8 `$pipeline-performance-judge` | Required after every created or updated MR | Main delegates immediately in ordinary interactive work; serial invokes fresh after cheap exact-SHA terminal gating | Fast / `gpt-5.6-luna` `low` | Exact MR/source-SHA evidence | Independent pipeline-defense receipt; healthy evidence is quiet, actionable evidence creates/reuses a new ordinary issue, then `awaiting_human` |
 
-Green waits for every initially applicable Phase 4 reviewer, including `$license-checker`,
+Green waits for the Judge's non-functional handoff and every initially applicable Phase 5 reviewer, including `$license-checker`,
 consolidates the
 complete finding set, and makes a consolidated correction for all findings it can resolve.
 A finding is concrete and resolvable only when it names an
@@ -241,10 +242,12 @@ Stop for an identical repeated or reopened finding, unchanged relevant
 evidence, no approved-scope correction, scope expansion, or genuine
 controversy; never waive or relabel a finding to manufacture progress.
 
-After a correction, rerun only a reviewer whose finding was addressed or whose
-owned domain or evidence changed; rerun license review if and only if maintained in-scope files changed
-after its approval. Rerun the full test gate only when
-behavior or tests changed.
+After a correction, stage the new candidate and rerun the serial Phase-4 Judge
+and its Non-functional Reviewer child for every changed tree before dependent
+review or finalization. Every coding candidate requires the full Judge hook and
+current immutable JUnit evidence. Rerun only a Phase-5 reviewer whose finding
+was addressed or whose owned domain or evidence changed; rerun license review
+if and only if maintained in-scope files changed after its approval.
 Green returns receipts, the ledger, repairs, and unresolved findings to the
 still-live Architect. Reviewers never mutate the shared worktree or fail fast
 after another reviewer rejects.
@@ -262,7 +265,8 @@ verdict never approves merge. Unsafe or unvalidated diffs, or ambiguous
 publication authority, return `needs_human` without publication. Normal clean
 approval is unchanged.
 
-The read-only license-checker is an initial Phase-4 reviewer. It independently
+The read-only license-checker is an initial Phase-5 reviewer. The
+Non-functional Reviewer is the Judge's Phase-4 child. License Checker independently
 checks the stable post-Green diff and returns a receipt identifying that checked
 in-scope diff. Finalizer requires a current approving `$license-checker` receipt
 matching the final in-scope diff for normal and draft-safety paths. A violation

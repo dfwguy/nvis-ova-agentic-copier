@@ -30,6 +30,19 @@ Work in explicit phases with distinct roles:
 - **Implementer** — starts only after both phase-2 receipts, writes minimal code to pass failing tests, and reconciles the draft against final interfaces
 - **Judge** — validates the full cycle: meaningful tests, clean implementation, all tooling passing, conventions followed
 
+In Phase 3, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
+`uv run ty check`, then focused behavior tests, stages the exact candidate, and
+records its tree OID. These fast commands are repair tools; Phase 4 verifies the
+candidate and owns the one expensive tox/full-suite run. In serial Phase 4,
+Judge runs the installed hook through Git against that staged tree and returns
+the unchanged tree OID plus immutable supported-version JUnit snapshot paths,
+SHA-256 digests, test counts, and its Non-functional Reviewer child receipt.
+Every coding candidate runs the full hook. Only then may Green start the
+concurrent Phase-5 read-only reviews. Phase 6
+Finalizer verifies that evidence and makes the interactive `--no-verify` commit;
+Phase 7 main publishes, and Phase 8 independently observes the exact-source
+pipeline.
+
 ## Never
 
 - Write implementation code before a failing test exists

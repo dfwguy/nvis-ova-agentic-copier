@@ -581,8 +581,8 @@ class LedgerRecord(BoundaryModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_legacy_split_record(cls, value: object) -> object:
-        """Discard only the retired split checkpoint from an older ledger record."""
+    def normalize_legacy_record(cls, value: object) -> object:
+        """Discard explicitly retired fields from older durable ledger records."""
         if not isinstance(value, dict):
             return value
         record = cast("dict[str, object]", value)
@@ -592,10 +592,12 @@ class LedgerRecord(BoundaryModel):
             field in record
             for field in ("decomposition_plan", "decomposition_progress")
         )
+        has_retired_gate_evidence = "publication_gate_evidence" in record
         if (
             state != "decomposing"
             and prior_state != "decomposing"
             and not has_legacy_fields
+            and not has_retired_gate_evidence
         ):
             return value
         normalized = dict(record)
@@ -606,6 +608,7 @@ class LedgerRecord(BoundaryModel):
         if has_legacy_fields:
             normalized.pop("decomposition_plan", None)
             normalized.pop("decomposition_progress", None)
+        normalized.pop("publication_gate_evidence", None)
         return normalized
 
     @model_validator(mode="after")

@@ -3180,10 +3180,46 @@ def test_prepare_commit_stages_only_explicit_validated_paths_including_deletions
     )
 
     assert prepared_sha == prepared
-    assert ("add", "--all", "--", "docs/space name.md", "removed.py") in [
-        call[3:] for call in calls
-    ]
+    assert any(
+        call[3:] == ("add", "--all", "--", "docs/space name.md", "removed.py")
+        for call in calls
+    )
     assert not any(call[3:] == ("add", "--all") for call in calls)
+
+
+def test_prepare_commit_does_not_bypass_the_installed_git_hook(tmp_path: Path) -> None:
+    """An ordinary publication commit has no no-verify hook bypass."""
+    candidate, prepared = "a" * 40, "b" * 40
+    head = candidate
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal head
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{head}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "M changed.py\n", "")
+        if arguments == ("commit", "-m", "Resolve issue #12"):
+            head = prepared
+            return CommandResult(0, "", "")
+        if arguments == ("rev-list", "--parents", "-n", "1", prepared):
+            return CommandResult(0, f"{prepared} {candidate}\n", "")
+        return CommandResult(0, "", "")
+
+    prepared_sha = GitRepository(_config(tmp_path), fake).prepare_commit(
+        tmp_path / "worktree", "agent/issue-12", 12, expected_head=candidate
+    )
+
+    assert prepared_sha == prepared
+    commit_calls = [call[3:] for call in calls if call[3] == "commit"]
+    assert commit_calls == [("commit", "-m", "Resolve issue #12")]
+    assert all("--no-verify" not in call for call in commit_calls)
 
 
 @pytest.mark.parametrize(

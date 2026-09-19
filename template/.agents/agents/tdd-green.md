@@ -45,16 +45,19 @@ exists. Do not add untested functionality.
    reconcile required documentation with the final interface before review,
    and update README when required. Do not delegate another agent that mutates
    the worktree.
-4. **Run relevant tests** to confirm Green. For Python:
-   ```
-   uv run tox run-parallel
-   ```
-   The supported-version environments write gitignored JUnit artifacts with
-   per-test `time` values for the Non-functional Reviewer; do not delete or
-   replace them before review.
-   For Bash, run the selected shell test command, `bash -n`, and ShellCheck.
-5. **Fan out review.** On the initial review, delegate every applicable Phase
-   4 judge, including `$license-checker`, from `AGENTS.md` concurrently, subject to available slots. Give each
+4. **Prepare one exact candidate.** Run `uv run ruff check --fix`, `uv run
+   ruff format`, and `uv run ty check`, then focused behavior tests. Stage
+   with `git add --all`, require no unstaged or untracked maintained files,
+   and record `git write-tree`. These fast commands repair the candidate; the
+   Judge independently verifies it and owns the one expensive tox/full-suite
+   run. Delegate the Phase-4 Judge alone; it runs
+   `git hook run pre-commit`, captures immutable JUnit snapshots, and delegates
+   `$nonfunctional-review` as its read-only child. It must return the identical
+   tree OID, snapshots, SHA-256 digests, test counts, and non-functional
+   receipt. Only after that combined approval fan out the remaining applicable
+   read-only reviewers.
+5. **Fan out review.** In Phase 5, delegate every remaining applicable reviewer,
+   including `$license-checker`, from `AGENTS.md` concurrently, subject to available slots. Give each
    only its relevant diff, instructions, and current test/JUnit evidence.
    Reviewers are read-only. Wait for every result even when one rejects.
 6. **Classify and repair with evidence.** Consolidate the complete finding set before
@@ -65,9 +68,12 @@ exists. Do not add untested functionality.
    expansion are human-judgment blockers. Fix all resolvable findings in one
    pass. After correction, rerun only reviewers whose finding was addressed or
    whose owned domain/evidence changed; rerun license review if and only if
-   maintained in-scope files changed after its approval; rerun the full test gate only when behavior or tests
-   changed. If a test must change, first reconfirm that it fails against
-   pre-fix behavior.
+   maintained in-scope files changed after its approval. Every candidate-tree
+   change requires a new staged tree and a fresh Phase-4 Judge receipt before
+   any dependent review or Finalizer check. When behavior or tests changed,
+   rerun focused behavior tests and require the Judge's full installed hook.
+   Every coding candidate requires the Judge's full installed hook. If a test
+   must change, first reconfirm that it fails against pre-fix behavior.
 7. **Return a cycle ledger to Architect.** Report Red/Green evidence, changed
    paths, documentation status, every judge verdict, repairs, unresolved
    findings, and current JUnit evidence. For an additional Architect-authorized

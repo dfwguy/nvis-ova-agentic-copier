@@ -523,6 +523,34 @@ def test_worker_prompt_requires_the_builder_and_v2_contract(tmp_path: Path) -> N
     assert "WORKFLOW_RECEIPTS" in prompt
 
 
+def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(
+    tmp_path: Path,
+) -> None:
+    """The trusted worker prompt preserves the Judge-before-review protocol."""
+    prompt = build_worker_prompt(
+        _record(tmp_path).model_dump(mode="json"),
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+    )
+
+    judge = prompt.index("delegates the serial Phase-4 $tdd-judge")
+    nonfunctional = prompt.index(
+        "delegates $nonfunctional-review as its read-only child"
+    )
+    fanout = prompt.index("Phase-5 reviewer")
+
+    assert judge < nonfunctional < fanout
+
+
+def test_coding_receipts_put_the_judge_before_every_phase_five_reviewer() -> None:
+    """Whole-workflow receipt order matches the serial review dependency."""
+    receipts = WORKFLOW_RECEIPTS[WorkflowLane.CODING]
+
+    assert receipts.index("$nonfunctional-review") == receipts.index("$tdd-judge") + 1
+    assert receipts.index("$tdd-judge") < receipts.index("$diataxis-judge")
+
+
 def test_worker_result_build_cli_writes_only_one_envelope_to_stdout(
     tmp_path: Path,
 ) -> None:

@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from agent_work.domain import RunnerState, StatusProjection, WorkflowPhase, WorkKind
 from agent_work.ledger import (
     JsonLedger,
+    LedgerCorrupt,
     LockBusy,
     XdgIssueLock,
     XdgProjectLock,
@@ -238,6 +239,52 @@ def test_legacy_ledger_record_loads_with_unknown_audit_then_persists_v2_timestam
     assert persisted.latest_meaningful_update_at == now
     assert persisted.completed_at is None
     assert stored["schema_version"] == 2
+
+
+def test_legacy_ledger_discards_retired_publication_gate_evidence(
+    tmp_path: Path,
+) -> None:
+    """Prior durable records remain readable after retiring gate evidence."""
+    legacy = LedgerRecord(
+        project_id=310967,
+        issue_iid=12,
+        state=RunnerState.PREPARING,
+        phase=WorkflowPhase.DISCOVERY,
+        work_kind=WorkKind.ORDINARY,
+        source_branch="agent/issue-12",
+        worktree=tmp_path / "worktrees" / "12",
+    ).model_dump(mode="json")
+    legacy["publication_gate_evidence"] = {"retired": True}
+    target = tmp_path / "records" / "12.json"
+    target.parent.mkdir()
+    target.write_text(json.dumps(legacy))
+
+    loaded = JsonLedger(tmp_path, clock=lambda: datetime(2026, 9, 14, tzinfo=UTC)).load(
+        12
+    )
+
+    assert loaded is not None
+    assert loaded.issue_iid == 12
+
+
+def test_ledger_rejects_unrecognized_legacy_field(tmp_path: Path) -> None:
+    """The compatibility normalizer allows only the explicitly retired field."""
+    legacy = LedgerRecord(
+        project_id=310967,
+        issue_iid=12,
+        state=RunnerState.PREPARING,
+        phase=WorkflowPhase.DISCOVERY,
+        work_kind=WorkKind.ORDINARY,
+        source_branch="agent/issue-12",
+        worktree=tmp_path / "worktrees" / "12",
+    ).model_dump(mode="json")
+    legacy["unknown_retired_field"] = True
+    target = tmp_path / "records" / "12.json"
+    target.parent.mkdir()
+    target.write_text(json.dumps(legacy))
+
+    with pytest.raises(LedgerCorrupt):
+        JsonLedger(tmp_path, clock=lambda: datetime(2026, 9, 14, tzinfo=UTC)).load(12)
 
 
 def test_complete_persist_sets_completion_time_without_replacing_activation_time(

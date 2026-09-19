@@ -636,10 +636,12 @@ hands the approved design concurrently to Red and the Diátaxis Writer. Red
 exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`.
 Architect waits for both receipts before Green starts with the design, Red test
 diff, and Diátaxis draft/report or no-doc rationale. Green reconciles that
-draft with the final interface, then fans out every applicable initial
-read-only Phase-4 reviewer, including `$license-checker`, against the same
-stable post-Green diff. It waits for every initial receipt before consolidating
-feedback and returns that result to Architect for the final decision.
+draft with the final interface, then runs the serial Phase-4 TDD Judge against
+its staged tree. The Judge's unchanged tree OID and supported-version JUnit
+digests and counts are prerequisites for every applicable concurrent Phase-5
+reviewer, including `$license-checker`, against the same stable post-Green diff.
+Green waits for every initial receipt before consolidating feedback and returns
+that result to Architect for the final decision.
 
 ### Preselection pipeline gate
 

@@ -1,6 +1,6 @@
 ---
 name: tdd-judge
-description: Run applicable lint and non-test validation gates without editing files.
+description: Run the full installed-hook suite and record JUnit evidence without editing files.
 metadata:
   model-tier: balanced
 ---
@@ -20,6 +20,13 @@ Use this portable workflow skill for the implementation judge phase. Read and
 follow [the role instructions](../../agents/tdd-judge.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.
+
+The serial Phase-4 Judge validates one staged candidate through `git hook run
+pre-commit`, records the unchanged passed tree OID and immutable absolute
+supported-version JUnit snapshots with SHA-256 digests and test counts, then
+delegates `$nonfunctional-review` as its read-only child. It returns their
+combined handoff to Green before the Phase-5 reviewer fanout; it does not
+duplicate individual hook commands or rerun a suite.
 
 ## Model selection
 

@@ -342,12 +342,16 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     architect = prompt.index("Delegate Architect")
     red = prompt.index("delegates Red")
     green = prompt.index("then delegates Green")
-    fan_out = prompt.index("delegates every applicable independent judge concurrently")
+    judge = prompt.index("delegates the serial Phase-4 $tdd-judge")
+    nonfunctional = prompt.index(
+        "delegates $nonfunctional-review as its read-only child"
+    )
+    fan_out = prompt.index("Phase-5 reviewer concurrently")
     repair = prompt.index(
         "evidence-based correction cycles while material progress exists"
     )
     feedback = prompt.index("returns all receipts and unresolved findings")
-    assert architect < red < green < fan_out < repair < feedback
+    assert architect < red < green < judge < nonfunctional < fan_out < repair < feedback
     assert "Green is the sole mutable owner" in prompt
     assert "Quality Judge receives the architecture" in prompt
     assert "Test Judge receives the Red receipt" in prompt

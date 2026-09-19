@@ -266,9 +266,13 @@ git worktree add -b agent/work-base "$agent_checkout" origin/main
 git -C "$agent_checkout" branch --set-upstream-to=origin/main agent/work-base
 cd "$agent_checkout"
 command -v uv systemctl loginctl
+uv run pre-commit install
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
+
+This installs the project's commit hook in the dedicated checkout. An ordinary
+Git commit runs the hook.
 
 The service manager does not inherit an interactive `PATH` or checkout `direnv`
 variables. The environment file records the configured bare GitLab host and
