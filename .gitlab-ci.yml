@@ -29,27 +29,7 @@ workflow:
     - mkdir -p /tmp/ci-image-context
     - cp Dockerfile pyproject.toml uv.lock /tmp/ci-image-context/
 
-ci-image:validate:
-  extends: .ci_image_builder
-  tags:
-    - size/medium
-  script:
-    - |
-      buildctl-daemonless.sh build \
-        --frontend dockerfile.v0 \
-        --local context=/tmp/ci-image-context \
-        --local dockerfile=/tmp/ci-image-context \
-        --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE"
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      changes:
-        paths:
-          - Dockerfile
-          - pyproject.toml
-          - uv.lock
-    - when: never
-
-ci-image:publish:
+ci-image:candidate:
   extends: .ci_image_builder
   tags:
     - size/medium
@@ -71,7 +51,9 @@ ci-image:publish:
         --local dockerfile=/tmp/ci-image-context \
         --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE" \
         --metadata-file build-metadata.json \
-        --output "type=image,name=$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA,push=true"
+        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache" \
+        --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache,mode=max" \
+        --output "type=image,name=$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID,push=true"
     - |
       digest="$(sed -n 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' build-metadata.json)"
       printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
@@ -84,23 +66,16 @@ ci-image:publish:
       - build-metadata.json
       - ci-image.env
     when: always
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      changes:
-        paths:
-          - Dockerfile
-          - pyproject.toml
-          - uv.lock
-    - when: never
-
 .base_uv:
   stage: validate
   interruptible: true
-  needs: []
+  needs:
+    - job: ci-image:candidate
+      artifacts: false
   tags:
     - size/medium
   image:
-    name: gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521
+    name: $CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   before_script:
     - cd "$CI_PROJECT_DIR"
 

@@ -5,12 +5,12 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-18
+last_reviewed: 2026-09-19
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
   - path: refresh-ci-image.md
-    why: Publishes the dependency image used to accelerate these checks.
+    why: Explains the commit-specific image used for these checks.
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the merge-request publication command.
 ---
@@ -45,9 +45,12 @@ The local `tox` command remains the supported-matrix test runner. In GitLab CI,
 the root pipeline lists nine native jobs: `ruff-check`, `ruff-format`,
 `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
 `license-check`, and `shellcheck`. They extend the one root `.base_uv`
-definition, whose image is
-pinned by immutable digest, and perform no `apt-get`, `uv python install`, or
-`uv sync` bootstrap. There is no synthetic aggregate root validation job or
+definition, whose image is the commit-specific candidate
+`$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. All nine jobs wait for the
+BuildKit image job before starting and perform no `apt-get`, `uv python
+install`, or `uv sync` bootstrap. They retain `uv run --no-sync`. The BuildKit
+job uses a registry-backed cache and retains build metadata and the image digest
+as pipeline evidence. There is no synthetic aggregate root validation job or
 aggregate JUnit gate suite. Inspect an individual root check through its named
 GitLab job. Each root pytest job runs four deterministic concurrent shards: one
 complete `tests/test_agent_work_serial_runtime.py` shard, one complete
@@ -66,9 +69,12 @@ generated Copier payload is not part of that root coverage
 measurement.
 
 The generated template deliberately keeps its portable `validation (9 gates)`
-aggregate job. It performs the dependency bootstrap once, then reports its
-aggregate gate suite and separate pytest reports; it does not consume the root
-image or require registry credentials. In both configurations, workflow rules
+aggregate job. It does not consume the root image or require registry
+credentials. Instead, before its `uv run --no-sync` checks, it unconditionally
+runs `uv sync --locked --all-groups` against the checkout's `pyproject.toml`
+and `uv.lock` for both Python environments. That makes its dependency content
+current without a private registry image. It then reports its aggregate gate
+suite and separate pytest reports. In both configurations, workflow rules
 select a merge-request pipeline and suppress a duplicate branch pipeline while
 that merge request is open.
 

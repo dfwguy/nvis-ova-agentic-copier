@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-_IMAGE_INPUTS = ("Dockerfile", "pyproject.toml", "uv.lock")
 _VALIDATION_JOBS = {
     "kingfisher",
     "license-check",
@@ -31,9 +30,9 @@ _VALIDATION_JOBS = {
     "type-check",
     "yamllint",
 }
-_PUBLISHED_VALIDATION_IMAGE = (
-    "gitlab-master.nvidia.com:5005/nvis-ova/nvis-ova-agentic-copier/validation@"
-    "sha256:adf3aa8e0f7a1996766e80d576c45f1e7677626f863829cec8114fabf8747521"
+_CANDIDATE_JOB = "ci-image:candidate"
+_CANDIDATE_VALIDATION_IMAGE = (
+    "$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID"
 )
 
 
@@ -85,14 +84,14 @@ def test_validation_image_contains_the_locked_non_root_toolchain(
         assert executable in dockerfile
 
 
-def test_ci_image_validation_builds_without_registry_credentials_or_push(
+def test_candidate_image_builds_and_pushes_current_checkout_for_every_admitted_pipeline(
     project_root: Path,
 ) -> None:
-    """Merge requests prove the image build without publishing it."""
+    """Every admitted revision gets the exact validation image it needs."""
     ci_text = (project_root / ".gitlab-ci.yml").read_text()
     configuration = yaml.safe_load(ci_text.replace("!reference ", ""))
     builder = configuration[".ci_image_builder"]
-    validation = configuration["ci-image:validate"]
+    candidate = configuration[_CANDIDATE_JOB]
 
     assert re.fullmatch(
         r"docker\.io/moby/buildkit:v0\.33\.0-rootless@sha256:[0-9a-f]{64}",
@@ -106,74 +105,35 @@ def test_ci_image_validation_builds_without_registry_credentials_or_push(
         "mkdir -p /tmp/ci-image-context",
         "cp Dockerfile pyproject.toml uv.lock /tmp/ci-image-context/",
     ]
-    assert validation["extends"] == ".ci_image_builder"
-    assert validation["tags"] == ["size/medium"]
-    assert validation["rules"] == [
-        {
-            "if": '$CI_PIPELINE_SOURCE == "merge_request_event"',
-            "changes": {"paths": list(_IMAGE_INPUTS)},
-        },
-        {"when": "never"},
-    ]
-    assert validation["script"][0].splitlines() == [
-        "buildctl-daemonless.sh build \\",
-        "  --frontend dockerfile.v0 \\",
-        "  --local context=/tmp/ci-image-context \\",
-        "  --local dockerfile=/tmp/ci-image-context \\",
-        '  --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE"',
-    ]
-    effective_validation_text = str((builder, validation))
-    assert "push=true" not in effective_validation_text
-    assert "CI_REGISTRY_PASSWORD" not in effective_validation_text
-    assert "CI_REGISTRY_USER" not in effective_validation_text
-
-
-def test_ci_image_publication_is_default_branch_only_and_emits_digest(
-    project_root: Path,
-) -> None:
-    """Only reviewed toolchain changes publish an immutable image receipt."""
-    ci_text = (project_root / ".gitlab-ci.yml").read_text()
-    configuration = yaml.safe_load(ci_text.replace("!reference ", ""))
-    publication = configuration["ci-image:publish"]
-    job_text = str(publication)
-
-    assert publication["extends"] == ".ci_image_builder"
-    assert publication["tags"] == ["size/medium"]
-    assert publication["rules"] == [
-        {
-            "if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH",
-            "changes": {"paths": list(_IMAGE_INPUTS)},
-        },
-        {"when": "never"},
-    ]
-    assert "CI_REGISTRY_USER" in job_text
-    assert "CI_REGISTRY_PASSWORD" in job_text
-    assert publication["before_script"][0] == [
+    assert candidate["extends"] == ".ci_image_builder"
+    assert candidate["tags"] == ["size/medium"]
+    assert "rules" not in candidate
+    assert candidate["before_script"][0] == [
         ".ci_image_builder",
         "before_script",
     ]
-    publisher_setup = "\n".join(map(str, publication["before_script"][1:]))
-    assert 'mkdir -p "$HOME/.docker"' in publisher_setup
-    assert "$CI_REGISTRY_USER" in publisher_setup
-    assert "$CI_REGISTRY_PASSWORD" in publisher_setup
-    assert '"$HOME/.docker/config.json"' in publisher_setup
-    build_command, digest_command = publication["script"]
-    assert build_command.splitlines() == [
-        "buildctl-daemonless.sh build \\",
-        "  --frontend dockerfile.v0 \\",
-        "  --local context=/tmp/ci-image-context \\",
-        "  --local dockerfile=/tmp/ci-image-context \\",
-        '  --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE" \\',
-        "  --metadata-file build-metadata.json \\",
-        (
-            '  --output "type=image,name=$CI_REGISTRY_IMAGE/validation:'
-            '$CI_COMMIT_SHA,push=true"'
-        ),
-    ]
+    candidate_setup = "\n".join(map(str, candidate["before_script"][1:]))
+    assert 'mkdir -p "$HOME/.docker"' in candidate_setup
+    assert "$CI_REGISTRY_USER" in candidate_setup
+    assert "$CI_REGISTRY_PASSWORD" in candidate_setup
+    assert '"$HOME/.docker/config.json"' in candidate_setup
+    assert "echo" not in candidate_setup
+    assert "set -x" not in candidate_setup
+    build_command, digest_command = candidate["script"]
+    for expected in (
+        "--local context=/tmp/ci-image-context",
+        "--local dockerfile=/tmp/ci-image-context",
+        '--secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE"',
+        "--metadata-file build-metadata.json",
+        '"type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache"',
+        '"type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache,mode=max"',
+        "name=$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID,push=true",
+    ):
+        assert expected in build_command
     assert '"containerimage.digest"' in digest_command
     assert "^sha256:[0-9a-f]{64}$" in digest_command
     assert "CI_IMAGE=%s/validation@%s" in digest_command
-    assert publication["artifacts"] == {
+    assert candidate["artifacts"] == {
         "reports": {"dotenv": "ci-image.env"},
         "paths": ["build-metadata.json", "ci-image.env"],
         "when": "always",
@@ -187,16 +147,17 @@ def test_project_image_contract_does_not_leak_into_generated_ci(
     root_ci = (project_root / ".gitlab-ci.yml").read_text()
     template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
 
-    assert "ci-image:validate" in root_ci
-    assert "ci-image:publish" in root_ci
+    assert _CANDIDATE_JOB in root_ci
+    assert "ci-image:validate" not in root_ci
+    assert "ci-image:publish" not in root_ci
     assert "CI_REGISTRY_IMAGE" not in template_ci
     assert "moby/buildkit" not in template_ci
 
 
-def test_root_validation_consumes_the_published_image_without_bootstrap(
+def test_root_validation_consumes_its_pipeline_candidate_without_bootstrap(
     project_root: Path,
 ) -> None:
-    """Root validation reuses the reviewed image without downloading tools."""
+    """Root validation waits for and uses its pipeline-specific candidate image."""
     root_ci = (project_root / ".gitlab-ci.yml").read_text()
     configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
     base = configuration[".base_uv"]
@@ -205,13 +166,24 @@ def test_root_validation_consumes_the_published_image_without_bootstrap(
         str(configuration[name]) for name in (".pytest", *sorted(_VALIDATION_JOBS))
     )
 
-    assert base["image"]["name"] == _PUBLISHED_VALIDATION_IMAGE
-    assert base["needs"] == []
+    assert base["image"]["name"] == _CANDIDATE_VALIDATION_IMAGE
+    expected_need = {"job": _CANDIDATE_JOB, "artifacts": False}
+    assert base["needs"] == [expected_need]
     assert base["before_script"] == ['cd "$CI_PROJECT_DIR"']
     for runtime_setup in ("apt-get", "uv python install", "uv sync"):
         assert runtime_setup not in before_script
         assert runtime_setup not in validation_contract
+    pytest_template = configuration[".base_uv"] | configuration[".pytest"]
     assert configuration[".pytest"]["extends"] == ".base_uv"
+    for job_name in _VALIDATION_JOBS:
+        inherited_job = (
+            pytest_template
+            if job_name.startswith("pytest-")
+            else configuration[".base_uv"]
+        )
+        effective_job = inherited_job | configuration[job_name]
+        assert effective_job["needs"] == [expected_need]
+        assert effective_job["image"]["name"] == _CANDIDATE_VALIDATION_IMAGE
     assert 'UV_PROJECT_ENVIRONMENT="$python_environment"' in str(
         configuration[".pytest"]
     )
@@ -512,11 +484,11 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
 def test_portable_template_keeps_its_independent_validation_bootstrap(
     project_root: Path,
 ) -> None:
-    """Generated repositories do not depend on this project's private image."""
+    """The generated template stays independent of the root image."""
     template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
     configuration = yaml.safe_load(template_ci)
 
-    assert _PUBLISHED_VALIDATION_IMAGE not in template_ci
+    assert _CANDIDATE_VALIDATION_IMAGE not in template_ci
     assert "gitlab-master.nvidia.com:5005/nvis-ova" not in template_ci
     assert "apt-get install -y --no-install-recommends git jq shellcheck" in template_ci
     assert "uv python install 3.14.3 --managed-python" in template_ci
