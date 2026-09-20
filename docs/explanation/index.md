@@ -12,19 +12,20 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Read these pages when you need the reasoning behind the template and its agent
-workflow. They explain design choices, boundaries, and trade-offs.
+Use these pages to learn why the template and agent loop work this way.
+They explain key choices, limits, and trade-offs. Read the page that fits
+your question. Then use its links to learn more.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
-### Template architecture
-- [Template and generated project](template-and-generated-project.md) — Understand the boundary between this Copier template and its generated output.
-- [Why Diátaxis](why-diataxis.md) — Understand why the documentation separates reader needs.
-- [Why coding standards exist](coding-standards.md) — Understand the rationale for the generated development conventions.
+### Template Architecture
+- [Why the template and generated project are separate](template-and-generated-project.md) — Learn why templates and projects differ.
+- [Why this repository uses Diátaxis](why-diataxis.md) — Learn why docs separate reader needs.
+- [Why the coding standards exist](coding-standards.md) — Learn why projects use these coding standards.
 
-### Agent workflow
-- [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Understand the recoverable state machine for unattended agent work.
-- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
-- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand why bounded workflow sessions use GitLab projection and local durable state.
+### Agent Workflow
+- [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Learn how the loop recovers unattended work.
+- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Learn why agent tools share one workflow.
+- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Learn why the loop uses GitLab and local state.
 <!-- END GENERATED -->

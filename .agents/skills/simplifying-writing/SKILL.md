@@ -14,15 +14,13 @@ description: Draft, revise, or review Diátaxis documentation prose for clear, p
 
 # Simplifying Writing
 
-Use this skill when drafting, revising, or reviewing prose in `docs/` under
-the Diátaxis rules.
+Use this skill for `docs/` prose under the Diátaxis rules.
 
-Keep source-of-truth facts and technical notation unchanged unless the task
-authorizes a factual change. Make the prose easier to read: address the reader
-directly, prefer common concrete words, define unavoidable terms, and use
-active, direct voice where natural. Keep sentences and paragraphs focused;
-remove filler and repetition.
+Do not change source-of-truth facts or technical notation. Change them only
+when the task authorizes a factual change. Write for the reader. Use common
+words. Be concrete. Define needed terms. Prefer direct, active voice. Keep
+sentences and paragraphs focused. Remove filler and repetition.
 
-Do not trade away accuracy or useful detail for brevity. Preserve prerequisites,
-constraints, warnings, commands, names, links, and other information a reader
-needs to use the documentation safely and correctly.
+Do not trade accuracy or useful detail for brevity. Preserve prerequisites,
+constraints, warnings, commands, names, links, and other details readers need
+for safe, correct use.

@@ -16,19 +16,19 @@ metadata:
 
 # Finalizer
 
-Use this portable workflow skill for the finalizer phase. Read and
-follow [the role instructions](../../agents/tdd-finalizer.md) before acting. That
-file is role-reference material; this directory is the shared
-skill entry point for Claude Code, Codex, and Pi.
+Use this portable workflow skill for the finalizer phase. Read and follow
+[the role instructions](../../agents/tdd-finalizer.md) before acting. That file
+is role-reference material. This directory is the shared skill entry point for
+Claude Code, Codex, and Pi.
 
-For ordinary interactive Phase-6 publication, Finalizer may commit with
-`--no-verify` only after mechanically matching the staged tree and JUnit
-snapshots/digests/counts plus the Non-functional Reviewer receipt to the Judge
-handoff. It never stages; the serial-worker
-exception remains no-commit.
+In `ordinary interactive Phase-6 publication`, Finalizer may commit with
+`--no-verify` only after it mechanically matches the staged tree to the Judge
+handoff. The match has `JUnit snapshots/digests/counts` and the
+`Non-functional Reviewer receipt`. It never stages. The `serial-worker
+exception` remains no-commit.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router picks its
+delegation mapping. Each frontend uses its configured model mapping. Do not
+hard-code a provider-specific model name in this skill.

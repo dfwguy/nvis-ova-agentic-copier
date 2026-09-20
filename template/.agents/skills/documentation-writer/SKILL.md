@@ -16,12 +16,11 @@ metadata:
 
 # Documentation Writer
 
-Use this portable workflow skill for the documentation and agent-policy edit
-phase. Read and follow [the role instructions](../../agents/documentation-writer.md)
-before acting.
+Use this portable skill for docs and agent-policy edits. Before you act, read
+and follow [the role instructions](../../agents/documentation-writer.md).
 
 ## Model selection
 
-The live Architect delegates this phase and waits while the writer remains the
-sole mutable-worktree owner. Use this skill's `metadata.model-tier`; the
-Architect router resolves the delegation mapping.
+The live Architect delegates this phase and waits. Only the writer may edit the
+worktree. Use this skill's `metadata.model-tier`. The Architect router maps
+delegation.

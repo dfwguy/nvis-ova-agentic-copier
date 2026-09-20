@@ -16,14 +16,15 @@ metadata:
 
 # CI/CD Judge
 
-Use this portable workflow skill for the read-only CI configuration review.
-This phase inspects repository configuration only; it does not inspect live
-GitLab state. Read and follow [the role instructions](../../agents/judge-cicd.md)
-before acting. That file is role-reference material; this directory is the
-shared skill entry point for Claude Code, Codex, and Pi.
+Use this skill for the read-only CI configuration review. It inspects
+repository configuration, not live GitLab state. Read and follow [the role
+instructions](../../agents/judge-cicd.md) before acting. That file is
+role-reference material. This directory is the shared entry point for Claude
+Code, Codex, and Pi.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router resolves its
+delegation mapping. Each frontend resolves that tier through its configured
+model mapping. Do not guess a model name. Do not hard-code a provider-specific
+model name here. Use the mapped tier. Keep this rule.

@@ -22,6 +22,7 @@ import yaml
 _VALIDATION_JOBS = {
     "kingfisher",
     "license-check",
+    "readability-check",
     "pytest-py311",
     "pytest-py314",
     "ruff-check",
@@ -93,6 +94,11 @@ def test_candidate_image_builds_and_pushes_current_checkout_for_every_admitted_p
     builder = configuration[".ci_image_builder"]
     candidate = configuration[_CANDIDATE_JOB]
 
+    assert builder["stage"] == "ci-image"
+    assert (builder | candidate)["stage"] == "ci-image"
+    assert configuration["stages"].index("ci-image") < configuration["stages"].index(
+        "validate"
+    )
     assert re.fullmatch(
         r"docker\.io/moby/buildkit:v0\.33\.0-rootless@sha256:[0-9a-f]{64}",
         builder["image"]["name"],

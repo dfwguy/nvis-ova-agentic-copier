@@ -16,10 +16,12 @@ metadata:
 
 # Plain-Language Review
 
-Use this advisory, read-only skill to review agent instructions for clear,
-concise language that a junior engineer can follow. It does not change policy
-or grant authority. Read and follow [the role instructions](../../agents/plain-language-review.md).
+Use this skill. It is read-only and advisory. Check agent instructions for
+clear, concise language that junior engineers can follow. It does not change
+policy or grant authority.
+Read and follow [the role instructions](../../agents/plain-language-review.md).
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.
+Use this skill's `metadata.model-tier`. The live Architect router resolves its
+delegation mapping.

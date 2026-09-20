@@ -12,10 +12,10 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Tutorials will provide fixed, successful lessons for new users.
+Tutorials are lessons for people learning the template.
+None ship with this template yet.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
-### Other
 <!-- END GENERATED -->

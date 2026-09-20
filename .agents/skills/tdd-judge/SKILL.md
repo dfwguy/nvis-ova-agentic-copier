@@ -16,29 +16,29 @@ metadata:
 
 # Implementation Judge
 
-Use this portable workflow skill for the implementation judge phase. Read and
-follow [the role instructions](../../agents/tdd-judge.md) before acting. That
-file is role-reference material; this directory is the shared
-skill entry point for Claude Code, Codex, and Pi.
+Use this `portable workflow skill` for the `implementation judge phase`. Read
+and follow [the role instructions](../../agents/tdd-judge.md) before acting.
+That file is `role-reference material`. This is the shared skill entry point
+for Claude Code, Codex, and Pi.
 
-The serial Phase-4 Judge records the exact staged candidate tree, then invokes
-exactly one mutation-gated `agent-work validation run --candidate-tree TREE
---apply`. That durable candidate-tree-keyed validation session executes one
-fixed hook, persists the terminal exit, and uses its idempotent candidate
-lock/session to prevent a duplicate hook run. The Judge does not invoke the
-hook directly. If frontend output yields or its execution handle is lost, the
-Judge uses the read-only `agent-work validation status --candidate-tree TREE
---wait-seconds 30` action for the same candidate until a persisted terminal
-exit exists. Status never launches a hook. A running or missing exit
-authorizes no tree verdict, artifact inspection, non-functional delegation, or
-handoff. A terminal nonzero returns to Green. Only terminal zero permits the
-unchanged-tree check and capture of immutable absolute supported-version JUnit
-snapshots with SHA-256 digests and test counts, followed by delegation to
-`$nonfunctional-review`. The Judge returns the combined handoff to Green
-before the Phase-5 reviewer fanout.
+The `serial Phase-4 Judge` records the exact staged candidate tree. It then
+calls `exactly one mutation-gated` `agent-work validation run --candidate-tree
+TREE --apply`. The durable `candidate-tree-keyed validation session` runs one
+fixed hook and saves its `terminal exit`. Its idempotent `candidate
+lock/session` blocks a duplicate hook run. The Judge does not call the hook.
+
+If frontend output yields or its handle is lost, use read-only `agent-work
+validation status --candidate-tree TREE --wait-seconds 30` for that candidate.
+Use it until a persisted `terminal exit` exists. Status never starts a hook. A
+running or missing exit gives no tree verdict, artifact check,
+`non-functional delegation`, or handoff. A `terminal nonzero` returns to
+Green. Only `terminal zero` permits the unchanged-tree check. Then get
+`immutable absolute supported-version JUnit snapshots` with `SHA-256 digests`
+and test counts. Delegate `$nonfunctional-review`. Return the combined handoff
+to Green before the `Phase-5 reviewer fanout`.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router picks its
+delegation mapping. Each frontend uses its configured model mapping. Do not
+hard-code a provider-specific model name in this skill.

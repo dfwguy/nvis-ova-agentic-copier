@@ -1,7 +1,7 @@
 ---
-title: Create a project non-interactively
+title: How to create a project non-interactively
 type: how-to
-summary: Supply Copier answers from a script or CI job.
+summary: Make a project.
 audience: practitioner
 tags: [project-generation]
 status: current
@@ -9,8 +9,6 @@ last_reviewed: 2026-08-27
 related:
   - path: ../tutorials/create-your-first-project.md
     why: Introduces the interactive path before automation.
-  - path: ../reference/template-contract.md
-    why: Defines the Copier inputs used by this command.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -22,10 +20,11 @@ related:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# Create a project non-interactively
+# How to create a project non-interactively
 
-Use this when automation or a repeatable
-script needs to provide all Copier answers without prompts.
+Use this guide to run Copier from a script. Give the command every answer. Run
+it where you can create the target directory. Keep the answers in your script.
+Then each run uses the same project details.
 
 Pass values with `--data` and give Copier a target directory:
 
@@ -36,15 +35,23 @@ uvx copier copy --trust ssh://git@gitlab-master.nvidia.com:12051/nvis-ova/nvis-o
   --data description="Order ingestion pipeline"
 ```
 
-`--trust` is still required because the template declares post-generation
-tasks. After Copier finishes, verify the generated project:
+The final positional value is the target directory. In this example, Copier
+creates `order-service`. Quote values that contain spaces. Use a unique target
+directory for each CI job. Do not reuse a directory with files that the job
+must keep.
+
+Keep `--trust` because the template has post-generation tasks. When Copier
+finishes, check the generated project:
 
 ```bash
 cd order-service
 uv run pytest
 ```
 
-Use an importable Python identifier for `project_slug`; it becomes both the
-package directory and the distribution name. See the
-[template reference](../reference/template-contract.md#copier-inputs) for the
-complete input contract.
+Run the check from the generated project's root. Fix a failed check there
+before treating the generated project as ready. Keep the command output with
+the CI job when the project is generated in automation.
+
+Choose an importable Python identifier for `project_slug`. It names the package
+directory and distribution. See the [template reference](../reference/template-contract.md#copier-inputs)
+for the full input contract.

@@ -14,20 +14,16 @@ description: Configure one guarded, serial GitLab polling loop; not webhooks, qu
 
 # Set up agent loop
 
-Use this skill to configure one GitLab project for the recoverable `loop run` state machine.
-It neither installs a webhook nor broadens authority beyond `AGENTS.md`.
-When `AGENTS.md` supplies standing authority for routine factory operations,
-that authority covers unattended publication and user-timer actions here
-without per-command confirmation.
-Its Developer-readable readiness path permits exactly 30 effective API access
-before checking repository safeguards.
+Use this skill for one GitLab project's recoverable `loop run` state machine.
+It installs no webhook. It does not widen `AGENTS.md` authority. Standing
+factory authority covers unattended publication. It covers user-timer actions.
+It needs no per-command confirmation. Its Developer route permits only
+effective API access 30. It then checks repository safeguards.
 
-1. Establish and validate a bare `GITLAB_HOST` and numeric
-   `GITLAB_PROJECT_ID` first. Then run the complete Developer-readable
-   readiness preflight using only the preinstalled Git, `glab`, selected coding
-   agent, and
-   `jq` tools and their existing noninteractive sessions. Do not print or
-   place tokens in commands, environment files, or logs:
+1. Validate bare `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID`. Run the full
+   Developer readiness preflight. Use only installed Git, `glab`, the chosen
+   coding agent, and `jq`. Use current noninteractive sessions. Never print a
+   token. Never put one in a command, environment file, or log:
 
    ```bash
    set -Eeuo pipefail
@@ -106,34 +102,29 @@ before checking repository safeguards.
    fi
    printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval audit and attestation not required for this readiness policy.'
    ```
-2. Create a clean dedicated checkout that is not an operator's active checkout.
-   Run the runner from that checkout. It derives the checkout and GitLab project
-   from the current directory and `origin`.
-   Durable state, the single-project lock, and one worktree per active issue
-   live below the XDG state directory, outside the checkout. Stashes are
-   emergency evidence only and are never the normal persistence mechanism.
-3. Check `uv`, the selected `codex`, `claude`, or `pi` agent, and user-level `systemd`, then run `uv run agent-work loop canary --json` from the
-   dedicated checkout as a non-claiming preview smoke test. Do not use a separately installed
-   bare `agent-work` executable, which can be stale. Install and enable the
-   documented project-named user-level timer only after the applicable
-   `AGENTS.md` standing authorization or separate explicit authorization.
-   Record the selected agent name and absolute executable paths for both `uv`
-   and the agent in its environment file; the runner invokes that recorded
-   absolute agent path directly, rather than relying on the service manager PATH.
-   Record the bare `GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID` in
-   the mode-600 environment file with those paths, but never a token. If the
-   GitLab token is directory-scoped through `direnv`, select it only when the
-   dedicated checkout has a regular checkout-local `.envrc`, record an absolute
-   executable `direnv` path, and run the runner through `direnv exec
-   <checkout>`. The wrapper rejects a configured `direnv` route without that
-   local file and restores the recorded host and project ID after `direnv`
-   supplies credentials. Before enabling the timer, execute the wrapper's
-   no-`--apply` preview through `env -i` with exactly the public service
-   variables and minimal service baseline so an interactive credential or
-   identity cannot mask the configured route. The user manager does not inherit
-   interactive `direnv` variables; never put the token in the environment file
-   or use `glab auth status` to test this credential route, because it reports
-   only stored `glab` logins.
+2. Make a clean, dedicated checkout. It must not be an operator's active
+   checkout. Run the runner there. It gets its checkout and project from the
+   current directory and `origin`. Keep durable state below XDG state. Keep the
+   single-project lock there. Keep each active issue worktree there, outside the checkout. Stashes
+   are emergency evidence. They are not normal persistence.
+3. Check `uv`, the chosen `codex`, `claude`, or `pi`, and user `systemd`. In the
+   dedicated checkout, run `uv run agent-work loop canary --json`. This is a
+   non-claiming smoke preview. Do not use a separately installed bare
+   `agent-work`; it may be stale. Install and enable the documented,
+   project-named user timer only with relevant `AGENTS.md` standing authority.
+   Or use separate explicit authority. Save the agent name in its environment file.
+   Save absolute `uv` and agent paths there. The runner calls the saved agent path.
+   Never use service-manager PATH. Save bare `GITLAB_HOST`, positive numeric
+   `GITLAB_PROJECT_ID`, and those paths in the mode-600 file. Never save a
+   token. For a directory-scoped `direnv` token, require a regular
+   checkout-local `.envrc`. Save an absolute executable `direnv` path. Run with
+   `direnv exec <checkout>`. The wrapper rejects a configured route without the
+   file. `direnv` supplies credentials. The wrapper then restores saved host and project
+   ID. Before timer enablement, run its no-`--apply` preview with
+   `env -i`. Use exactly public service variables. Use the least service baseline.
+   An interactive credential must not mask a bad route. Nor may an identity. The user
+   manager does not inherit interactive `direnv` values. Never store its token.
+   Do not use `glab auth status`; it checks stored `glab` logins only.
 
    ```bash
    unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -169,94 +160,81 @@ before checking repository safeguards.
      bash "$PWD/scripts/agent-work-systemd-run.sh"
    ```
 
-   The wrapper emits once to stdout/stderr and systemd records that output, so
-   operators use `journalctl --user -u <project-slug>-agent-work.service`.
-   Only after that isolated preview succeeds may the operator run
-   `systemctl --user enable --now <project-slug>-agent-work.timer`.
-   The timer schedules 20 minutes after the previous service completion and
-   uses a stable randomized delay to spread starts. Require linger
-   with `sudo loginctl enable-linger "$USER"`, then verify `Linger=yes` using
-   `loginctl show-user "$USER" --property=Linger`.
+   The wrapper writes once to stdout/stderr. systemd records it. Operators use
+   `journalctl --user -u <project-slug>-agent-work.service`. After an isolated
+   preview succeeds, run `systemctl --user enable --now
+   <project-slug>-agent-work.timer`. The timer runs 20 minutes after the prior
+   service ends. Its random delay is stable. Require linger with `sudo
+   loginctl enable-linger "$USER"`. Check `Linger=yes` with `loginctl show-user
+   "$USER" --property=Linger`.
 
-   After this wrapper first merges, stop the timer, manually fast-forward the
-   dedicated checkout, run the isolated preview, review and apply an exact
-   `loop canary --plan-file` checkpoint, then restart the
-   timer. Later applied activations verify the configured GitLab project and
-   refresh the default branch before Python starts. Local executable/rewrite
-   Git configuration and target filter attributes are rejected, hooks are
-   disabled, and system/global credential and transport configuration remains
+   After the wrapper first merges, stop the timer. Manually fast-forward the
+   dedicated checkout. Run the isolated preview. Review and apply one exact
+   `loop canary --plan-file` checkpoint. Restart the timer. Later applied runs
+   check the configured GitLab project. Refresh default branch before Python
+   starts. Reject local Git executable/rewrite config. Reject target filter
+   attributes. Disable hooks. System/global credential and transport config is
    the operator-managed service boundary.
-4. Do not make a second project request or query membership. The step 1
-   preflight uses local `jq` to classify effective API access as the
-   `max` of `.permissions.project_access.access_level` and
-   `.permissions.group_access.access_level`, ignoring missing values. Missing
-   or nonnumeric access is `unknown`. Only exactly 30 is permitted. An
-   `unknown` result, an access level less than 30, or 40 or greater must block
-   `--apply`.
-5. An access level of exactly 30 is the Developer readiness fast path. Use the
-   constrained service identity and the applicable `AGENTS.md` standing
-   authorization for unattended publication; do not request it again per
-   command. The encoded
-   `repository/branches/$default_branch_uri` endpoint checked in step 1 is
-   authoritative for the effective default branch and must return the exact
-   default-branch name, strict Boolean `default` and `protected` values of
-   true, and strict Boolean `developers_can_push`, `developers_can_merge`, and
-   `can_push` values of false. This handles wildcard and multiple protection
-   rules without trying to infer their effective result. `approval_rules` must
-   contain at least one rule with numeric `approvals_required >= 1` that is
-   unambiguously global: it has no protected branches, no protected branches
-   are configured, or `applies_to_all_protected_branches` is true. An explicit
-   branch-scoped or malformed rule is missing evidence and must block
-   `--apply`.
+4. Make no second project request. Do not query membership. Step 1 uses local
+   `jq` for the `max` of `.permissions.project_access.access_level` and
+   `.permissions.group_access.access_level`. Ignore absent values. Missing
+   access is `unknown`. So is nonnumeric access. Permit only 30. `unknown`, less than 30, and
+   40 or more block `--apply`.
+5. Access 30 is the Developer readiness fast path. Use the constrained service
+   identity and relevant `AGENTS.md` standing authority. Use it for unattended
+   publication. Do not ask again for each command. In step 1, encoded
+   `repository/branches/$default_branch_uri` is authoritative for the effective
+   default branch. It must return the exact default-branch name. Boolean
+   `default` must be true. `protected` must be true. Boolean `developers_can_push`,
+   `developers_can_merge`, and `can_push` must be false. This handles wildcards
+   and many protection rules without inference. `approval_rules` needs one
+   unambiguously global rule with numeric `approvals_required >= 1`: no
+   protected branches, no configured protected branches, or
+   `applies_to_all_protected_branches` true. A branch-scoped or malformed rule
+   is missing evidence. It blocks `--apply`.
 
-   If any preflight command fails, evidence is inaccessible, or evidence is
-   absent, report `missing evidence` and block `--apply`. The actionable
-   remediation is: have a Maintainer correct the reported project safeguard,
-   then rerun this preflight. After every check passes, report exactly:
+   If a preflight command fails, or evidence is absent or inaccessible, report
+   `missing evidence`. Block `--apply`. A Maintainer must fix the named
+   safeguard. Then rerun preflight. After all checks pass, report exactly:
    `Effective API access: Developer (30); Maintainer-only approval audit and attestation not required for this readiness policy.`
-   For exactly 30, skip only the Maintainer-only GET `/approvals` audit and
-   recurring Maintainer attestation; keep every other identity, publication,
-   checkout, origin, and preview check.
-6. For 40 or greater, use a constrained Developer credential before retrying;
-   the executable readiness path blocks privileged values.
-7. This role classification is readiness, not hard proof of repository policy.
-   Developer access cannot prove self-approval prevention or per-MR approval
-   rule overrides, so this readiness selection skips those Maintainer-only
-   checks and relies on workflow, settings, and runtime never-approve/merge
-   guardrails. Developers may approve merge requests, and project settings
-   control pushes, merges, and self-approval. Git and `glab` credentials may
-   differ. Preserve the applicable authorization, constrained identity,
-   dedicated checkout and origin checks, and preview; never approve or merge.
-8. Stop the user timer before changing the checkout, credentials, or GitLab
-   labels: `systemctl --user disable --now <project-slug>-agent-work.timer`.
-   Inventory legacy labels, branches, worktrees, and stashes with
-   `uv run agent-work migration preview --json`; apply only the exact reviewed
-   plan, then create, review, and apply one exact non-claiming canary plan
-   before re-enabling the timer. For retained work, use a separate exact-IID
-   `loop recover --issue-iid IID --apply --plan-file PATH` plan; do not use
-   ordinary `loop run` as a recovery canary. A canary may instead propose the
-   fixed lifecycle-label provisioning action; review and apply that exact plan
-   while stopped, then checkpoint before re-enabling. It never assigns labels
-   to an issue.
+   At 30, skip only the Maintainer-only GET `/approvals` audit and repeat
+   Maintainer attestation. Keep every other identity, publication, checkout,
+   origin, and preview check.
+6. At 40 or more, use a constrained Developer credential before retrying. This
+   readiness path blocks privileged values.
+7. This role test shows readiness. It does not prove policy. Developer access
+   cannot prove no self-approval or no per-MR approval override. This route
+   skips those Maintainer-only checks. It relies on workflow. It relies on settings.
+   It relies on runtime never-approve/merge guards. Developers may approve MRs. Project
+   settings control pushes. They control merges and self-approval. Git and `glab` creds may
+   differ. Keep authority, constrained identity, dedicated checkout, origin
+   checks, and preview. Never approve or merge.
+8. Before changing checkout, credentials, or GitLab labels, stop the timer:
+   `systemctl --user disable --now <project-slug>-agent-work.timer`. Inventory
+   old labels, branches, worktrees, and stashes with `uv run agent-work
+   migration preview --json`. Apply only the exact reviewed plan. Before timer
+   enablement, create, review, and apply one exact non-claiming canary plan. For
+   retained work, use exact-IID `loop recover --issue-iid IID --apply --plan-file
+   PATH`. Do not use ordinary `loop run` as a recovery canary. A canary may
+   propose fixed lifecycle-label setup. While stopped, review that plan. Apply that
+   exact plan. Then checkpoint before re-enabling. It assigns no issue labels.
 
-Enabling the guarded loop authorizes it to resume active or automatically
-resumable work before selecting fresh open, non-confidential issues without a
-lifecycle projection, ledger record, or open split prerequisite. It projects active work as
-`agent::running`, and then uses
-`agent::awaiting-human` only after exact same-project MR evidence, matching
-local/remote branch tips, default target, and `Closes #IID`. Expected human
-action uses `agent::blocked`; `agent::failed` is reserved for exceptional,
-unrecoverable cases. Ordinary branches are deterministic: `agent/issue-<IID>`.
-Expected durable outcomes exit zero; exit one means state could not be safely
-recorded or reconciled, and exit two means invalid CLI usage. The lock is
-single-host and is not a distributed GitLab compare-and-set claim. Never
-approve or merge a resulting MR.
+The guarded loop resumes active work first. It then selects new,
+open, non-confidential issues with no lifecycle projection, ledger record, or
+open split prerequisite. It projects active work as `agent::running`. It uses
+`agent::awaiting-human` only with same-project MR evidence, matching local and
+remote tips, default target, and `Closes #IID`. Expected human action uses
+`agent::blocked`. `agent::failed` is only for exceptional cases. It is only for unrecoverable cases.
+Ordinary branches are `agent/issue-<IID>`. Expected durable outcomes exit zero.
+Exit one means state could not be recorded safely. Or reconciled safely. Exit two means
+bad CLI use. The lock is single-host. It is not a distributed GitLab
+compare-and-set claim. Never approve or merge its MR.
 
 ## Credential rotation and repair
 
 Do not manually edit `AGENT_WORK_FACTORY_USERNAME` when the configured
-directory-scoped GitLab credential changes. Keep the service stopped and use
-the guarded command from the dedicated checkout instead:
+directory-scoped GitLab credential changes. Keep the service stopped. Use this
+guarded command from the dedicated checkout:
 
 ```bash
 uv run agent-work credential rotate \
@@ -267,11 +245,12 @@ uv run agent-work credential rotate \
   --unit-name "$unit_name" --apply --json
 ```
 
-The bare command validates only non-secret configuration and changes nothing.
-With `--apply`, it disables and stops the timer and service, proves both are
-inactive, verifies the directory-scoped credential through the configured
-checkout and numeric project route, and atomically updates only the username
-when it changed. It then runs the isolated wrapper preview. The command never
-accepts, writes, or renders a token; a failed post-write preview rolls back the
-exact prior environment bytes once. It leaves both units stopped for retained
-record review, canary, and explicit re-enable.
+The bare command checks non-secret config only. It makes no change. With
+`--apply`, it disables and stops the timer and service. It proves both
+inactive. It verifies the
+directory-scoped credential through the configured checkout and numeric project
+route. It changes only a changed username. It does so atomically. Then it runs the
+isolated wrapper preview. It never accepts, writes, or renders a token. A
+failed post-write preview rolls back exact prior environment bytes once.
+Both units stay stopped for retained-record review. They stay stopped for canary and explicit
+re-enable.

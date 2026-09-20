@@ -9,6 +9,8 @@
 <!-- its affiliates is strictly prohibited. -->
 # Markdown
 
-Language-agnostic conventions for Markdown files in this repo.
+Rules for Markdown files in this repo.
 
-- Always provide a language for fenced code blocks: `text` when no highlighting is needed, otherwise `bash`, `python`, etc. as appropriate.
+- Always name a language for a fenced code block. Use `text` when no
+  highlighting is needed. Otherwise use an appropriate name, such as `bash`
+  or `python`.

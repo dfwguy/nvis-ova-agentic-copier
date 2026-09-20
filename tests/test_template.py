@@ -11,7 +11,6 @@
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tomllib
@@ -290,10 +289,10 @@ def test_ci_jobs_run_one_direct_gate_command(
     assert "tox run" not in str(configuration)
 
 
-def test_readability_hooks_and_ci_use_their_respective_changed_file_scopes(
+def test_readability_hooks_and_root_ci_check_all_writing_without_diff_setup(
     project_root: Path, template_dir: Path
 ) -> None:
-    """Local hooks use staged filenames while CI computes its Git diff base."""
+    """Hooks and root CI check all writing without filename or Git-diff inputs."""
     for root in (project_root, template_dir):
         hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
         readability_hook = next(
@@ -302,23 +301,33 @@ def test_readability_hooks_and_ci_use_their_respective_changed_file_scopes(
             for hook in repository["hooks"]
             if hook["id"] == "readability-check"
         )
-        assert readability_hook["entry"].endswith("--scope files --paths")
-        assert readability_hook["pass_filenames"] is True
-        assert re.fullmatch(readability_hook["files"], "guide.md")
-        assert re.fullmatch(readability_hook["files"], "guide.md.jinja")
+        assert readability_hook["entry"].endswith("--scope all")
+        assert "--scope changed" not in readability_hook["entry"]
+        assert "--scope files" not in readability_hook["entry"]
+        assert "--base-ref" not in readability_hook["entry"]
+        assert "--paths" not in readability_hook["entry"]
+        assert readability_hook["pass_filenames"] is False
+        assert readability_hook["always_run"] is True
+        assert "files" not in readability_hook
 
     root_ci = _ci_configuration(project_root)
     readability_script = "\n".join(_ci_job_script(root_ci, "readability-check"))
     assert "python -m agent_work.readability" in readability_script
-    assert "--scope changed" in readability_script
-    assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" in readability_script
-    assert "CI_DEFAULT_BRANCH" in readability_script
+    assert "--scope all" in readability_script
+    assert "--scope changed" not in readability_script
+    assert "--scope files" not in readability_script
+    assert "--base-ref" not in readability_script
+    assert "--paths" not in readability_script
+    assert "git fetch" not in readability_script
+    assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" not in readability_script
+    assert "CI_COMMIT_BEFORE_SHA" not in readability_script
+    assert "CI_DEFAULT_BRANCH" not in readability_script
 
 
-def test_readability_dependency_and_template_gate_are_rendered_portably(
+def test_readability_dependency_and_generated_ci_helper_are_rendered_portably(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
-    """Both projects install textstat and the portable helper records ten gates."""
+    """Both projects install textstat and run all-scope portability checks."""
     for root in (project_root, generated_project):
         configuration = tomllib.loads((root / "pyproject.toml").read_text())
         assert any(
@@ -330,8 +339,15 @@ def test_readability_dependency_and_template_gate_are_rendered_portably(
         helper = (root / "tests" / "helpers" / "run-ci-checks.sh").read_text()
         assert '"readability-check"' in helper
         assert "agent_work.readability" in helper
-        assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" in helper
-        assert "CI_DEFAULT_BRANCH" in helper
+        assert "--scope all" in helper
+        assert "--scope changed" not in helper
+        assert "--scope files" not in helper
+        assert "--base-ref" not in helper
+        assert "--paths" not in helper
+        assert "git fetch" not in helper
+        assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" not in helper
+        assert "CI_COMMIT_BEFORE_SHA" not in helper
+        assert "CI_DEFAULT_BRANCH" not in helper
 
 
 def test_ci_jobs_publish_independent_reports(

@@ -17,6 +17,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 Edit only approved agent-policy paths: root AGENTS.md, .agents/**, and their
 portable template mirrors. Work alongside Red, which owns tests, and the
-Diátaxis Writer, which owns docs. Return a complete mirror and policy receipt
-to Architect. Do not edit executable files. After Phase 5, repair only
-Architect-authorized policy findings in owned paths; do not self-route or expand scope.
+Diátaxis Writer, which owns docs. Send Architect a full mirror and policy
+receipt. Do not edit executable files.
+After Phase 5, repair only policy findings that Architect authorizes in owned
+paths. Do not self-route or expand scope.

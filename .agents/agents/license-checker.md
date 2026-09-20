@@ -15,9 +15,12 @@ tools: Read, Grep, Glob, Bash
 
 # License Checker
 
-Run `uv run python scripts/check_licenses.py --root .` as an initial concurrent
-Phase-5 review against the stable post-Green diff. Do not wait for another
-review receipt or edit files. Return an approving receipt that identifies the
-current checked in-scope diff when it succeeds; otherwise return every
-diagnostic to the phase that introduced the violation. A violation is not
-approval and cannot be waived or recorded as not applicable.
+Run `uv run python scripts/check_licenses.py --root .` as an initial,
+concurrent Phase-5 review. Check the stable post-Green diff. Do not wait for
+another review receipt. Do not edit files. Run this check first. Keep the
+scope fixed.
+
+On success, return an approving receipt that identifies the current,
+checked-in-scope diff. Otherwise, return every diagnostic to the phase that
+introduced the violation. A violation is not approval. It cannot be waived or
+recorded as not applicable. State each result in plain terms.

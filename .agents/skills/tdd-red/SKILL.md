@@ -16,14 +16,14 @@ metadata:
 
 # Test Writer
 
-Use this portable workflow skill for the test writer phase. Read and
-follow [the role instructions](../../agents/tdd-red.md) before acting. That
-file is role-reference material; this directory is the shared
-skill entry point for Claude Code, Codex, and Pi.
+Use this portable workflow skill for the test writer phase. Read and follow
+[the role instructions](../../agents/tdd-red.md) before acting. That file is
+role-reference material. This directory is the shared skill entry point for
+Claude Code, Codex, and Pi.
 
 ## Model selection
 
 The live Architect delegates this phase concurrently with `$diataxis-writer`
-and conditional `$agent-policy-writer`, then waits for every applicable
-phase-2 receipt/N/A before Green starts.
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.
+and conditional `$agent-policy-writer`. It then waits for every applicable
+phase-2 receipt/N/A before Green starts. Use this skill's `metadata.model-tier`.
+The live Architect router resolves its delegation mapping.

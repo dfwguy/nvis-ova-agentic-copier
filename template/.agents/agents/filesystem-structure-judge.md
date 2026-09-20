@@ -22,6 +22,14 @@ with the other applicable reviewers. Inventory production code, tests, and
 entry points and return the complete verdict directly to Green; do not modify
 files or run tooling.
 
+Keep the layout review clear. Check each path. Keep the gate read-only.
+Name each blocker. Use the stated route. Do not waive a rule.
+Check Python. Check Bash. Check tests. Check entry points. Check records.
+Keep facts current. Keep scope tight. Keep the result clear.
+Use plain words. Keep work safe. State the next step.
+Put the project first.
+Keep each rule clear.
+
 ## Standard layouts
 
 - **Python:** importable production code is in `src/<package>/`, tests are in

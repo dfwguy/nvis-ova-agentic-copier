@@ -1,7 +1,7 @@
 ---
 title: How to validate template changes
 type: how-to
-summary: Run the checks required before proposing a template change.
+summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
@@ -26,8 +26,8 @@ related:
 
 # How to validate template changes
 
-Use this when you have changed this
-Copier template and need to verify the change before opening a merge request.
+Use this guide after changing the Copier template. Complete these checks before
+you open a merge request.
 
 From the repository root, run the local equivalents of the GitLab validation
 checks:
@@ -36,52 +36,52 @@ checks:
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
+uv run --locked --all-groups python -m agent_work.readability --root . --scope all
 uv run tox
 uv run yamllint -d '{"extends": "default", "rules": {"line-length": "disable", "document-start": "disable"}}' -f parsable .
 uv run kingfisher scan . --git-history none --no-validate --no-update-check --exclude .git --exclude .venv --exclude .tox --exclude .pytest_cache --exclude .ruff_cache
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-the root pipeline lists nine native jobs: `ruff-check`, `ruff-format`,
+the root pipeline has ten native validation jobs: `ruff-check`, `ruff-format`,
 `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
-`license-check`, and `shellcheck`. They extend the one root `.base_uv`
-definition, whose image is the commit-specific candidate
-`$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. All nine jobs wait for the
-BuildKit image job before starting and perform no `apt-get`, `uv python
-install`, or `uv sync` bootstrap. They retain `uv run --no-sync`. The BuildKit
-job uses a registry-backed cache and retains build metadata and the image digest
-as pipeline evidence. There is no synthetic aggregate root validation job or
-aggregate JUnit gate suite. Inspect an individual root check through its named
-GitLab job. Each root pytest job runs four deterministic concurrent shards: one
-complete `tests/test_agent_work_serial_runtime.py` shard, one complete
-`tests/test_template.py` shard, and two exhaustive, non-overlapping partitions
-of the remaining suite. The remaining-suite shards use
-`tests.helpers.serial_runtime_shard` with indices 0 and 1 of 2 and ignore both
-dedicated files. The job waits for every shard PID and publishes a JUnit report
-for each shard. After all shards finish, the job
-combines their coverage data, measures only the maintained `src/agent_work`
-source tree, enforces the existing 85% floor, and publishes one combined
-Cobertura report for its Python version. A failure in any shard, or a failure while
-combining, checking, or reporting coverage, fails the named pytest job. When
-investigating a failed job, inspect every shard JUnit and, when generation
-succeeded, its combined coverage report; otherwise use the job log. The
-generated Copier payload is not part of that root coverage
-measurement.
+`license-check`, `readability-check`, and `shellcheck`. They extend the root
+`.base_uv` definition, whose image is the commit-specific candidate
+`$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. The separate
+`ci-image:candidate` BuildKit image-build job produces it, and all ten
+validation jobs wait for that job. They do not bootstrap with `apt-get`,
+`uv python install`, or `uv sync`. All except `readability-check` use
+`uv run --no-sync`; `readability-check` uses `uv run --locked --all-groups`.
+The BuildKit job uses a registry-backed cache. It keeps build metadata and the
+image digest as pipeline evidence. The root has no aggregate validation job or
+aggregate JUnit suite. Inspect each check in its named GitLab job.
 
-Before validation starts, each configuration's shared `.base_uv` setup trusts
-only its current `$CI_PROJECT_DIR` checkout with Git. This setting exists only
-in the ephemeral validation container; it does not trust wildcard paths or
-change host Git configuration.
+Each root pytest job runs four fixed concurrent shards. One runs all of
+`tests/test_agent_work_serial_runtime.py`. One runs all of
+`tests/test_template.py`. The other two split the remaining suite without
+overlap. They use `tests.helpers.serial_runtime_shard`, with indices 0 and 1
+of 2, and ignore both dedicated files. The job waits for every shard PID and
+publishes one JUnit report per shard. It then combines coverage, measures only
+the maintained `src/agent_work` tree, enforces the existing 85% floor, and
+publishes one Cobertura report per Python version. Any shard, coverage combine,
+coverage check, or coverage report failure fails its named pytest job. For a
+failed job, inspect every shard JUnit report. Inspect its combined coverage
+report when it exists; otherwise, use the job log. Root coverage excludes the
+generated Copier payload.
 
-The generated template deliberately keeps its portable `validation (9 gates)`
-aggregate job. It does not consume the root image or require registry
-credentials. Instead, before its `uv run --no-sync` checks, it unconditionally
-runs `uv sync --locked --all-groups` against the checkout's `pyproject.toml`
-and `uv.lock` for both Python environments. That makes its dependency content
-current without a private registry image. It then reports its aggregate gate
-suite and separate pytest reports. In both configurations, workflow rules
-select a merge-request pipeline and suppress a duplicate branch pipeline while
-that merge request is open.
+Before validation, each shared `.base_uv` setup trusts only its current
+`$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary
+validation container. It trusts no wildcard path and changes no host Git
+configuration.
+
+The generated template keeps its portable `validation (10 gates)` aggregate
+job. It uses no root image or registry credentials. Before its
+`uv run --no-sync` checks, it always runs `uv sync --locked --all-groups` with
+the checkout's `pyproject.toml` and `uv.lock` for both Python environments.
+This keeps dependencies current without a private registry image. It reports
+its aggregate gate suite and separate pytest reports. In both configurations,
+workflow rules select a merge-request pipeline and suppress a duplicate branch
+pipeline while that merge request is open.
 
 If the change adds or modifies a Bash script, validate that script directly:
 
@@ -90,18 +90,15 @@ bash -n path/to/script.sh
 shellcheck path/to/script.sh
 ```
 
-The ShellCheck gate automatically ignores `.git`, `.cache`,
-`.venv`, `.tox`, `.pytest_cache`, and `.ruff_cache`, because they contain
-generated or tool-managed files rather than maintained source. Do not silence
-findings in tracked scripts; fix the script or make a documented standards
-change instead.
+The ShellCheck gate ignores `.git`, `.cache`, `.venv`, `.tox`,
+`.pytest_cache`, and `.ruff_cache`. Those paths hold generated or tool-managed
+files, not maintained source. Do not silence findings in tracked scripts. Fix
+the script or document a standards change.
 
-For the exact generated-project contract, see the
-[template reference](../reference/template-contract.md). For the distinction
-between this template and its generated output, see
-[the template explanation](../explanation/template-and-generated-project.md).
+For the exact generated-project contract and the distinction between the
+template and its generated output, see the [template reference](../reference/template-contract.md#rendering-rules).
 
-## Publish the verified branch for review
+## Publish the verified branch for review.
 
 After the checks pass, push the feature branch. Then preview the merge-request
 description before changing GitLab:
@@ -122,15 +119,15 @@ Review the preview. Run the same command with `--apply` to create a merge
 request or update the one open merge request for that source branch. The
 command does not push, approve, or merge. It rejects more than one open merge
 request for the source branch. With `--issue-iid`, the preview ends with
-`Closes #139`. After create or update, the command reads the merge request
-back and requires GitLab to project exactly that configured-project issue as
-closing. A missing or conflicting projection fails closed. Omit `--issue-iid`
-for an issue-less merge request.
+`Closes #139`. After create or update, it reads the merge request back. GitLab
+must project exactly that configured-project issue as closing. A missing or
+conflicting projection fails closed. Omit `--issue-iid` for an issue-less merge
+request.
 
-Add `--impact`, `--human-action`, or `--tracking` only when that information
-helps the reviewer. `--tracking` may accompany `--issue-iid`, but it must not
-contain a closing directive. Do not put a closing directive in any structured
-text; use `--issue-iid` for the one closing issue.
+Add `--impact`, `--human-action`, or `--tracking` only when it helps the
+reviewer. `--tracking` may accompany `--issue-iid`, but cannot contain a
+closing directive. Do not put a closing directive in structured text. Use
+`--issue-iid` for the one closing issue.
 
 See the [merge-request publication reference](../reference/serial-gitlab-agent-loop.md#merge-request-publish)
 for every option and its verification contract.

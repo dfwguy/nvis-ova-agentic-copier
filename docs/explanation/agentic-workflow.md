@@ -1,7 +1,7 @@
 ---
 title: Why the agent workflow uses specialized roles
 type: explanation
-summary: Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
+summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
@@ -28,165 +28,142 @@ related:
 
 # Why the agent workflow uses specialized roles
 
-This page explains how the generated multi-agent workflow turns a change into
-a human-reviewed merge request without leaving role selection to a frontend's
-interpretation. It is an explanation of the routing model; `AGENTS.md` is the
-portable bootstrap, while the live `$architect` router in
-`.agents/agents/architect.md` owns the authoritative step-by-step workflow.
+This page explains the route from a change to a human-reviewed MR.
+`AGENTS.md` is the portable bootstrap. The live `$architect` router in
+`.agents/agents/architect.md` owns the workflow.
 
-The workflow separates design, test design, documentation, implementation, and
-review so every step has a clear purpose and an independent check. It has two
-lanes: the coding lane for behavior or machine-readable-contract changes, and
-the documentation and agent-policy lane for content-only changes. Roles are
-portable across Claude Code, Codex, and Pi because the shared entry points are
-the directories under `.agents/skills/`, not frontend-specific agents or
-configuration. A display name such as “Test Writer” helps a reader understand
-the phase, but it is never a routing identifier. The exact `$skill-id` named
-by the manifest is the only identifier an agent may load or delegate.
+The route is clear. It names each role, check, and stop. Each role has one job.
+Each check has one clear aim.
 
-Capacity is a launch-scoped workflow precondition, not a repository setting.
-Each new workflow-owning session uses trusted frontend or runtime metadata for
-that active launch. It records the manifest topology and exact widest concurrent
-row, then checks current live slots, retained-agent-object headroom, and every
-owner's direct-child and descendant headroom before delegation, fanout, or
-worktree mutation. The coding lane's fully applicable widest row needs at most
-12 live slots: Main, Architect, Green, and nine Phase-5 reviewers. The nested
-Judge and Non-functional Reviewer require five live slots. A Phase-2 policy
-writer makes that phase five slots as well: Main, Architect, Red, Diátaxis
-Writer, and Agent-policy Writer. It does not widen the 12-slot coding maximum.
-The documentation and agent-policy lane needs three live slots.
+The workflow has two lanes. Coding covers behavior and machine-readable
+contracts. Documentation and agent policy cover content-only changes. Shared
+`.agents/skills/` directories work with Claude Code, Codex, and Pi. A display
+name explains a role. The manifest's exact `$skill-id` is the only ID an agent
+may load or delegate.
 
-The coding topology is deliberate: Main owns Architect; Architect owns the
-Phase-2 writers, Green, and Finalizer; Green owns Judge and the applicable
-Phase-5 reviewers; and Judge owns Non-functional Reviewer. A conditional role
-reduces the topology only when its condition is demonstrably false. A live-slot
-total alone is not enough: the retained-object ceiling, current use, and each
-owner's limits must all admit that topology. Handle reuse is allowed only under
-an explicit verified plan for the same owner and tier with non-overlapping
-work; it must preserve the skill, parentage, concurrency, and receipt.
-Architect and Green start fresh for each issue unless that plan proves reuse is
-safe.
+Capacity applies at launch. It is not a repository setting. One session owns one
+workflow. It records the manifest topology and widest concurrent row. Admission
+happens before delegation, fan-out, or worktree mutation. All checks must pass.
 
-This boundary matters most during recovery. A retained worktree and ledger can
-preserve work and record the previous capacity decision, but they cannot prove
-capacity for a new session. An ordinary relaunch, retained-worktree retry, or
-systemd-started worker must recheck current metadata. New consistent evidence
-replaces the earlier observation. Missing, stale, conflicting, or insufficient
-evidence stops before nested work and produces a `needs_human` handoff with the
-lane, required total, available total or `unknown`, shortfall or `unknown`, and
-a remedy for the active frontend.
+| Admission check | What must pass |
+| --- | --- |
+| Live slots | Current live-slot limit |
+| Retained agents | Retained-agent headroom |
+| Each owner | Child and descendant headroom |
 
-Repository files, task or issue text, user settings, provider-specific
-configuration, and retained ledger or audit records remain non-authoritative.
-They can describe or configure a limit, but only the active frontend or runtime
-can attest what the current session can use. This fail-closed check preserves
-the declared parallel phase instead of silently serializing it. For the
-operator procedure and examples, see [Configure agent
-capacity](../how-to/configure-agent-capacity.md).
+Together, the checks admit one topology. One check cannot admit a workflow.
+Each check uses the current launch. The table gives the full set.
 
-`AGENTS.md` is intentionally a concise portable bootstrap rather than a second
-copy of workflow procedure. It establishes universal authority and safety,
-classification, conditional loading, and the route to `$architect`. The live
-Architect router owns lane manifests, model mapping, admission, parentage,
-receipts, correction, and final decisions. Individual skills own their phase
-procedure and capability metadata; `$git-flow` owns publication, and
-`$work-item-runner` owns the serial controller/worker exception.
+| Case | Live slots |
+| --- | --- |
+| Fully applicable coding lane: Main, Architect, Green, and nine Phase-5 reviewers | At most 12 |
+| Judge with Non-functional Reviewer | 5 |
+| Phase 2 with Agent-policy Writer: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer | 5; does not raise the 12-slot maximum |
+| Documentation and agent-policy lane | 3 |
+
+Each row gives one concurrent need. The rows do not add to one total. Each row
+must fit at launch.
+
+Parentage gives each check a clear owner. Main owns Architect. Architect owns
+the Phase-2 writers, Green, and Finalizer. Green owns Judge and applicable
+Phase-5 reviewers. Judge owns Non-functional Reviewer. A conditional role
+leaves the topology only when its condition is demonstrably false. The
+retained-object ceiling, current use, and every owner's limits must also admit
+the topology. Reuse needs an explicit, verified plan. The plan uses the same
+owner and tier. Its work does not overlap. It preserves skill, parentage,
+concurrency, and receipt. Without that plan, Architect and Green start fresh for
+each issue.
+
+A retained worktree or ledger preserves work. It also preserves an earlier
+decision. It does not preserve new-session capacity. Relaunches recheck current
+metadata. Retained-worktree retries also recheck it. So do systemd workers. New
+consistent evidence replaces old evidence. Missing evidence stops nested work.
+Stale evidence does too. Conflicting or insufficient evidence also stops it. The
+result is a `needs_human` handoff. It names the lane. It names the required total.
+It gives available total or `unknown`. It gives shortfall or `unknown`. It gives
+an active-frontend remedy. Repository files are non-authoritative. Task or issue
+text is too. So are user settings, provider configuration, and retained ledger or
+audit records. Only the active frontend or runtime attests current capacity. This
+fail-closed check preserves the declared parallel phase. It never silently
+serializes it. See [Configure agent capacity](../how-to/configure-agent-capacity.md).
+
+`AGENTS.md` sets authority and safety. It sets classification and conditional
+loading. It gives the route to `$architect`. Architect owns lane manifests. It
+owns model mapping, admission, parentage, receipts, correction, and final
+decisions. Skills own procedure and capability metadata. `$git-flow` owns
+publication. `$work-item-runner` owns the serial controller/worker exception.
 
 ## Two lanes keep validation proportional
 
-The coding lane is the default for a whole diff that changes executable code,
-tests, CI, packaging, configuration, schemas, command contracts, or executable
-automation. It uses the full TDD route: architecture, Red, Green, timing
-review, validation, and the applicable implementation, test, CI, CLI, and
-filesystem reviews. Red and the Diátaxis Writer prepare disjoint phase-2 test
-and documentation changes in parallel. When a mixed coding change also touches
-portable agent policy, the Agent-policy Writer joins them. Green then implements
-the production change and reconciles the documentation with behavior, tests,
-and final interfaces; it does not edit agent-policy paths.
+The coding lane applies to a complete diff with code, tests, CI, packaging,
+configuration, schemas, command contracts, or executable automation. Its TDD
+route has architecture, Red, Green, timing review, and validation. It has
+applicable implementation, test, CI, CLI, and filesystem reviews. Red and
+Diátaxis Writer prepare separate tests and docs. They work in parallel.
+Agent-policy Writer joins mixed coding work that touches portable policy. Green
+implements production changes. It reconciles docs with behavior, tests, and final
+interfaces. Green never edits agent-policy paths.
 
-In Phase 3, Green first runs the fast formatter, lint, and type checks, runs
-focused behavior tests, stages one exact candidate, and records its tree OID.
-In serial Phase 4, the TDD Judge uses an applied, durable validation session
-keyed by that staged tree. The session records itself as running before it runs
-exactly one `git hook run pre-commit` command, then records its terminal exit
-code. Only terminal success permits the Judge to inspect the unchanged tree
-and every supported-version JUnit artifact's SHA-256 digest and test count;
-terminal failure blocks the workflow. If a frontend loses or yields the command
-handle, the Judge observes the same tree's session until it is terminal rather
-than starting another hook. These checks are prerequisites for its
-Non-functional Reviewer child and then the nine concurrent Phase-5 reviews.
-The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
-defines the run and read-only status commands. In Phase 6, Finalizer may commit with `--no-verify`
-only after matching that exact evidence; the serial runner uses its ordinary
-commit path. Phase-8 pipeline observation after Phase-7 push independently
-checks the exact source commit; it never substitutes for the Judge.
+In Phase 3, Green runs the fast formatter and lint. It runs type checks. It runs
+focused behavior tests. It stages one exact candidate. It records its tree OID.
+In serial Phase 4, TDD Judge uses an applied durable session. The session uses
+that tree as its key. It records running state. It runs exactly one
+`git hook run pre-commit`. It records the terminal exit code. Only terminal
+success lets Judge inspect the unchanged tree. It then inspects each
+supported-version JUnit artifact. It records each SHA-256 digest and test count.
+Failure blocks the workflow. A frontend can lose the handle. It can also yield
+it. In either case, Judge watches the existing tree session to terminal state. It
+does not start another hook. These checks come before Non-functional Reviewer.
+They also come before nine concurrent Phase-5 reviews. The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
+defines run and read-only status commands.
 
-In interactive work Finalizer makes the verified local
-commit, then the main thread pushes and creates or updates the merge request.
-For serial work Finalizer does not commit; the trusted controller's ordinary
-Git commit retains its hook.
+In Phase 6, Finalizer may use `--no-verify`. It may do so only after matching
+that evidence. The serial runner uses its normal commit path. Phase-8 observation
+checks the exact source commit after the Phase-7 push. It never replaces Judge.
+Interactive Finalizer makes the verified local commit. This comes before
+main-thread publication. In serial work, Finalizer does not commit. The trusted
+controller commits with its hook.
 
-The documentation and agent-policy lane is for a whole diff limited to
-documentation and the instructions that govern agent work. It does not invent
-passing tests for prose. Instead, its writer identifies the source of truth,
-records the files and mirrors changed, and validates structure: Markdown,
-links and anchors, Diátaxis metadata and indexes, skill and manifest
-references, and Copier rendering where a template is affected. Reviewers also
-compare claims about supported versions, test commands, CI, and shell behavior
-to their actual configuration and source. This checks that documentation stays
-in sync without making a test suite assert wording.
+The documentation lane needs a complete diff limited to docs and agent-work
+instructions. It never invents passing prose tests. Its writer records sources.
+It records changed files and mirrors. It validates Markdown, links, and anchors.
+It validates Diátaxis metadata and indexes. It validates skill and manifest
+references. It validates changed-template Copier rendering. Reviewers compare
+version claims with configuration and source. They do the same for test-command,
+CI, and shell claims.
 
-The route is selected from the complete proposed diff, not from a file chosen
-to describe it. A mixed diff, executable Markdown fence, or uncertainty uses
-the coding lane. Agent-policy changes are never treated as trivial: changing a
-route, authority boundary, or validation requirement can change how later
-work is performed even when the edit is small.
-
-Both lanes preserve the same publication boundary. They establish a feature
-branch through Git flow, retain receipts for required or explicitly
-not-applicable phases, publish a merge request, and leave approval and merge
-to a human. The documentation lane substitutes content and policy validation
-for Red, Green, JUnit timing, and code-focused judges; it does not skip the
-merge-request record or human review.
+Route from the complete proposed diff. Do not route from one descriptive file. A
+mixed diff uses coding. An executable Markdown fence uses coding. So does
+uncertainty. Agent-policy changes are never trivial. A small route change can
+alter later work. A small authority or validation change can too. Both lanes use
+a Git-flow feature branch. They retain required receipts. They also retain
+explicit not-applicable receipts. They publish an MR. A human alone approves and
+merges. The documentation lane replaces Red and Green. It replaces JUnit timing
+and code judges. It uses content and policy checks. It keeps MR review.
 
 ## Loading is a decision, not an import side effect
 
 Every session reads `AGENTS.md` and `.agents/project.md` before repository
 work. The contribution-policy marker check is also mandatory; a failed check
-loads `$repository-setup` before any other repository action. These are the
-small shared context needed to understand the repository and its guardrails.
+loads `$repository-setup` before any other repository action. Python guidance
+applies when the intended change includes Python, Bash guidance when it
+includes Bash, Markdown guidance when it includes Markdown, and Python-testing
+guidance when the work writes or reviews the relevant Python tests. TDD guidance
+applies to the coding workflow, while content guidance applies to documentation
+and agent-policy work. The manifest defines these conditions.
 
-Language and process guidance are conditional. Python guidance applies when
-the intended change includes Python, Bash guidance when it includes Bash,
-Markdown guidance when it includes Markdown, and Python-testing guidance when
-the work writes or reviews the relevant Python tests. TDD guidance applies to
-the coding workflow, while content guidance applies to documentation and
-agent-policy work. The manifest defines the classification boundary so an agent
-does not load a full change workflow for a small, isolated correction or skip
-it for a behavior-changing change.
-
-The routing is written as imperative reads, not `@...` includes. Such includes
-are not a portable recursive-loading mechanism across the supported frontends:
-some hosts ignore them, while others can load an unrelated language guide on
-every session. Conditional paths in the manifest make both the required and
-unrequired context explicit.
-
-Pi receives the repository's `.agents/skills` directory explicitly when the
-serial worker starts it. This prevents project-trust discovery from silently
-dropping the shared workflow. Claude Code uses the checked-in compatibility
-link, and Codex discovers the shared skill tree, but each still follows the
-same manifest and exact IDs.
-
-The workflow is deliberately human-gated. Agents can prepare and publish a
-merge request, but they do not approve or merge it. The serial GitLab loop
-keeps the same boundary when it processes an issue.
+Use imperative reads, not `@...` includes. Some hosts ignore recursive includes.
+Others load an unrelated language guide each session. The serial worker gives Pi
+`.agents/skills/` explicitly. Claude Code uses the checked-in compatibility link.
+Codex finds the shared skill tree. All use the same manifest. All use exact IDs.
+Agents may prepare and publish an MR. They never approve it. They never merge it.
+This also applies in the serial GitLab loop.
 
 ## Workflow topology
 
-The diagrams show the normal clean-publication path and the separate stops
-that require human direction. A resident parent remains live while its child
-roles work. A fresh-context node is a deliberately new AI context, not a
-continuation of an interrupted agent.
+The diagrams show the normal clean-publication path. They also show stops that
+need human direction. A resident parent remains live while child roles work. A
+fresh-context node is a new AI context. It is not an interrupted agent's continuation.
 
 ```mermaid
 flowchart TD
@@ -305,150 +282,172 @@ flowchart TD
     selection --> childworkflow["Fresh AI context: applicable full workflow"]
 ```
 
-The coding review fan-out includes the License Checker as an initial,
-read-only Phase-5 reviewer. The Non-functional Reviewer is instead the TDD
-Judge's read-only Phase-4 child. Every Phase-5 reviewer examines the same stable
-post-Green diff, and Green waits for every initial receipt before consolidating
-findings; a license receipt never depends on another review receipt. A license
-violation re-enters focused correction with the other actionable findings. The
-checker reruns only if maintained files in its checked scope changed. Final
-validation requires a current approving license receipt for the final in-scope
-diff: a violation cannot be waived or marked not applicable. A Draft
-publication, when an explicit draft-safety verdict permits it, remains a
-separate human handoff rather than an automatic consequence of a stop.
+License Checker starts Phase 5 as a read-only reviewer. TDD Judge owns the
+read-only Phase-4 Non-functional Reviewer. Each Phase-5 reviewer sees the same
+stable post-Green diff. Green gets every initial receipt. It then consolidates
+findings. A license receipt never needs another review receipt. A violation joins
+other actionable findings in focused correction. Rerun the checker only when a
+maintained file changes in its checked scope. Final validation needs a current
+approving license receipt for the final in-scope diff. A violation cannot be
+waived. It cannot be marked not applicable. An explicit draft-safety verdict may
+permit Draft publication. This is a human handoff. It is never an automatic stop
+result.
 
-The ordinary interactive branch convention is `clanker/<slug>`. The serial
-controller reserves `agent/issue-<iid>` for its issue worktrees. These names
-identify the two contexts; this explanation does not claim a separate runtime
-branch-enforcement mechanism.
+Interactive branches conventionally use `clanker/<slug>`. The serial controller
+reserves `agent/issue-<iid>` for issue worktrees. These names identify contexts.
+They do not claim separate runtime branch enforcement. For non-trivial coding
+work, Architect names every phase. It does not group them as “final judges.” Each
+manifest records applicability, ownership, prerequisites, receipts, and reroutes.
+Each delegated manifest row names its exact tier and Codex model/effort.
+`gpt-5.6-sol` / `high` is for most-capable work. `gpt-5.6-terra` / `medium` is
+for balanced work. `gpt-5.6-luna` / `low` is for focused checks. Other supported
+frontends use only their enabled equivalent. Frontier is never a fallback.
 
-For non-trivial coding work, the Architect router names every phase rather than rolling
-them up as “final judges.” Each manifest records phase applicability, ownership,
-prerequisites, receipts, and reroutes. Delegated phases use the exact tier
-and Codex model/effort named by their row. In Codex those tiers resolve to
-`gpt-5.6-sol` / `high` for most-capable work, `gpt-5.6-terra` / `medium` for
-balanced work, and `gpt-5.6-luna` / `low` for focused checks. Other supported
-frontends resolve only their enabled equivalent; Frontier is never a fallback.
+Architect owns one coding workflow session. It does not launch unrelated
+top-level processes. It sends design to Red and Diátaxis Writer at once. When
+portable policy applies, it sends the approved boundary to conditional
+Agent-policy Writer. Red changes only `tests/`. Diátaxis Writer changes only
+`docs/`. This includes indexes and reciprocal links. Agent-policy Writer changes
+only `AGENTS.md`, `.agents/**`, and declared portable `template/` mirrors.
+Architect waits for each applicable receipt or exact not-applicable record. It
+then gives Green design, Red test diff, Diátaxis draft/report or no-doc rationale,
+and policy-writer receipt. Green implements production and test changes. It
+reconciles docs. It fans out applicable read-only judges. It repairs its feedback.
+It consolidates results. Green never edits agent-policy paths or mirrors.
 
-For coding work, the Architect owns one workflow session rather than launching
-an unrelated top-level process for each phase. It hands its design concurrently
-to Red and the Diátaxis Writer. When portable agent policy is in scope, it also
-hands the approved policy boundary to the conditional Agent-policy Writer. Red
-exclusively mutates `tests/`; the Diátaxis Writer exclusively mutates `docs/`,
-including required indexes and reciprocal links; and the Agent-policy Writer
-exclusively mutates `AGENTS.md`, `.agents/**`, and their declared portable
-`template/` mirrors. Architect waits for every applicable receipt, or its exact
-not-applicable record, before handing Green the design, Red test diff, Diátaxis
-draft/report or no-doc rationale, and policy-writer receipt. Green implements
-production and test changes, reconciles documentation, fans out the applicable
-read-only judges, repairs its owned actionable feedback, and consolidates the
-results for the Architect. Green never edits agent-policy paths or their
-mirrors.
+Green makes needed README and doc edits before read-only fan-out. No second agent
+mutates the shared worktree. In the documentation and agent-policy lane,
+Architect delegates one sole-mutator Documentation Writer. It then delegates one
+consolidated Documentation Finalizer. Repair cycles need material progress. A
+repeated finding returns to Architect for human direction. Unchanged evidence
+also returns to Architect. Scope expansion does too. Neither lane has a fixed
+repair count.
 
-For coding work, Green makes required README and documentation edits before
-the read-only review fan-out; no second agent mutates the shared worktree. In
-the documentation and agent-policy lane, Architect delegates one Documentation
-Writer as the sole mutator, followed by one consolidated Documentation
-Finalizer. Evidence-based writer/finalizer repair and finalization cycles may
-continue while they make material progress; a repeated finding, unchanged
-evidence, or scope expansion returns to Architect for human direction. Neither
-lane has an arbitrary repair count.
-
-Phase-2 documentation is an approved-design draft, not a promise about code
-that has not yet been written. Before review, Green compares and reconciles it
-with the final code, configuration, and interfaces. The Diátaxis Judge then
-explicitly compares the Architect design, writer report, final documentation,
-and final implementation/configuration; the Finalizer requires that comparison
-receipt. Every declared root/template mirror must be byte-identical, and a
-changed Copier mirror must be smoke-rendered.
+Phase-2 docs are an approved-design draft. They do not promise unwritten code.
+Before review, Green reconciles them with final code, configuration, and
+interfaces. Diátaxis Judge compares Architect design, writer report, final docs,
+and final implementation/configuration. Finalizer needs that receipt. Each
+declared root/template mirror is byte-identical. Each changed Copier mirror is
+smoke-rendered.
 
 ## Coding review convergence is bounded by evidence
 
-Green makes evidence-led consolidated correction cycles while material progress
-exists. A concrete
-finding identifies its owner or domain, path or scope, evidence, requested
-outcome, and a correction that stays within the approved design and authority.
-By contrast, policy or authority ambiguity, conflicting valid requirements or
-reviewers, acceptance controversy, a project-owned value change, and scope
-expansion require human judgment.
+### Findings and human judgment
 
-Green consolidates every Phase-5 finding before it routes a correction. A
-policy-path finding goes through the still-live Architect to the Agent-policy
-Writer. Architect serializes that correction owner with Green, so Green never
-repairs policy. Every changed candidate then follows the fresh Judge, applicable
-review, and Finalizer sequence.
+Green runs cycles only with real progress. Each finding names its owner or
+domain. It names its path or scope and evidence. It also names the requested
+outcome and design-approved correction within authority.
 
-The Architect may request another focused Green invocation only while the
-cycle ledger demonstrates material progress, not for a fixed number of tries.
-The ledger records a cycle identifier; stable finding fingerprints and
-classifications; changed paths or scope; checks before and after (or N/A);
-reviewers rerun and why; and open, closed, and new findings with a continuation
-or termination reason. A fingerprint combines reviewer or owner, path or
-scope, and stable summary or requested outcome. Progress closes a prior
-finding or materially changes relevant evidence without reopening the same
-closed finding. Repetition, unchanged evidence, an unavailable approved-scope
-correction, scope expansion, or genuine controversy stops the loop rather than
-relabeling a finding to create apparent progress.
+Humans decide:
 
-The first review includes every applicable reviewer, including the License
-Checker. A correction reruns only the reviewer whose finding was addressed or
-whose domain/evidence changed; the License Checker reruns when maintained files
-in its checked scope changed, and the full test gate runs only when behavior or
-tests changed. The Finalizer requires a current approving license receipt for
-the final in-scope diff; a license violation cannot be waived or marked not
-applicable. When a safe diff stops at a human judgment boundary, the Finalizer
-can give a draft-safety verdict. That can hand off a
-clearly titled `Draft:` merge request containing unresolved findings, the
-evidence/cycle ledger, exact human decisions, tests, and unchanged project-owned
-values. It is not merge approval. Unsafe or unvalidated work, or unclear
-publication authority, returns to a human without publication. A normal
-Finalizer approval and a draft-safety verdict are distinct handoffs: Architect
-can accept the latter only to publish or update the labeled Draft: proposal for
-human judgment. Existing merge requests retain their required closing content
-and are read back after their title and description are updated. The normative
-routing rules remain in the Architect router and publication rules remain in
-`git-flow`.
+- Unclear policy or authority.
+- Valid needs or reviewers that conflict.
+- Acceptance controversy.
+- A project-owned value change.
+- Scope expansion.
 
-The CLI and filesystem judges are conditional only because their subjects can
-be absent. Skipping either requires an explicit receipt in the applicability
-record, for example `$cli-syntax-judge: not applicable — no CLI surface or
-contract changed` or `$filesystem-structure-judge: not applicable — no
-Python/Bash layout or packaging changed`; silence is not a skip. The Finalizer
-validates every required completion and every permitted not-applicable receipt
-before it allows publication. This preserves a complete record without running
-a judge against a change that cannot affect its contract or layout.
+### Correction route
+
+Green groups Phase-5 findings before routing them. Policy findings follow:
+
+1. The still-live Architect receives the finding.
+2. Architect sends it to Agent-policy Writer. It runs that work in series with
+   Green.
+3. Green may not repair policy.
+4. Each fixed candidate gets a fresh Judge, applicable review, and Finalizer.
+
+### Cycle ledger and stop conditions
+
+Architect calls another focused Green run only when the ledger shows real
+progress. It has no fixed attempt count. The ledger lists:
+
+- Cycle ID.
+- Stable finding fingerprints and classes.
+- Changed paths or scope.
+- Checks before and after, or N/A.
+- Rerun reviewers and the reason.
+- Open, closed, and new findings.
+- The continuation or end reason.
+
+A fingerprint joins the reviewer or owner and path or scope. It also joins the
+stable summary or requested outcome. Progress closes a prior finding. Or it
+materially changes evidence without reopening it.
+
+The loop stops for repetition or unchanged evidence. It also stops for an
+unavailable approved-scope correction, scope expansion, or real controversy.
+
+### Reruns
+
+Initial review has all applicable reviewers. This includes License Checker.
+Rerun a reviewer only when its finding was fixed. Also rerun one whose domain
+or evidence changed. Rerun License Checker when maintained files in its checked
+scope change. Run the full test gate again only when behavior or tests change.
+
+### Finalization and draft safety
+
+Finalizer needs a current license receipt. It must approve the final in-scope
+diff. A violation cannot be waived or marked not applicable. At a safe
+human-judgment boundary, Finalizer may give a draft-safety verdict. It can hand
+off a clear `Draft:` MR with:
+
+- Unresolved findings.
+- The evidence and cycle ledger.
+- Exact human decisions.
+- Tests.
+- Unchanged project-owned values.
+
+Draft safety is not merge approval. Unsafe or unvalidated work goes to a human
+without publication. So does work with unclear authority to publish. Architect
+may accept draft safety only to publish or update that Draft proposal. Existing
+MRs keep required closing content. They get read-back after title and
+description updates. Architect router owns routing. `$git-flow` owns
+publication.
+
+### Conditional judges
+
+CLI and filesystem judges are conditional only when their subjects are absent.
+A skip needs an explicit receipt, such as
+`$cli-syntax-judge: not applicable — no CLI surface or contract changed` or
+`$filesystem-structure-judge: not applicable — no Python/Bash layout or packaging changed`.
+Silence is not a skip. Finalizer validates required completions. It also checks
+allowed N/A receipts before publication.
 
 ## Publication and post-publication evidence
 
-After every merge-request creation or update, a fresh Fast/low Pipeline
-Performance Judge observes that MR's exact source SHA. Healthy evidence causes
-no external mutation. A concrete, repository-actionable problem creates or
-reuses one deduplicated GitLab issue; the judge never directly changes the MR,
-code, pipeline, approval, or merge. Unverified evidence remains a reported
-limitation, not manufactured repository work.
+### After publication
 
-In the serial flow, the deterministic controller cheaply waits for the exact
-SHA to become terminal before the fresh judge starts. A resulting problem issue
-is selected later by normal reconciliation and begins a new full workflow
-context. This is intentionally not a promise of direct same-session repair.
-Agents never approve or merge, and they never change project-owned values or
-workflow policy merely to clear a gate without explicit human approval for that
-exact change.
+Each MR create or update starts a fresh Fast/low Pipeline Performance Judge.
+The Judge uses that MR's exact source SHA. Healthy evidence makes no external
+change. A concrete problem the repository can act on creates or reuses one
+deduplicated GitLab issue. The Judge never directly changes the MR, code,
+pipeline, approval, or merge. Unknown evidence stays a reported limit, not
+made-up work.
+
+### Serial flow
+
+The deterministic controller first does a cheap wait for the exact SHA to
+become terminal. A fresh Judge then starts. Later normal reconciliation selects
+a resulting problem issue and starts a new full workflow context. It does not
+promise a repair in the same session. Agents never approve or merge. They never
+change project-owned values or workflow policy just to clear a gate without
+explicit human approval for that change.
 
 ## Merge requests are the shared record
 
-A local branch and an agent session are working contexts, not the durable
-record of a change. The GitLab merge request is the shared source of truth: it
-records the proposed diff, branch tip, pipeline results, review discussions,
-approvals, conflicts, and whether the change is open, merged, or closed.
+### Shared record
 
-Agents therefore interact with the merge request throughout the handoff. They
-open or update it after publishing a feature branch, use its reported state to
-decide whether follow-up work belongs on that branch, and return it to human
-review after a repair. A new session does not infer completion from a local
-checkout or a prior conversation; it checks the merge request. This keeps
-review and publication visible to every collaborator and preserves the human
-approval and merge boundary.
+A local branch and agent session are working contexts, not the durable record.
+The GitLab MR is the shared source of truth. It records the proposed diff and
+branch tip. It also records pipeline results, review discussion, approvals,
+conflicts, and its open, merged, or closed state.
+
+### Follow-up
+
+Agents open or update the MR after feature-branch publication. They use its
+state to decide if follow-up belongs on that branch. After repair, they return
+it to human review. A new session checks the MR rather than inferring
+completion from a checkout or earlier chat. This keeps review and publication
+visible and preserves the human approval and merge boundary.
 
 ## Roles
 
@@ -475,19 +474,22 @@ approval and merge boundary.
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |
 | Documentation Finalizer | Verifies content classification, structure, mirrors, and source synchronization | Edit, stage, publish, or call remote APIs |
 
-The role boundaries prevent one step from silently marking its own work as
-complete. They are workflow controls, not a same-user security boundary; GitLab
-branch protection and human review remain the final controls.
+| Boundary | Rule |
+| --- | --- |
+| Roles | Role boundaries stop one step from silently marking its own work complete. They are workflow controls, not a same-user security boundary. GitLab branch protection and human review are the final controls. |
 
 ## The serial worker has narrower authority
 
-The serial `agent-work` worker uses the same manifest and explicit skill
-directory, but it is not a normal repository author. It only edits and
-validates its already-prepared branch. The trusted runner, rather than the
-worker, commits, pushes, creates or updates the merge request, and hands it to
-human review. Neither participant approves or merges. Keeping publication in
-the trusted runner lets the worker execute the technical route without gaining
-authority to cross the human review boundary.
+### Worker role
 
-For the serial worker's exact lifecycle and command contract, see the
-[serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md).
+The serial `agent-work` worker uses the same manifest and explicit skill
+directory, but it is not a normal author. It edits and validates
+only its prepared branch. This lets it follow the technical route without
+crossing the human-review boundary.
+
+### Contract
+
+The trusted runner commits and pushes changes, creates or updates the MR, and
+hands it to human review. Neither the worker nor the runner approves or merges.
+See the [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md)
+for the worker lifecycle and command contract.

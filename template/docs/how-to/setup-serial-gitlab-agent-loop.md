@@ -1,7 +1,7 @@
 ---
 title: How to set up the recoverable serial GitLab agent loop
 type: how-to
-summary: Install, inspect, plan recovery, and enable one serial agent loop.
+summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
@@ -26,56 +26,67 @@ related:
 
 # How to set up the recoverable serial GitLab agent loop
 
-The installed service may process consecutive terminally handed-off issues in
-one invocation. Each issue still has its own bounded activation; empty queues
-and durable retry waits yield back to the 20-minute timer. An applied activation
-waits for nonterminal pipeline evidence in place.
+This guide configures the loop.
+Follow it in order.
+Read each step before you act.
+Use the safe route.
+Stop if unsure.
+Check the saved state.
+Keep the timer stopped.
+Wait for clear proof.
+Keep proof.
+Stop.
+Use one clear plan.
 
-Use one dedicated checkout and one user timer for one GitLab project. The loop
-is authorized by enabling the project-level timer. It selects eligible open,
-non-confidential issues without a lifecycle projection or ledger record, never
-approves or merges, and never applies or drops a recovery stash.
+The installed service can process consecutive terminally handed-off issues in
+one run. Each issue has its own bounded run. Empty queues and saved retry waits
+return to the 20-minute timer. An applied run waits for nonterminal pipeline
+proof in place.
 
-Before enabling the loop, ensure setup provisions the scoped GitLab priority
-labels `agent-priority::high` and `agent-priority::low`, the manual-tracker
-marker `agent-work::manual`, and lifecycle labels `agent::needs_repair`
-(`#D4A72C`), `agent::repair_failed` (`#C91C00`), and `agent::suggest_close`
-(`#6F42C1`). Use the provisioned definitions and the meanings in the reference;
-do not repurpose these labels for a local workflow. For fresh eligible work,
-the loop orders exact high, normal (no recognized exact priority value), then
-exact low; within each group it uses absolute creation time and IID. Apply high
-to expedite an issue, low to defer it, or remove either label to return it to
-normal ordering. Active/resumable work and all eligibility checks still take
-precedence. Do not retroactively label existing issues.
+Use one set checkout and one user timer for one GitLab project. Starting the
+project timer authorizes the loop. It selects only ready issues. They must be
+open and non-confidential. They must have no lifecycle projection or ledger
+record. The loop never approves or merges. It never applies or drops a restore
+stash.
 
-To keep an open issue as a human-maintained tracker or recovery checklist, add
-the exact `agent-work::manual` label in the GitLab UI. The loop excludes that
-issue from fresh selection. This marker is not an `agent::…` lifecycle label:
-it does not create a ledger record or worktree, affect prerequisite handling,
-or become input to orphan reconciliation. Do not use it for an error or
-lifecycle state, or to override a prerequisite. Remove the exact label when
-the tracker is ready for ordinary work; an otherwise eligible open issue then
-returns to normal fresh selection.
+Before starting the loop, ensure setup adds the scoped GitLab priority labels
+`agent-priority::high` and `agent-priority::low`. Also add the manual-tracker
+marker `agent-work::manual` and lifecycle labels `agent::needs_repair`
+(`#D4A72C`), `agent::repair_failed` (`#C91C00`), and
+`agent::suggest_close` (`#6F42C1`).
+Use their set definitions and reference meanings. Do not reuse these labels for
+a local flow. For fresh ready work, the loop orders exact high, normal (no
+known exact priority value), then exact low. Each group uses absolute creation
+time and IID. Apply high to speed an issue or low to defer it. Remove either
+label to return to normal order. Active or resumable work and all ready checks
+come first. Do not label old issues after the fact.
 
-The loop creates and maintains `agent-prereq_<IID>` labels only when a
-validated split child has an open trusted prerequisite. These non-scoped
-labels let one child display several open prerequisites at once. They are an
-operator-visible projection, not a way to control the queue. Do not add,
-remove, or use them to bypass a dependency: the split markers and the live
-state of prerequisite issues remain authoritative.
+To keep an open issue as a human-run tracker or restore checklist, add the
+exact `agent-work::manual` label in the GitLab UI. The loop skips that issue in
+fresh selection. This is not an `agent::…` lifecycle label. It creates no
+ledger record or worktree, does not affect prerequisite work, and is not input
+to orphan reconciliation. Do not use it for an error or lifecycle state, or to
+override a prerequisite. Remove the exact label when the tracker is ready for
+normal work. An otherwise ready open issue then returns to fresh selection.
 
-## Check prerequisites and Developer-readable safeguards
+The loop creates and keeps `agent-prereq_<IID>` labels only when a checked split
+child has an open trusted need. These non-scoped labels let one child show
+several open needs at once. They are a user-visible projection, not a queue
+control. Do not add, remove, or use them to bypass a dependency. Split markers
+and the live state of prerequisite issues remain the source of truth.
 
-Run the loop from the repository it operates on. It uses the configured GitLab
-host and numeric project ID, confirms Git and API access independently, and
-stores durable state below `XDG_STATE_HOME` (or the platform default). Do not
-print, export, or put tokens in this setup.
+## Check needs and Developer-readable guards.
 
-Choose `codex` (default), `claude`, or `pi`; verify Git, `glab`, `jq`, and the
-selected agent. Configure a directory-scoped `GITLAB_TOKEN` that can access
-the configured project. Require a non-empty `GITLAB_HOST` and positive numeric
-`GITLAB_PROJECT_ID`. The API and Git checks are separate: the same token must
-pass both, but neither check substitutes for the other.
+Run the loop from its target repo. It uses the set GitLab host and numeric
+project ID. It checks Git and API access on their own. It stores saved state
+below `XDG_STATE_HOME` (or the platform default). Do not print, export, or put
+tokens in this setup.
+
+Choose `codex` (default), `claude`, or `pi`. Check Git, `glab`, `jq`, and the
+chosen agent. Set a dir-scoped `GITLAB_TOKEN` that can access the set project.
+Require a non-empty `GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID`.
+The API and Git checks are separate. The same token must pass both. Neither
+check replaces the other.
 
 ```bash
 export AGENT_WORK_AGENT=claude  # Or: pi. Omit for the codex default.
@@ -86,48 +97,46 @@ direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" "pro
 git remote get-url origin
 ```
 
-The final setup route gives Git the token only when it asks the repository
-credential-protocol helper for HTTPS credentials. Do not place a token or a
-derived Basic-authentication header in `origin`, Git configuration, the service
-environment file, a command line, a diagnostic, a ledger, or another retained
-record. Keep `origin` as a credential-free HTTPS URL. The service and ordinary
-interactive publication paths use the same helper; inherited credential
-helpers and related ambient Git configuration cannot override it, and prompts
-remain disabled.
+The final setup route gives Git the token only when it requests HTTPS
+credentials from the repository credential-protocol helper. Do not place a
+token or derived Basic-authentication header in `origin` or Git configuration.
+Do not place either in the service environment file, a command line,
+diagnostic, ledger, or retained record. Keep `origin` as a credential-free
+HTTPS URL. Service and ordinary interactive publication use the same helper.
+Inherited credential helpers and related ambient Git configuration cannot
+override it. Prompts stay disabled.
 
 Before enabling the timer, run the supported non-mutating Git readiness check
-from the [Git Flow preflight](../../.agents/skills/git-flow/SKILL.md), separately
-from the numeric-project API check above. Both checks must pass before a remote
-mutation. Missing configuration stops setup before that mutation. Treat an
-invalid or expired token as an authentication failure; treat a token that
-authenticates but cannot push as an authorization failure. Only a known
-temporary transport failure is retryable. Preserve only the safe classification
-in reports; never paste command output or credential material into an issue,
-log, or ledger.
+from the [Git Flow preflight](../../.agents/skills/git-flow/SKILL.md). Run it
+separately from the numeric-project API check above. Both must pass before a
+remote mutation. Missing configuration blocks setup first. Treat an invalid or
+expired token as an authentication failure. Treat a token that authenticates
+but cannot push as an authorization failure. Retry only a known temporary transport
+failure. Report only the safe classification; never paste command output or
+credential material into an issue, log, or ledger.
 
-This guide intentionally does not introduce a new operator CLI or a
-token-bearing command.
+This guide does not introduce an operator CLI or token-bearing command.
 
-Run `codex login status` or `claude auth status` before enabling `--apply`.
+Before enabling `--apply`, run `codex login status` or `claude auth status`.
 Pi has no equivalent non-secret status command; verify its provider credential
 with Pi. The unattended path requires exactly Developer access (`30`) for the
-`glab` identity. This is a fail-closed readiness check, not a claim that a role
+`glab` identity. This fail-closed readiness check does not claim that a role
 alone proves repository policy.
 
 For Codex, also verify that `codex exec --help` advertises `--add-dir` before
 enabling `--apply`. The worker grants only the prepared issue checkout's
-`.agents` and `template/.agents` directories through that option, allowing the
-approved workflow policy while keeping the writable scope bounded. Upgrade
-Codex or select another supported agent if the option is absent.
+`.agents` and `template/.agents` directories through that option. This permits
+the approved workflow policy while bounding writable scope. Upgrade Codex or
+select another supported agent if the option is absent.
 
 ```bash
 codex exec --help | grep -Eq '(^|[[:space:]])--add-dir([[:space:]]|$)'
 ```
 
-### Verify Developer-readable safeguards
+### Verify Developer-readable safeguards.
 
-Before enabling `--apply`, paste this guarded block. It exits nonzero and
-prints actionable missing evidence whenever applied operation must be blocked:
+Before enabling `--apply`, run this guarded block. It exits nonzero and prints
+actionable missing evidence whenever an applied operation must be blocked:
 
 ```bash
 (
@@ -200,17 +209,17 @@ printf '%s\n' 'Effective API access: Developer (30); Maintainer-only approval au
 )
 ```
 
-The policy deliberately skips only Maintainer-only `/approvals` audit and
-recurring Maintainer attestation. The observable branch and global approval
-checks above must pass; the runtime independently never approves or merges.
-The parentheses isolate strict shell options and preserve the block's status.
+The policy skips only the Maintainer-only `/approvals` audit and repeat
+Maintainer attestation. The seen branch and global approval checks above must
+pass. The runtime never approves or merges. The parentheses keep strict shell
+options apart and keep the block's status.
 
-## Preview or file an upstream finding
+## Preview or file an upstream bug.
 
-Validate a supplied upstream-finding manifest against an explicit upstream
-target using a dedicated credential file. Start with the harmless preview: it
-performs strict local validation and bounded GET-only exact-marker deduplication,
-but does not create an issue or change the checkout.
+Use a set key file to check an upstream-finding manifest for a clear upstream
+target. First run the safe preview. It does strict local checks and bounded
+GET-only exact-marker deduplication. It creates no issue and changes no
+checkout.
 
 ```bash
 uv run agent-work upstream-finding preview --manifest-file finding.yaml \
@@ -218,9 +227,8 @@ uv run agent-work upstream-finding preview --manifest-file finding.yaml \
   --upstream-credential-file /secure/upstream-token
 ```
 
-Review a `would-create` result before explicitly filing the finding. The only
-mutation switch is `--apply`; it repeats exact-marker deduplication immediately
-before making at most one create request.
+Review `would-create` before filing. `--apply` is the only write switch. It
+repeats exact-marker deduplication just before at most one create request.
 
 ```bash
 uv run agent-work upstream-finding preview --manifest-file finding.yaml \
@@ -228,24 +236,23 @@ uv run agent-work upstream-finding preview --manifest-file finding.yaml \
   --upstream-credential-file /secure/upstream-token --apply
 ```
 
-Interpret `would-create` as a dry-run finding with no matching open issue,
-`match` as an existing or recovered exact marker, and `created` as one verified
-new upstream issue. If an applied command reports a sanitized uncertain create
-failure, rerun the same explicit command: the next marker scan recovers a
-created issue as `match`, or creates at most one issue only when no exact marker
-exists. Do not expect this command to create a checkout, local ledger, labels,
-assignments, approvals, or merges. The new open, non-confidential issue enters
-the upstream project's normal guarded workflow only if that project has enabled
-one; a human still approves and merges any resulting merge request.
+`would-create` means a dry run found no matching open issue. `match` means an
+old or restored exact marker. `created` means one checked new upstream issue.
+After a safe uncertain create failure, rerun the same clear command. Its next
+marker scan restores a created issue as `match`, or creates at most one issue
+when no exact marker exists. It creates no checkout, local ledger, labels,
+assignments, approvals, or merges. A new open, non-confidential issue enters
+the clear upstream project's normal guarded flow only when that project starts
+one. A human still approves and merges any resulting merge request.
 
 See the complete syntax and exit behavior in the
 [reference](../reference/serial-gitlab-agent-loop.md).
 
-## Install and inspect
+## Install and inspect.
 
-From the dedicated checkout, ensure Git, `glab`, the selected coding agent,
-and UV are available. Confirm Git and GitLab API access without exposing a
-token, then inspect the recoverable state before enabling a timer:
+From the set checkout, ensure Git, `glab`, the chosen coding agent, and UV are
+there. Check Git and GitLab API access without exposing a token. Then inspect
+saved state before starting a timer:
 
 ```bash
 # Run the command-scoped credential-helper Git readiness check above.
@@ -254,11 +261,10 @@ uv run agent-work loop status --json
 uv run agent-work loop canary --json
 ```
 
-Install the repository's rendered user service and timer using the project's
-systemd assets. Create a dedicated service checkout first. Its
-`agent/work-base` branch tracks `origin/main`; the FSM creates one durable
-issue worktree below the XDG state directory rather than returning this
-checkout to an issue branch.
+Install the rendered user service and timer from the project's systemd assets.
+First create a set service checkout. Its `agent/work-base` branch tracks
+`origin/main`. The FSM creates one saved issue worktree below the XDG state dir.
+It does not return this checkout to an issue branch.
 
 ```bash
 agent_checkout="$(dirname "$PWD")/$(basename "$PWD")-agent-work"
@@ -271,17 +277,15 @@ export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 
-This installs the project's commit hook in the dedicated checkout. An ordinary
-Git commit runs the hook.
+This installs the project's commit hook in the set checkout. A normal Git
+commit runs the hook.
 
 The service manager does not inherit an interactive `PATH` or checkout `direnv`
-variables. The environment file records the configured bare GitLab host and
-positive numeric project ID, but never a token. Use `direnv` only when this
-dedicated checkout has its own regular `.envrc`; the wrapper refuses any other
-configured `direnv` route. It runs `direnv` only to obtain directory-scoped
-credentials and then restores the configured host and project ID. Record
-absolute executable paths, install the units, and create a mode-600 environment
-file:
+vars. Its env file records the set bare GitLab host and positive numeric project
+ID, never a token. Use `direnv` only when this checkout has its own `.envrc`.
+The wrapper refuses all other set `direnv` routes. It uses `direnv` only for
+dir-scoped keys, then restores the set host and project ID. Record full
+executable paths, install the units, and create a mode-600 env file:
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -321,25 +325,23 @@ env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.conf
   /usr/bin/env bash "$PWD/scripts/agent-work-systemd-run.sh"
 ```
 
-This isolated preview validates the exact service wrapper and credential route
-without inheriting an interactive GitLab identity. It must succeed before
-enabling the timer. Enable linger for the operator so the user manager survives
-logout, then reload and enable the timer:
+This isolated preview checks the exact service wrapper and key route without
+inheriting an interactive GitLab user. It must pass before starting the timer.
+Enable user linger so the user manager survives logout. Then reload and start
+the timer:
 
-Initial installation writes the factory-managed service-environment contract at
-version `1`. Its deterministic required keys include `AGENT_WORK_TIMEOUT`.
-Keep project-owned `AGENT_WORK_AGENT`, `AGENT_WORK_BASE_BRANCH`,
-`AGENT_WORK_FACTORY_USERNAME`, `GITLAB_HOST`, and `GITLAB_PROJECT_ID` under
-operator control. A later repository upgrade can detect an older, incomplete,
-contract; a missing file requires the supported setup procedure to recreate it.
+Install writes version `1` of the factory-managed service-env contract. Its
+fixed required keys include `AGENT_WORK_TIMEOUT`. Keep project-owned
+`AGENT_WORK_AGENT`, `AGENT_WORK_BASE_BRANCH`, `AGENT_WORK_FACTORY_USERNAME`,
+`GITLAB_HOST`, and `GITLAB_PROJECT_ID` under user control. A later repo update
+finds an old, incomplete contract. Recreate a lost file with this setup.
 
-After this wrapper change first merges, stop the timer, manually fast-forward
-the dedicated checkout once, run this preview (and any canary), then restart
-the timer. Later applied activations refresh the verified default branch before
-they invoke Python. Local executable or rewrite-capable Git configuration and
-target filter attributes are rejected; repository hooks are disabled for the
-refresh. System/global transport and credential configuration is the
-operator-managed service boundary.
+After this wrapper change first merges, stop the timer and fast-forward the set
+checkout once by hand. Run this preview and any canary, then restart the timer.
+Later applied runs refresh the checked default branch before Python starts. They
+reject local executable or rewrite-capable Git setup and target filter
+attributes. Repo hooks are off for the refresh. System/global transport and key
+setup is the user-run service boundary.
 
 ```bash
 sudo loginctl enable-linger "$USER"
@@ -348,58 +350,53 @@ systemctl --user enable --now "$unit_name.timer"
 systemctl --user status "$unit_name.timer"
 ```
 
-The timer schedules the next bounded activation 20 minutes after the service
-becomes inactive, to check for newly arrived work only when the factory is
-genuinely idle with no eligible or resumable work. It is not the cadence for an
-active pipeline wait. Within an activation, one worker owns the issue's complete
-workflow session; its Architect, Red, Green, and read-only judges hand context
-directly to one another. The runner recovers only the durable worktree and
-coarse `WORKFLOW` state, not a sidecar checkpoint for each internal role. The
-service has a 190-minute outer timeout: the approved 180-minute worker budget
-plus a 10-minute margin for wrapper checkout, GitLab, publication, and
-reporting work. Other wrapper housekeeping calls have a 120-second deadline,
-while the applied worker remains governed by its remaining 10,800-second
-budget. On expiry systemd terminates the whole control group, gives it 30
-seconds to exit, and records the timeout in the journal; the durable ledger
-and issue worktree remain for normal retry or human diagnosis. Run only one
-timer host for a project. The service's environment and XDG state directory
-must be writable only by the operator.
-If `systemctl --user` reports `Failed to connect to bus`, stop and repair the
-user-manager socket; do not retry using a different credential, host, or
-environment. Systemd captures standard output and error under its
-project-specific `SyslogIdentifier`; the wrapper does not duplicate output via
-`logger`.
+The timer schedules the next bounded run 20 minutes after the service goes
+inactive. It checks for new work only when the factory is idle with no ready or
+resumable work. It does not set the pace for an active pipeline wait. In a run,
+one worker owns the issue's full flow session. Its Architect, Red, Green, and
+read-only judges pass context to each other. The runner restores the saved
+worktree and coarse `WORKFLOW` state, not a sidecar checkpoint for each role.
+The service has a 190-minute outer timeout. It includes the approved 180-minute
+worker budget and 10 minutes for wrapper checkout, GitLab, publication, and
+reporting work. Other wrapper housekeeping calls have a 120-second deadline.
+The applied worker remains governed by its remaining 10,800-second budget. On
+expiry, systemd terminates the whole control group. It gives the group 30
+seconds to exit and records the timeout in the journal. The durable ledger and
+issue worktree remain for normal retry or human diagnosis. Run only one timer
+host for a project. The service's environment and XDG state directory must be
+writable only by the operator. If `systemctl --user`
+reports `Failed to connect to bus`, stop and fix the user-manager socket. Do
+not retry with another key, host, or env. Systemd saves standard output and
+error under its project-specific `SyslogIdentifier`. The wrapper does not also
+send output through `logger`.
 
 ### Establish a validated user-bus boundary
 
-The runtime applies this boundary before every executable
-`systemctl --user` command: it preserves valid explicit
-`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values. Only when either key
-is absent, derive `XDG_RUNTIME_DIR=/run/user/<effective-uid>` and
-`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<effective-uid>/bus`. The
-boundary then requires an absolute runtime directory with the effective user's
-ownership and an absolute existing bus socket owned by that user. It fails
-closed if any check fails; do not substitute another host, credential, or bus
-address.
+The runtime applies this boundary before every executable `systemctl --user`
+command. It preserves valid explicit `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` values. Only when either is absent, it derives
+`XDG_RUNTIME_DIR=/run/user/<effective-uid>` and
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<effective-uid>/bus`. It then
+requires an absolute runtime directory and existing bus socket, both owned by
+the effective user. It fails closed if any check fails. Do not substitute
+another host, credential, or bus address.
 
-Credential rotation and service-environment migration use that same
-boundary. Their isolated previews run the intentionally mode-`0644`
-wrapper with argv,
+Credential rotation and service-environment migration use the same boundary.
+Their isolated previews run the intentionally mode-`0644` wrapper with argv,
 not a shell command: `/usr/bin/env bash <checkout>/scripts/agent-work-systemd-run.sh`.
-Service-environment migration adds `--validate-service-environment`. Do not
-add an executable bit to the wrapper.
+Service-environment migration adds `--validate-service-environment`. Do not add
+an executable bit to the wrapper.
 
-### Repair an installed service configuration
+### Repair an installed service configuration.
 
-Stop the timer before changing its environment file. Re-run the environment
-file creation block above, then reload and enable the timer. Do not change
-credentials, worktrees, ledger files, branches, or stashes merely to make the
-service start.
+Stop the timer before changing its environment file. Re-run the creation block
+above, then reload and enable the timer. Do not change credentials, worktrees,
+ledger files, branches, or stashes merely to start the service.
 
-### Migrate a service environment after a repository upgrade
+### Update a service env after a repo upgrade.
 
 Before enabling an upgraded timer, migrate its installed environment file. The
-bare command is a non-mutating, non-claiming validation and preview: it does
+bare command is a non-mutating, non-claiming validation and preview. It does
 not select an issue, create a ledger record, or run normal loop work. It
 compares the installed contract with the current version and required keys.
 
@@ -417,9 +414,9 @@ uv run agent-work service-environment migrate \
 ```
 
 Review the redacted preview. If it reports a stale or missing factory-managed
-contract, apply the same reviewed operation. Migration validates the existing
-configured Developer identity, configured project, default-branch protection,
-and approval safeguards through the checkout's `direnv` and password-store
+contract, apply that reviewed operation. Migration validates the configured
+Developer identity and project. It also validates default-branch protection and
+approval safeguards through the checkout's `direnv` and password-store
 credential route. It does not accept, print, or rebind a credential.
 
 ```bash
@@ -429,29 +426,29 @@ uv run agent-work service-environment migrate \
 ```
 
 Applied migration regenerates only the factory-managed contract version,
-checkout, and tool-path fields; it preserves the five project-owned values
-listed above. It atomically replaces the mode-600 file and runs an isolated,
+checkout, and tool-path fields. It preserves the five project-owned values
+listed above. It atomically replaces the mode-600 file and runs isolated,
 non-claiming validation. Both units remain stopped for human review. If a
-pre-write check fails, the file is unchanged. If a later step fails, retain the
-stopped units and use the command's sanitized error to restore or inspect the
-byte-recoverable prior file; do not hand-edit the contract to bypass a failed
+pre-write check fails, the file is unchanged. If a later step fails, keep the
+units stopped. Use the command's sanitized error to restore or inspect the
+byte-recoverable prior file. Do not hand-edit the contract to bypass a failed
 check.
 
-After a successful migration, review the result, run the normal canary
-checkpoint, and explicitly re-enable the timer only after the canary is
-understood. Migration never enables or starts either unit.
+After a successful migration, review the result and run the normal canary
+checkpoint. Re-enable the timer only after the canary is understood. Migration
+never enables or starts either unit.
 
-### Rotate the directory-scoped GitLab credential
+### Rotate the dir-scoped GitLab key.
 
-Use the credential-rotation command after the directory-scoped credential used
-by the installed wrapper changes ownership. It updates only the configured
-`AGENT_WORK_FACTORY_USERNAME`; the credential remains in its existing
-directory-scoped route and is never a command argument, environment-file
-value, diagnostic, or log entry.
+Use credential rotation after ownership changes for the directory-scoped
+credential used by the installed wrapper. It updates only the configured
+`AGENT_WORK_FACTORY_USERNAME`. The credential remains in its directory-scoped
+route and is never a command argument, environment-file value, diagnostic, or
+log entry.
 
 First stop unattended work and inspect the dry-run result. Supply the exact
-mode-600 service environment file and the installed unit name. The dry run
-does not write the file and leaves the timer and service stopped.
+mode-600 service environment file and installed unit name. The dry run does not
+write the file and leaves the timer and service stopped.
 
 ```bash
 systemctl --user disable --now "$unit_name.timer"
@@ -461,11 +458,11 @@ uv run agent-work credential rotate \
   --unit-name "$unit_name" --json
 ```
 
-After reviewing the redacted result, apply the same command. It checks the
+After reviewing the redacted result, apply that command. It checks the
 configured bare host and numeric project through the newly configured
-credential, requires exactly Developer access, strict effective default-branch
-protection, and at least one global approval rule before it changes the
-expected username entry atomically.
+credential. It requires exactly Developer access and strict effective
+default-branch protection. It also requires at least one global approval rule
+before it atomically changes the expected username entry.
 
 ```bash
 uv run agent-work credential rotate \
@@ -473,24 +470,24 @@ uv run agent-work credential rotate \
   --unit-name "$unit_name" --apply --json
 ```
 
-Do not re-enable the timer as part of credential rotation. On success, inspect
-the redacted result, perform the normal explicit operator review and bounded
-canary in [Canary and re-enable](#canary-and-re-enable), then re-enable the
-timer only when that review succeeds. Ordered canary execution and retained
-record recovery are outside this command.
+Do not re-enable the timer during credential rotation. On success, inspect the
+redacted result. Complete the normal explicit operator review and bounded canary
+in [Canary and re-enable](#canary-and-re-enable). Re-enable the timer only when
+that review succeeds. Ordered canary execution and retained record recovery are
+outside this command.
 
 If the command reports an invalid, expired, unauthorized, or mismatched
-credential, leave the timer and service stopped. The environment file is
-byte-identical unless all preconditions pass. If the bounded post-update
-wrapper preview fails, the command makes one exact-byte rollback attempt and
-returns a sanitized corrective handoff. If rollback cannot be confirmed, it
-reports configuration uncertainty for human correction. Preserve the stopped services and the
-environment file, act on that handoff, and rerun a dry run after correcting the
-directory-scoped credential; do not manually edit the username to bypass it.
+credential, leave the timer and service stopped. The environment file remains
+byte-identical unless all preconditions pass. If the bounded post-update wrapper
+preview fails, the command makes one exact-byte rollback attempt and returns a
+sanitized corrective handoff. If rollback cannot be confirmed, it reports
+configuration uncertainty for human correction. Preserve the stopped services
+and environment file, act on that handoff, and rerun a dry run after correcting
+the directory-scoped credential. Do not manually edit the username to bypass it.
 
-## Run and inspect an activation
+## Run and inspect.
 
-Preview the next action before authorizing mutation. A preview must not change
+Preview the next action before you allow a change. A preview must not change
 GitLab, labels, branches, worktrees, ledger records, or systemd state.
 
 ```bash
@@ -499,15 +496,13 @@ uv run agent-work loop canary --json
 uv run agent-work loop status --json
 ```
 
-After a human has completed the repository's unattended-publication readiness
-gate, run one applied activation or let the timer do so. The defaults permit up
-to 16 workflow attempts within one 10,800-second (three-hour) overall work
-budget. Each workflow invocation receives the positive, ceil-rounded time
-remaining from that budget. A fresh issue attempts its complete applicable
-workflow; a recovered issue resumes from its durable worktree and coarse
-`WORKFLOW` state. Existing legacy phase-ledger values
-finish their recorded route; internal Architect, Red, Green, and judge handoffs are not
-separately persisted:
+After a human completes the repo's automatic-push readiness gate, run an
+applied run or let the timer do so. The default allows up to 16 flow attempts
+in one 10,800-second (three-hour) work budget. Each flow call gets the
+positive, ceil-rounded time left. A fresh issue tries its full fit flow. A
+restored issue resumes from its saved worktree and coarse `WORKFLOW` state. Old
+phase-ledger values finish their saved route. Internal Architect, Red, Green,
+and judge handoffs are not saved apart:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -515,28 +510,26 @@ uv run agent-work loop run --apply --json
 systemctl --user status "$unit_name.service"
 ```
 
-Use `--max-segments` or `--max-activation-seconds` to apply smaller operational
-bounds. The activation advances only one issue. With `--apply`, it polls
-nonterminal default-branch or exact current-MR pipeline evidence in the same
-activation after 5, 10, then 20 seconds, capped at 30 seconds, and resumes when
-the evidence becomes terminal. A future retry deadline, a human or safety
-block, missing, failed, or unrecognized evidence, an idle/no-eligible-or-
-resumable-work result, or an exhausted bound remains a handoff. Preview is
-read-only and immediate: it does not poll. The JSON `items` list records
-workflow results chronologically; `segments_run` and `stop_reason` summarize
-the activation.
+Use `--max-segments` or `--max-activation-seconds` for smaller work limits.
+The run advances one issue. With `--apply`, it polls nonterminal default-branch
+or exact current-MR pipeline proof after 5, 10, and 20 seconds in the same run.
+Polling caps at 30 seconds. It resumes after proof is terminal. A future retry
+deadline, a human or safety block, missing, failed, or unknown proof, an idle
+no-ready-or-resumable-work result, or an exhausted limit stays a handoff.
+Preview is read-only and fast. It does not poll. The JSON `items` list saves
+flow results in order. `segments_run` and `stop_reason` sum up the run.
 
-If the overall budget is exhausted, inspect the recorded retry or
-durable-worktree recovery outcome in the same way as any other timeout.
+If the full budget is used, inspect the saved retry or worktree restore result
+as you would any other timeout.
 
-Use `--debug` when the redacted status needs local diagnostic context. Do not
-copy debug output containing private operational details into an issue.
+Use `--debug` when the safe status needs local diagnostic context. Do not copy
+debug output with private work details into an issue.
 
-## Retry or recover retained work
+## Retry or recover retained work.
 
-First inspect the recorded state and next action. A retry is appropriate only
-for the named blocked item after explicit human direction; it resets that
-item's retry budget and returns it to resumable preparation.
+Inspect the saved state and next action first. Retry a named blocked item only
+after clear human direction. This resets its retry budget and returns it to
+resumable setup.
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -545,82 +538,75 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-The initial attempt plus three retries are automatic workflow attempts. An
-activation yields when a retry deadline is in the future. When retries are
-exhausted, the issue is `agent::blocked`; follow its recorded next action, then
-explicitly retry that exact IID after a human has resolved the condition. Do
-not change labels to resume blocked work.
-Leave a dirty durable worktree in place. If status inventories a stash,
-preserve it for review: do not use `git stash apply` or `git stash drop` as an
-automated recovery step.
+The first try and three retries are automatic. A run yields when a retry due
+time is in the future. When retries run out, the issue is `agent::blocked`.
+Follow its saved next action. After a human fixes the case, retry that exact IID
+clearly. Do not change labels to resume blocked work. Leave a dirty saved
+worktree in place. If status lists a stash, keep it for review. Do not use
+`git stash apply` or `git stash drop` as an automatic restore step.
 
-An exact failed current-source merge-request pipeline with one uniquely
-corroborated retained owner repairs automatically. Keep the timer enabled, or
-run one ordinary applied activation; the loop runs one eligible repair workflow
-without a reviewed checkpoint:
+An exact failed current-source merge-request pipeline repairs itself when it
+has one unique backed retained owner. Keep the timer on or run one normal
+applied run. The loop runs one ready repair flow without a reviewed checkpoint:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop run --apply --json
 ```
 
-Do not replace this with a broad label edit or a manual recovery command. An
-unsuccessful automatic repair records a 20-minute backoff for that item. The
-next activation can select another eligible exact repair or ordinary work; it
-does not stop the whole factory for this item. After three unsuccessful
-automatic repairs, the item is quarantined or deferred for human review. Use
-`loop status --issue-iid IID --json` or the non-mutating preview to inspect its
-attempt count, backoff or quarantine, exact evidence, and next action.
+Do not use a broad label edit or manual restore command instead. A failed
+automatic repair saves a 20-minute backoff for that item. The next run can pick
+another ready exact repair or normal work. It does not stop the full factory for
+this item. After three failed automatic repairs, the item is held or deferred
+for human review. Use `loop status --issue-iid IID --json` or the read-only
+preview. Inspect the try count, backoff or hold, exact proof, and next action.
 
-Use targeted `loop recover` only for interrupted, ambiguous, or otherwise
-unsafe retained work. It is an exceptional reviewed path for one exact IID
-with live corroboration; it does not spend or reset the automatic repair
-budget. Ambiguous or inexact identity, active ownership, credential, policy,
-or authority conflicts remain fail-closed. Neither issue nor merge-request
-text can set repair priority, the budget, or the backoff. The loop never
-approves or merges. A blocked record can likewise be reclassified only one IID
-at a time with live corroboration.
+Use targeted `loop recover` only for cut off, unclear, or unsafe retained work.
+It is an unusual, reviewed path for one exact IID with live backing. It does
+not spend or reset the automatic repair budget. Unclear or inexact user, active
+owner, key, policy, or authority conflicts stay fail-closed. Neither issue nor
+merge-request text can set repair priority, the budget, or backoff. The loop
+never approves or merges. Reclassify one blocked record at a time with live
+backing.
 
 An `agent::suggest_close` label is a structured recommendation for human
 closure, never an automated close. Review its duplicate, superseded,
-already-satisfied, or no-longer-applicable evidence. Only a human may close the
-issue; that closure reconciles the record to `COMPLETE` and clears the label.
-The loop never approves, merges, or closes issues.
+already-satisfied, or no-longer-applicable evidence. Only a human may close an
+issue. Closure reconciles the record to `COMPLETE` and clears the label. The
+loop never approves, merges, or closes issues.
 
-### Observe an automated `split_required` decomposition
+### Observe an automated `split_required` decomposition.
 
 When an Architect returns `result_kind=split_required`, the trusted runner
-handles the validated plan in the current executing segment. It searches for
-each exact child marker, reuses a matching child, and creates only missing
-children. Each new child has a full description with links to the parent and
-its dependencies. Once every child exists, the controller adds one parent note
-and closes the parent.
+handles the validated plan in the current segment. It searches for each exact
+child marker. It reuses a matching child and creates only missing children.
+Each new child has a full description that links to the parent and its
+dependencies. Once every child exists, the controller adds one parent note and
+closes it.
 
-If that handling is interrupted, the next attempt reruns the workflow and the
-same marker searches recover children already created. There is no separate
+If this handling is interrupted, the next attempt reruns the workflow. The
+same marker searches recover children that already exist. There is no separate
 decomposition state, saved plan or progress record, checkpoint restoration, or
 special queue to repair.
 
-For an open child, the runner projects every open trusted prerequisite as one
+For an open child, the runner projects each open trusted prerequisite as one
 `agent-prereq_<IID>` label, ordered by numeric IID. It removes a projection
-when the prerequisite closes, the dependency is removed from the trusted
-marker, or the child closes. Preview `loop run` and `recovery inventory` show
-the current and intended labels without writing them. An applied `loop run`
-repairs missing or stale labels before normal selection. It creates or
-normalizes the canonical project-label definitions, removes exact legacy
-`agent::prereq_<IID>` labels from affected issues, and adds the complete
-ordered canonical set. Only after every issue-label transition succeeds does
-it delete the matching legacy project-label definitions. A partial transition
-keeps those definitions available for a safe retry. If it repairs any
-projection drift, that pass does only the repair and does not claim work,
-create a ledger record or worktree, or start a worker. A later run resumes
-normal selection.
+when the prerequisite closes, the trusted marker removes the dependency, or
+the child closes. Preview `loop run` and `recovery inventory` show current and
+intended labels without writing them. An applied `loop run` repairs missing or
+stale labels before normal selection. It creates or normalizes canonical
+project-label definitions, removes exact legacy `agent::prereq_<IID>` labels
+from affected issues, and adds the full ordered canonical set. It deletes
+matching legacy project-label definitions only after every issue-label
+transition succeeds. A partial transition keeps those definitions for a safe
+retry. A pass that repairs projection drift only repairs. It does not claim
+work, create a ledger record or worktree, or start a worker. A later run
+resumes normal selection.
 
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or
-close it according to the project's issue practice. If the parent itself was
-narrowed to a suitable outcome, explicitly retry that IID only after the edit
-is complete:
+close it under the project's issue practice. If the parent is narrowed to a
+suitable outcome, explicitly retry that IID only after the edit is complete:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -628,17 +614,17 @@ uv run agent-work loop retry --issue-iid IID --json
 uv run agent-work loop retry --issue-iid IID --apply --json
 ```
 
-Do not remove lifecycle or prerequisite-projection labels by hand or increase
-worker budgets to bypass the sizing decision. The explicit retry preserves the
-durable recovery path;
-the next worker session reassesses the revised scope before mutation.
+Do not remove lifecycle or prerequisite-projection labels by hand. Do not
+increase worker budgets to bypass the sizing decision. The explicit retry
+preserves the durable recovery path. The next worker session reassesses the
+revised scope before mutation.
 
-## Migrate existing loop evidence
+## Move old loop proof.
 
-Stop the timer and ensure no service segment is active before migration. The
-preview inventories running, awaiting-human, failed, blocked, and closed GitLab
-projections; exact branch, worktree, and stash evidence; and the resulting
-safe ledger actions without modifying them.
+Before moving old data, stop the timer and ensure no service segment is active.
+The preview lists running, awaiting-human, failed, blocked, and closed GitLab
+projections; exact branch, worktree, and stash proof; and safe ledger actions.
+It changes nothing.
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -651,7 +637,7 @@ uv run agent-work migration preview --json >agent-work-migration-plan.json
 Review every proposed record, label transition, retained artifact, and blocked
 decision. Do not apply a preview with ambiguous evidence. Apply refuses a
 stale or tampered plan, changed inventory, a different project, or an existing
-ledger record; it never overwrites that evidence. After human review, apply
+ledger record. It never overwrites that evidence. After human review, apply
 the idempotent migration and inspect the result:
 
 ```bash
@@ -660,13 +646,16 @@ uv run agent-work migration apply --plan-file agent-work-migration-plan.json --a
 uv run agent-work loop status --json
 ```
 
-## Plan a canary checkpoint and targeted recovery
+## Plan a canary check and focused restore.
 
-Keep the timer disabled and service inactive while preparing recovery. A
-canary is a non-claiming operational checkpoint: it verifies public identity,
-durable recovery evidence, and pipelines; it does not choose or mutate an
-issue. Create and review its plan, then apply that exact plan while the timer
-remains stopped:
+### Canary and re-enable.
+
+Keep the timer off and the service inactive while you prepare restore. A canary
+is a non-claiming checkpoint. It checks public user, saved restore proof, and
+pipelines without picking or changing an issue.
+
+First, create and review the plan. Apply that same plan only while the timer
+stays stopped:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -676,14 +665,14 @@ uv run agent-work loop canary --apply --plan-file agent-work-canary-plan.json --
 uv run agent-work loop status --json
 ```
 
-If the preview reports lifecycle-label or manual-tracker-marker provisioning,
-review that deterministic label-spec action and apply it with the same
-stopped-timer sequence above. The apply rechecks the preview, creates missing
-fixed labels or the `agent-work::manual` marker, and corrects their color or
-description; it never assigns an issue label.
+If the preview instead proposes lifecycle-label or manual-tracker-marker setup,
+review that fixed label-spec action and use the same stopped-timer order. Apply
+checks the preview again, creates lost fixed labels or the `agent-work::manual`
+marker, and fixes their color or text. It never assigns a label to an issue.
 
-When status names a retained item requiring recovery, make a separate plan for
-that IID. Do not use ordinary `loop run` to bypass the targeted evidence check:
+When status finds a retained item that needs restore, make a separate plan for
+that exact IID. Do not use normal `loop run`; it would skip the targeted proof
+check:
 
 ```bash
 uv run agent-work loop recover --issue-iid IID --json >agent-work-recover-IID-plan.json
@@ -693,48 +682,48 @@ uv run agent-work loop recover --issue-iid IID --apply \
 uv run agent-work loop status --issue-iid IID --json
 ```
 
-Each apply rechecks the reviewed plan under the project lock. Identity rotation,
-ledger revision, or any target, repository, merge-request, or pipeline evidence
-change requires a new preview. Neither plan prints secrets. If the command
-reports a conflict, higher-priority owner, failed pipeline without an exact
-owner, or a nonterminal pipeline, keep the timer stopped and follow its exact
-safe next action; do not select another issue or alter retained artifacts.
+Each apply rechecks the reviewed plan under the project lock. Create a new
+preview after an identity rotation, ledger revision, or a change to target,
+repository, merge-request, or pipeline evidence. Neither plan prints secrets.
 
-Only after the expected checkpoint is reached and status is understood should
-you re-enable the timer:
+Keep the timer stopped if the command reports a conflict, a higher-priority
+owner, a failed pipeline without an exact owner, or a nonterminal pipeline.
+Follow the reported safe next action. Do not select another issue or change
+retained artifacts.
+
+Re-enable the timer only when the expected checkpoint has been reached and you
+understand the reported status:
 
 ```bash
 systemctl --user enable --now <project-slug>-agent-work.timer
 ```
 
-This ordering also handles the historical issue-76/77-style situation: inspect
-and plan the existing retained owner first, apply only evidence that still
-matches, and leave unrelated work untouched. The issue text is evidence to
-inspect, never operational authority. Human review, approval, and merge remain
-outside the loop.
+This order also handles the old issue-76/77-style case. Inspect and plan the
+old retained owner first. Apply only matching proof. Leave other work alone.
+Issue text is proof to inspect, never work authority. Human review, approval,
+and merge stay outside the loop.
 
-## Monitor, restart, or stop the loop
+## Monitor, restart, or stop the loop.
 
-### Diagnose user-systemd access before supervision checks
+### Check user-systemd access before supervision.
 
-From a non-login or API shell, apply the validated user-bus boundary before
-each `systemctl --user` or `journalctl --user` command. Preserve explicit
-`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values; derive
-`/run/user/<effective-uid>` and its `bus` socket only for absent values. Then
-validate absolute paths, effective-user ownership, directory/socket types, and
-fail closed on mismatch. The [software-factory-supervisor skill](../../.agents/skills/software-factory-supervisor/SKILL.md)
-requires this procedure at the point of supervision use.
+From a non-login or API shell, apply the checked user-bus boundary before each
+`systemctl --user` or `journalctl --user` command. Keep clear
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` values. Derive
+`/run/user/<effective-uid>` and its `bus` socket only if they are absent. Check
+full paths, real-user owner, dir and socket types. Fail closed on a mismatch.
+The [software-factory-supervisor skill](../../.agents/skills/software-factory-supervisor/SKILL.md)
+needs this procedure when it supervises.
 
-If the derived values validate, the shell was missing environment variables;
-that is not a systemd outage. If validation fails, report the user-manager
-directory or socket as missing, inaccessible, invalid, or incorrectly owned.
-Do not classify `Failed to connect to bus: No medium found` as an outage until
-this validation has failed.
+Checked derived values mean the shell lacked env vars, not that systemd is down.
+On check failure, report the user-manager dir or socket as lost, blocked, bad,
+or wrongly owned. Do not call `Failed to connect to bus: No medium found` an
+outage until the check fails.
 
-Inspect the timer, service, and redacted state together. Systemd owns service
-logs through the unit's `SyslogIdentifier`; the application also retains its
-local lifecycle log as `agent-work.log` in the XDG project-state directory.
-Inspect both evidence sources; neither replaces the other.
+Inspect the timer, service, and safe state together. Systemd owns service logs
+through the unit's `SyslogIdentifier`. The app keeps its local lifecycle log,
+`agent-work.log`, in the XDG project-state dir. Inspect both sources. Neither
+replaces the other.
 
 ```bash
 unit_name="$(basename "$(find systemd -maxdepth 1 -type f -name '*-agent-work.timer' -print -quit)" .timer)"
@@ -747,22 +736,19 @@ export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 
-For this `Type=oneshot` service, an in-progress activation normally reports
-`ActiveState=activating` and `SubState=start`. If its
-`ExecMainStartTimestamp` is less than 190 minutes old, it is still within its
-outer envelope; do not interrupt it merely because it is running. A completed
-outer timeout reports `Result=timeout` (or `Result=failed` when it ends with a
-different failure). `ActiveState=inactive` with `Result=success` means the
-activation completed. Use `systemctl status` and the unit journal to identify
-the bounded wrapper diagnostic, then use `agent-work loop status --json` to
-find the durable ledger state and redacted next action. Retained worktrees and
-ledger records are the recovery evidence; do not delete them to clear a
-timeout.
+For this `Type=oneshot` service, an active run normally reports
+`ActiveState=activating` and `SubState=start`. If `ExecMainStartTimestamp` is
+less than 190 minutes old, it is within its outer limit. Do not stop it just
+because it runs. A done outer timeout reports `Result=timeout`. Another fault
+reports `Result=failed`. `ActiveState=inactive` with `Result=success` means the
+run ended. Use `systemctl status` and the unit journal to find the bounded
+wrapper diagnostic. Then use `agent-work loop status --json` for the saved
+ledger state and safe next action. Retained worktrees and ledger records are
+restore proof. Do not delete them to clear a timeout.
 
-To restart after a transient user-manager failure, let an active bounded
-activation finish when possible. Stopping it can interrupt a segment; the
-ledger and durable worktree make the next `loop run` reconcile the last durable
-boundary.
+After a short user-manager fault, let an active bounded run finish if it can.
+Stopping it can cut off a segment. The ledger and saved worktree let the next
+`loop run` match the last saved boundary.
 
 ```bash
 systemctl --user stop "$unit_name.timer" "$unit_name.service"
@@ -771,9 +757,9 @@ systemctl --user enable --now "$unit_name.timer"
 systemctl --user start "$unit_name.service"
 ```
 
-To stop future unattended work, disable the timer and stop an active service.
-This preserves the ledger, worktrees, branches, stashes, environment file, and
-journal for inventory and review.
+To stop future automatic work, turn off the timer and stop an active service.
+This keeps the ledger, worktrees, branches, stashes, env file, and journal for
+listing and review.
 
 ```bash
 systemctl --user disable --now "$unit_name.timer"
@@ -784,30 +770,37 @@ export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
 ```
 
-The timer must report `UnitFileState=disabled` and `ActiveState=inactive`
-before migration or a manual evidence review. If `journalctl --user` access is
-denied, ask the host administrator for the appropriate journal access; do not
-change journald storage settings or use another credential route.
+Before a move or manual proof review, the timer must report
+`UnitFileState=disabled` and `ActiveState=inactive`. If `journalctl --user`
+access is denied, ask the host admin for fit journal access. Do not change
+journald storage settings or use another key route.
 
 
-## Publication credential readiness and retained recovery
+## Publication credential readiness and retained recovery.
 
 Before either preview or apply invokes the worker, the shared Git credential
-route verifies the configured credential-free HTTPS origin and performs a
+route verifies the configured credential-free HTTPS origin. It performs a
 non-mutating Git readiness check. It receives the configured `GITLAB_TOKEN`
-only at runtime through the repository-owned credential-protocol helper; the
-token and any derived Basic header never enter a remote URL, persistent Git
-configuration, service environment file, command arguments or process reports,
-logs, diagnostics, ledger, or retained record. The check is independent from
+only at runtime through the repository-owned credential-protocol helper. The
+token and any derived Basic header never enter a remote URL or persistent Git
+configuration. They never enter the service environment file, command
+arguments or process reports, logs, diagnostics, ledger, or retained record.
+The check is independent from
 the GitLab API verification for `GITLAB_HOST` and numeric
 `GITLAB_PROJECT_ID`.
 
 Missing configuration stops before remote mutation. Invalid or expired
-credentials are authentication failures; an authenticated identity without
+credentials are authentication failures. An authenticated identity without
 push permission is an authorization failure. Known temporary transport
 failures alone use the bounded retry path. Inherited credential helpers and
-hostile ambient Git configuration cannot replace the shared route, and it
-never falls back to an interactive prompt. Keep the human approval and merge
+hostile ambient Git configuration cannot replace the shared route. It never
+falls back to an interactive prompt. Keep the human approval and merge
 boundary unchanged.
 
-For retained publication recovery, first inspect status, the source branch, local `HEAD`, recorded source SHA, and the exact pending publication intent. Run preview, then explicitly run `agent-work loop retry --issue-iid IID --apply`. A retained publish intent moves directly back to publishing: it keeps the same branch, SHA, draft evidence, and intent, and replays the clean committed head without a second commit or merge request. Do not copy credentials or command output into the ledger or issue.
+For retained publication recovery, first inspect status, the source branch,
+local `HEAD`, recorded source SHA, and the exact pending publication intent.
+Run preview. Then explicitly run `agent-work loop retry --issue-iid IID --apply`.
+A retained publish intent moves directly back to publishing. It keeps the same
+branch, SHA, draft evidence, and intent. It replays the clean committed head
+without a second commit or merge request. Do not copy credentials or command
+output into the ledger or issue.
