@@ -78,6 +78,7 @@ ci-image:candidate:
     name: $CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   before_script:
     - cd "$CI_PROJECT_DIR"
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
 
 ruff-check:
   extends: .base_uv

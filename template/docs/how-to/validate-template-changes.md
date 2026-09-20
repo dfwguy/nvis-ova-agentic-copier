@@ -5,7 +5,7 @@ summary: Run the checks required before proposing a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-20
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -67,6 +67,11 @@ investigating a failed job, inspect every shard JUnit and, when generation
 succeeded, its combined coverage report; otherwise use the job log. The
 generated Copier payload is not part of that root coverage
 measurement.
+
+Before validation starts, each configuration's shared `.base_uv` setup trusts
+only its current `$CI_PROJECT_DIR` checkout with Git. This setting exists only
+in the ephemeral validation container; it does not trust wildcard paths or
+change host Git configuration.
 
 The generated template deliberately keeps its portable `validation (9 gates)`
 aggregate job. It does not consume the root image or require registry

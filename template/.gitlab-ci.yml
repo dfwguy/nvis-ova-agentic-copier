@@ -23,6 +23,7 @@ workflow:
     name: ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
   before_script:
     - cd "$CI_PROJECT_DIR"
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - uv --version
     - |
       set -Eeuo pipefail
