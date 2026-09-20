@@ -1,7 +1,7 @@
 ---
 title: How to resolve factory issue recovery
 type: how-to
-summary: Inspect exceptional recovery evidence and apply one reviewed resolution for a retained factory issue.
+summary: Fix one issue.
 audience: maintainer
 tags: [agent-workflow]
 status: draft
@@ -24,62 +24,65 @@ related:
 
 # How to resolve factory issue recovery
 
-Use this procedure when a factory issue has interrupted, ambiguous, or unsafe
-retained recovery evidence and a human needs to make one bounded lifecycle
-decision. It does not approve or merge a merge request, claim fresh work,
-discard a retained worktree, or alter project policy.
+Resolve one issue at a time.
+
+Use this guide when retained recovery is interrupted, unclear, or unsafe. A
+human makes one bounded lifecycle decision. The guide never approves or merges
+a merge request. It does not claim fresh work, discard a retained worktree, or
+change project policy.
 
 Do not use this procedure for an exact failed current-source merge-request
-pipeline with one uniquely corroborated retained owner. An applied ordinary
-`agent-work loop run --apply` activation transitions that owner to `repair` and
-runs the repair workflow without a human checkpoint.
+pipeline with one uniquely corroborated retained owner. Use an applied ordinary
+`agent-work loop run --apply` activation instead. It transitions that owner to
+`repair` and runs the repair workflow without a human checkpoint.
 
-## 1. Inspect the non-claiming inventory
+## 1. Inspect the non-claiming inventory.
 
-Run the inventory before deciding what to do. It correlates the issue's
-lifecycle projection with its ledger, retained branch or worktree, merge
-request and pipeline evidence, and local controller evidence without changing
-any of them.
+Run the inventory before making a decision. The non-claiming audit correlates
+lifecycle, ledger, worktree, remote, and local controller evidence without
+changing any of those records.
 
 ```bash
 uv run agent-work recovery inventory --issue-iid 89 --json
 ```
 
-Start with the aggregate `total`, `open`, `closed`, `active`, `blocked`,
-`dependency_gated`, `human_action`, and `no_action` counts. Use a detailed
-candidate's active state, `human_action_required`, bounded blocked cause,
-named open trusted prerequisites, and exact next action to decide whether to
-act. Failed main and open-MR pipelines appear before
-ordinary retained work. Do not use this command to select fresh work: it only
-reports fresh items.
+Begin with aggregate `total`, `open`, and `closed`, then inspect `active`,
+`blocked`, `dependency_gated`, `human_action`, and `no_action` counts. For a
+candidate, inspect its active state, `human_action_required` and the bounded
+cause, named open trusted prerequisites, and the exact next action. The
+inventory lists failed main and open-MR pipelines first and ordinary retained
+work afterward. The inventory reports fresh items but never selects them.
 
-Treat `closed_no_action` as settled. It applies to a closed recordless split
-issue and a closed `COMPLETE` record even if retained worktree, head,
-merge-request, or pipeline evidence has drifted. A closed nonterminal record
-still needs human review. An untargeted inventory summarizes settled closed
-items; use `--issue-iid` when you need its exact evidence.
+Treat `closed_no_action` as settled for a closed recordless split issue or a
+closed `COMPLETE` record. Worktree, head, MR, or pipeline drift does not
+change the settled result. A closed nonterminal record needs human review. An
+untargeted inventory lists settled closed items, while `--issue-iid` gives
+exact evidence.
 
-A stale running item is an early `needs_human_decision`, not a retry target:
-use `agent-work loop recover` for its exact retained state. Retry is limited to
-a retained `BLOCKED` record whose trusted prerequisites are all closed (or
-absent); it preserves any retained publication replay and retry history.
+Treat stale running work as `needs_human_decision`, never as a retry target.
+Use `agent-work loop recover` for retained state. Retry only a retained
+`BLOCKED` record whose trusted prerequisites are all closed or absent; this
+retry keeps retained publication replay and retry history.
 
-When `$software-factory-supervisor` identifies action-required recovery, it
-hands exactly one IID to `$resolve-factory-issues`. Keep no-action inventories
-with the supervisor; do not turn a count-only report into bulk resolutions.
+The supervisor finds recovery that requires action and
+`$software-factory-supervisor` hands one IID to `$resolve-factory-issues`.
+Keep no-action inventories with the supervisor, and never bulk-resolve a
+count-only report.
 
-An immediate owner is one record in `PREPARING`, `EXECUTING`, `PUBLISHING`,
-`OBSERVING`, or `REPAIR`. `BLOCKED` is action-required, not
-runnable; `RETRY_WAIT` is queued and does not compete with an already selected
-IID. A reviewed retry changes only its selected `BLOCKED` IID to `PREPARING`,
-or retains `PUBLISHING` for a publication replay. Untouched blocked and queued
-records remain non-competing. Stop if a different immediate owner exists or if
-more than one immediate owner needs reconciliation.
+Immediate owners are `PREPARING`, `EXECUTING`, `PUBLISHING`, `OBSERVING`, or
+`REPAIR`. A `BLOCKED` owner requires action and is not
+runnable. A `RETRY_WAIT` owner is queued and non-competing. A `RETRY_WAIT`
+owner never competes with a selected IID. A reviewed retry changes only the selected IID
+from `BLOCKED` to `PREPARING` and retains `PUBLISHING` for publication replay;
+untouched blocked and queued records remain non-competing. Stop for a
+different immediate owner, when multiple owners must reconcile, or when the
+owner state is unclear.
 
-## 2. Choose and preview one resolution
+## 2. Choose and preview one resolution.
 
-Choose only the action supported by the inventory evidence. Preview writes an
-evidence-bound plan and does not change GitLab or local lifecycle state.
+Choose one action supported by inventory evidence.
+Preview writes an evidence-bound plan.
+Preview changes neither GitLab nor local lifecycle state.
 
 ```bash
 uv run agent-work recovery resolve --issue-iid 89 --choice retry \
@@ -88,22 +91,33 @@ uv run agent-work recovery resolve --issue-iid 89 --choice retry \
   --json >agent-work-recovery-89-plan.json
 ```
 
-Use `close` only with a reason plus an evidence link or replacement issue.
-Use `supersede` with `--replacement-issue-iid` and the supporting reason and
-evidence. Use `relabel` only with a canonical lifecycle label through
-`--target-label`. Close, supersede, and relabel use replayable durable intents;
-closure records one idempotent reason/evidence/replacement receipt, clears the
-lifecycle projection, and terminalizes the ledger. `reopen` is only for a
-closed issue with no retained record; it atomically clears lifecycle labels and
-leaves fresh ordinary work unclaimed. Each plan binds exact MR project/target,
-source SHA, pipeline ID, and trusted dependencies. A plan has one explicit
-decision for one issue.
+Use `close`.
+A close needs a reason.
+A close needs evidence.
+The evidence can be a link or replacement issue.
+Use `supersede` with `--replacement-issue-iid`.
+Provide a reason and evidence.
+Use `relabel` only with a canonical lifecycle label.
+Provide that label through `--target-label`.
+`close`, `supersede`, and `relabel` create durable intents.
+Each intent is replayable.
+Each closure records one idempotent receipt.
+The closure receipt records the reason, evidence, and replacement.
+The closure receipt clears the lifecycle projection.
+The closure receipt terminalizes the ledger.
+Use `reopen` only for a closed issue without a retained record.
+A reopen atomically clears lifecycle labels.
+A reopen leaves fresh ordinary work unclaimed.
+Each plan binds the exact MR project and target.
+Each plan also binds source SHA and pipeline ID.
+Each plan binds trusted dependencies.
+Each plan makes one explicit issue decision.
 
-## 3. Review the preview with the responsible human
+## 3. Review the preview with the responsible human.
 
-Confirm the planned issue, choice, reason, evidence links, observed state, and
-proposed state. For example, the interaction should make the decision and its
-authority visible:
+Confirm the planned issue, choice, reason, and evidence.
+Confirm observed and proposed states.
+Make the decision and authority visible.
 
 ```text
 Operator: Issue #89 was dependency-gated. The dependency merged; should I retry it?
@@ -111,15 +125,19 @@ Maintainer: Yes. Retry only #89. The linked MR is the evidence; do not claim ano
 Operator: I will apply the reviewed retry plan and report the before/after receipt.
 ```
 
-If inventory reports an expired credential or configured-bot mismatch, stop
-before preview or apply. Run `agent-work credential rotate` and complete the
-credential-recovery handoff for issue #84; then make a new inventory and plan.
+Stop for expired credentials or configured-bot mismatch.
+Stop before preview or apply.
+Run `agent-work credential rotate` for issue #84.
+Complete the credential-recovery handoff.
+Then create a new inventory and plan.
 
-## 4. Apply the exact reviewed plan
+## 4. Apply the exact reviewed plan.
 
-Apply requires both the reviewed plan file and `--apply`. It rechecks current
-evidence while holding the project lock. A stale or drifted plan is rejected;
-make a new preview instead of editing or reusing it.
+Apply requires the reviewed plan file and `--apply`.
+It rechecks current evidence under the project lock.
+It rejects stale or drifted plans.
+Create a new preview.
+Never edit or reuse the rejected plan.
 
 ```bash
 uv run agent-work recovery resolve --issue-iid 89 --choice retry \
@@ -128,8 +146,9 @@ uv run agent-work recovery resolve --issue-iid 89 --choice retry \
   --plan-file agent-work-recovery-89-plan.json --apply --json
 ```
 
-The preview and applied receipts are redacted. Their field names below are the
-planned contract; use the command's actual values as the durable evidence.
+Preview and applied receipts are redacted.
+Their field names define the planned contract.
+Use actual command values as durable evidence.
 
 ```json
 {
@@ -154,31 +173,34 @@ planned contract; use the command's actual values as the durable evidence.
 }
 ```
 
-Record the receipt with the issue's recovery evidence. If application fails
-because evidence changed, retain the old plan as review history and start again
-at the inventory step. Do not work around the rejection by changing labels,
-branches, pipelines, or retained artifacts manually.
+Record the receipt with recovery evidence.
+If evidence changes, retain the old plan.
+It remains review history.
+Return to the inventory step.
+Never manually change labels, branches, pipelines, or artifacts.
 
-## 5. Recover a clean interrupted claim for issue #35
+## 5. Recover a clean interrupted claim for issue #35.
 
-Use this route only when the exact evidence shows that issue #35 has a clean,
-interrupted `EXECUTING`/`WORKFLOW` claim. Do not edit the ledger manually.
+Use this route only with exact evidence.
+Issue #35 needs a clean interrupted `EXECUTING`/`WORKFLOW` claim.
+Never edit the ledger manually.
 First create and review the exact recovery plan:
 
 ```bash
 uv run agent-work loop recover --issue-iid 35 --json >agent-work-recover-35-plan.json
 ```
 
-Apply that exact reviewed plan only when it confirms the claim can be safely
-normalized to `BLOCKED`:
+Apply that exact reviewed plan only when safe.
+It must normalize the claim to `BLOCKED`:
 
 ```bash
 uv run agent-work loop recover --issue-iid 35 --apply \
   --plan-file agent-work-recover-35-plan.json --json
 ```
 
-Then use the normal inventory and one-IID retry-plan sequence. Review every
-result; these commands do not authorize a choice for another issue.
+Then use inventory and a one-IID retry sequence.
+Review every result.
+These commands do not authorize a choice for another issue.
 
 ```bash
 uv run agent-work recovery inventory --issue-iid 35 --json
@@ -191,7 +213,8 @@ uv run agent-work recovery resolve --issue-iid 35 --choice retry \
 uv run agent-work loop run --apply --json
 ```
 
-The reviewed retry is the durable handoff to the one selected IID; a
-multi-segment continuation remains pinned to #35. If normalization is not
-verified, stop for human review. This route never approves or merges a merge
-request.
+The reviewed retry hands off one selected IID.
+Multi-segment continuation remains pinned to #35.
+Stop for human review without verified normalization.
+This route never approves a merge request.
+This route never merges a merge request.

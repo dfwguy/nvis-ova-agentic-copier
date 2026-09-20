@@ -1,7 +1,7 @@
 ---
 title: Template revision preview
 type: reference
-summary: Look up the read-only command that compares a recorded template commit with an upstream candidate.
+summary: Compare the recorded template revision with a candidate revision.
 audience: integrator
 tags: [template]
 status: current
@@ -29,13 +29,14 @@ agent-work template preview --candidate-revision REV [--project-root PATH] [--js
 ```
 
 `--candidate-revision REV` is required. `--project-root PATH` defaults to `.`.
-The command reads `<project-root>/.copier-answers.yml`, using its recorded
-template origin and current revision to compare with the candidate revision.
+The command reads `<project-root>/.copier-answers.yml`. The recorded template
+origin locates the template. The current revision is compared with the
+candidate revision, which does not need to be newer.
 
-This command is stateless and read-only. It has no `--apply` option and writes
-no project or template state. It does not execute Copier, render or update a
-generated project, perform conflict recovery, create a branch or worktree, or
-run publication automation.
+This command is stateless and read-only. It has no `--apply` option. It writes
+no project or template state. It does not execute Copier. It does not render or
+update a generated project. It does not perform conflict recovery, create a
+branch or worktree, or run publication automation.
 
 ## Output
 
@@ -47,7 +48,7 @@ path=<safe-path>
 ```
 
 `current_commit` and `candidate_commit` are resolved 40-character lowercase
-Git commit IDs. `outcome` is `changed` when `paths` is nonempty; otherwise it
+Git commit IDs. `outcome` is `changed` when `paths` is nonempty. Otherwise, it
 is `unchanged`. Each path is a safe relative path in the upstream template
 repository.
 
@@ -64,7 +65,7 @@ With `--json`, the command emits this compact object:
 }
 ```
 
-The `outcome` value is either `changed` or `unchanged`; when it is
+The `outcome` value is either `changed` or `unchanged`. When it is
 `unchanged`, `paths` is an empty array. The object always contains every key
 shown above.
 
@@ -74,8 +75,8 @@ update analysis.
 
 ## Failures and exit status
 
-Ordinary failures are redacted. `--debug` adds only a safe stage identifier;
-it does not expose untrusted input, repository details, or credentials.
+Ordinary failures are redacted. `--debug` adds only a safe stage identifier.
+It does not expose untrusted input, repository details, or credentials.
 
 | Exit status | Meaning |
 | --- | --- |

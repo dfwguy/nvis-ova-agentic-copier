@@ -34,10 +34,10 @@ repos:
         always_run: true
       - id: readability-check
         name: Markdown readability
-        entry: uv run python -m agent_work.readability --root . --scope files --paths
+        entry: uv run python -m agent_work.readability --root . --scope all
         language: system
-        files: '.*\.md(\.jinja)?$'
-        pass_filenames: true
+        pass_filenames: false
+        always_run: true
       - id: bash-syntax
         name: Bash syntax
         entry: bash -n

@@ -15,7 +15,7 @@ type: index
 Pick the section that fits your task. Start with its index. Use the
 [documentation structure rules](../DIATAXIS.md) to learn the Diátaxis model.
 
-- [Tutorials](tutorials/index.md) — Repeatable lessons for learning the template. (1)
-- [How-to guides](how-to/index.md) — Goal-oriented guidance for practical tasks. (9)
+- [Tutorials](tutorials/index.md) — Repeatable lessons for learning the template. (0)
+- [How-to guides](how-to/index.md) — Goal-oriented guidance for practical tasks. (6)
 - [Reference](reference/index.md) — Complete facts about the template and agent loop. (5)
-- [Explanation](explanation/index.md) — Context, rationale, and design trade-offs. (6)
+- [Explanation](explanation/index.md) — Context, rationale, and design trade-offs. (3)

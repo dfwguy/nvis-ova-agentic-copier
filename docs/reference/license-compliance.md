@@ -1,7 +1,7 @@
 ---
 title: License compliance
 type: reference
-summary: Look up the repository license-header policy, checked scope, and documented exemptions.
+summary: Look up license rules, checked files, and allowed exemptions.
 audience: maintainer
 tags: [compliance, template]
 status: current
@@ -24,7 +24,7 @@ related:
 
 # License compliance
 
-This policy checks file headers. It fails on a bad header. It does not edit
+This policy checks file headers. It fails on a bad header and does not edit
 files.
 
 ## Checks
@@ -33,9 +33,9 @@ files.
 | --- | --- |
 | Pre-commit | `license-check` stops a commit with a bad header. |
 | GitLab CI | `license-check` checks the submitted tree. |
-| Final review | `$license-checker` reviews the stable Green diff. Green waits for its result. `$tdd-finalizer` needs a current pass. |
+| Final review | `$license-checker` reviews the stable Green diff. Green waits for its result, and `$tdd-finalizer` requires a current passing rerun. |
 
-Fix each failed file. Run the check again after a checked file changes. A fail
+Fix every failed file and rerun the check after a checked file changes. A fail
 is not a waiver.
 
 ## Command
@@ -61,30 +61,30 @@ uv run python scripts/check_licenses.py --root . --policy .license-policy.toml
 | 1 | One or more files fail. |
 | 2 | Input, path, scan, or policy error. |
 
-JSON goes to standard output. Its error stream is empty. Normal passes are
+JSON goes to standard output with an empty error stream. Normal passes are
 silent. Normal errors and debug notes go to standard error.
 
 ## JSON result
 
 The JSON result has `schema_version` 1. Its `outcome` is `compliant`,
-`violations`, or `error`. A violation has `path` and `message`. An error has
+`violations`, or `error`. A violation has `path` and `message`; an error has
 `error`. This format also covers startup errors.
 
 ## Scope
 
 The policy checks the root, `.agents`, the Copier payload, and rendered output.
 A template file and its output must both pass. Git gives the scan its tracked
-paths. Outside Git, the scan uses `.gitignore` rules. It does not follow links.
-It sorts paths.
+paths. Outside Git, the scan uses `.gitignore` rules. It does not follow links
+and sorts paths.
 
-The scan walks from the top down. It applies each nested ignore rule in order.
+The scan walks from the top down and applies each nested ignore rule in order.
 A nested rule can add a path back. The scan prunes a skipped directory only
 when no nested rule can add a path back.
 
 ## Text and config
 
 The scan reads text and TOML as UTF-8. A bad or unreadable checked file fails.
-A bad, missing, or unreadable policy or annotation file is a setup error. It
+A bad, missing, or unreadable policy or annotation file is a setup error and
 exits 2. The scan does not use part of a policy or assume an empty annotation
 list.
 
@@ -98,18 +98,18 @@ list.
 
 The full header must be one block at that start. A later, partial, or changed
 copy fails. Skill files keep YAML front matter first. Put their Markdown header
-right after it, with no blank line.
+right after it with no blank line.
 
 The last notice line ends the header before file text starts. A longer or
-embedded copy is not a valid header.
+embedded copy is invalid.
 
 ## Exceptions
 
 | Kind | Required action |
 | --- | --- |
-| JSON | Add the named annotation. |
-| Lock file | Add the named annotation. Do not hand-edit it. |
-| Symbolic link | Add the named annotation. Do not replace it. |
+| JSON | Add its named annotation. |
+| Lock file | Add its named annotation. Do not hand-edit it. |
+| Symbolic link | Add its named annotation. Do not replace it. |
 
 An annotation applies to one file. Its TOML must parse and meet its schema. A
 missing or bad annotation does not excuse a file. It is not a broad opt-out for

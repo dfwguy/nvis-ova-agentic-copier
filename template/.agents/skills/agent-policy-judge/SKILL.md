@@ -16,9 +16,11 @@ metadata:
 
 # Agent Policy Judge
 
-Use this portable workflow skill for read-only agent-policy review. Read and
-follow [the role instructions](../../agents/agent-policy-judge.md) before acting.
+Use this portable skill for agent-policy review. It is read-only. Before acting,
+read and follow [the role instructions](../../agents/agent-policy-judge.md).
+Those instructions govern the review.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.
+Use this skill's `metadata.model-tier`. Its tier is `fast`. The live Architect
+router resolves the delegation mapping. It resolves it for delegation.

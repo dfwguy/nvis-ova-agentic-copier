@@ -16,18 +16,22 @@ metadata:
 
 # License Checker
 
-Read and follow [the role instructions](../../agents/license-checker.md) before
-running the repository checker as an initial concurrent Phase-5 review:
+Read and follow [the role instructions](../../agents/license-checker.md)
+before you run the checker. That file is role-reference material. This
+directory is the shared skill entry point for Claude Code, Codex, and Pi. It
+is an initial, concurrent Phase-5 review:
 
 ```bash
 uv run python scripts/check_licenses.py --root .
 ```
 
-This phase is read-only. Do not add headers, annotations, exclusions, or policy
-changes. Return an approval receipt when the command exits successfully. On
-failure, report each diagnostic and reject to the phase that introduced the
-noncompliant file.
+This phase is read-only. Do not add headers, annotations, exclusions, or
+policy changes. Run it once. Return an approval receipt when the command exits
+successfully. On failure, report each diagnostic. Reject it to the phase that
+introduced the noncompliant file.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping.
+Use this skill's `metadata.model-tier`. The live Architect router resolves its
+delegation mapping. Each frontend resolves that tier through its configured
+model mapping. Do not hard-code a provider-specific model name here.

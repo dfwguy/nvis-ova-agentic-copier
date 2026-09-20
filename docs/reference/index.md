@@ -12,20 +12,20 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Use this index first. It is a map. Read these pages. Find facts here. See each
-tool. See each rule. The pages list interfaces. They are not task guides.
+Find facts here. This index is not a task guide. It lists a read-only revision
+check. It also lists the loop and how it can recover.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
 ### Template
-- [Template contract](template-contract.md) — Look up template inputs, generated files, setup tasks, and update behavior.
-- [Template revision preview](template-revision-preview.md) — Look up the read-only command that compares a recorded template commit with an upstream candidate.
-- [License compliance](license-compliance.md) — Look up the read-only NVIDIA license policy checker.
+- [Template contract](template-contract.md) — Look up template inputs, output, setup, and updates.
+- [Template revision preview](template-revision-preview.md) — Compare the saved template commit with a new upstream commit.
+- [License compliance](license-compliance.md) — Look up license rules, checked files, and allowed exemptions.
 
 ### Writing
-- [Readability checking](readability.md) — Look up the Markdown readability checker, its scopes, and its results.
+- [Readability checking](readability.md) — Look up readability checks, scopes, and results.
 
 ### Agent workflow
-- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up the recoverable loop commands, lifecycle, data, and operating constraints.
+- [Serial GitLab agent-loop reference](serial-gitlab-agent-loop.md) — Look up loop commands, states, data, and limits.
 <!-- END GENERATED -->

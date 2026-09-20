@@ -9,22 +9,28 @@
 <!-- its affiliates is strictly prohibited. -->
 # Python Testing Patterns
 
-Detailed, on-demand reference for writing Python tests in this repo. The concise rules live in [`python.md`](python.md) → Testing; this file holds the worked examples. Read it when writing or reviewing non-trivial tests (subprocess, HTTP, imports, fixtures, logging). It is **not** auto-loaded — pull it in when you need a pattern.
+This is an on-demand guide to Python tests in this repo. The short rules are in
+[`python.md`](python.md) → Testing. This file has worked examples. Read it for
+non-trivial tests: subprocess, HTTP, imports, fixtures, or logging. It is
+**not** auto-loaded. Read it when writing or reviewing non-trivial tests.
 
 ## Core Principles
 
-- Run tests via `uv run pytest` — never invoke `python`/`pytest` directly
-- Only mock when required: true system boundaries (subprocess, HTTP, filesystem, time), never internal code
-- Prefer dependency injection — pass a fake through a parameter — over patching a symbol inside our own modules
-- One logical assertion per test; multiple related asserts are fine when they belong together
-- Use `pytest.raises` for exceptions, including inside parameterized cases
-- Avoid unnecessary assertion messages
-- Test behavior, not implementation
-- `pytest-randomly` is enabled — tests must be order-independent; fix shared state rather than pinning order
+- Run tests with `uv run pytest`. Never invoke `python`/`pytest` directly.
+- Mock only when required. Mock true system boundaries: subprocess, HTTP,
+  filesystem, and time. Never mock internal code.
+- Prefer dependency injection. Pass a fake through a parameter. Do not patch a
+  symbol in our own modules.
+- Use one logical assertion per test. Related asserts may stay together.
+- Use `pytest.raises` for exceptions, even in parameterized cases.
+- Avoid unneeded assertion messages.
+- Test behavior, not implementation.
+- `pytest-randomly` is enabled. Tests must be order-independent. Fix shared
+  state rather than pinning order.
 
 ## Fixtures and conftest.py
 
-These are typically defined once per project in `conftest.py`.
+Define these once per project in `conftest.py` when they apply.
 
 ### Clean directory per test
 
@@ -101,7 +107,7 @@ def caplog_fixture(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture
 
 ## Parameterization
 
-Prefer `@pytest.mark.parametrize` over duplicated test functions.
+Prefer `@pytest.mark.parametrize` to duplicate test functions.
 
 ```python
 import pytest
@@ -115,7 +121,7 @@ def test_uppercase(input_value: str, expected: str) -> None:
     assert input_value.upper() == expected
 ```
 
-Error cases inside a parameterized test:
+Use this form for errors in a parameterized test:
 
 ```python
 @pytest.mark.parametrize(
@@ -130,7 +136,7 @@ def test_division(divisor: int, *, expect_error: bool) -> None:
         assert 1 / divisor == pytest.approx(0.1)
 ```
 
-CLI argument variations (needs the `set_argv` fixture):
+Use the `set_argv` fixture for CLI argument variations:
 
 ```python
 @pytest.mark.parametrize(
@@ -146,7 +152,8 @@ def test_multiple_args(
 
 ## Subprocess — `pytest-subprocess`
 
-Use the `fp` fixture from `pytest-subprocess` to mock external commands. Never shell out for real in a test.
+Use the `fp` fixture from `pytest-subprocess` to mock external commands. Never
+run a real subprocess or shell out in a test.
 
 ```python
 import subprocess
@@ -165,7 +172,7 @@ def test_get_git_branch(fp) -> None:
     assert fp.call_count() == 1
 ```
 
-Test failure paths and exact arguments:
+Test failure paths and exact arguments too:
 
 ```python
 @pytest.mark.parametrize(
@@ -181,7 +188,7 @@ def test_return_code_handling(fp, returncode: int, *, should_raise: bool) -> Non
         subprocess.check_call(["some", "command"])
 ```
 
-`fp.calls[i].command` lets you assert a command was invoked with exact arguments.
+Use `fp.calls[i].command` to assert exact command arguments.
 
 ## HTTP / API — `requests-mock`
 
@@ -196,11 +203,13 @@ def test_api_call() -> None:
         assert requests.get("http://test.com", timeout=5).text == "resp"
 ```
 
-Prefer injecting the HTTP call as a dependency where the production code allows it; use `requests-mock` at the true boundary otherwise.
+Prefer injecting the HTTP call as a dependency when production code allows it.
+Otherwise, use `requests-mock` at the true boundary.
 
 ## Filesystem access
 
-Inject the file-opening function so success and failure paths are pure and parameterizable — no patching:
+Inject the file-opening function. This keeps success and failure paths pure and
+parameterizable. Do not patch.
 
 ```python
 import pytest
@@ -237,7 +246,7 @@ def test_read_file_contents(open_func, expected: str) -> None:
 
 ## Logging
 
-Use `caplog` (or the `caplog_fixture` above) to assert on log output.
+Use `caplog`, or `caplog_fixture` above, to assert log output.
 
 ```python
 import pytest
@@ -249,14 +258,19 @@ def test_logging_with_caplog(caplog_fixture: pytest.LogCaptureFixture) -> None:
     assert "Expected error message" in caplog_fixture.text
 ```
 
-Two common pitfalls:
+Two common pitfalls follow:
 
-- **Empty `caplog.text`** — the logger name must match exactly. Configure `caplog.set_level(logging.INFO, logger="my_package.my_module")`, not the top-level package name.
-- **A module's own `setup_logger` interfering** — inject or mock it to a no-op so caplog owns the configuration; do not reconfigure logging inside the mock.
+- **Empty `caplog.text`** — the logger name must match exactly. Configure
+  `caplog.set_level(logging.INFO, logger="my_package.my_module")`, not the
+  top-level package name.
+- **A module's own `setup_logger` interfering** — inject or mock it to a no-op
+  so caplog owns configuration. Do not reconfigure logging in the mock.
 
 ## Imports
 
-For code with conditional/optional imports or retry-on-import logic, drive failures through `monkeypatch` and clear the module cache. Test both the success and the missing-dependency path:
+For conditional/optional imports or retry-on-import logic, use `monkeypatch` to
+drive failures. Clear the module cache. Test success and the missing-dependency
+path:
 
 ```python
 import builtins
@@ -282,7 +296,8 @@ def test_import_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 ## Test organization
 
-One test file per module/feature; group related tests in subdirectories mirroring the source tree:
+Use one test file per module/feature. Group related tests in subdirectories
+that mirror the source tree:
 
 ```text
 my_project/

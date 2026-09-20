@@ -12,13 +12,15 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Read this material for the reasoning behind the agent-loop design.
+Use these pages to learn why the template and agent loop work as they do.
+They explain key choices, limits, and trade-offs. Pick the topic that fits
+your question, then use its links to learn more.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
-### Agent workflow
-- [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Understand the recoverable state machine for unattended agent work.
-- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Understand how explicit skill routing keeps every supported agent frontend on the same workflow.
-- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Understand why bounded workflow sessions use GitLab projection and local durable state.
+### Agent Workflow
+- [Recoverable serial agent-loop architecture](serial-agent-loop-recovery-design.md) — Learn how the loop recovers unattended work.
+- [Why the agent workflow uses specialized roles](agentic-workflow.md) — Learn why agent tools share one workflow.
+- [Why the agent loop is serial and GitLab-native](serial-gitlab-agent-loop.md) — Learn why the loop uses GitLab and local state.
 <!-- END GENERATED -->

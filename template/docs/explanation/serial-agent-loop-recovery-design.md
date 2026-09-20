@@ -1,7 +1,7 @@
 ---
 title: Recoverable serial agent-loop architecture
 type: explanation
-summary: Understand the recoverable state machine for unattended agent work.
+summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
@@ -28,71 +28,52 @@ related:
 
 # Recoverable serial agent-loop architecture
 
-Each activation owns one bounded issue workflow. After a terminal handoff, the
-systemd wrapper validates the report, refreshes authoritative project and
-default-branch evidence for a newly eligible issue, and starts a separate
-activation. An applied activation polls nonterminal pipeline evidence in place;
-only genuine idle and other durable handoffs yield to the timer.
+One run owns one bounded issue flow. After a handoff, the systemd wrapper checks
+its report and refreshes project and default-branch proof. It polls a live
+pipeline in place. Only idle or saved handoffs return control to the timer.
 
-This document explains the recoverable architecture used by the serial agent
-loop. The [serial GitLab agent-loop explanation](serial-gitlab-agent-loop.md),
-reference, and setup guide describe its operator-facing behavior.
+This page explains recovery design. The [serial GitLab agent-loop
+explanation](serial-gitlab-agent-loop.md) explains use. The
+[reference](../reference/serial-gitlab-agent-loop.md) owns commands, schemas,
+states, and exit codes. The setup guide owns user steps.
 
-The systemd scheduler is healthy. The problem is that the workflow contract
-now expects recovery, remediation, and post-publication phases that the runtime
-cannot represent. Further point fixes would preserve the mismatch. The
-replacement makes every activation a bounded workflow-owning session in an
-explicit, recoverable state machine. Recovery retains the durable worktree and
-a coarse `WORKFLOW` boundary rather than persisting an internal checkpoint for
-every agent phase.
+The scheduler was healthy, but missed recovery, repair, and post-publish work.
+The new state machine keeps worktrees and one coarse `WORKFLOW` boundary. It
+stores no agent-phase checkpoints.
 
 ## Evidence and confirmed defects
 
-The design audit on 2026-09-09 found a healthy enabled timer whose latest pass
-completed successfully with no eligible work. GitLab contained 12 historical
-`agent/issue-*` merge requests: 10 merged and two closed. The retained journal
-contained 886 idle results and nine failed work results, while issues 13–16
-were terminally labelled `agent::failed`. All 68 runner tests passed, showing
-that the tests describe the current implementation even where it differs from
-the end-to-end workflow contract.
+The 2026-09-09 audit found an enabled, healthy timer. Its last run had no ready
+work. GitLab had 12 past `agent/issue-*` MRs: 10 merged and two closed. The
+journal had 886 idle and nine failed-work results. Issues 13–16 had terminal
+`agent::failed` labels. All 68 runner tests passed, but describe code that can
+differ from the end-to-end contract.
 
 The audit confirmed these defects:
 
-1. Issue selection contradicted the documented contract. The gateway selected
-   open, non-confidential issues without a coherent durable queue rule.
-2. Existing-MR remediation is documented but not implemented. Remediation
-   issues for MR !88 were started on new `agent/issue-*` branches from `main`,
-   so the files they needed were absent.
-3. Expected blockers collapse into misleading publication failures. A
-   dependency on an open MR, an incorrect remediation branch, protected policy
-   work, and an intentional no-op all surface as variants of “worker made no
-   changes to publish.”
-4. Interrupted changes are preserved but cannot be resumed. Checkout cleanup
-   creates recovery stashes, but no subsequent runner path restores them. The
-   audit found an issue-12 stash containing ten changed files.
-5. One ephemeral worker is expected to finish architecture, Red/Green,
-   documentation, all reviews, finalization, and post-publication work, even
-   though trusted publication occurs only after that worker exits.
-6. Python and the Bash wrapper both restore the checkout. The wrapper also
-   uses `logger -s` while systemd captures standard output and standard error,
-   which duplicates journal lines.
-7. Status output omits the phase, stable error code, retry state, and next
-   action. The actionable explanation remains in a large private journal while
-   GitLab receives only a generic failure comment.
-8. Preview refreshes the checkout despite presenting itself as non-mutating;
-   failed default-branch pipeline repair is injected into unrelated issue
-   work; stale local branches can terminally fail an issue; closed issues keep
-   stale terminal labels; and the timer interval is measured from activation,
-   not completion.
+1. Selection has no saved queue rule for open, non-confidential issues.
+2. Existing-MR repair is absent. MR !88 starts a new `agent/issue-*` branch
+   from `main`; files are missing.
+3. Expected blocks look like publish faults: an open-MR need, wrong repair
+   branch, protected policy work, or no-op all say “worker made no changes to publish.”
+4. Cleanup saves stops as recovery stashes, but no runner restores them. An
+   issue-12 stash has ten changed files.
+5. One short worker must do design, Red/Green, docs, reviews, finalization,
+   and post-publish work. Trusted publish waits for it to end.
+6. Python and Bash both restore checkouts. `logger -s` duplicates lines that
+   systemd already captures.
+7. Status lacks phase, stable error code, retry state, and next action. The
+   journal has detail; GitLab has a vague failure note.
+8. Preview refreshes a checkout though it must not change state. Failed
+   default-branch repair enters other issue work; stale branches can fail
+   issues; closed issues keep terminal labels; timer gaps start at run, not end.
 
-These observations motivated the recovery architecture. Historical issues,
-branches, labels, stashes, and services remain evidence until an operator
-reviews a migration preview.
+These facts led to this design. Old issues, branches, labels, stashes, and
+services stay as proof until a user reviews a migration preview.
 
 ## State model
 
-GitLab remains the shared queue projection. A small local ledger stores the
-recoverable execution detail that does not belong in labels.
+GitLab is the shared queue. A small local ledger holds run detail not in labels.
 
 ```mermaid
 stateDiagram-v2
@@ -114,498 +95,362 @@ stateDiagram-v2
     AwaitingHuman --> [*]: human merges or closes
 ```
 
-GitLab labels have deliberately coarse meanings:
+GitLab labels stay broad:
 
-| Label | Meaning |
-| --- | --- |
-| `agent::running` | Work is active or automatically resumable. |
-| `agent::awaiting-human` | The exact MR, named source commit, required receipts, and factory-authored actionable issue handoff are ready for human review. |
-| `agent::blocked` | A documented human action is necessary before work can continue. |
-| `agent::failed` | An exceptional unrecoverable condition prevented safe reconciliation or recording. |
-| `agent::needs_repair` | A legacy or manually checkpointed repair awaits exact recovery; ordinary exact pipeline failures do not enter this state. |
-| `agent::repair_failed` | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed; it retains the evidence needed for safe follow-up. |
-| `agent::suggest_close` | Structured corroborated evidence recommends human closure for duplicate, superseded, already-satisfied, or no-longer-applicable work. |
+- `agent::running`: active or self-resuming work.
+- `agent::awaiting-human`: exact MR, named source commit, receipts, and
+  factory-authored actionable issue handoff await human review.
+- `agent::blocked`: documented human action is needed.
+- `agent::failed`: a rare, fatal state prevented safe checking or recording.
+- `agent::needs_repair`: legacy or manually checkpointed repair awaits exact
+  recovery. Ordinary exact pipeline failures never enter it.
+- `agent::repair_failed`: auto or reviewed repair failed, or exact proof
+  changed. It keeps follow-up proof.
+- `agent::suggest_close`: confirmed proof asks a human to close duplicate,
+  superseded, satisfied, or unfit work.
 
-The three recovery/closure labels are mutually exclusive with each other and
-with running, awaiting-human, blocked, and failed labels. They are not fresh
-selection candidates. The ledger refines `agent::running` into `preparing`,
-`executing`, `retry-wait`, `publishing`, `observing`, and `repair`; it retains
-the plan identity, evidence delta, failure, timing, and worktree when a repair
-becomes `agent::repair_failed`. `agent::blocked` continues to mean authority,
-safety, or unresolved-evidence work, while `agent::failed` remains exceptional
-or unrecoverable. Labels communicate operator-visible ownership; they are not
-the transaction log.
+The three repair and close labels exclude each other and running,
+awaiting-human, blocked, and failed. None is selectable. The ledger is the
+log. It splits `agent::running` into `preparing`, `executing`, `retry-wait`,
+`publishing`, `observing`, and `repair`. `agent::repair_failed` keeps plan ID,
+proof delta, fault, time, and worktree. `agent::blocked` covers authority,
+safety, and open proof; `agent::failed` is rare and fatal. Labels show owner.
 
-Split prerequisite labels are a separate, derived operator view. For an open
-split child, `agent-prereq_<IID>` means that IID is a currently open trusted
-prerequisite. These labels are non-scoped so one issue can display several
-open prerequisites; GitLab's scoped-label form could not do that. The validated
-marker and the prerequisite's live issue state, not that label, decide
-dependency gating. The runner derives a numerically ordered intended set,
-creates or reuses labels with stable presentation, and reconciles missing or
-stale projections idempotently. It removes a projection when its prerequisite
-closes, the marker dependency disappears, or the child closes. During the
-migration, it retains exact legacy `agent::prereq_<IID>` project-label
-definitions until every affected issue has moved to its complete canonical
-set, making an interrupted transition safely retryable. A failed remote update
-leaves retryable projection drift; it does not change the child's authority,
-lifecycle, or eligibility.
+Split prior-need labels are a user view. On an open child,
+`agent-prereq_<IID>` names an open, trusted prior need. They are non-scoped, so
+one issue can show many needs. Gates use checked markers and live need state.
 
-An automatic exact-pipeline repair is bounded per retained item. An
-unsuccessful attempt creates a durable 20-minute repair eligibility backoff,
-and three unsuccessful automatic attempts quarantine or defer that item for human review.
-Those conditions are visible through status and preview but do not prevent a
-later activation from scanning to another eligible exact repair or ordinary
-work. They are distinct from the ordinary `RETRY_WAIT` workflow state and from
-global fail-closed conflicts: inexact identity, active ownership, credentials,
-policy, and authority still stop safe automatic selection. Reviewed recovery
-remains an exceptional exact-IID action and does not consume the automatic
-repair budget.
+The runner orders by number, makes or reuses fixed labels, and safely fixes
+stale views. It removes a view when its need or child closes, or a marker ends.
+Migration keeps legacy `agent::prereq_<IID>` definitions until each changed
+issue has its full set. A stopped move retries; a failed remote update leaves
+retryable view drift. It never changes child authority, life cycle, or fit.
 
-Split handling is not a durable recovery state. After validating a
-protocol-v2 `split_required` result, the controller creates or reuses the
-marker-bound child issues in the executing segment, then notes and closes the
-parent. A retry starts a fresh workflow and repeats those marker searches. It
-does not restore a saved plan, progress record, transactional prefix, or
-checkpoint, and split children need no special supervisor projection.
+Auto exact-pipeline repair is item-bound. One failed try saves a 20-minute
+backoff. Three failed auto tries quarantine or defer it for human review.
+Status and preview show both. Later runs still scan for ready repair or work.
+
+This differs from ordinary `RETRY_WAIT` and global fail-closed conflicts.
+Inexact ID, active ownership, credentials, policy, and authority still stop
+selection. Reviewed recovery is a rare exact-IID action. It does not use the
+auto repair budget.
+
+Split handling is not saved recovery. After a protocol-v2 `split_required`
+result, the loop makes or reuses marker-bound children while running.
+It then notes and closes the parent. A retry starts fresh and repeats marker
+searches. It restores no plan, progress record, transactional prefix, or
+checkpoint. Split children need no supervisor projection.
 
 ## Scheduler liveness and item-local recovery
 
-The scheduler has one liveness invariant: no state of one item may prevent an
-unrelated eligible item from being considered. A retained item's backoff,
-quarantine, dependency, ordinary retry, or human handoff is durable and
-operator-visible, but is local to that item. Only a configured project identity
-or credential failure, ownership of the single project lock, corrupt shared
-durable state, or a truly ambiguous cross-item identity can stop an activation.
-Those cases are project-scoped because the controller cannot safely identify
-the project or sole item to advance.
+The scheduler can take another ready item while one waits. Backoff, quarantine,
+need, retry, and handoff are saved and local. A run stops for ID or credential
+failure, the project lock, bad shared state, or unclear cross-item ID. It then
+cannot name the project or its sole item safely.
 
-Serial safety still applies: the controller advances at most one active owner,
-and starts at most one automatic repair workflow, per activation. A locally
-deferred retained item does not claim a later activation; the controller records
-its next safe action and continues a deterministic scan for another candidate.
+The loop moves one owner. It starts at most one auto repair per run. It logs a
+deferred item's next safe action, then scans in fixed order.
 
-| Durable state | Representative corroborated evidence | Scheduler action and scope |
-| --- | --- | --- |
-| `PREPARING` | One clean retained worktree and matching selected item | Resume or repair that one item. |
-| `EXECUTING` | One retained workflow owner with recoverable worktree evidence | Resume or repair that one item at the coarse workflow boundary. |
-| `RETRY_WAIT` | Due `retry_at` with no immediate owner | Resume the earliest due item; defer a future deadline and continue scanning. |
-| `PUBLISHING` | Exact retained branch, worktree, and pending publication evidence | Resume or repair publication for that one item. |
-| `OBSERVING` | Exact current merge-request source SHA and nonterminal pipeline | Wait or resume observation; a safely owned terminal failure can enter repair. |
-| `REPAIR` | One exact failed current-source pipeline and uniquely corroborated owner | Resume or run at most one repair workflow in the activation. |
-| `NEEDS_REPAIR` | Legacy or reviewed recovery evidence | Defer from ordinary selection; expose exact-IID reviewed recovery and continue scanning. |
-| `REPAIR_FAILED` | Automatic repair timing and attempt evidence | Resume only when due and safe; otherwise defer or quarantine locally and continue scanning. |
-| `SUGGEST_CLOSE` | Corroborated duplicate, supersession, or no-longer-applicable evidence | Skip automatic work and show the human closure decision. |
-| `BLOCKED` | Recorded human action or unresolved item evidence | Skip automatic work and show the exact operator action. |
-| `AWAITING_HUMAN` | Verified human-review handoff for an exact MR source SHA | Skip automatic work and preserve the human handoff. |
-| `FAILED` | Exceptional item-local failure with a safe next action | Skip automatic work and show the required recovery action. |
-| `COMPLETE` | Closed issue or completed durable record | Complete: no scheduler action. |
+The scheduler treats each saved state as follows:
 
-Progress is bounded and observable. The controller stores a stable fingerprint
-for the retained issue identity, relevant state and phase, exact branch/MR/
-pipeline identity when present, and resulting action. A changed fingerprint or
-closed earlier outcome is progress. The same fingerprint with unchanged
-evidence is no progress: defer, quarantine, or hand off the item rather than
-retrying indefinitely. Status and preview retain the reason, timing, attempt
-count, evidence summary, and next action. Preview uses the same decisions but
-never claims work or changes GitLab, the ledger, worktrees, branches, or
-services.
+- `PREPARING`: a clean worktree matches. Resume or repair.
+- `EXECUTING`: saved worktree proof exists. Resume or repair at `WORKFLOW`.
+- `RETRY_WAIT`: no live owner and `retry_at` is due. Resume first due item;
+  defer a later one and keep scanning.
+- `PUBLISHING`: exact branch and worktree wait to publish. Resume or repair.
+- `OBSERVING`: the exact MR SHA has a live pipeline. Wait or resume. A safe
+  owned terminal fault can enter repair.
+- `REPAIR`: exact failed current-source proof and one owner permit repair.
+- `NEEDS_REPAIR`: old or reviewed proof defers new work. Show exact-IID
+  reviewed recovery and keep scanning.
+- `REPAIR_FAILED`: resume only when due and safe. Else defer or quarantine,
+  then keep scanning.
+- `SUGGEST_CLOSE`: proved duplicate, replacement, or poor fit skips work and
+  shows the close choice.
+- `BLOCKED`: human action or open proof skips work. Show that action.
+- `AWAITING_HUMAN`: a checked handoff for an exact MR SHA skips work and stays.
+- `FAILED`: a rare item fault skips work. Show recovery action.
+- `COMPLETE`: a closed issue or complete record needs no action.
 
-Retry and repair budgets, delay bounds, priorities, and lock rules are trusted
-controller constants. Untrusted issue and merge-request text cannot set them or
-turn an item-local deferment into project authority.
+Progress is bounded and clear. Its fingerprint has issue ID, state, phase,
+exact branch, MR, pipeline ID, and action. A changed fingerprint or closed end
+is progress. Unchanged proof is not. Defer, quarantine, or hand off. Status
+and preview show cause, time, tries, proof, and next action. Preview uses the
+same choices. It claims no work and changes no GitLab, ledger, worktree, branch,
+or service.
+
+Trusted constants set budgets, waits, ranks, and locks. Issue and MR text
+cannot set them or turn a local delay into project authority.
 
 ## State-machine activation and workflow sessions
 
-Every timer activation acquires the single-project lock, reconciles durable
-evidence, and advances at most one issue through a workflow-owning session.
-The durable recovery boundary surrounds that session, not every internal agent
-handoff:
+Each activation holds at most one local activation lock: the single-project
+lock. The lock is local. It reconciles durable evidence and advances at most
+one issue in a workflow-owning session. Recovery covers that session, not
+internal agent handoffs.
 
-1. Acquire the single-project local lock.
-2. Reconcile GitLab issue and MR data, the durable worktree, Git branches, and
-   the local ledger.
-3. Apply the pipeline and default-evidence gate by inspecting the configured
-   project's newest default-branch pipeline and every open merge request's
-   newest pipeline for that merge request's exact current source SHA. Missing,
-   malformed, or inaccessible evidence blocks selection; a nonterminal
-   observation yields. An exact failed MR pipeline with one uniquely
-   corroborated retained owner transitions directly to `repair` and starts the
-   repair workflow in that activation.
-4. Resume the sole recoverable `agent::running` work.
-5. Permit a blocked-record reclassification only for one exact IID, with live
-   corroboration and a reviewed `loop recover --issue-iid IID` plan. A bulk
-   status report cannot supply per-item live corroboration; targeted status
-   may. This manual path is for interrupted, ambiguous, or otherwise unsafe
-   retained work, not a uniquely owned failed current-source MR pipeline.
-6. Treat a failed default-branch or ownerless merge-request pipeline as an
-   actionable human block, then continue only when the preceding gate and
-   targeted recovery decisions permit fresh selection.
-7. Reconcile prerequisite-label projections before fresh selection. A pass that
-   changes any projection ends as housekeeping and does not claim work or
-   create a ledger record, worktree, or worker session.
-8. Filter fresh work to open, non-confidential issues with no lifecycle
-   projection, ledger record, or open split prerequisite. Rank exact high,
-   then normal (no recognized exact priority label), then exact low; within a
-   rank compare absolute creation time and IID.
-9. Classify it before claiming it as ordinary issue work, existing-MR
-   remediation, merge-conflict repair, or protected policy work that requires
-   the manual lane.
-10. Persist transition intent before the corresponding external mutation, then
-   record the observed result. Reconciliation completes or compensates any
-   transition interrupted between those writes.
-11. Run one bounded workflow-owning worker in the issue's durable worktree.
-12. Validate a versioned worker result: `ready_to_publish`, `retryable`, or
-   `needs_human`.
-13. Publish idempotently and verify exact same-project MR, branch, target, tip,
-   and closing-issue evidence.
-14. Record one safe, actionable outcome. Continue immediately with the same
-    issue when progress is safe, or yield when the activation reaches idle,
-    no progress or a future external wait, a terminal or human-facing
-    state, or its workflow or wall-time bound.
+| Phase | Action | Required evidence or authority | Stop or next state |
+| --- | --- | --- | --- |
+| Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
+| Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, or inaccessible evidence blocks. Nonterminal evidence yields. An exact failed MR pipeline enters `repair` only with one uniquely corroborated retained owner. |
+| Retained-work recovery | Resume sole recoverable `agent::running` work. Reclassify one blocked IID only with live corroboration and reviewed `loop recover --issue-iid IID`. | Targeted status can corroborate an item; bulk status cannot. This manual path is for interrupted, ambiguous, or unsafe retained work. | It never handles a uniquely owned failed current-source MR pipeline. |
+| Human block | Treat a failed default-branch or ownerless MR pipeline as blocking humans. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
+| Prerequisite projection | Reconcile prerequisite-label projections before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
+| Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, or open split prerequisite. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
+| Classification | Classify before claim: ordinary work, existing-MR remediation, merge-conflict repair, or manual-lane protected policy work. | The applicable classification and Architect lane. | Claim only after classification. |
+| Write-ahead transition | Persist intent before each external mutation. Record its observed result. | Durable intent and observed result. | Reconciliation completes or compensates across interruption. |
+| Worker | Run one bounded owner worker in its durable worktree. Validate its versioned `ready_to_publish`, `retryable`, or `needs_human` result. | The one workflow-owning worker session and its versioned result. | Continue to publication only with a valid result. |
+| Publication | Publish idempotently. Verify exact same-project MR, branch, target, tip, and closing-issue evidence. Record one safe action. | Exact GitLab and Git evidence. | Continue only with safe progress. Otherwise yield for idle, no progress, future wait, terminal or human state, or workflow or wall-time bound. |
 
-An interrupted ordinary workflow can have completed publication before its
-ledger records the MR. Before normal retry, worker, worktree-baseline, push, or
-MR-creation paths, the runner inventories every opened MR for that recorded
-source branch. It accepts only one candidate whose configured numeric source
-and target projects, source and target branches, source SHA, closing relation,
-and durable worktree all match. This makes the discovered MR authoritative
-without choosing a newest candidate. A mismatch or ambiguity is a
-`publication_identity_mismatch` block; an empty inventory leaves the ordinary
-recovery path unchanged. Once verified, retained Draft metadata is reconciled
-without downgrading it, retry fields are cleared atomically, and exact-SHA
-pipeline observation begins in that activation.
+An interrupted ordinary workflow may publish before ledger MR recording. Before
+retry, worker, baseline, push, or MR creation, inventory opened MRs for the
+recorded source branch. Accept one only when numeric source and target projects,
+branches, source SHA, closing relation, and durable worktree all match. That MR
+is authoritative. Never choose the newest candidate. Mismatch or ambiguity is
+`publication_identity_mismatch`. Empty inventory changes no ordinary recovery.
+After verification, reconcile Draft metadata without downgrading it. Clear
+retry fields atomically. Start exact-SHA observation in that activation.
 
-When reconciliation finds ordinary retained-branch advancement, it may accept
-the MR's descendant SHA only when all facts corroborate: configured numeric
-project identity; retained MR identity and URL when present; matching source
-branch; configured target project and default branch; a clean retained
-worktree; exact retained branch and `HEAD` equal to the MR source SHA; proof
-that the retained SHA is an ancestor of the MR SHA; and no competing identity.
-Any missing or conflicting fact quarantines that item locally while the
-scheduler continues scanning. This rule never chooses a plausible newest MR.
+The runner may accept an MR descendant SHA for ordinary retained-branch
+advancement only with every corroborating fact. These are configured numeric
+project identity; retained MR identity and URL, when present; matching source
+branch; configured target project and default branch; clean retained worktree;
+exact retained branch and `HEAD` equal to MR source SHA; ancestor proof; and
+no competing identity. Missing or conflicting facts quarantine the item
+locally. Scanning continues. Never choose a plausible newest MR.
 
-Selection of a fresh issue starts at the beginning of its applicable workflow
-and attempts to reach human handoff or another yield condition in that
-activation. Reconciliation of an existing record restores the worktree and
-re-enters its coarse `WORKFLOW` state. Existing legacy phase-ledger values
-finish their recorded route; the first rollout deliberately adds no sidecar checkpoints for
-Architect, Red, Green, documentation, or judges.
+Fresh selection begins its applicable workflow. It seeks human handoff or a
+yield in that activation. Reconciliation restores existing worktrees. It
+re-enters their coarse `WORKFLOW` state. Legacy phase-ledger values finish
+their recorded route. First rollout adds no sidecar checkpoints for Architect,
+Red, Green, documentation, or judges.
 
-The default activation runs at most 16 workflow attempts within one 10,800-second
-(three-hour) overall work budget. Each workflow-owning invocation receives the
-positive, ceil-rounded time remaining from that budget. An exhausted budget is
-handled by the normal durable-worktree retry and recovery path. Retryable worker
-failures are immediately due and continue in that activation. When default-branch
-or exact current-MR pipeline evidence is nonterminal, an applied activation
-rechecks it in place after a short bounded exponential delay: 5, 10, then 20
-seconds, capped at 30 seconds. It resumes promptly when the evidence becomes
-terminal. The 20-minute timer runs only after the service becomes inactive for
-genuine idle/no-eligible-or-resumable-work checks; it does not pace an active
-pipeline wait. Future retry deadlines, human or safety blocks, missing, failed,
-or unrecognized evidence, the activation deadline, and the systemd outer
-timeout remain durable handoffs. The systemd oneshot adds a 190-minute
-sequence-wide outer envelope: the approved 180-minute worker budget plus a
-10-minute safety margin for wrapper checkout,
-GitLab, publication, and reporting. This bounds an otherwise hung wrapper
-without shrinking the worker's 10,800-second budget. Non-worker housekeeping
-operations have 120-second deadlines, while the applied worker receives its
-remaining budget. When the outer envelope expires, systemd terminates the
-whole control group with a 30-second TERM-to-KILL grace period and preserves
-`Result=timeout` plus journal evidence. The trade-off is that a failed or hung
-activation is stopped predictably rather than allowed to delay completion-
-relative timer scheduling indefinitely; the durable ledger and retained
-worktree make normal retry and human diagnosis possible. The timer does not
-own workflow state or perform checkout cleanup.
+Default activation allows 16 workflow attempts in a 10,800-second
+(three-hour) budget. Each owning invocation gets positive, ceil-rounded time
+left. Exhaustion follows durable-worktree retry and recovery. Retryable worker
+failures are immediately due and continue. Nonterminal default-branch or exact
+current-MR evidence rechecks in place. Delays are 5, 10, then 20 seconds,
+capped at 30. It resumes when evidence is terminal. The 20-minute timer starts
+only after service inactivity for idle, no eligible work, or no resumable work.
+It never paces an active pipeline wait.
+
+Future retries, human or safety blocks, missing, failed, or unrecognized
+evidence, activation deadline, and systemd timeout are durable handoffs. The
+oneshot outer envelope is 190 minutes. It combines the approved 180-minute
+worker budget and ten minutes for checkout, GitLab, publication, and reports.
+It bounds hangs without shrinking 10,800-second worker budget. Housekeeping
+has 120-second deadlines. Workers get remaining budget. On expiry, systemd
+ends the control group after 30-second TERM-to-KILL grace. It retains
+`Result=timeout` and journal evidence. This stops hangs predictably. The ledger
+and worktree support retry and diagnosis. The timer owns no workflow state or
+checkout cleanup.
 
 ## Durable ledger and worktrees
 
-State lives below an XDG state directory, keyed by the configured GitLab host
-and numeric project ID. Each active issue owns one durable worktree and one
-ledger record. A record contains at least:
+The XDG state directory uses GitLab host and numeric project ID as its key. Reconcile
+this ledger before selecting work. Each active issue has one durable worktree
+and one record. The record tells recovery what to do, in order.
 
-- schema version, project identity, issue IID, and work kind;
-- state, coarse workflow phase, attempt number, retry deadline, and last transition time;
-- base, source, and target branches plus observed commit IDs;
-- the exact verified reconciliation target commit used when the worktree is
-  merged with the target branch before a replayed workflow;
-- merge-request identity and last verified publication evidence;
-- worker protocol version, latest result kind, and required receipts;
-- a stable error code, redacted summary, and explicit next action; and
-- transition intent needed to reconcile an interrupted external mutation.
+| Durable field group | Purpose and constraint |
+| --- | --- |
+| Schema version, project identity, issue IID, and work kind | Name one known record, project, and issue. |
+| State, coarse workflow phase, attempt count, retry deadline, and last transition time | Use only this state and phase. Retry by this count and deadline. |
+| Base, source, and target branches with observed commit IDs | Keep branch identity and the commit IDs used to check it. |
+| Verified reconciliation target commit | Keep the exact SHA used to merge the worktree with the target branch before replay. |
+| Merge-request identity and verified publication evidence | Keep the MR IID, project identities, branches, exact source SHA, and publication marker. |
+| Worker protocol version, latest result kind, and required receipts | Keep the protocol, result, receipts, evidence markers, and human-handoff marker. |
+| Stable error code, redacted summary, and explicit next action | Keep a stable error identity and next action. Redact detail. |
+| Transition intent | Write an external-change intent first, so it can be replayed safely. |
 
-The ledger stores no GitLab token, agent credential, issue-body authority, or
-unredacted worker transcript. Writes use atomic replacement and restrictive
-permissions. Corrupt or unsupported records become `agent::blocked` when the
-runner can still safely record that outcome; they become `agent::failed` only
-when safe reconciliation or recording is impossible.
-
-Worktrees, commits, and verified remote refs are normal persistence. Stashes
-are emergency evidence only. The runner inventories a recovery stash and
-associates it with an issue, but never applies or drops it automatically.
+| Condition | Ledger or worktree action |
+| --- | --- |
+| A record is new, resumed, or stopped mid-step | Atomically write the ledger with restricted permissions. Reconcile before work resumes. |
+| A record is corrupt, unsupported, missing, unknown, or ambiguous | Fail closed as `agent::blocked`. Use `agent::failed` only if safe recording or reconciliation fails. |
+| A durable worktree, commit, or verified remote ref is found | Keep it with its record as normal persistence. Do not make a competing worktree. |
+| A stash is found | Inventory it and associate it with its worktree as emergency evidence. Never apply, drop, or clean it up automatically. |
+| Cleanup is safe | Clean only the durable worktree owned by a terminal, reconciled record. Keep its ledger and ownership evidence until then. |
+| Diagnostics are stored | Redact them. Never save tokens, secrets, credentials, issue-body authority, or unredacted worker transcripts. |
 
 ## Invariants
 
-The implementation must maintain these invariants:
+The table maps each invariant to the required control or evidence.
 
-- At most one local activation holds the project lock.
-- No new issue is claimed while resumable running work exists.
-
-Retry-wait records are queued rather than concurrent owners: ordinary selection
-first resumes the sole non-waiting active record, then considers only due
-retries in deterministic deadline/IID order. Two non-waiting active records
-remain a fail-closed ambiguity.
-- Project-level loop enablement authorizes unattended work. A new issue is
-  eligible only when it is open, non-confidential, has none of
-  `agent::running`, `agent::awaiting-human`, `agent::blocked`, or
-  `agent::failed`, and has no ledger record.
-- One issue maps to one durable worktree and one authoritative source branch.
-- Existing-MR remediation uses the verified MR source branch and never creates
-  a second MR.
-- A transition is replayable: its intent is durable before an external write,
-  and reconciliation is safe after interruption at either side of that write.
-- During exact-source pipeline observation, a human merge can complete the
-  record only after fresh evidence corroborates the configured project, the
-  recorded MR IID, both MR project identities and branches, the recorded exact
-  source SHA, the closing relationship, the now-closed issue, and that SHA's
-  successful pipeline. Mismatched, unrelated, ambiguous, missing, or
-  non-successful evidence remains fail-closed.
-- The controller persists `COMPLETE` before it clears lifecycle labels. A
-  restart can therefore retry only the label projection after the durable
-  completion record exists. A `BLOCKED` or `RETRY_WAIT` wrapper retains verified
-  publication identity, so later closed-issue reconciliation can still make
-  this exact completion decision. When the issue is open, it repairs the
-  `OBSERVING` lifecycle-label projection before observation continues.
-- Publication is idempotent and accepted only from exact GitLab and Git
-  evidence.
-- Protected-policy applicability is determined from the prospective
-  publication tree relative to the durable verified reconciliation target, not
-  from raw worktree status. This attributes target-branch-only policy changes
-  to the target branch while retaining review evidence for issue-owned changes
-  and merge resolutions that differ from the target tree.
-- Before projecting `agent::awaiting-human`, the runner writes one
-  factory-authored actionable issue handoff for the exact MR source commit. Its
-  deterministic project, issue, MR, and SHA marker plus verified factory author
-  make recovery noiseless: the same SHA reuses the note, while a changed SHA
-  requires a new handoff. The note tells a human to review that named commit and
-  either approve and merge it if acceptable or leave actionable general or
-  inline MR feedback. The runner never assigns a reviewer, approves, or merges.
-- The full repository workflow remains intact inside one workflow-owning
-  session. Red and the Diátaxis Writer concurrently and exclusively mutate
-  `tests/` and `docs/`, respectively; Green begins only after both receipts,
-  then becomes sole mutable owner, reconciles the documentation draft, and
-  consolidates applicable read-only judge findings for the Architect's final
-  decision.
-- Expected durable outcomes do not make the systemd unit fail.
-- The runner never approves or merges and never widens authority from issue
-  text, labels, comments, or worker output.
+| Invariant | Required control or evidence |
+| --- | --- |
+| Local activation | One local activation holds the project lock. |
+| Resumable work | Do not claim new work while resumable running work exists. |
+| Retry selection | Retry-wait records queue; they are not concurrent owners. Normal selection first resumes the sole non-waiting active record. It then considers only due retries in deterministic deadline/IID order. Two non-waiting active records are a fail-closed ambiguity. |
+| New-issue eligibility | Project-level loop enablement permits unattended work. A new issue must be open and non-confidential. It must have no `agent::running`, `agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no ledger record. |
+| Issue identity | One issue has one durable worktree and one authoritative source branch. |
+| MR uniqueness | Existing-MR remediation uses the verified MR source branch. It never makes a second MR. |
+| Durable transitions | A transition is replayable. Its intent is durable before an external write. Reconciliation is safe after interruption on either side of that write. |
+| Exact-source observation | During exact-source pipeline observation, a human merge completes the record only after fresh evidence corroborates the configured project and recorded MR IID. It must also corroborate both MR project identities and branches, the recorded exact source SHA, the closing relationship, the closed issue, and that SHA's successful pipeline. Mismatched, unrelated, ambiguous, missing, or non-successful evidence fails closed. |
+| Completion projection | The controller persists `COMPLETE` before clearing lifecycle labels. A restart then retries only label projection after the durable completion record exists. A `BLOCKED` or `RETRY_WAIT` wrapper keeps verified publication identity. Later closed-issue reconciliation can make the same exact completion decision. For an open issue, the controller repairs the `OBSERVING` lifecycle-label projection before observation continues. |
+| Publication | Publication is idempotent. It needs exact GitLab and Git evidence. |
+| Protected-policy applicability | Protected-policy applicability uses the prospective publication tree against the durable verified reconciliation target, not raw worktree status. This assigns target-branch-only policy changes to the target branch. It keeps review evidence for issue-owned changes and merge resolutions that differ from the target tree. |
+| Human handoff | Before projecting `agent::awaiting-human`, the runner writes one factory-authored actionable issue handoff for the exact MR source commit. A deterministic project, issue, MR, and SHA marker, plus a verified factory author, make recovery noiseless. The same SHA reuses the note. A changed SHA needs a new handoff. The note asks a human to review the named commit and either approve and merge it if acceptable or leave actionable general or inline MR feedback. The runner never assigns a reviewer, approves, or merges. |
+| Workflow ownership | The full repository workflow stays in one workflow-owning session. Red and the Diátaxis Writer concurrently and exclusively mutate `tests/` and `docs/`. Green starts only after both receipts. It then becomes sole mutable owner, reconciles the documentation draft, and consolidates applicable read-only judge findings for the Architect's final decision. |
+| Systemd outcomes | Expected durable outcomes do not fail the systemd unit. |
+| Authority boundary | The runner never approves or merges. It never widens authority from issue text, labels, comments, or worker output. |
 
 ## Workflow protocol and receipts
 
-The workflow-owning session returns a versioned result envelope. The envelope
-identifies the issue, expected ledger transition, coarse completed workflow
-state, receipts produced, result kind, redacted diagnostic, and proposed next
-action. The trusted runner validates it against the current record and Git
-evidence before changing state.
+The workflow session returns a versioned envelope. It names the issue, expected
+ledger transition, completed coarse state, receipts, result kind, redacted
+diagnostic, and proposed next action. Before changing state, the trusted runner
+checks it against the current record and Git evidence. A deliberate stop is not
+a failure.
 
-`ready_to_publish` means the bounded workflow session produced validated changes or a
-validated repair that the trusted runner may publish. `retryable` names a
-transient category and is immediately retried within the activation. External
-transient failures retain their future retry deadline. `needs_human` names the blocked reason
-and a concrete action without treating a deliberate stop as failure.
+| Phase or result | Owner and required input | Receipt, transition, or stop |
+| --- | --- | --- |
+| `ready_to_publish` | Coding or content finalizer; validated change or repair | May proceed. New-MR work needs a returned or ledger-retained `merge_request_draft`; existing-MR remediation uses its verified MR. |
+| `retryable` | Runner; current retry evidence | Retry now, or retain a future deadline for an external transient. An explicit retry of the exact issue resets the automatic budget after a human fix. |
+| `needs_human` | Runner; block and concrete action | Block publication. |
+| Malformed protocol or receipt | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. |
+| Architecture through Green | Architect gives the approved design concurrently to Red and the Diátaxis Writer | Green starts only after both receipts, receives test evidence and the documentation draft or no-doc rationale, becomes sole mutable owner, and reconciles docs with implemented interfaces. |
+| Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out, corrects from evidence, consolidates feedback, and returns it to Architect. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
+| Publication and assessment | Architect, finalizer, then runner; complete finalizer evidence | `observing`, exact-MR-conflict `repair`, and fresh `post-publication` assessment are durable. Publication does not end assessment. |
 
-Malformed protocol and receipt-validation failures need one additional progress
-check. The first automatic failure schedules the current immediate retry. On a
-later automatic attempt, the runner compares its canonical identity—the
-canonical error code and bounded, stable, redacted contract-field or reason
-diagnostic—with the latest
-automatic condition in the same coarse phase. An identical identity shows that
-retrying has not changed the relevant evidence. The runner blocks immediately
-instead of spending another retry, while retaining the coarse phase, durable
-worktree, and safe cause. It then makes the normal blocked projection and
-comment. A changed code, diagnostic, or phase remains evidence of progress and
-continues through the ordinary bounded retry path; non-protocol transient
-failures keep their existing retry behavior. A human fixes the condition and
-explicitly retries the exact issue, which resets its automatic retry budget.
-
-For every new-MR work kind, including protected policy work, the coding or
-content finalizer may return
-`ready_to_publish` only with a returned or ledger-retained
-`merge_request_draft`. This prevents the trusted runner from reconstructing a
-publication request from untrusted issue text. Existing-MR remediation is the
-intentional exception: its verified MR supplies the publication target, so no
-new draft is required.
-
-The trusted runner permits protected policy paths only after complete applicable
-workflow receipts, a complete verdict, and typed non-empty metadata. A safe
-controversial result uses a `Draft:` title and includes unresolved findings and
-evidence, exact human decisions, tests, cycle ledger, and unchanged
-project-owned values. Missing evidence, unsafe worktree identity, authority
-expansion, project-owned value changes, `needs_human`, or a finalizer rejection
-remain fail-closed before publication. The worker never commits, pushes, or
-creates a merge request.
-
-Architecture, Red/Green, documentation, review, finalization, and
-post-publication assessment remain required according to the live
-`$architect` router. The Architect carries approved design concurrently to Red and the
-Diátaxis Writer, waits for both receipts, then gives Green the test evidence
-and documentation draft or no-doc rationale. Green reconciles documentation
-with implemented interfaces, owns subsequent modifications, concurrent
-read-only judge fan-out, evidence-led correction cycles, and feedback consolidation before the
-Architect makes the final decision. The Diátaxis Judge compares the design,
-writer receipt, final docs, and final interface; its comparison verdict and
-the writer evidence remain required finalizer evidence. Publication no longer
-prevents later post-publication work because `observing`, `repair` for exact
-MR conflicts, and fresh `post-publication` assessment are durable states.
+Protected policy also needs all applicable receipts, a complete verdict, and
+typed, non-empty metadata. A safe disputed result starts `Draft:`. It includes
+open findings and evidence, exact human decisions, tests, the cycle ledger, and
+unchanged project-owned values. Missing evidence, an unsafe worktree identity,
+expanded authority, project-owned value changes, `needs_human`, or finalizer
+rejection blocks publication. The runner never builds a publication request
+from issue text. The worker never commits, pushes, or opens an MR. Only a human
+reviews, approves, or merges the exact MR.
 
 ## Failure taxonomy and process exits
 
-Failures are classified before labels or exit codes are chosen:
+Classify a failure before choosing its label or exit code.
 
-| Category | Examples | Durable outcome |
-| --- | --- | --- |
-| Idle | No resumable record or eligible issue | Successful `idle` |
-| Retryable | Timeout, temporary API failure, transient runner contention | `retry-wait`; up to three automatic attempts |
-| Human-blocked | Ambiguous request, unmet dependency, unsafe policy evidence, unsafe recovery evidence | `agent::blocked` with exact next action |
-| Awaiting review | Exact MR and required receipts verified | `agent::awaiting-human` |
-| Unrecoverable | Ledger cannot be safely read or written, irreconcilable identity conflict | `agent::failed` where safely recordable |
+| Category | Evidence | Label or state | Outcome |
+| --- | --- | --- | --- |
+| Idle | No resumable record or eligible issue. | `idle` | Exit successfully. |
+| Retryable | A timeout, temporary API failure, or transient runner contention. | `retry-wait` | Make at most three automatic attempts. |
+| Human-blocked | An ambiguous request, unmet dependency, or unsafe policy or recovery evidence. | `agent::blocked` | Record the exact next action. |
+| Awaiting review | The exact MR and required receipts are verified. | `agent::awaiting-human` | Wait for human review. |
+| Unrecoverable | The ledger cannot be read or written safely, or identity conflicts cannot be reconciled. | `agent::failed`, when safe to record | Stop safely. |
 
-Idle, retry scheduled, blocked, and awaiting-human outcomes exit successfully
-from systemd. Exit `1` means the runner could not safely record or reconcile
-state. CLI-usage errors remain distinct from runtime failure, and lock
-contention remains a temporary outcome for interactive callers. The reference
-defines the exact CLI, JSON schema, and full exit-code table.
+Systemd treats idle, scheduled retry, blocked, and awaiting review as successful
+exits. Exit `1` means the runner cannot safely record or reconcile state.
+CLI-usage errors are not runtime failures. For an interactive caller, lock
+contention is temporary. The reference owns the exact CLI, JSON schema, and
+full exit-code table.
 
 ## Recovery and reconciliation
 
-Reconciliation treats ledger intent plus external evidence as the source for a
-safe next transition:
+Reconciliation uses ledger intent and external evidence to choose the next safe
+transition.
 
-- A `running` issue with a valid ledger and worktree resumes its recorded
-  coarse workflow state, regardless of the process that created it.
-- A persisted transition intent is checked against GitLab and Git; an already
-  completed external mutation is recorded, while an absent idempotent mutation
-  may be retried.
-- Before a workflow replay needs target-branch reconciliation, the runner
-  persists the exact verified target commit. Recovery uses that same commit,
-  so an interruption cannot silently compare the prospective publication tree
-  with a later target tip. An unresolved conflict or a missing, mismatched, or
-  ambiguous merge identity fails closed before publication.
-- An awaiting-human projection is reconciled against its exact MR source SHA
-  and its factory-authored issue handoff even when its label is already present.
-  A missing handoff is repaired before the label is projected. A transient
-  handoff-write failure keeps durable retry state and prevents a new
-  awaiting-human label; after interruption, an already-written verified note is
-  reused before the label is repaired.
-- A legacy ordinary `PUBLISHING` or `READY_TO_PUBLISH` record with
-  `source_sha`, no `merge_request_draft`, and `intent=null` returns
-  side-effect-free to its lane finalizer. Reconciliation never fabricates a
-  draft from issue text.
-- A missing worktree may be recreated only from recorded and verified commits
-  when no uncommitted evidence can be lost.
-- A dirty durable worktree remains in place for its next workflow attempt. It is not
-  cleaned or stashed during normal shutdown.
-- An orphan worktree, branch, label, or stash is inventoried and blocked for a
-  human decision when ownership cannot be proved.
-- At the beginning of an applied activation, closed lifecycle projections are
-  reconciled in one bounded IID-ordered inventory before any open work is
-  resumed or selected. A closed issue with a ledger is first durably normalized
-  to `COMPLETE`, clearing transient retry, intent, error, worker-exit, and
-  pending-feedback state; only then are its lifecycle labels removed through
-  the existing authenticated GitLab identity boundary. A closed issue without a
-  ledger loses only its stale lifecycle labels: reconciliation does not
-  manufacture a complete, blocked, journal, or worktree record. This
-  persist-before-label order makes a partial failure harmlessly resumable: a
-  ledger failure retains the label, while a recorded issue's label failure
-  retains the canonical `COMPLETE` record and its stale label for the next
-  activation. An orphan label-removal failure retains only its stale label.
-  Earlier IID-ordered successes remain valid. This closed-issue housekeeping
-  neither consumes the open-work budget nor invokes a worker or performs
-  repository, branch, worktree, push, or merge-request operations; open orphan
-  projections retain their existing blocked recovery path.
-- Retryable work uses at most three bounded automatic attempts. Exhaustion
-  moves it to `agent::blocked`, not `agent::failed`.
+| Condition and evidence | Recovery action or stop condition |
+| --- | --- |
+| A `running` issue has a valid ledger and worktree. | Resume its recorded coarse workflow state, regardless of which process created it. |
+| A persisted transition intent is checked against GitLab and Git. | Record an external mutation that already completed; retry an absent idempotent one. |
+| Replay needs target-branch reconciliation. | Persist the exact verified target commit. Recovery uses that commit, so interruption cannot compare the prospective publication tree with a later target tip. An unresolved conflict, or a missing, mismatched, or ambiguous merge identity, fails closed before publication. |
+| An awaiting-human projection is checked against its exact MR source SHA and factory-authored issue handoff, even when its label exists. | Repair a missing handoff before projecting the label. A transient handoff-write failure keeps durable retry state and prevents a new awaiting-human label. After an interruption, reuse an already-written verified note before repairing the label. |
+| A legacy ordinary `PUBLISHING` or `READY_TO_PUBLISH` record has `source_sha`, no `merge_request_draft`, and `intent=null`. | Return side-effect-free to its lane finalizer. Reconciliation never fabricates a draft from issue text. |
+| A worktree is missing and no uncommitted evidence can be lost. | Recreate it only from recorded and verified commits. |
+| A durable worktree is dirty. | Keep it for its next workflow attempt. Normal shutdown does not clean or stash it. |
+| An orphan worktree, branch, label, or stash has unproved ownership. | Inventory it and block it for a human decision. |
+| An applied activation starts with closed lifecycle projections. | Reconcile them in one bounded IID-ordered inventory before resuming or selecting open work. |
+| A closed issue has a ledger. | First normalize it to `COMPLETE`, clearing transient retry, intent, error, worker-exit, and pending-feedback state. Then remove lifecycle labels through the existing authenticated GitLab identity boundary. |
+| A closed issue has no ledger. | Remove only stale lifecycle labels. Reconciliation creates no complete, blocked, journal, or worktree record. |
+| A partial failure occurs in persist-before-label order. | This makes partial failure resumable: keep the label after a ledger failure. Keep the canonical `COMPLETE` record and stale label for the next activation after a recorded issue's label failure. |
+| An orphan label-removal attempt fails. | Keep only its stale label. Earlier IID-ordered successes remain valid. |
+| Closed-projection housekeeping runs. | Use no open-work budget, worker, repository, branch, worktree, push, or merge-request operation. |
+| An open orphan projection remains. | Keep its blocked recovery path. |
+| Work is retryable. | Use at most three bounded automatic attempts. On exhaustion, move it to `agent::blocked`, not `agent::failed`. |
 
-Operational recovery is deliberately plan-bound. A non-claiming canary makes a
-reviewable identity-and-evidence checkpoint without selecting an issue or
-starting a worker. Targeted recovery makes a separate plan for one IID and
-rechecks its public identity, ledger revision, worktree, MR, and exact-SHA
-pipeline evidence under the project lock before mutation. This separates human
-review of the next action from authorization to change evidence that may have
-moved since review. Conflicting active records, a competing owner, or changed
-evidence fail closed rather than allowing the loop to choose a substitute.
+Operational recovery follows a plan. A non-claiming canary creates a checkpoint
+for identity and evidence review. It claims no issue. It starts no worker. It
+makes no change. Targeted recovery makes a separate plan for one IID. Before a
+change, it rechecks public identity and the ledger revision. It also rechecks
+the worktree, MR, and exact-SHA pipeline evidence. It does this under the
+project lock. Review of the next action does not authorize a change to moved
+evidence. A conflicting active record fails closed. A competing owner does too.
+Changed evidence does too. The loop chooses no substitute.
 
-The recovery inventory is a concise audit view, not a second recovery engine.
-It reports the current and intended prerequisite-label projections alongside
-the authoritative dependency explanation, but never reconciles either one.
-Terminal evidence has a deliberate no-action precedence: a closed recordless
-split issue and a closed `COMPLETE` record remain settled even when later
-worktree, head, merge-request, or pipeline observations drift. This prevents
-old terminal artifacts from creating misleading work while keeping aggregate
-closed and no-action counts visible. A closed nonterminal record remains a
-human decision, and a targeted lookup retains the full exact evidence needed
-to make it. This view changes neither the one-IID, one-explicit-choice,
-evidence-bound resolution boundary nor the rule that only humans approve or
-merge.
+The recovery inventory is an audit view. It is not a second recovery engine. It
+reports current and intended prerequisite-label projections. It gives the
+source-of-truth reason for each need. It reconciles neither. Terminal evidence
+takes no-action precedence. A closed recordless split issue stays settled. A
+closed `COMPLETE` record does too. Later worktree, head, merge-request, or
+pipeline evidence can drift. That drift cannot reopen terminal work. It avoids
+false work from old artifacts. It keeps aggregate closed and no-action counts
+visible. A closed nonterminal record needs a human decision. A targeted lookup
+is exact. It keeps full evidence. The view keeps one IID and one explicit
+choice. Its resolution stays evidence-bound. Only humans approve or merge.
 
 ## Security and authority boundaries
 
-GitLab issue text and worker results remain untrusted task data. They cannot
-select a different project, grant credentials, relax sandboxing, modify
-approval policy, or authorize approval or merge. Every API operation stays
-under the configured numeric project ID, and every Git/MR identity is verified
-against that project.
+GitLab issue text and worker results are untrusted task data. They cannot
+choose a project. They cannot grant credentials or relax sandboxing. They
+cannot change approval policy. They cannot approve or merge. Every API
+operation uses the configured numeric project ID. Every Git/MR identity is
+checked against that project.
 
-The ledger and worktrees are local durability, not a distributed lock or a
-same-user security boundary. Exactly one host owns unattended processing for a
-project. Secrets stay in the existing credential providers and are never
-copied into the ledger or journal.
+The ledger and worktrees provide local durability. They are not a distributed
+lock. They are not a same-user security boundary. One host owns unattended
+processing for a project. Secrets stay in existing credential providers. They
+never enter the ledger or journal.
 
-Protected agent-policy changes use a human-directed lane unless a separate
-secure cross-agent design is reviewed. The state machine records that boundary
-as `agent::blocked`. The publication boundary checks the paths actually changed
-in the durable worktree, including template mirrors; it does not weaken the
-sandbox or reinterpret the issue as authority.
+Protected agent-policy changes use a human-directed lane. A separate secure
+cross-agent design review is needed before an exception. The state machine
+records that boundary as `agent::blocked`. The publication boundary checks
+paths changed in the durable worktree, including template mirrors. It does not
+weaken the sandbox. It does not reinterpret issue text as authority.
+
+## Security
+
+| Threat or boundary | Control |
+| --- | --- |
+| Untrusted GitLab issue text or worker results | They cannot select a project, grant credentials, weaken sandboxing or approval policy, or authorize approval or merge. |
+| Project and GitLab identity | Each API call uses the configured numeric project ID. Git and MR identity must match that project. |
+| Local durability | The ledger and worktrees are not a distributed lock or a same-user security boundary. One host owns unattended work for a project. |
+| External credentials | Existing credential providers keep secrets out of the ledger and journal. |
+| Protected agent-policy work | Use a human-directed lane unless a separate secure cross-agent design has been reviewed. Record this boundary as `agent::blocked`. |
+| Publication boundary | Check changed paths in the durable worktree, including template mirrors. Do not weaken the sandbox or treat the issue as authority. |
 
 ## Migration and rollout
 
-Migration is evidence-preserving:
+Migration preserves evidence and moves in this order. Do not use a later row
+to bypass a stop in an earlier one.
 
-1. Stop the timer and confirm no activation holds the project lock.
-2. Inventory current running, awaiting-human, failed, blocked, and closed
-   projections; exact branch, MR, worktree, and recovery-stash evidence.
-3. Run a non-mutating migration preview that proposes ledger records, label
-   transitions, retained evidence, and human decisions.
-4. Review the preview. Never apply, drop, relabel, close, or delete ambiguous
-   evidence automatically.
-5. Apply approved migrations idempotently only while the plan and inventory
-   remain exact and no ledger record already exists; verify the resulting
-   ledger, worktrees, labels, branches, and MRs.
-6. Create and review a non-claiming canary plan, then apply its exact checked
-   checkpoint while the timer remains stopped. Create and apply a separate
-   target-only recovery plan where retained evidence requires it.
-7. Re-enable the timer only after the expected checkpoint and operational
-   status output are verified.
+| Step | Rollout action | Required check or retained evidence | Stop condition and authority |
+| --- | --- | --- | --- |
+| 1 | Stop and disable the installed timer. Stop the service. Install upgraded units. Reload systemd. | Both units are inactive, no activation holds the single-project lock, and expected unit paths are installed. | Stop on an active unit, held lock, or unexpected path. Migration and reload start no work. |
+| 2 | Inventory running, awaiting-human, failed, blocked, and closed projections. | Retain numeric project identity, exact IID, branch, MR, worktree, ledger revision, recovery stash, and any old passive activation-owner marker. | Unknown or conflicting ownership needs a human decision. Do not discard, relabel, close, or delete old marker or identity evidence. |
+| 3 | Run non-mutating migration preview and service-environment validation. | The preview names proposed ledger records, label projections, kept evidence, human decisions, and marker outcome: `current`, `stale`, `verified`, `rolled-back`, or `correction-needed`. | Stop for a required-path or timeout failure, identity mismatch, or unclear evidence. Preview changes no issue, ledger, worktree, branch, MR, service, or credential. |
+| 4 | Review and approve only the exact preview actions. | Each action still matches the inventory, configured identity, and absent or matching ledger record. | Only a human resolves unclear evidence. A human also resolves project-owned identity and credential-routing choices. Untrusted issue, label, comment, marker, or worker output cannot decide. |
+| 5 | Apply the durable migration in bounded, repeat-safe slices. | Recheck plan, inventory, identity, ledger, and target projection before each mutation. Persist intent and observed result. | Reject the whole plan on mismatch. Replay only an exact `migrate_projection` after partial failure; do not substitute an IID or create a second recovery engine. |
+| 6 | Replace only factory-managed service-environment fields and validate the versioned contract. | Atomic mode-600 replacement preserves project-owned identity and credential routing; isolated validation passes. | Failed pre-write check, validation, rollback, or `correction-needed` leaves both units stopped. Never hand-edit around a check. |
+| 7 | Verify migration and retained state. | Compare ledger, worktrees, labels, branches, MRs, stashes, unit paths, marker, and status. Compare all with the approved plan. | Drift, missing proof, or incompatible old marker remains durable human-review evidence. |
+| 8 | Make one non-claiming canary plan under the project lock. | Recheck public identity, ledger revision, worktree, MR, and exact-SHA pipeline evidence. The canary selects no issue and starts no worker. | Conflicting active record, competing owner, changed evidence, or lock conflict fails closed. Retained work needs a separate reviewed plan for one exact IID. Choose no substitute. |
+| 9 | Resume only after the checkpoint is understood. | A human reviews canary, status, publication, and recovery evidence, then enables the expected project units. | Humans alone resume, approve, and merge. Failure or uncertainty keeps units stopped and evidence retained. |
 
-The installed service environment has a separate versioned contract because
-the timer may outlive a repository upgrade. A version marker lets the operator
-distinguish a current runtime configuration from one that is missing a newly
-required executable path or timeout without guessing from file shape. Stopping
-the timer and service before migration prevents an activation from reading a
-partly replaced contract. The migration boundary preserves project-owned
-identity choices and credential routing, replaces only factory-managed runtime
-fields atomically, and leaves units stopped so a human can review a
-non-claiming validation and canary before explicitly resuming unattended work.
-
-The implementation is maintained in reviewable slices: ledger and
-reconciliation; deterministic selection and classification; durable worktrees
-and versioned workflow sessions; idempotent publication and existing-MR
-remediation; post-publication observation, exact-conflict repair, and fresh
-pipeline assessment; then wrapper, timer,
-status, and operational-documentation updates. Each slice follows the full
-coding workflow.
+The implementation stays in reviewable slices: ledger and reconciliation;
+deterministic selection and classification; durable worktrees and versioned
+workflow sessions; idempotent publication and existing-MR remediation;
+post-publication observation, exact-conflict repair, and fresh pipeline
+assessment; then wrapper, timer, status, and operational-documentation
+updates. Each slice follows the full coding workflow.
 
 
 ## Publication credential readiness and retained recovery
 
-Publication is deliberately split between a bounded readiness proof and durable replay. The wrapper requires a regular checkout-local `.envrc` and absolute `direnv`, then routes API, Git transport, readiness, and worker operations through the same scoped Developer token used by the deterministic controller, AI workflow, and required nested agents. Humans provide product and policy inputs and alone approve or merge. It restores captured project identity and replaces ambient credential-helper configuration with the repository-owned credential-protocol helper while disabling prompts, so unattended Git cannot fall back to interactive or persisted helper state. Its dry-run push proves the write-auth path without remote mutation. Safe classification separates permanent authentication, authorization, policy, and configuration failures from known transient transport failures. A permanent failure retains the exact publication intent; explicit recovery re-enters publishing rather than replaying implementation, preventing duplicate commits and merge requests. The setup guide contains the operator procedure, and the reference defines the exact contract.
+Publication requires bounded credential readiness and durable, exact replay.
+The credential is directory-scoped and never stored or reported in a remote
+URL, persistent Git setup, service environment file, command arguments, logs,
+diagnostics, ledger, or retained record.
+This table shows what the loop checks, saves, and may do next. It stops when
+the proof does not match. It does not send or save a secret.
+
+| Publication condition or check | Required evidence | Allowed outcome or recovery |
+| --- | --- | --- |
+| Credential source and Git readiness | A regular checkout-local `.envrc`, executable absolute `AGENT_WORK_DIRENV`, directory-scoped Developer `GITLAB_TOKEN`, captured project identity, repository-owned credential-protocol helper, prompts disabled, and a dry-run push. | Use the token for the API, Git transport, readiness, controller, workflow, and nested agents; do not use or retain ambient, interactive, or saved helpers. |
+| New or existing-MR publication | A durable publication intent and either a nonempty `merge_request_draft` or the verified existing MR. | Publish idempotently; retry or reuse the recorded intent and MR rather than duplicate a commit or MR. |
+| MR and source verification | The configured project, MR IID and both project identities, source and target branches, closing issue, and recorded exact source SHA agree. | Observe only the exact source pipeline. Missing, mismatched, ambiguous, unrelated, or non-successful evidence fails closed. |
+| Exact-source success | The exact SHA's successful pipeline and required receipts are fresh and corroborated. | Write or reuse the factory-authored handoff before projecting `agent::awaiting-human`. |
+| Human handoff | The handoff links the verified MR and names its exact source commit. | A human may review, approve, and merge; the worker never assigns a reviewer, approves, or merges. |
+| Permanent or transient failure | The retained ledger, worktree, publication intent, and observed failure distinguish authentication, authorization, policy, or configuration from a known short-lived transport failure. | Preserve evidence. Block permanent or unsafe cases; retain retry state for a transient. After the recorded action or retry, resume `publishing`, not implementation. |

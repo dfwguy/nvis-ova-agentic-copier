@@ -11,16 +11,20 @@
 
 {{ description }}
 
+This file starts the project. It gives checks and links.
+
 ## First validation
 
 ```bash
 uv run pytest
 ```
 
+Run this from the project checkout. It checks the project.
+
 ## Set up the agent loop
 
-From this project checkout, ask Codex to guide the setup and ongoing management
-of the recoverable serial GitLab agent loop:
+From this project checkout, ask Codex to guide the agent loop. The loop is
+recoverable and serial. It uses GitLab.
 
 ```text
 Set up and manage the recoverable serial GitLab agent loop for this project.
@@ -29,11 +33,13 @@ the prerequisites and safeguards, and surface any human decisions or blockers.
 ```
 
 The [agent-loop setup guide](docs/how-to/setup-serial-gitlab-agent-loop.md) is
-the detailed procedure and source of truth for installation and operation. See
-the [agent-loop reference](docs/reference/serial-gitlab-agent-loop.md) for the
-operational model.
+the source of truth. It covers setup and use. See the
+[agent-loop reference](docs/reference/serial-gitlab-agent-loop.md) for the
+model.
 
 ## Project documentation
+
+Use these links for more help.
 
 - [Agent instructions](AGENTS.md)
 - [Documentation index](docs/index.md)

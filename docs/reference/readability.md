@@ -1,7 +1,7 @@
 ---
 title: Readability checking
 type: reference
-summary: Look up the Markdown readability checker, its scopes, and its results.
+summary: Look up readability checks, scopes, and results.
 audience: maintainer
 tags: [compliance, writing]
 status: current
@@ -22,8 +22,8 @@ related:
 
 # Readability checking
 
-The read-only checker limits each selected writing file to a Flesch-Kincaid
-grade of 8 or less. It uses `textstat` to score the prose from the whole file.
+The read-only checker scores each selected writing file with `textstat`.
+Each file must have a Flesch-Kincaid grade of 8 or less.
 
 ## Command
 
@@ -51,17 +51,16 @@ The checker has no `--apply` option. It never edits writing files.
 
 ## Scope and score
 
-Eligible writing files end in `.md` or `.md.jinja`. The checker scores the
-prose taken from each selected file as one whole input. A file passes when its
-grade is at or below the limit. A file with no prose also passes.
+Eligible writing files end in `.md` or `.md.jinja`. The checker scores prose
+from each selected file as one whole input. A file passes at or below the
+limit. A file with no prose also passes.
 
-Markdown extraction keeps human prose. It removes front matter, HTML and
-license comments, fenced and indented code, tables, inline code, URLs, link
-destinations, and markup before scoring.
+Markdown extraction keeps human prose. Before scoring, it removes front
+matter, HTML comments, license comments, fenced code, indented code, tables,
+inline code, URLs, link destinations, and markup.
 
-The checker now supports all three scopes. The initial gates do not require
-every old writing file to pass. A later migration will revise that writing and
-then use `all` scope for both gates.
+The checker supports three scopes. It checks named files, changed files, or
+all eligible writing files.
 
 ## Results
 
@@ -71,14 +70,13 @@ then use `all` scope for both gates.
 | 1 | One or more files exceed the allowed grade. |
 | 2 | Command use or an operational check failed. |
 
-Use `--json` when another tool needs the result. Use `--debug` when you need
-more detail about selection or extraction.
+Use `--json` when another tool needs the result. Use `--debug` for selection
+or extraction details.
 
 ## Enforcement
 
-Pre-commit checks staged, changed writing files. GitLab CI checks writing files
-changed from the GitLab merge-request diff base. These gates check changed
-writing only until the planned repository-wide migration is complete.
+Pre-commit and GitLab CI use `all` scope. Both check every eligible writing
+file. Use `files` or `changed` for a narrower local selection.
 
 ## Related pages
 

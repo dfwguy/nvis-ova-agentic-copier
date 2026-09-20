@@ -1,5 +1,5 @@
 ---
-title: Customize a generated project's workflow
+title: How to customize a generated project's workflow
 type: how-to
 summary: Tailor generated code and tooling without losing template compatibility.
 audience: practitioner
@@ -7,10 +7,10 @@ tags: [project-generation]
 status: current
 last_reviewed: 2026-08-27
 related:
-  - path: ../reference/template-contract.md
-    why: Defines the generated files and template-owned boundaries.
   - path: ../explanation/template-and-generated-project.md
     why: Explains why template and project changes have different owners.
+  - path: update-a-generated-project.md
+    why: Shows how to apply template updates while preserving local choices.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -22,15 +22,17 @@ related:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# Customize a generated project's workflow
+# How to customize a generated project's workflow
 
-Use this when a generated project needs
-project-specific conventions or tooling after its initial creation.
+Use this guide for a generated project. It applies when that project needs its
+own conventions or tools after creation. Make the change in the generated
+project to keep it compatible with the template. Keep the template repository
+unchanged. Review the change before you commit it.
 
-1. Change the generated project's own configuration, rather than editing this
-   template repository. For example, adjust dependency groups or tool settings
-   in `pyproject.toml`, and update the project's `README.md` to describe its
-   domain.
+1. Change the generated project's configuration rather than this template
+   repository. For example, adjust dependency groups or tool settings in
+   `pyproject.toml`. Update the project's `README.md` to describe its domain.
+   Keep each change tied to the project's needs.
 2. Keep the project's checks aligned. Run the relevant commands after a change:
 
    ```bash
@@ -41,16 +43,22 @@ project-specific conventions or tooling after its initial creation.
    ```
 
 3. If you change the agent workflow or coding conventions, update the
-   generated project's `AGENTS.md` and the referenced `.agents/` guidance at
-   the same time. Those files are the source of truth for contributors and
-   agents working in that project.
+   generated project's `AGENTS.md` and referenced `.agents/` guidance at the
+   same time. Those files are the source of truth for contributors and agents
+   working in that project.
 4. Commit the customization through the generated project's required feature
    branch and merge-request flow.
 
+Use the project's own branch for this work. Ask a reviewer to check changes
+that affect shared workflow. Merge only through the project's normal review.
+Keep the review scope clear. Record why the project needs the change.
+Run the checks again after a reviewer asks for a revision.
+Keep the result with the merge request. Use the same checks for each revision.
+
 Do not expect `uvx copier update --trust` to overwrite the generated project's
-`README.md`, `.gitlab-ci.yml`, or package initializer: the template deliberately
-preserves those files. It also preserves `pyproject.toml` and
-`.agents/project.md`, which contain project-specific package metadata and agent
-context. Update those files deliberately when changing the project layout. For
-the reasoning, see
+`README.md`, `.gitlab-ci.yml`, or package initializer. The template deliberately
+preserves these files, plus `pyproject.toml` and `.agents/project.md`, because
+they contain project-specific package metadata and agent context. Update them
+deliberately when changing the project layout. Check preserved files after an
+update. Reapply a needed local change by hand. For the reasoning, see
 [why the template separates source from generated output](../explanation/template-and-generated-project.md).

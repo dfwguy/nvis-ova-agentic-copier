@@ -1,14 +1,12 @@
 ---
 title: Why the template and generated project are separate
 type: explanation
-summary: Understand the boundary between this Copier template and its generated output.
+summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
 last_reviewed: 2026-09-19
 related:
-  - path: ../reference/template-contract.md
-    why: Documents the observable template behavior explained here.
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
 ---
@@ -24,8 +22,19 @@ related:
 
 # Why the template and generated project are separate
 
-This page explains the boundary between
-this repository and the projects it creates.
+This page explains the boundary between this repository and the projects it creates.
+
+The boundary gives each side a clear job. The template holds shared work. A
+generated project holds a team's own work. A team can take new shared work when
+it is ready. It can keep its local choices at the same time. This makes an
+update easier to review and safer to use.
+
+The split also makes change easy to trace. Shared fixes start in the template.
+Local work stays with the project that needs it. Teams can tell which choice is
+theirs before they take an update.
+
+This is useful when a project grows. It keeps shared changes easy to find. It
+also keeps local work in the hands of the team that owns it.
 
 ```mermaid
 flowchart LR
@@ -38,78 +47,28 @@ flowchart LR
     merge --> project
 ```
 
-This repository is a Copier template, not a starter application that happens
-to be copied occasionally. Its `template/` directory is the product: Copier
-renders that directory into a new project's files. The root-level tests verify
-that rendering and check the output's important structure. In particular, the
-template's generated Python package is located at `src/<project_slug>/`, not
-at the generated repository root.
+This repository is a Copier template. It is not a starter application copied
+now and then. Its `template/` directory is the product. Copier renders it into
+a new project's files. Root tests verify the rendering and its key structure.
+The generated Python package lives at `src/<project_slug>/`, not at the
+generated repository root.
 
-That distinction keeps two kinds of change understandable. Template maintainers
-can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—in
-one place. Generated-project owners can then decide when to adopt those
-improvements through Copier's three-way update process.
+This split makes two kinds of change clear. Template maintainers improve shared scaffolding, such as tooling, CI, workflow guidance, and defaults, in one place. Generated-project owners choose when to take those improvements through Copier's three-way update process.
 
-The root repository also has an internal CI boundary. Every merge-request and
-default-branch pipeline builds and pushes a project-only validation candidate
-for its commit, then nine native jobs use it: `ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
-`license-check`, and `shellcheck`. The candidate tag includes the commit SHA
-and pipeline ID,
-so the jobs validate the Dockerfile and locked dependencies from that same
-commit rather than stale dependency content from a fixed digest. The image
-holds the jobs' interpreter, system tools, and locked dependencies, so they do
-not install them again. BuildKit uses a registry-backed cache, and its metadata
-and output digest are kept as evidence.
+The root repository also has its own CI boundary. Each merge-request and default-branch pipeline builds and pushes a project-only validation candidate for its commit. Ten native jobs use it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`, and `shellcheck`. Its tag includes the commit SHA and pipeline ID. The jobs therefore validate the Dockerfile and locked dependencies from that commit, rather than stale dependencies from a fixed digest. The image contains the jobs' interpreter, system tools, and locked dependencies, so they do not install them again. BuildKit uses a registry-backed cache. Its metadata and output digest remain evidence.
 
-That optimization belongs only to this repository. Generated projects retain
-their single portable `validation (9 gates)` job without the private registry
-image or its credentials. Before `uv run --no-sync` validation, it
-unconditionally runs `uv sync --locked --all-groups` from its own checkout's
-`pyproject.toml` and `uv.lock` for both Python environments. The root and
-generated paths therefore use different mechanisms, but neither can silently
-validate stale dependency content.
+That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
-Both CI configurations run only for merge-request events and the default
-branch. They therefore avoid duplicate feature-branch pipelines.
+Both CI configurations run only for merge-request events and the default branch. They avoid duplicate feature-branch pipelines.
 
-The update model intentionally preserves files that are commonly customized,
-such as a project's README, dependencies, CI pipeline, package initializer, and
-project-specific agent context. A template update should offer an upgrade path,
-not silently replace a team's decisions. This makes updates a deliberate
-maintenance activity rather than an uncontrolled overwrite.
+The update model preserves files that teams often customize. These include a project's README, dependencies, CI pipeline, package initializer, and project-specific agent context. A template update is an upgrade path. It does not silently replace a team's choices. Updates are deliberate maintenance, not uncontrolled overwrites.
 
-The agent workflow follows the same ownership rule. `.agents/` is the single
-canonical workflow tree; `CLAUDE.md` is only an adapter to `AGENTS.md`, and
-`.claude/skills` is a relative compatibility link to `.agents/skills`. Copier
-uses a guarded post-render task to replace an identical legacy skills tree;
-when the trees differ, it stops without changing either one. The small Claude
-settings file is an enforcement adapter for the never-approve-or-merge rule,
-not a second workflow definition. During upgrades, a legacy
-`.claude/project.md` remains readable until its project-specific context is
-reconciled into `.agents/project.md`.
+The agent workflow has the same ownership boundary. `.agents/` is the one canonical workflow tree. `CLAUDE.md` only adapts to `AGENTS.md`, and `.claude/skills` is a relative compatibility link to `.agents/skills`. A guarded Copier post-render task replaces an identical legacy skills tree. When trees differ, it stops without changing either tree. The small Claude settings file enforces the never-approve-or-merge rule; it is not a second workflow definition. During upgrades, a legacy `.claude/project.md` stays readable until its project-specific context is reconciled into `.agents/project.md`.
 
-The template combines Python tooling and an agent workflow because it aims to
-make a new project productive immediately. UV gives the project a consistent
-command entry point, while Ruff, ty, pytest, tox, pre-commit, and GitLab CI
-turn the expected development checks into repeatable automation. The workflow
-adds explicit design, testing, documentation, review, and merge-request stages
-around those tools. Its filesystem-structure gate preserves the `src` Python
-layout and, for projects that add Bash, a single `bin/` command backed by
-implementation in `src/` or `lib/`.
+The template combines Python tooling and an agent workflow so a new project can be useful at once. UV gives a consistent command entry point. Ruff, ty, pytest, tox, pre-commit, and GitLab CI make expected development checks repeatable. The workflow adds design, testing, documentation, review, and merge-request stages around those tools. Its filesystem-structure gate preserves the `src` Python layout. A project that adds Bash gets one `bin/` command backed by code in `src/` or `lib/`.
 
-The gate is intentionally a documented standard rather than a claim that every
-project has identical constraints. A project that needs another layout records
-its real paths and rationale in `.agents/project.md`, so maintainers and
-reviewers can understand the exception without reverse-engineering it from the
-tree.
+This gate is a documented standard, not a claim that all projects share the same limits. A project that needs another layout records its actual paths and rationale in `.agents/project.md`. Maintainers and reviewers can then see the exception without reverse-engineering the tree.
 
-This is a Python-oriented starting point, not a universal template. Its
-commands, CI jobs, testing conventions, and agent roles assume Python and its
-toolchain. Projects in another language should start with a template designed
-for that ecosystem instead of carrying incompatible defaults.
+This is a Python-oriented start, not a universal template. Its commands, CI jobs, test conventions, and agent roles assume Python and its toolchain. A project in another language should use a template for that ecosystem, rather than carry incompatible defaults.
 
-For the exact file and task contract, use the
-[template reference](../reference/template-contract.md). For the rationale
-behind the generated coding rules, read
-[why the coding standards exist](coding-standards.md).
+For the file and task contract, use the [template reference](../reference/template-contract.md). For the rationale behind generated coding rules, read [why the coding standards exist](coding-standards.md).

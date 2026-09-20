@@ -16,18 +16,19 @@ metadata:
 
 # Pipeline Performance Judge
 
-Use this portable workflow skill for one complete bounded reconciliation invocation
-after a merge request is published. This one agent owns live GitLab
-pipeline observation, internal waiting, timing and failure diagnosis, and any
-deduplicated feedback issue that should enter the serial work loop. No other
-workflow role polls or interprets the live pipeline.
+Use this portable workflow skill once for a complete, bounded reconciliation
+after a merge request is published. This agent alone owns live GitLab pipeline
+observation, internal waiting, timing and failure diagnosis, and any
+deduplicated feedback issue for the serial work loop. No other workflow role
+polls or interprets the live pipeline. Run this bounded work once. This work
+has one owner. Its scope is set.
 
-Read and follow [the role instructions](../../agents/pipeline-performance-judge.md)
-before acting. That file is a compatibility reference for Claude Code; this
-directory is the shared skill entry point for Codex, Pi, and Claude Code.
+Before you act, read and follow [the role instructions](../../agents/pipeline-performance-judge.md).
+That file is a compatibility reference for Claude Code. This directory is the
+shared skill entry point for Codex, Pi, and Claude Code.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router resolves its
+delegation mapping. Each frontend resolves that tier through its configured
+model mapping. Do not hard-code a provider-specific model name in this skill.

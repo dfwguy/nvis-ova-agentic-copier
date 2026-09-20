@@ -9,7 +9,8 @@
 <!-- its affiliates is strictly prohibited. -->
 # Python Conventions
 
-This file is the single source of truth for Python-specific conventions in this repo. It is included automatically by agents that work on Python code.
+This file is the single source of truth for Python conventions in this repo. Agents
+working on Python code include it automatically.
 
 ## Commands
 
@@ -17,12 +18,10 @@ This file is the single source of truth for Python-specific conventions in this 
 # Run tests
 uv run tox                  # All tests across Python versions
 uv run pytest               # Run pytest directly (faster iteration)
-
 # Lint and format
 uv run ruff check --fix     # Lint and auto-fix
 uv run ruff format          # Format code
 uv run ty check             # Type checking
-
 # Pre-commit
 uv run pre-commit run --all-files
 ```
@@ -35,88 +34,114 @@ uv run pre-commit run --all-files
 
 ## Linting
 
-Ruff is configured with `select = ["ALL"]`. Exceptions are documented in `pyproject.toml`. Do not suppress rules inline (`# noqa`) without a compelling reason — add to the `pyproject.toml` ignore list with a comment explaining why.
+Ruff uses `select = ["ALL"]`. Exceptions are in `pyproject.toml`. Do not use
+inline `# noqa` without a compelling reason. Put it in the `pyproject.toml`
+ignore list with a comment explaining why.
 
 ## Python Conventions
 
 ### Filesystem structure
 
-- Keep importable production code in `src/<package>/`; do not add a top-level
-  importable package beside `pyproject.toml`.
+- Keep importable production code in `src/<package>/`; do not add a top-level importable package beside `pyproject.toml`.
 - Keep tests in `tests/`, outside the production package.
-- Keep packaging metadata in `pyproject.toml`; declare Python CLI entry points
-  through `[project.scripts]` so they invoke the installed package.
-- A nonstandard layout is allowed only when `.agents/project.md` records the
-  language, replaced rule, actual paths, and rationale.
+- Keep packaging metadata in `pyproject.toml`.
+- Declare Python CLI entry points in `[project.scripts]`. They invoke the installed package.
+- Nonstandard layout requires `.agents/project.md` to state language, replaced
+  rule, actual paths, and rationale.
 
-- **Pathlib** over `os` for all path operations
-- **Dependency inversion** (see [Dependency Inversion](#dependency-inversion) below) — external calls are passed in as parameters, not imported and called directly
-- **Pydantic at boundaries, dataclasses internally** — any structured data crossing a system boundary (config files, CLI args, HTTP payloads, file-format I/O) is parsed into a Pydantic model so validation happens once at the edge. Internal grouped data uses `@dataclass(frozen=True)` — cheap to construct in tests, immutable by default, no runtime validation overhead. Do not reach for Pydantic on internal types just because it's available.
-- **Type annotations** on all functions and methods
-- **Docstrings** on all public functions, classes, and modules
-- **`raise`** instead of `sys.exit(1)` for error conditions
-- **Specific exceptions** — catch the narrowest type possible; never bare `except Exception` without re-raising
-- **Private functions** prefixed with `_` when not part of the public interface
-- **No `print`** — use `logger` everywhere; `print` is only acceptable inside `if __name__ == "__main__"` guards
-- Use `uv run` — never invoke `python` directly
+### General rules
+
+- Use **Pathlib** over `os` for all path operations.
+- Use **dependency inversion**. See [Dependency Inversion](#dependency-inversion).
+- Pass external calls as parameters. Do not directly import and call them.
+- Parse any structured config files, CLI args, HTTP payloads, and file-format I/O into Pydantic
+  models. That validates system-boundary data once at the edge.
+- Use `@dataclass(frozen=True)` for internal grouped data. It is test-cheap,
+  immutable by default, and has no runtime validation overhead.
+- Do not use Pydantic for internal types just because it is available.
+- Type all functions and methods. Add docstrings to all public functions, classes, and modules.
+- Use `raise`, not `sys.exit(1)`, for errors.
+- Catch the narrowest type. Never bare `except Exception` without re-raising.
+- Prefix non-public functions with `_`.
+- Use `logger`, not `print`. `print` is allowed only in `if __name__ == "__main__"`.
+- Use `uv run`, never `python` directly.
 
 ## Dependency Inversion
 
-We use dependency inversion throughout. Every external call — subprocess, filesystem, HTTP, time, environment lookups, anything that crosses a system boundary — is **passed in as a parameter** rather than imported and invoked directly.
+Use dependency inversion throughout. Pass subprocess, filesystem, HTTP, time,
+and environment lookups as parameters.
 
-The pattern:
+- Functions take dependencies as `Callable`s, small protocols, or dataclasses of callables.
+- Wire real implementations once at `main()` or a top-level orchestrator.
+- Tests pass fakes or stubs. Do not patch modules.
 
-- Functions accept their external dependencies as arguments (typically `Callable`s, small protocols, or dataclasses of callables).
-- Real implementations are wired in once, at the entry point (`main()` or a top-level orchestrator).
-- Tests pass fakes/stubs through the same parameters — no module-level patching.
+If a test uses `unittest.mock.patch` to replace our symbol, apply DI first. It
+is a refactor, not a test workaround. Patch only true system boundaries. Use
+`pytest-subprocess` for subprocess, `requests-mock` for HTTP, and stdlib
+`unittest.mock` for dependencies that cannot be injected.
 
-If a test reaches for `unittest.mock.patch` to swap a symbol inside our own code, the production code needs DI applied first — that's a refactor, not a test workaround. Patching is reserved for true system boundaries handled by purpose-built tools: `pytest-subprocess` for subprocess, `requests-mock` for HTTP, stdlib `unittest.mock` for things we genuinely cannot inject.
-
-The architect names every injection point in the design; the implementer wires them through; the judges reject changes that hardcode external calls or that patch internal modules in tests.
+The Architect names every injection point. The implementer wires it. Judges
+reject hardcoded external calls and internal module patching in tests.
 
 ## Functional Programming
 
-Prefer functional style throughout:
-
-- **Pure functions**: same inputs → same outputs, no side effects
-- **Small, composable functions**: one responsibility each; chain them
-- **Immutable data**: prefer tuples over lists when the collection won't change
-- **Comprehensions over loops**: list/dict/set comprehensions are preferred for transforms
-- No global mutable state
+- Prefer pure functions: same inputs → same outputs, with no side effects.
+- Use small, composable functions with one responsibility each. Chain them.
+- Prefer tuples for unchanged collections.
+- Prefer list, dict, and set comprehensions for transforms.
+- Do not use global mutable state.
 
 ## Testing
 
-- Test method docstrings are not required — the method name is sufficient documentation
-- Use `pytest.mark.parametrize` over duplicated test functions for data-driven cases
-- Test behavior, not implementation — avoid mocking internal code; mock at system boundaries only
-- Use `pytest-subprocess` for subprocess isolation; `unittest.mock` (stdlib) for other external calls; `requests-mock` for HTTP calls
-- **Property-based tests with `hypothesis`** for pure functions — declare the invariant, let hypothesis find the counterexamples. Use it alongside `parametrize` (handpicked cases for known edges, hypothesis for the unknown ones), not as a replacement.
-- **`pytest-randomly` is enabled** — tests must be order-independent. A test that only passes in a given order is broken; fix the shared state rather than pinning order.
-- **Coverage gate**: tox enforces `--cov-fail-under=85` as the floor. Raise it as the codebase matures; never lower it to make a CI run pass.
+- Test method docstrings are not required. Names document tests.
+- Use `pytest.mark.parametrize` instead of duplicate data-driven tests.
+- Test behavior, not implementation. Mock only system boundaries.
+- Use `pytest-subprocess` for subprocess, `unittest.mock` (stdlib) for other
+  external calls, and `requests-mock` for HTTP.
+- Use property-based `hypothesis` tests for pure functions. Declare invariants.
+- Use hypothesis with `parametrize`: edges are handpicked; unknowns are found.
+- `pytest-randomly` is enabled. Tests must be order-independent. Fix shared
+  state; never pin an order.
+- Tox enforces `--cov-fail-under=85`. Raise it as code matures. Never lower it
+  to pass CI.
 
-For worked examples of the harder cases — subprocess (`pytest-subprocess`), HTTP (`requests-mock`), imports, filesystem, logging, and conftest fixtures — see [`python-testing.md`](python-testing.md). Read it on demand when writing or reviewing non-trivial tests; it is not auto-loaded.
+For examples of subprocess, HTTP, imports, filesystem, logging, and conftest
+fixtures, see [`python-testing.md`](python-testing.md). Read it on demand for
+non-trivial tests. It is not auto-loaded.
 
 ## Script Conventions
 
-When writing standalone scripts:
-- Include a shebang line
-- Define a `main()` function as the entry point
-- Define `parse_arguments()` separately from `main()`
-- Add a `--debug` / `-d` flag that routes extra output to `logger.debug`
-- **Operational logging stays local.** A user-facing CLI or service with
-  operational logging must configure a `logging.FileHandler` (or rotating file
-  handler) at an explicit application-owned local path. `--debug` / `-d` must
-  raise the local handler's verbosity to include diagnostic events; ordinary
-  runs retain lifecycle and failure events locally. Do not add
-  `logging.handlers.SysLogHandler`, another remote syslog handler, or a network
-  log handler. Tests must cover both ordinary and `--debug` verbosity.
-- **Make no changes by default; require an `--apply` / `-a` flag to mutate state** for any script or CLI that writes files, calls a network/external service, changes git state, or deletes anything. Without `--apply`, the script makes **no** changes — it logs each action it *would* take via `logger.info` (prefixed e.g. `[dry-run]`) and exits success. The mutation only happens when the user passes `--apply`. This safe-by-default stance is non-negotiable for mutating tools: a bare invocation must always be a harmless preview. Read-only scripts do not need the flag.
-- Use `logger.info` (not `print`) once the logger is initialized
+- Include a shebang. Define `main()` and separate `parse_arguments()`.
+- Add `--debug` / `-d` for `logger.debug` output.
+- Operational logging stays local. A user-facing CLI or service must use a
+  `logging.FileHandler` or rotating file handler at an explicit application-owned local path.
+- `--debug` / `-d` raises local-handler verbosity. Ordinary runs retain local
+  lifecycle and failure events.
+- Do not add `logging.handlers.SysLogHandler`, another remote syslog handler,
+  or a network log handler. Test ordinary and `--debug` verbosity.
+- A mutating script or CLI is dry-run by default. It needs `--apply` / `-a` to
+  write files, call a network/external service, change git state, or delete.
+- Without `--apply`, it makes no changes. Log intended actions with `logger.info`
+  and a prefix such as `[dry-run]`, then exit successfully.
+- Mutate only with `--apply`. This is non-negotiable. A bare run is harmless.
+- Read-only scripts need no flag. Use `logger.info`, not `print`, after setup.
 
-The preview and apply paths should share the same code path, branching only at the side-effecting boundary (the injected dependency) — so a preview run exercises the same logic and the `--apply` value flows in as a parameter rather than being checked ad hoc throughout.
+Preview and apply share a code path. Branch only at the injected side-effecting
+boundary. Pass `--apply` as a parameter; do not check it ad hoc.
 
 ### Verifying mutating commands against the real environment
 
-Our tests inject fakes at every system boundary (see [Dependency Inversion](#dependency-inversion)) and never reach a real API, network, or filesystem outside the sandbox — fast and hermetic, but it means **green tests alone don't prove the command works against the real thing**: auth, connectivity, argument wiring, and the read side all go unexercised. So before and after changing a mutating script or CLI, run the **actual command outside the sandbox, without `--apply`**, to smoke-test it against the real environment. Run it *before* the change to confirm the baseline works, and *after* to confirm the change didn't break the real-world path. Omitting `--apply` keeps the run a harmless preview — it drives the real code path up to the side-effecting boundary and logs what it *would* do, mutating nothing — which is exactly what makes it safe to run for real.
+Tests inject fakes at all system boundaries. See
+[Dependency Inversion](#dependency-inversion). They never reach a real API,
+network, or filesystem outside the sandbox. They are fast and hermetic. Green
+tests do not prove auth, connectivity, argument wiring, or the read side.
 
-This is the deliberate exception to the "sandbox first" rule in `AGENTS.md`: the run is sanctioned outside the sandbox precisely because the tests cannot cover this path. Assume the working directory is already provisioned for these local runs (authenticated tooling, configured remotes, installed dependencies) **unless the project's `.agents/project.md` notes otherwise** — if it says the environment isn't set up for local running, skip the real-environment run rather than guessing.
+Before and after changing a mutating script or CLI, run its actual command
+outside the sandbox without `--apply`. The first run confirms the baseline. The
+second confirms the real-world path. It is harmless: it reaches the
+side-effecting boundary, logs intended work, and changes nothing.
+
+This sanctioned run is the exception to `AGENTS.md` sandbox-first. Tests cannot
+cover this path. Assume local authentication, remotes, and dependencies exist,
+unless `.agents/project.md` says local running is not set up. In that case, skip
+the real-environment run rather than guessing.

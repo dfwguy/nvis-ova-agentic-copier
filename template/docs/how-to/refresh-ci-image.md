@@ -1,7 +1,7 @@
 ---
 title: How to refresh the CI validation image
 type: how-to
-summary: Build and verify the commit-specific CI image used by root validation.
+summary: Refresh CI image.
 audience: maintainer
 tags: [template-maintenance]
 status: current
@@ -24,73 +24,72 @@ related:
 
 # How to refresh the CI validation image
 
-Use this procedure after changing `Dockerfile`, `pyproject.toml`, or `uv.lock`.
-They are the validation-image build inputs. The pipeline builds and pushes a
-candidate for the current commit before root validation starts. Locked
-dependency changes must update and commit `uv.lock`.
+Use this guide after changing `Dockerfile`, `pyproject.toml`, or `uv.lock`.
+These files build the validation image. Keep the lock current and commit it
+with any locked dependency change. The pipeline makes a new image before root
+checks begin.
 
-## 1. Open the change merge request
+## 1. Open the change merge request.
 
-Open a merge request for the change. Every merge-request and default-branch
-pipeline builds the root validation image with rootless BuildKit from the
-current `Dockerfile`, `pyproject.toml`, and `uv.lock`. It pushes the candidate
-as `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
+Open a merge request. Each merge-request and default-branch pipeline builds a
+rootless BuildKit candidate from the current `Dockerfile`, `pyproject.toml`,
+and `uv.lock`. It does this before root validation. Its tag is
+`$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
 
-The nine native root validation jobs wait for that candidate and run in it.
-They retain `uv run --no-sync`; the image supplies the interpreter, system
-tools, and locked dependencies, so the jobs must not install dependencies at
-runtime. This removes the window where validation could run against stale
-dependency content from a fixed digest.
+The ten native root jobs wait for that candidate and run in it:
+`ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
+`kingfisher`, `type-check`, `license-check`, `readability-check`, and
+`shellcheck`. The image has the Python tools and locked dependencies. Most use
+`uv run --no-sync`. `readability-check` uses `uv run --locked --all-groups`.
+Do not install tools or dependencies in these jobs. This avoids a stale digest
+or stale dependency set.
 
-The BuildKit job uses a registry-backed cache to stay within the per-job
-budget: prefer 60 seconds and reject a duration over 120 seconds. Do not count
-queue time toward that limit. Do not print registry credentials, tokens, or
-generated authentication files in job output.
+BuildKit uses a registry cache. Prefer a job run of 60 seconds or less. Reject
+one over 120 seconds. Do not count queue time. Do not print credentials,
+tokens, or auth files in logs.
 
-## 2. Review the image evidence
+## 2. Review the image evidence.
 
-Review the image-build job in the same pipeline. It retains BuildKit metadata
-and the produced image digest as artifacts. Confirm that the job pushed the
-commit-specific tag and that the digest has the form
-`sha256:<64 hexadecimal characters>`.
+Review the image-build job in that pipeline. It keeps BuildKit metadata and its
+image digest as artifacts. Check that it pushed the commit tag. The digest must
+match `sha256:<64 hexadecimal characters>`.
 
-Keep the metadata and digest with the pipeline evidence. They record the image
-build result. Do not copy registry-login commands or
-credentials into a generated template.
+Keep the metadata and digest with the pipeline evidence. Do not put login
+commands or credentials in the template.
 
-## 3. Verify the root validation jobs
+## 3. Verify the root validation jobs.
 
-Inspect the nine named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
-`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, and
-`shellcheck`. They must wait for the candidate image and use its prepared
-environment. They must not run `apt-get`, `uv python install`, `uv sync`, or a
-dependency-installation fallback.
+Inspect the ten named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
+`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
+`readability-check`, and `shellcheck`. Each waits for the candidate and uses
+its prepared environment. None may run `apt-get`, `uv python install`, `uv
+sync`, or an install fallback.
 
-Run the consumer pipeline and inspect the nine named root jobs directly; do
-not look for a root synthetic aggregate validation job or JUnit gate suite. Each
-pytest job runs four concurrent shards: one complete serial-runtime test shard,
-one complete template-test shard, and two exhaustive, non-overlapping remaining-suite
-partitions. The remaining-suite shards use `tests.helpers.serial_runtime_shard`
-with indices 0 and 1 of 2 and ignore both dedicated test files. The job waits
-for every shard PID before coverage
-aggregation. Inspect every shard JUnit report and the one combined
-per-version Cobertura report when it was generated; otherwise inspect the job
-log. The combined report measures only maintained `src/agent_work` source. A
-failure in any shard or in coverage aggregation, floor enforcement, or
-report generation fails that named job. Apply the
-project budget to the longest executed terminal job with a numeric duration:
-prefer at most 60 seconds and reject execution over 120 seconds. Report skipped,
-canceled, or manual jobs, the overall pipeline span, and queue time separately;
-runner scheduling does not count against the execution budget. If the image
-needs another dependency, update its build inputs and let the next pipeline
-build a new commit-specific candidate; do not restore bootstrap work to root
-validation. There is no separate post-merge pin-update merge request.
+Inspect those jobs directly. There is no root aggregate job or aggregate JUnit
+gate suite. Each pytest job starts four shards in parallel. One runs the full
+serial-runtime file. One runs the full template file. The other two split all
+remaining tests without overlap. They use `tests.helpers.serial_runtime_shard`
+with indices 0 and 1 of 2. They ignore both dedicated files. The job waits for
+every shard PID before it combines coverage.
 
-Generated Copier projects remain registry-independent. Their portable
-validation job unconditionally runs `uv sync --locked --all-groups` against
-its own checkout's `pyproject.toml` and `uv.lock` for both Python environments
-before it runs `uv run --no-sync` checks. That bootstrap gives generated
-projects the same no-stale-dependency guarantee without using the root image.
+Check every shard JUnit report. Check the one per-version Cobertura report when
+it exists. Otherwise, check the job log. The combined report covers only
+maintained `src/agent_work` code. A shard, coverage combine, coverage floor,
+or report failure fails its named job.
+
+Use the longest terminal job with a numeric run time for the budget. Prefer 60
+seconds or less. Reject more than 120 seconds. Report skipped, canceled, and
+manual jobs separately. Also report pipeline span and queue time. Runner wait
+time is not part of this budget.
+
+If the image needs a dependency, update the inputs. The next pipeline makes a
+new commit candidate. Do not add bootstrap work to root jobs. Do not open a
+post-merge pin-update merge request.
+
+Generated Copier projects need no registry. Their portable validation job
+always runs `uv sync --locked --all-groups` on its own `pyproject.toml` and
+`uv.lock` in both Python environments. It does this before `uv run --no-sync`
+checks. This keeps dependencies current without the root image.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership

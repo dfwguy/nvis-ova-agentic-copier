@@ -19,5 +19,5 @@ Each tutorial takes one predictable path to a working outcome.
 
 <!-- BEGIN GENERATED -->
 ### Project generation
-- [Create your first project](create-your-first-project.md) — Generate a project and verify its development tooling is ready.
+- [Your first project](create-your-first-project.md) — Make a new project, then check that its tools are ready.
 <!-- END GENERATED -->

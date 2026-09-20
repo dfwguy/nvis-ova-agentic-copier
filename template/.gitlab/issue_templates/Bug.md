@@ -9,7 +9,7 @@
 <!-- its affiliates is strictly prohibited. -->
 ## Summary
 
-<!-- What is wrong? Keep this concise. -->
+<!-- The problem. State what broke. -->
 
 ## Steps to reproduce
 
@@ -19,34 +19,34 @@
 
 ## Expected behavior
 
-<!-- What should have happened? -->
+<!-- The expected result. State it plainly. -->
 
 ## Actual behavior
 
-<!-- What happened instead? Include the exact error, if applicable. -->
+<!-- The result. Add the exact error, if any. -->
 
 ## Environment
 
-<!-- Version/commit, operating system, runtime, and relevant configuration. -->
+<!-- Give version or commit. Give system, runtime, and relevant config. Add only needed details. -->
 
 ## Priority
 
-<!-- Choose exactly one, then delete the other options. -->
+<!-- Choose one. Delete the rest. -->
 
-- [ ] P0 — Stop-ship: immediate action required.
-- [ ] P1 — High: address in the current milestone.
-- [ ] P2 — Normal: planned work.
-- [ ] P3 — Low: worthwhile, but no current commitment.
+- [ ] P0 — Stop work. Act now.
+- [ ] P1 — High. Do this cycle.
+- [ ] P2 — Normal. Plan it.
+- [ ] P3 — Low. Keep for later.
 
 ## Severity
 
-<!-- Choose exactly one, then delete the other options. Severity measures impact; priority measures urgency. -->
+<!-- Choose one. Severity is impact. Priority is urgency. -->
 
-- [ ] S1 — Critical: outage, data loss, security exposure, or no viable workaround.
-- [ ] S2 — Major: a core workflow is substantially impaired.
-- [ ] S3 — Moderate: a workaround exists or impact is limited.
-- [ ] S4 — Minor: cosmetic, copy, or negligible-impact defect.
+- [ ] S1 — Critical. Outage, data loss, or risk. No workaround.
+- [ ] S2 — Major. Core work is substantially impaired.
+- [ ] S3 — Moderate. A workaround exists. Or, impact is limited.
+- [ ] S4 — Minor. Cosmetic or copy issue.
 
 ## Additional context
 
-<!-- Logs, screenshots, links to related issues/MRs, or a proposed fix. Remove this section if empty. -->
+<!-- Logs, images, links, or a fix. Remove if empty. -->

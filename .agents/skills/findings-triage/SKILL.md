@@ -16,15 +16,14 @@ metadata:
 
 # Findings Triage
 
-Use this portable workflow skill after publication to process accumulated
-actionable Minor findings from the selected workflow's prepublication review.
-This role is independent of other post-publication work. Read and follow [the role
-instructions](../../agents/findings-triage.md) before acting. That file is a
-compatibility reference for Claude Code; this directory is the shared skill
-entry point for Codex, Pi, and Claude Code.
+Use this skill after publication. It handles actionable Minor findings from
+the selected workflow's prepublication review. It is separate from other
+post-publication work. Read and follow [the role instructions](../../agents/findings-triage.md) before you act.
+That file supports Claude Code. This directory is the shared entry point for
+Codex, Pi, and Claude Code.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`; the live Architect router resolves its delegation mapping. Each frontend
-resolves that tier through its configured model mapping; do not hard-code a
-provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router resolves the
+delegation mapping. Each frontend maps that tier. Do not hard-code a
+provider-specific model name here.
