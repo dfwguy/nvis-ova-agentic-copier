@@ -82,6 +82,25 @@ run_license_check() {
     uv run --no-sync python scripts/check_licenses.py --root .
 }
 
+run_readability_check() {
+    local base_ref
+
+    if [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ]; then
+        base_ref="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+        if ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base_ref"
+        fi
+    else
+        base_ref="${CI_COMMIT_BEFORE_SHA:-}"
+        if ! printf '%s' "$base_ref" | grep -Eq '^[0-9a-f]{40}$' \
+            || ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+            base_ref="$(git rev-parse "origin/${CI_DEFAULT_BRANCH:-main}")"
+        fi
+    fi
+    uv run --no-sync python -m agent_work.readability \
+        --root . --scope changed --base-ref "$base_ref"
+}
+
 run_shellcheck() {
     local file
     local first_line
@@ -133,6 +152,7 @@ run_selected_gate() {
         kingfisher) run_kingfisher ;;
         type-check) run_type_check ;;
         license-check) run_license_check ;;
+        readability-check) run_readability_check ;;
         shellcheck) run_shellcheck ;;
         *)
             printf 'Unknown CI gate: %s\n' "$name" >&2
@@ -171,6 +191,7 @@ readonly -a check_names=(
     "kingfisher"
     "type-check"
     "license-check"
+    "readability-check"
     "shellcheck"
 )
 declare -a check_pids=()

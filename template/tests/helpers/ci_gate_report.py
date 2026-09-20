@@ -29,6 +29,7 @@ EXPECTED_GATES = (
     "kingfisher",
     "type-check",
     "license-check",
+    "readability-check",
     "shellcheck",
 )
 
@@ -47,6 +48,7 @@ class GateResultInput(BaseModel):
         "kingfisher",
         "type-check",
         "license-check",
+        "readability-check",
         "shellcheck",
     ]
     status: int = Field(ge=0, le=255)

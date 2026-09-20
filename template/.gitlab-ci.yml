@@ -66,7 +66,7 @@ workflow:
       if (( py314_status != 0 )); then
           exit "$py314_status"
       fi
-validation (9 gates):
+validation (10 gates):
   extends: .base_uv
   tags:
     - size/medium
