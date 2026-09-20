@@ -50,6 +50,8 @@ condition is false. The supported frontends do not all support `@...` imports.
 
 | Condition | Read or load | Timing |
 |---|---|---|
+| The CONTRIBUTING check fails | `$repository-setup` | Before any other repository work. |
+| A non-trivial change | `$architect` | Before design, delegation, or mutation; Architect owns lane selection and all delegated workflow phases below. |
 | Markdown files | `.agents/guidance/markdown.md` | Before editing or reviewing Markdown |
 | Writing or reviewing `docs/` prose | `$simplifying-writing` | Before prose work |
 | Coding workflow | `.agents/guidance/tdd.md` | Before architecture or Red |
@@ -58,6 +60,14 @@ condition is false. The supported frontends do not all support `@...` imports.
 | Bash files or Bash shebangs | `.agents/lang/bash.md` | Before editing or validating them |
 | Python tests | `.agents/lang/python-testing.md` | Before writing or reviewing Python tests |
 | Any repository mutation | `$git-flow` | Before branching or editing; retain through publication |
+| A Python change needs standard lint, format, type, or test checks, or the user asks to diagnose or repair those failures | `$lint-and-pytest` | Before the requested validation or repair; it does not replace routing, review, or publication. |
+| A change has published or updated an MR | `$pipeline-performance-judge` | After every MR update, following the accepted workflow finalizer result. |
+| Post-publication review leaves actionable Minor findings | `$findings-triage` | After publication, independently of other post-publication work. |
+| An existing repository needs standards assessment and a repair sequence | `$remediate` | Before proposing or carrying out the remediation work. |
+| A guarded serial GitLab polling loop must be configured | `$setup-agent-loop` | Before configuring the loop. |
+| A guarded factory loop needs status, recovery reconstruction, resume, or an event-driven wait | `$software-factory-supervisor` | Before that supervisory action. |
+| Retained factory recovery evidence identifies one explicitly reviewed issue resolution | `$resolve-factory-issues` | Before applying that one resolution. |
+| The guarded serial loop selects one eligible GitLab issue for its dedicated checkout | `$work-item-runner` | In that worker session, before routing the issue through its human-gated MR workflow. |
 
 Canonical skills are at `.agents/skills/<skill-id>/SKILL.md`. Their linked files
 in `.agents/agents/` are role references. Codex and Pi use `.agents/skills`.
