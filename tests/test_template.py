@@ -142,6 +142,31 @@ def test_ci_runs_only_merge_request_and_default_branch_pipelines(
         assert _ci_configuration(root)["workflow"]["rules"] == expected_rules
 
 
+@pytest.mark.parametrize("ci_root_name", ("root", "template", "rendered"))
+def test_ci_trusts_only_the_exact_checkout_directory(
+    ci_root_name: str,
+    generated_project: Path,
+    project_root: Path,
+    template_dir: Path,
+) -> None:
+    """Validation containers trust their checkout and no broader Git directory."""
+    expected_command = 'git config --global --add safe.directory "$CI_PROJECT_DIR"'
+    ci_roots = {
+        "root": project_root,
+        "template": template_dir,
+        "rendered": generated_project,
+    }
+    before_script = _ci_configuration(ci_roots[ci_root_name])[".base_uv"][
+        "before_script"
+    ]
+    checkout_trust_commands = [
+        command for command in before_script if "safe.directory" in command
+    ]
+
+    assert before_script[:2] == ['cd "$CI_PROJECT_DIR"', expected_command]
+    assert checkout_trust_commands == [expected_command]
+
+
 def test_generated_ci_uses_exact_stable_python_versions(
     generated_project: Path,
 ) -> None:

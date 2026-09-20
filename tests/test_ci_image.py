@@ -169,7 +169,10 @@ def test_root_validation_consumes_its_pipeline_candidate_without_bootstrap(
     assert base["image"]["name"] == _CANDIDATE_VALIDATION_IMAGE
     expected_need = {"job": _CANDIDATE_JOB, "artifacts": False}
     assert base["needs"] == [expected_need]
-    assert base["before_script"] == ['cd "$CI_PROJECT_DIR"']
+    assert base["before_script"] == [
+        'cd "$CI_PROJECT_DIR"',
+        'git config --global --add safe.directory "$CI_PROJECT_DIR"',
+    ]
     for runtime_setup in ("apt-get", "uv python install", "uv sync"):
         assert runtime_setup not in before_script
         assert runtime_setup not in validation_contract
