@@ -16,47 +16,55 @@ metadata:
 
 # Git Flow
 
-Every repository change must publish a feature branch and open or update a
-merge request. A publication failure is a blocker, not completion.
+Every change must use a feature branch. Open or update an MR. A publication
+failure blocks completion.
 
-Every change in this repo — full TDD workflow or one-off trivial edit — follows the same lifecycle: branch off `main`, do the work, commit, push, and open or update a merge request via `glab`. Publication hands the work to a human reviewer; waiting for merge is not part of the active run and does not block unrelated work. **There is no direct-to-`main` path.** The repository setup procedure configures GitLab branch protection so pushes to `main` are rejected and merging requires approval; even a one-line typo fix must land through an MR. For coding work, Phase 6 Finalizer owns the verified local commit and this main-thread skill owns only push and MR update. Content/trivial work retains its ordinary main-thread commit. **Do not spawn a subagent for the main-thread publication steps below** — they are short, local-only or single-command-remote.
+All work uses one flow. This includes full TDD work and trivial edits. Branch
+from `main`, do the work, commit, push, then use `glab` to open or update an
+MR. Publication hands work to a human reviewer. Waiting for a merge is not
+part of the active run. It does not block unrelated work. **There is no
+direct-to-`main` path.** Setup protects `main`. GitLab rejects pushes to it and
+requires approval to merge. Even a one-line typo fix needs an MR. For coding
+work, Phase 6 Finalizer owns the verified local commit. This main-thread skill
+owns only the push and MR update. Content or trivial work keeps its normal
+main-thread commit. **Do not spawn a subagent for the main-thread publication
+steps below.** They are short, local-only, or one remote command.
 
-For a coding workflow, Phase-6 Finalizer commits with `git commit --no-verify`
-only after mechanically matching the staged tree and supported-version JUnit
-digests/counts to the Phase-4 Judge receipt. This avoids rerunning the
-already-recorded hook. The serial runner's repository commit remains ordinary
-`git commit -m`; it has no Judge identity shortcut. Phase-8 post-push pipeline
-observation is an independent defense, never a substitute for Judge.
+For coding work, Phase-6 Finalizer may use `git commit --no-verify`. First, it
+must mechanically match the staged tree and supported-version JUnit
+digests/counts to the Phase-4 Judge receipt. This avoids rerunning the recorded
+hook. The serial runner still uses ordinary `git commit -m`. It has no Judge
+identity shortcut. Phase-8 post-push pipeline observation is another defense.
+It never replaces Judge.
 
-**Do not confuse a readiness or policy audit with publication permission.** A
-Developer may be unable to read Maintainer-only policy settings and still be
-able to push a feature branch and create an MR. After normal work completes,
-always attempt the full branch → commit → push → MR handoff. Only an actual
-Git push or MR-creation failure blocks publication.
+**A readiness or policy audit is not publication permission.** A Developer may
+not be able to read Maintainer-only policy settings. That Developer may still
+push a feature branch and create an MR. After normal work, always try the full
+branch → commit → push → MR handoff. Only a Git push or MR-creation failure
+blocks publication.
 
 ## GitLab target
 
-Every remote `glab` operation uses the numeric project ID. Require
-`GITLAB_HOST` and numeric `GITLAB_PROJECT_ID` from the environment; never
+Use the numeric project ID for every remote `glab` operation. Require
+`GITLAB_HOST` and numeric `GITLAB_PROJECT_ID` from the environment. Never
 derive a project path from the Git remote.
 
-For the MR handoff, use the numeric API endpoint
-`projects/$GITLAB_PROJECT_ID/merge_requests`. If the available API client
-cannot address a numeric project ID, use its already-configured project path;
-either way, attempt MR creation after the push rather than stopping on an
-unrelated preflight result.
+For the MR handoff, use `projects/$GITLAB_PROJECT_ID/merge_requests`. If the
+API client cannot use a numeric project ID, use its configured project path.
+Either way, try to create the MR after the push. Do not stop for an unrelated
+preflight result.
 
 ## Git and GitLab access preflight
 
-Before branching from `main` or publishing, prove the two independent access
-paths with read-only commands. For HTTPS Git, load the directory-scoped
-`GITLAB_TOKEN` only at runtime and configure Git with this checkout's
-`src/agent-work-git-credential.sh`; it is the sole credential helper for
-that command. Do not print, inspect, or copy secret environment-variable
-values, and do not use a stored helper or SSH agent for this route.
+Before branching from `main` or publishing, prove both access paths with
+read-only commands. For HTTPS Git, load the directory-scoped `GITLAB_TOKEN`
+only at runtime. Configure Git with this checkout's
+`src/agent-work-git-credential.sh`. It is the only credential helper for that
+command. Do not print, inspect, or copy secret environment values. Do not use
+a stored helper or SSH agent for this route.
 
-First require a non-empty `GITLAB_HOST` and a numeric `GITLAB_PROJECT_ID`.
-Then, from a clean `main`, run:
+Require a non-empty `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID`. Then run
+this from clean `main`:
 
 ```bash
 credential_helper="$PWD/src/agent-work-git-credential.sh"
@@ -72,43 +80,45 @@ direnv exec . /usr/bin/env -u GIT_CONFIG_PARAMETERS \
 direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'
 ```
 
-`git pull --ff-only` verifies the configured credential-free HTTPS origin,
-network route, and Git credential, while the `glab` request independently
-verifies API authentication and that the supplied host/project pair is
-accessible. Neither command assumes a sandbox proxy. The helper emits `oauth2`
-and the token only through Git's credential protocol; never put either in a
-remote URL, persisted Git configuration, command report, or diagnostic.
+`git pull --ff-only` checks the configured credential-free HTTPS origin,
+network route, and Git credential. The `glab` request separately checks API
+auth and access to the supplied host/project pair. Neither command assumes a
+sandbox proxy. The helper emits `oauth2` and the token only through Git's
+credential protocol. Never put either in a remote URL, saved Git config,
+command report, or diagnostic.
 
-When a checkout supplies `GITLAB_TOKEN` through `.envrc`, run every API
-command through `direnv exec . /usr/bin/env bash -c` so variables expand after
-the environment loads (for example, `direnv exec . /usr/bin/env bash -c 'exec
-glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'`). Use that numeric
-endpoint to diagnose access: a path-based `404` is not evidence that the
-directory-scoped token lacks project access. `glab auth status` checks only
-stored logins and cannot verify this route.
+When `.envrc` supplies `GITLAB_TOKEN`, run each API command through `direnv
+exec . /usr/bin/env bash -c`. Variables then expand after the environment
+loads. For example, use `direnv exec . /usr/bin/env bash -c 'exec glab api
+--hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'`. Use that numeric
+endpoint to diagnose access. A path-based `404` does not prove that the
+directory-scoped token lacks project access. `glab auth status` checks stored
+logins only. It cannot check this route.
 
-If either command fails, stop before creating a branch or publishing. Report
-which command failed and its non-secret error, then have the user repair the
-appropriate Git route/credential or GitLab API configuration. This is a
-blocker, never a completed outcome. Do not infer that a successful
-`glab` call also authorizes Git, or vice versa.
+If either command fails, stop before branching or publishing. Report the
+failed command and its non-secret error. Have the user repair the Git
+route/credential or GitLab API config. This blocks completion. A working
+`glab` call does not authorize Git, and the reverse is also true.
 
 ## Step 1: Start a feature branch from clean `main`
 
-> **This step runs first in *every* session that will make a change — a full TDD feature or a one-line trivial edit alike. It is not part of the TDD workflow; it gates it.** The most common and most damaging mistake is to skip it because "I'm already on a branch that looks right" and append to a branch whose work has already merged — that re-creates the deleted remote branch, re-introduces merged commits, and produces merge conflicts. Always verify the starting point *mechanically* (below); never infer it from the branch name.
+> **Run this step first in every session that will change work.** This applies
+> to full TDD features and one-line trivial edits. It gates TDD; it is not part
+> of TDD. Do not skip it because a branch looks right. Adding work to a merged
+> branch can recreate a deleted remote branch, restore merged commits, and
+> cause conflicts. Always check the start point *mechanically*. Never trust the
+> branch name.
 
 ### Session boundary
 
-At the start of a session, inspect the current branch before treating it as a
-work branch. A task dispatched by the serial work-item runner is explicitly
-related to its required `agent/issue-<IID>` branch; stay on that prepared branch
-and return control to the runner when the task is done. Do not switch that
-agentic checkout to `main` at the end of the worker session.
+At session start, inspect the current branch before using it for work. A serial
+work-item runner task belongs to its required `agent/issue-<IID>` branch. Stay
+on that prepared branch. Return control to the runner when done. Do not switch
+that agentic checkout to `main` at the end of the worker session.
 
-For an ordinary user session that starts away from the default branch, first
-decide whether the request is genuinely follow-up work for that branch and its
-open merge request. If it is unrelated, require a clean tree, then switch and
-refresh before beginning the new task:
+For a normal user session away from the default branch, decide first whether
+the request is follow-up work for that branch and its open MR. If not, require
+a clean tree. Then switch and refresh before the new task:
 
 ```bash
 git status --porcelain
@@ -116,28 +126,26 @@ git switch main
 git pull --ff-only
 ```
 
-If it is related, use the mechanical branch and merge-request checks below.
-Never use this decision to append unrelated work to a feature branch.
+If it is related, use the mechanical branch and MR checks below. Never use
+this decision to add unrelated work to a feature branch.
 
 Derive the task's kebab-case slug (≤40 characters) and intended branch before
-checking the current checkout:
+you check the current checkout:
 
 ```bash
 intended_branch="clanker/<slug>"
 ```
 
-The `agent/issue-<iid>` form is reserved for the serial `work-item-runner` in
-its configured dedicated checkout. Its starting point is the configured
-default branch. A runner child must mechanically verify that checkout, then
-continue its already-selected workflow without recursively invoking
-`agent-work` or creating another branch:
+Only the serial `work-item-runner` may use `agent/issue-<iid>`. It uses that
+form in its configured dedicated checkout. It starts from the configured
+default branch. A runner child must mechanically check that checkout. It then
+continues its selected flow. Do not call `agent-work` again or create a branch.
 
-The coding agent inside that runner is not the main agent for this lifecycle.
-Its runner-owned worker exception takes precedence over the publication
-requirements in this document: edit and validate only uncommitted working-tree
-changes, then return exactly one delimited merge-request draft. Do not commit,
-push, create a merge request, approve, or merge. The trusted runner alone
-performs the publication handoff after it validates that draft.
+The coding agent in that runner is not the main agent for this lifecycle. Its
+runner-owned worker exception overrides this document's publication rules. It
+may edit and validate uncommitted work-tree changes only. Then it returns one
+delimited MR draft. Do not commit, push, create an MR, approve, or merge. The
+trusted runner checks that draft. It performs publication.
 
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
@@ -150,10 +158,10 @@ configured_default_branch="$(jq -er '.default_branch' <<<"$project_json")"
 git merge-base --is-ancestor "origin/$configured_default_branch" HEAD
 ```
 
-Only the serial runner uses this verified path. An ordinary checkout that
-finds an `agent/issue-<iid>` branch must refuse it rather than create, reuse, or
-publish that reserved form. The branch and its merge request remain available
-at `awaiting_human`; GitLab is the durable handoff record.
+Only the serial runner uses this checked path. A normal checkout that finds an
+`agent/issue-<iid>` branch must refuse it. Do not create, reuse, or publish that
+reserved form. The branch and its MR stay available at `awaiting_human`. GitLab
+is the durable handoff record.
 
 Run from the main thread with Bash:
 
@@ -162,51 +170,58 @@ git rev-parse --abbrev-ref HEAD
 ```
 
 - **On a mechanically verified runner `agent/issue-<iid>` branch** → use the
-  checks above to prove the durable Git worktree, configured project
-  origin, and configured default branch. Then continue the runner-selected
-  workflow phase on this branch. `agent-work loop run --apply` is the parent
-  invocation that selected it; never invoke `agent-work` recursively.
+  checks above. They prove the durable Git worktree, configured project origin,
+  and configured default branch. Then continue the runner-selected phase on
+  this branch. `agent-work loop run --apply` selected it. Never call
+  `agent-work` recursively.
 
-- **Already on a `clanker/<slug>` feature branch** → do **not** trust the branch name; verify *mechanically* that it still holds unfinished work for the current task before appending. Fetch first, then check whether the branch has already landed:
+- **Already on a `clanker/<slug>` feature branch** → do **not** trust its name.
+  Mechanically check that it still has unfinished work for this task before you
+  add work. Fetch first. Then check whether the branch has landed:
    ```bash
    git fetch origin --prune
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=all&source_branch=$(git rev-parse --abbrev-ref HEAD)"
    ```
-   - **A merged MR exists for this branch**, or `git log --oneline origin/main..HEAD` shows only commits whose content is already in `main` → the branch is **stale / already-landed**, even when its name still matches your topic. Switch back with `git checkout main` and start fresh below. **Never re-push a merged branch** — doing so re-creates the deleted remote branch and re-introduces already-merged commits, which is exactly what causes merge conflicts.
-   - **Only an open MR — or no MR yet — for genuinely unfinished current-task work** → this is a real follow-up iteration: append commits to the same branch and update the same MR (Step 3b); skip the rest of this step.
+   - **A merged MR exists for this branch**, or `git log --oneline origin/main..HEAD` shows only commits whose content is already in `main` → the branch is **stale / already-landed**. This is true even if its name fits the topic. Switch back with `git checkout main`. Then start fresh below. **Never re-push a merged branch.** That recreates the deleted remote branch. It restores merged commits. It causes merge conflicts.
+   - **Only an open MR — or no MR yet — for unfinished current-task work** → this is a real follow-up. Add commits to the same branch. Update the same MR through Step 3b. Skip the rest of this step.
 
-   Never pile new or unrelated work onto a stale branch, and never assume a branch is live just because its name fits the task.
+   Never add new or unrelated work to a stale branch. Never assume a branch is
+   live just because its name fits the task.
 
-- **On `main` / `master`** → this is the expected starting point. Run the pre-flight checks below first; only create the feature branch once all are clean.
+- **On `main` / `master`** → this is the expected start. Run the pre-flight
+  checks below. Create the feature branch only after all pass.
 
-- **On any other branch** (detached `HEAD`, or a branch outside the ordinary
-  `clanker/` convention) → stop and surface it. The sole exception is the
-  mechanically verified reserved `agent/issue-<iid>` runner branch above; do
-  not widen ordinary branch authority. You are not at a known-good starting
-  point; let the user say whether to switch to `main` first rather than guessing.
+- **On any other branch** (detached `HEAD`, or a branch outside the normal
+  `clanker/` form) → stop and report it. The only exception is the mechanically
+  checked `agent/issue-<iid>` runner branch above. Do not widen normal branch
+  authority. This is not a known-good start. Let the user decide whether to
+  switch to `main`. Do not guess.
 
 ### Pre-flight checks (only when starting from `main`)
 
-**First, confirm a clean working tree** — run `git status --porcelain` and require it to be empty. Uncommitted changes mean you are not at a clean starting point, and a dirty tree even aborts the `git pull --ff-only` below. If there are local changes, stop and surface them; let the user decide to commit, stash, or discard. **Never stash or discard silently.** Then run the access preflight above and the remaining checks:
+**First, require a clean work tree.** Run `git status --porcelain`. Its output
+must be empty. Uncommitted changes mean this is not a clean start. A dirty tree
+also stops the `git pull --ff-only` below. If there are local changes, stop and
+report them. Let the user choose to commit, stash, or discard them. **Never
+stash or discard silently.** Then run the access preflight and these checks:
 
 1. **Coding-lane baseline tests** — after classifying the whole intended
    change through the `$architect` router, run this only for the coding workflow:
    ```bash
    uv run pytest
    ```
-   This is the fast coding baseline; the full matrix still runs at coding
-   finalization. Documentation and agent-policy work uses its content checks
-   and does not require a test baseline.
+   This is the fast coding baseline. The full matrix still runs at coding
+   finalization. Documentation and agent-policy work uses content checks. It
+   needs no test baseline.
 
 2. **Open merge request awareness**:
    ```bash
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&per_page=100"
    ```
-   Unrelated open merge requests are **non-blocking**. Do not stop merely
-   because this query returns an MR. Stop only for a concrete dependency on
-   unmerged work, the same branch belonging to another run, or a known file or
-   resource conflict. A continuation of an existing MR reuses its branch as
-   described above.
+   Unrelated open MRs are **non-blocking**. Do not stop only because this query
+   returns an MR. Stop for a real dependency on unmerged work, the same branch
+   owned by another run, or a known file or resource conflict. A follow-up to
+   an existing MR reuses its branch as described above.
 
 3. **Branch-specific continuation from `main`**:
    ```bash
@@ -214,50 +229,55 @@ git rev-parse --abbrev-ref HEAD
    glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID/merge_requests?state=opened&source_branch=$intended_branch"
    git show-ref --verify --quiet "refs/heads/$intended_branch"
    ```
-   An open MR for the same task is a follow-up iteration, not new work. Check
-   out the existing local branch with `git checkout "$intended_branch"`; if
-   only its remote-tracking branch exists, use
-   `git checkout --track "origin/$intended_branch"`. Then append the review
-   fix and update the existing MR through Step 3b. If that branch or MR belongs
-   to another work item, stop for a same-branch conflict. If a local or remote
-   branch exists without an open MR, verify mechanically whether it is
-   genuinely unfinished current-task work before reusing it; never overwrite
-   it or create a duplicate branch.
+   An open MR for this task is a follow-up, not new work. Check out the local
+   branch with `git checkout "$intended_branch"`. If only its remote-tracking
+   branch exists, use `git checkout --track "origin/$intended_branch"`. Add the
+   review fix. Update the existing MR through Step 3b. If that branch or MR
+   belongs to another work item, stop for a same-branch conflict. If a local or
+   remote branch exists without an open MR, mechanically check that it has
+   unfinished work for this task before reuse. Never overwrite it or make a
+   duplicate branch.
 
-**All blocking checks clean and no current-task branch exists** → create the intended branch:
+**All blocking checks pass and no branch exists for this task** → create the
+intended branch:
 
 ```bash
 git checkout -b "$intended_branch"
 ```
 
-**A blocking check fails** → summarize the failure (test names, dependency,
-same-branch ownership, or resource conflict) and remediate it before handoff.
-Other failures still require user direction when their repair would materially
-expand scope. An unrelated open MR is not a failed check.
+**A blocking check fails** → summarize the failure. Include test names,
+dependencies, same-branch ownership, or resource conflicts. Fix it before
+handoff. Other repairs need user direction when they would materially expand
+scope. An unrelated open MR is not a failed check.
 
-If `glab` is unauthenticated or errors for tooling reasons, surface the error and stop; do not retry blindly.
+If `glab` lacks auth or has a tooling error, report it and stop. Do not retry
+blindly.
 
-`git pull` and the `glab` reads need network. Use the environment's normal
-working route: the sandbox proxy where it exists, or the VM's configured
-network path otherwise. The other commands are local-only and sandbox-safe.
+`git pull` and `glab` reads need network. Use the normal environment route:
+the sandbox proxy when present, or the VM's configured network route. Other
+commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
 - **Non-trivial change** → activate `$architect` and follow the live router.
-- **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) → the main agent may edit + commit on the feature branch without spawning the TDD subagents. Pre-commit hooks still run at commit time, so quality gates are not bypassed.
+- **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) →
+  the main agent may edit and commit on the feature branch without TDD
+  subagents. Pre-commit hooks still run at commit time. Quality gates remain.
 
-Either path lands at a local commit on the feature branch. **Both paths then proceed to Step 3 (push + MR)** — the trivial shortcut skips the TDD subagents, not the merge request.
+Both paths make a local feature-branch commit. **Both then go to Step 3 (push +
+MR).** The trivial path skips TDD subagents, not the MR.
 
 ## Step 3: Publish (push + MR)
 
-Run from the main thread using the same verified Git and GitLab access path as
-the preflight. One user approval per remote-touching command.
+Run this from the main thread. Use the same checked Git and GitLab path as the
+preflight. Get one user approval for each remote-touching command.
 
 1. **Sanity-check branch** (in-sandbox):
    ```bash
    git rev-parse --abbrev-ref HEAD
    ```
-   If on `main` / `master`, stop — Step 1 should have prevented this. Never push directly to the default branch.
+   If on `main` / `master`, stop. Step 1 should have prevented this. Never push
+   directly to the default branch.
 
 2. **Detect an existing MR for this branch** (in-sandbox; `glab` reads only):
    ```bash
@@ -292,19 +312,19 @@ the preflight. One user approval per remote-touching command.
      exit 1
    }
    git push --set-upstream origin HEAD
-   agent-work merge-request publish \
+   uv run agent-work merge-request publish \
      --source-branch "$source_branch" --target-branch "$target_branch" --title "$title" \
      --problem "Review handoffs were hard to scan." \
      --impact "Reviewers could miss the action needed to move work forward." \
      --outcome "Make the MR description concise and nonduplicative." \
      --validation "git diff --check" --issue-iid "$issue_iid" --apply
    ```
-   Publication verifies the configured-project issue, source and target
-   branches, title, and Markdown returned by GitLab. A failure is a blocker.
-   Use free-form structured fields and `--tracking` only for non-closing
-   relationships. They must contain no GitLab closing pattern, including
-   `Closes`, `Fixes`, `Resolves`, Implement variants, or issue/work-item URLs.
-   `--issue-iid` is the sole closing association.
+   Publication checks the configured-project issue, source and target branches,
+   title, and Markdown returned by GitLab. A failure blocks completion. Use
+   free-form fields and `--tracking` only for non-closing relationships. They
+   must not contain a GitLab closing pattern. This includes `Closes`, `Fixes`,
+   `Resolves`, Implement variants, and issue/work-item URLs. `--issue-iid` is
+   the only closing association.
 
    Keep role receipts, result envelopes, full correction ledgers, and duplicated
    summaries out of the human-facing description; retain them in durable audit
@@ -344,7 +364,7 @@ the preflight. One user approval per remote-touching command.
    fi
    ```
    GitLab updates the existing MR with new commits. To replace its title or
-   description, use `agent-work merge-request publish` with scalar Problem,
+   description, use `uv run agent-work merge-request publish` with scalar Problem,
    Outcome, and Validation fields after this push; it updates exactly that
    source branch and verifies the returned metadata. For issue-backed updates,
    pass the validated `--issue-iid`; free-form fields and `--tracking` must

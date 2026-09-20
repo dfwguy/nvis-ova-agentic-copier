@@ -52,6 +52,7 @@ condition is false. The supported frontends do not all support `@...` imports.
 |---|---|---|
 | The CONTRIBUTING check fails | `$repository-setup` | Before any other repository work. |
 | A non-trivial change | `$architect` | Before design, delegation, or mutation; Architect owns lane selection and all delegated workflow phases below. |
+| Any Git or GitLab access, including read-only commands | `$git-flow` | Before the first such access or command; retain through publication as applicable. |
 | Markdown files | `.agents/guidance/markdown.md` | Before editing or reviewing Markdown |
 | Writing or reviewing `docs/` prose | `$simplifying-writing` | Before prose work |
 | Coding workflow | `.agents/guidance/tdd.md` | Before architecture or Red |
