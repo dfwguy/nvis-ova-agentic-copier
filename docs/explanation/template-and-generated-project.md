@@ -5,7 +5,7 @@ summary: Understand the boundary between this Copier template and its generated 
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-19
 related:
   - path: ../reference/template-contract.md
     why: Documents the observable template behavior explained here.
@@ -50,22 +50,28 @@ can improve shared scaffolding—tooling, CI, workflow guidance, and defaults—
 one place. Generated-project owners can then decide when to adopt those
 improvements through Copier's three-way update process.
 
-The root repository also has an internal CI boundary. Its `.base_uv` definition
-pins one project-only image by immutable digest, and nine native jobs extend
-it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
-`kingfisher`, `type-check`, `license-check`, and `shellcheck`. The image holds
-the jobs'
-interpreter, system tools, and locked dependencies, so they do not install them
-again. That optimization belongs only to this repository. Generated projects
-instead retain their single portable `validation (9 gates)` job, which performs
-dependency bootstrap once and reports the aggregate checks without the private
-registry image or its credentials. When root dependencies change, maintainers
-publish a new image digest and deliberately update the one `.base_uv` pin
-rather than relying on a mutable image tag.
+The root repository also has an internal CI boundary. Every merge-request and
+default-branch pipeline builds and pushes a project-only validation candidate
+for its commit, then nine native jobs use it: `ruff-check`, `ruff-format`,
+`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
+`license-check`, and `shellcheck`. The candidate tag includes the commit SHA
+and pipeline ID,
+so the jobs validate the Dockerfile and locked dependencies from that same
+commit rather than stale dependency content from a fixed digest. The image
+holds the jobs' interpreter, system tools, and locked dependencies, so they do
+not install them again. BuildKit uses a registry-backed cache, and its metadata
+and output digest are kept as evidence.
 
-Both CI configurations prefer a merge-request pipeline and suppress the
-duplicate branch pipeline while that merge request is open. A branch pipeline
-still runs when no merge request is open.
+That optimization belongs only to this repository. Generated projects retain
+their single portable `validation (9 gates)` job without the private registry
+image or its credentials. Before `uv run --no-sync` validation, it
+unconditionally runs `uv sync --locked --all-groups` from its own checkout's
+`pyproject.toml` and `uv.lock` for both Python environments. The root and
+generated paths therefore use different mechanisms, but neither can silently
+validate stale dependency content.
+
+Both CI configurations run only for merge-request events and the default
+branch. They therefore avoid duplicate feature-branch pipelines.
 
 The update model intentionally preserves files that are commonly customized,
 such as a project's README, dependencies, CI pipeline, package initializer, and

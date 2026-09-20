@@ -1,11 +1,11 @@
 ---
-title: How to refresh the CI dependency image
+title: How to refresh the CI validation image
 type: how-to
-summary: Publish, pin, and verify the project-only CI image that root validation consumes.
+summary: Build and verify the commit-specific CI image used by root validation.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-19
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -22,54 +22,49 @@ related:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# How to refresh the CI dependency image
+# How to refresh the CI validation image
 
 Use this procedure after changing `Dockerfile`, `pyproject.toml`, or `uv.lock`.
-They are all image-build inputs. The image is a project-only root-repository
-dependency: root validation consumes its already-published contents by
-immutable digest and does no `apt` or UV bootstrap. Locked dependency changes
-must update and commit `uv.lock`. Generated Copier projects keep their own
-portable CI bootstrap and do not inherit this registry location, image pin, or
-credentials.
+They are the validation-image build inputs. The pipeline builds and pushes a
+candidate for the current commit before root validation starts. Locked
+dependency changes must update and commit `uv.lock`.
 
-## 1. Validate the image merge request
+## 1. Open the change merge request
 
-Open a merge request that changes the image prerequisites. Its pipeline builds
-the image with rootless BuildKit and validates the result, but does not push to
-the registry. Review the build and validation evidence before a human merges
-the merge request.
+Open a merge request for the change. Every merge-request and default-branch
+pipeline builds the root validation image with rootless BuildKit from the
+current `Dockerfile`, `pyproject.toml`, and `uv.lock`. It pushes the candidate
+as `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
 
-The root validation jobs use the currently pinned published image. Their empty
-`needs` declaration starts them immediately in parallel with `ci-image:validate`
-rather than waiting for that image-validation stage. This keeps the image build
-off the root validation critical path while retaining its evidence in the same
-pipeline.
+The nine native root validation jobs wait for that candidate and run in it.
+They retain `uv run --no-sync`; the image supplies the interpreter, system
+tools, and locked dependencies, so the jobs must not install dependencies at
+runtime. This removes the window where validation could run against stale
+dependency content from a fixed digest.
 
-Do not print registry credentials, tokens, or generated authentication files
-in job output. The validation path must use GitLab-provided credentials only
-where the CI configuration requires them.
+The BuildKit job uses a registry-backed cache to stay within the per-job
+budget: prefer 60 seconds and reject a duration over 120 seconds. Do not count
+queue time toward that limit. Do not print registry credentials, tokens, or
+generated authentication files in job output.
 
-## 2. Publish after the human merge
+## 2. Review the image evidence
 
-After the merge reaches the default branch, the publication job runs only when
-`Dockerfile`, `pyproject.toml`, or `uv.lock` changed. It publishes the
-project-only image and records its immutable digest as a pipeline artifact.
+Review the image-build job in the same pipeline. It retains BuildKit metadata
+and the produced image digest as artifacts. Confirm that the job pushed the
+commit-specific tag and that the digest has the form
+`sha256:<64 hexadecimal characters>`.
 
-Retrieve that artifact and confirm that it records `CI_IMAGE` in the form
-`<registry>/<project>/validation@sha256:<64 hexadecimal characters>`, not a
-mutable tag. Keep that exact digest with the pipeline evidence; do not copy a
-credential or registry-login command into a generated template.
+Keep the metadata and digest with the pipeline evidence. They record the image
+build result. Do not copy registry-login commands or
+credentials into a generated template.
 
-## 3. Verify the consumer change
+## 3. Verify the root validation jobs
 
-Use the recorded digest to update the single image pin in the root `.base_uv`
-definition in a separate merge request. Set it to the complete `CI_IMAGE`
-value, including `@sha256:...`; never substitute a floating tag. The nine
-native jobs that extend `.base_uv`—`ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
-`license-check`, and `shellcheck`—then use the image's prepared interpreter, system tools, and
-locked project dependencies. They must not run `apt-get`, `uv python install`,
-`uv sync`, or another dependency-installation fallback.
+Inspect the nine named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
+`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, and
+`shellcheck`. They must wait for the candidate image and use its prepared
+environment. They must not run `apt-get`, `uv python install`, `uv sync`, or a
+dependency-installation fallback.
 
 Run the consumer pipeline and inspect the nine named root jobs directly; do
 not look for a root synthetic aggregate validation job or JUnit gate suite. Each
@@ -87,8 +82,15 @@ project budget to the longest executed terminal job with a numeric duration:
 prefer at most 60 seconds and reject execution over 120 seconds. Report skipped,
 canceled, or manual jobs, the overall pipeline span, and queue time separately;
 runner scheduling does not count against the execution budget. If the image
-needs another dependency, refresh and publish the image first, then repeat this
-pin-update procedure; do not restore bootstrap work to root validation.
+needs another dependency, update its build inputs and let the next pipeline
+build a new commit-specific candidate; do not restore bootstrap work to root
+validation. There is no separate post-merge pin-update merge request.
+
+Generated Copier projects remain registry-independent. Their portable
+validation job unconditionally runs `uv sync --locked --all-groups` against
+its own checkout's `pyproject.toml` and `uv.lock` for both Python environments
+before it runs `uv run --no-sync` checks. That bootstrap gives generated
+projects the same no-stale-dependency guarantee without using the root image.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership
