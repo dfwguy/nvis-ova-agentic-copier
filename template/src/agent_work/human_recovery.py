@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .domain import RunnerState
+from .domain import IMMEDIATE_OWNER_STATES, RunnerState
 from .state_machine import ALLOWED_TRANSITIONS
 
 
@@ -61,6 +61,7 @@ class RecoveryObservation:
     ledger_revision: int | None = None
     source_branch: str | None = None
     source_sha: str | None = None
+    worktree: str | None = None
     worktree_exists: bool | None = None
     worktree_head: str | None = None
     worktree_dirty: bool | None = None
@@ -71,7 +72,59 @@ class RecoveryObservation:
     pipeline_id: int | None = None
     pipeline_sha: str | None = None
     controller_status: str | None = None
+    owner_status: str = "missing"
     blocked_cause: str | None = None
+    merge_request_url: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryOwnerCapacity:
+    """Classify retained ownership without changing any workflow state."""
+
+    owner_states: tuple[tuple[int, str], ...]
+    identity_conflict: bool
+    live_owner_iid: int | None
+    unknown_owner_iid: int | None
+
+
+def classify_recovery_owner_capacity(
+    observations: tuple[RecoveryObservation, ...], *, target_iid: int
+) -> RecoveryOwnerCapacity:
+    """Return deterministic retained-owner evidence for one exact recovery target."""
+    retained = tuple(
+        sorted(
+            (item for item in observations if item.record_state is not None),
+            key=lambda item: item.issue_iid,
+        )
+    )
+    identities = (
+        tuple(item.source_branch for item in retained if item.source_branch),
+        tuple(item.worktree for item in retained if item.worktree),
+        tuple(
+            str(item.merge_request_iid) for item in retained if item.merge_request_iid
+        ),
+        tuple(item.merge_request_url for item in retained if item.merge_request_url),
+    )
+    identity_conflict = any(len(values) != len(set(values)) for values in identities)
+    immediate = tuple(
+        item for item in retained if item.record_state in IMMEDIATE_OWNER_STATES
+    )
+    return RecoveryOwnerCapacity(
+        owner_states=tuple((item.issue_iid, item.owner_status) for item in retained),
+        identity_conflict=identity_conflict,
+        live_owner_iid=next(
+            (
+                item.issue_iid
+                for item in immediate
+                if item.issue_iid != target_iid and item.owner_status == "active"
+            ),
+            None,
+        ),
+        unknown_owner_iid=next(
+            (item.issue_iid for item in immediate if item.owner_status == "unknown"),
+            None,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -123,7 +176,11 @@ def _classification(observation: RecoveryObservation) -> RecoveryClassification:
         RunnerState.COMPLETE,
     }:
         return RecoveryClassification.CLOSED_NO_ACTION
-    if observation.ambiguous or observation.pipeline_status == "failed":
+    if (
+        observation.ambiguous
+        or observation.owner_status == "unknown"
+        or observation.pipeline_status == "failed"
+    ):
         return RecoveryClassification.NEEDS_HUMAN_DECISION
     if observation.stale:
         return RecoveryClassification.NEEDS_HUMAN_DECISION
@@ -155,27 +212,7 @@ def build_inventory(observations: tuple[RecoveryObservation, ...]) -> RecoveryIn
         or item.split_dependencies
     )
 
-    def order(item: RecoveryCandidate) -> tuple[int, int]:
-        observation = item.observation
-        if observation.pipeline_status == "failed":
-            return (0, item.issue_iid)
-        if observation.stale:
-            return (1, item.issue_iid)
-        if item.classification is RecoveryClassification.SAFELY_RETRYABLE:
-            return (2, item.issue_iid)
-        if item.classification is RecoveryClassification.DEPENDENCY_GATED:
-            return (3, item.issue_iid)
-        if observation.record_state is RunnerState.AWAITING_HUMAN:
-            return (4, item.issue_iid)
-        if item.classification is RecoveryClassification.NEEDS_HUMAN_DECISION:
-            return (5, item.issue_iid)
-        if item.classification is RecoveryClassification.CLOSURE_CANDIDATE:
-            return (6, item.issue_iid)
-        if item.classification is RecoveryClassification.SUPERSEDED_DUPLICATE:
-            return (7, item.issue_iid)
-        return (8, item.issue_iid)
-
-    return RecoveryInventory(tuple(sorted(candidates, key=order)))
+    return RecoveryInventory(tuple(sorted(candidates, key=lambda item: item.issue_iid)))
 
 
 def _evidence(observation: RecoveryObservation) -> tuple[tuple[str, object], ...]:
@@ -196,6 +233,7 @@ def _evidence(observation: RecoveryObservation) -> tuple[tuple[str, object], ...
         ("ledger_revision", observation.ledger_revision),
         ("source_branch", observation.source_branch),
         ("source_sha", observation.source_sha),
+        ("worktree", observation.worktree),
         ("worktree_exists", observation.worktree_exists),
         ("worktree_head", observation.worktree_head),
         ("worktree_dirty", observation.worktree_dirty),
@@ -206,6 +244,8 @@ def _evidence(observation: RecoveryObservation) -> tuple[tuple[str, object], ...
         ("pipeline_id", observation.pipeline_id),
         ("pipeline_sha", observation.pipeline_sha),
         ("controller_status", observation.controller_status),
+        ("owner_status", observation.owner_status),
+        ("merge_request_url", observation.merge_request_url),
     )
 
 

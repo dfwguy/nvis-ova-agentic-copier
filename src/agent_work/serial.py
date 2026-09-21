@@ -1265,6 +1265,7 @@ def select_record(
     *,
     now: datetime,
     issue_iid: int | None = None,
+    allow_pinned_conflict: bool = False,
     repository: RepositoryPort,
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
     """Reconcile work before ranking eligible fresh issues by priority and age."""
@@ -1273,7 +1274,9 @@ def select_record(
     if any(record.project_id != project.id for record in records):
         raise SegmentError("ledger record belongs to another project")
     scheduler_plan = plan_scheduler_inventory(records, now=now)
-    if scheduler_plan.project_stop is not None:
+    if scheduler_plan.project_stop is not None and not (
+        allow_pinned_conflict and issue_iid is not None
+    ):
         raise SegmentError("multiple resumable records require reconciliation")
     immediate_owners = tuple(
         record for record in records if record.state in IMMEDIATE_OWNER_STATES
@@ -3459,12 +3462,18 @@ def run_segment(
     timeout_seconds: int,
     now: datetime,
     issue_iid: int | None = None,
+    allow_pinned_conflict: bool = False,
     remaining_seconds: Callable[[], float] | None = None,
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     record, issue = select_record(
-        ledger, gitlab, now=now, issue_iid=issue_iid, repository=repository
+        ledger,
+        gitlab,
+        now=now,
+        issue_iid=issue_iid,
+        allow_pinned_conflict=allow_pinned_conflict,
+        repository=repository,
     )
     if record is None or issue is None:
         return None

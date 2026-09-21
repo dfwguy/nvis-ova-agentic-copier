@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -193,7 +193,7 @@ internal agent handoffs.
 | --- | --- | --- | --- |
 | Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
 | Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, or inaccessible evidence blocks. Nonterminal evidence yields. An exact failed MR pipeline enters `repair` only with one uniquely corroborated retained owner. |
-| Retained-work recovery | Resume sole recoverable `agent::running` work. Reclassify one blocked IID only with live corroboration and reviewed `loop recover --issue-iid IID`. | Targeted status can corroborate an item; bulk status cannot. This manual path is for interrupted, ambiguous, or unsafe retained work. | It never handles a uniquely owned failed current-source MR pipeline. |
+| Retained-work recovery | Resume one durable immediate `agent::running` record. Reclassify one blocked IID only with that issue's passive owner-marker corroboration and reviewed `loop recover --issue-iid IID`. | Status and inventory report each retained issue independently. A reviewed exact-IID plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
 | Human block | Treat a failed default-branch or ownerless MR pipeline as blocking humans. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Reconcile prerequisite-label projections before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
 | Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, or open split prerequisite. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
@@ -279,7 +279,7 @@ The table maps each invariant to the required control or evidence.
 | --- | --- |
 | Local activation | One local activation holds the project lock. |
 | Resumable work | Do not claim new work while resumable running work exists. |
-| Retry selection | Retry-wait records queue; they are not concurrent owners. Normal selection first resumes the sole non-waiting active record. It then considers only due retries in deterministic deadline/IID order. Two non-waiting active records are a fail-closed ambiguity. |
+| Retry selection | `RETRY_WAIT` records queue; they are not concurrent owners. Ordinary unpinned selection uses durable state, resumes one immediate record, and fails closed when more than one immediate record exists. Passive owner-marker reconciliation applies to status, inventory, and reviewed exact-IID recovery. Due retries remain in deterministic deadline/IID order. Unknown owner evidence or shared branch, worktree, or MR identity fails closed in that recovery path. |
 | New-issue eligibility | Project-level loop enablement permits unattended work. A new issue must be open and non-confidential. It must have no `agent::running`, `agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no ledger record. |
 | Issue identity | One issue has one durable worktree and one authoritative source branch. |
 | MR uniqueness | Existing-MR remediation uses the verified MR source branch. It never makes a second MR. |

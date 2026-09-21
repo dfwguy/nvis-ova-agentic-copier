@@ -964,7 +964,15 @@ def _dependencies(
         logger=logging.getLogger(f"test-agent-work-{id(ledger)}"),
         read_plan=lambda path: path.read_bytes(),
         process_probe=lambda: "missing",
+        issue_owner_probe=lambda _issue_iid: "stale",
     )
+
+
+def _with_issue_owner_probe(
+    dependencies: RuntimeDependencies, probe: Callable[[int], str]
+) -> RuntimeDependencies:
+    """Replace the injected passive owner probe for one owner-evidence test."""
+    return replace(dependencies, issue_owner_probe=probe)
 
 
 class AdvancingMonotonicClock:
@@ -1371,6 +1379,7 @@ def test_recovery_inventory_correlates_durable_evidence_without_claiming_or_muta
     dependencies = replace(
         _dependencies(config, ledger, gitlab, repository),
         process_probe=lambda: "active",
+        issue_owner_probe=lambda _issue_iid: "active",
     )
 
     report = dispatch(
@@ -2238,10 +2247,10 @@ def test_canary_prioritizes_a_failed_exact_pipeline_over_a_clean_active_claim_wi
     assert repository.prepared is False
 
 
-def test_targeted_recover_refuses_to_advance_a_failed_pipeline_owner_while_another_claim_is_active(
+def test_targeted_recover_plans_its_failed_pipeline_owner_with_a_stale_peer(
     tmp_path: Path,
 ) -> None:
-    """Recovery names the conflicting retained IID and does not touch either record."""
+    """Distinct stale retained records do not create a generic identity conflict."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     owner = ledger.persist(
@@ -2274,7 +2283,8 @@ def test_targeted_recover_refuses_to_advance_a_failed_pipeline_owner_while_anoth
     )
 
     assert report.applied is False
-    assert "77" in (report.next_action or "")
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "run_segment"
     assert ledger.load(76) == owner
     assert ledger.load(77) == conflict
     assert gitlab.labels == []
@@ -2692,6 +2702,7 @@ def test_reviewed_exact_retry_keeps_its_pinned_owner_ahead_of_queued_retry_wait(
             update={
                 "issue_iid": 55,
                 "source_branch": "agent/issue-55",
+                "worktree": config.state_root / "worktrees" / "55",
                 "retry_at": NOW - timedelta(seconds=1),
                 "prior_state": RunnerState.EXECUTING,
                 "prior_phase": WorkflowPhase.WORKFLOW,
@@ -2701,7 +2712,13 @@ def test_reviewed_exact_retry_keeps_its_pinned_owner_ahead_of_queued_retry_wait(
     blocked = ledger.persist(
         _record(
             tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(update={"issue_iid": 56, "source_branch": "agent/issue-56"})
+        ).model_copy(
+            update={
+                "issue_iid": 56,
+                "source_branch": "agent/issue-56",
+                "worktree": config.state_root / "worktrees" / "56",
+            }
+        )
     )
     gitlab = FakeGitLab(
         _issue(iid=35).model_copy(update={"labels": ("agent::running",)})
@@ -3061,10 +3078,10 @@ def test_run_preview_does_not_advertise_a_solely_future_retry_wait(
     assert ledger.load(waiting.issue_iid) == waiting
 
 
-def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_the_conflict(
+def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_stale_work(
     tmp_path: Path,
 ) -> None:
-    """The #76/#77 incident sequence cannot advance the non-target retained claim."""
+    """Distinct stale retained records each retain their exact recovery plan."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     owner = ledger.persist(
@@ -3104,7 +3121,8 @@ def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_the_co
         apply=False,
         dependencies=_dependencies(config, ledger, gitlab, repository),
     )
-    assert "77" in (conflict.next_action or "")
+    assert conflict.operational_plan is not None
+    assert conflict.operational_plan.action == "run_segment"
     claim_preview = dispatch(
         CommandRequest(command="loop.recover", issue_iid=77),
         apply=False,
@@ -13445,6 +13463,224 @@ def test_bulk_status_uses_only_durable_records_while_exact_status_corroborates_l
     assert repository.worktree_exists_calls == 1
 
 
+def test_bulk_status_reports_each_retained_owners_passive_evidence_in_iid_order(
+    tmp_path: Path,
+) -> None:
+    """Status reads each issue marker and never treats the coordinator as its owner."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    later = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
+    )
+    earlier = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    owner_probe_calls: list[int] = []
+
+    def issue_owner_probe(issue_iid: int) -> str:
+        owner_probe_calls.append(issue_iid)
+        return {earlier.issue_iid: "active", later.issue_iid: "stale"}[issue_iid]
+
+    dependencies = _with_issue_owner_probe(
+        replace(
+            _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+            process_probe=lambda: "active",
+        ),
+        issue_owner_probe,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.status"), apply=False, dependencies=dependencies
+    )
+
+    assert tuple(item.issue_iid for item in report.items) == (12, 13)
+    assert [item.corroboration["owner_status"] for item in report.items] == [
+        "active",
+        "stale",
+    ]
+    assert owner_probe_calls == [12, 13]
+    assert not (config.state_root / "issues" / "12.lock").exists()
+    assert not (config.state_root / "issues" / "12.lock.owner").exists()
+    assert not (config.state_root / "issues" / "13.lock").exists()
+    assert not (config.state_root / "issues" / "13.lock.owner").exists()
+
+
+def test_recovery_inventory_binds_per_issue_owner_evidence_to_its_candidates(
+    tmp_path: Path,
+) -> None:
+    """One coordinator owner cannot make all retained recovery records live."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    active = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    stale = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
+    )
+    owner_probe_calls: list[int] = []
+
+    def issue_owner_probe(issue_iid: int) -> str:
+        owner_probe_calls.append(issue_iid)
+        return {active.issue_iid: "active", stale.issue_iid: "stale"}[issue_iid]
+
+    dependencies = _with_issue_owner_probe(
+        replace(
+            _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+            process_probe=lambda: "active",
+        ),
+        issue_owner_probe,
+    )
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory"),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert [candidate.issue_iid for candidate in report.recovery_candidates] == [12, 13]
+    assert [
+        candidate.corroboration["owner_status"]
+        for candidate in report.recovery_candidates
+    ] == [
+        '"active"',
+        '"stale"',
+    ]
+    assert owner_probe_calls == [12, 13]
+    assert ledger.load(12) == active
+    assert ledger.load(13) == stale
+
+
+@pytest.mark.parametrize(
+    (
+        "owner_states",
+        "duplicate_identity",
+        "expected_action",
+        "expected_next_action",
+    ),
+    [
+        (
+            {12: "stale", 13: "missing"},
+            False,
+            "normalize_interrupted_claim",
+            "Apply the reviewed normalization for retained issue 13.",
+        ),
+        (
+            {12: "active", 13: "stale"},
+            False,
+            "capacity_blocked",
+            "Retained issue 12 has the verified live owner; do not advance issue 13.",
+        ),
+        (
+            {12: "unknown", 13: "stale"},
+            False,
+            "ownership_unverified",
+            "Verify the owner marker for retained issue 12 before recovering issue 13.",
+        ),
+        (
+            {12: "stale", 13: "missing"},
+            True,
+            "identity_conflict",
+            "Resolve the shared retained identity before recovering issue 13.",
+        ),
+    ],
+)
+def test_loop_recover_preview_reconciles_owner_capacity_or_fails_closed(
+    tmp_path: Path,
+    owner_states: dict[int, str],
+    duplicate_identity: bool,
+    expected_action: str,
+    expected_next_action: str,
+) -> None:
+    """Exact recovery distinguishes owners without mutating either record."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    second = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "issue_iid": 13,
+            "source_branch": first.source_branch
+            if duplicate_identity
+            else "agent/issue-13",
+            "worktree": first.worktree
+            if duplicate_identity
+            else tmp_path / "worktrees" / "13",
+        }
+    )
+    first = ledger.persist(first)
+    second = ledger.persist(second)
+    gitlab = FakeGitLab(
+        _issue(iid=13).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, gitlab, repository),
+        owner_states.__getitem__,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=13),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == expected_action
+    assert report.next_action == expected_next_action
+    assert report.operational_plan.evidence["owner_states"] == (
+        f"12={owner_states[12]},13={owner_states[13]}"
+    )
+    assert ledger.load(12) == first and ledger.load(13) == second
+
+
+def test_loop_recover_preview_keeps_retry_wait_queued_behind_a_stale_target(
+    tmp_path: Path,
+) -> None:
+    """A queued retry cannot reserve capacity ahead of a stale exact target."""
+    queued = _record(
+        tmp_path, state=RunnerState.RETRY_WAIT, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(update={"retry_at": NOW + timedelta(minutes=1), "issue_iid": 12})
+    target = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "issue_iid": 13,
+            "source_branch": "agent/issue-13",
+            "worktree": tmp_path / "worktrees" / "13",
+        }
+    )
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    queued = ledger.persist(queued)
+    target = ledger.persist(target)
+    gitlab = FakeGitLab(
+        _issue(iid=13).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, gitlab, repository),
+        lambda issue_iid: {12: "missing", 13: "stale"}[issue_iid],
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=13),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "normalize_interrupted_claim"
+    assert report.operational_plan.evidence["owner_states"] == "12=missing,13=stale"
+    assert ledger.load(12) == queued and ledger.load(13) == target
+
+
 def test_observation_segment_does_not_refresh_the_unrelated_base_checkout(
     tmp_path: Path,
 ) -> None:
@@ -13948,3 +14184,162 @@ def test_migration_rejects_pending_replay_when_issue_state_changed(
 
     assert gitlab.labels == []
     assert ledger.load(12) == pending
+
+
+@pytest.mark.parametrize("identity_field", ["merge_request_iid", "merge_request_url"])
+def test_loop_recover_rejects_each_shared_retained_mr_identity(
+    tmp_path: Path, identity_field: str
+) -> None:
+    """One shared recorded MR identity fails closed even with disjoint paths."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    shared = 88 if identity_field == "merge_request_iid" else "https://mr/88"
+    second = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 13,
+                "source_branch": "agent/issue-13",
+                "worktree": tmp_path / "worktrees" / "13",
+                identity_field: shared,
+            }
+        )
+    )
+    first = ledger.persist(first.model_copy(update={identity_field: shared}))
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+        lambda _issue_iid: "stale",
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=second.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "identity_conflict"
+    assert ledger.load(first.issue_iid) == first
+
+
+def test_loop_recover_fails_closed_when_owner_probe_is_unverifiable(
+    tmp_path: Path,
+) -> None:
+    """A passive owner-probe failure becomes unknown evidence, never advancement."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    target = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+        lambda _issue_iid: (_ for _ in ()).throw(OSError("unverifiable")),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=target.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "ownership_unverified"
+    assert report.operational_plan.evidence["owner_states"] == "12=unknown"
+
+
+@pytest.mark.parametrize("identity_field", ["source_branch", "worktree"])
+def test_loop_recover_rejects_each_shared_retained_branch_or_worktree(
+    tmp_path: Path, identity_field: str
+) -> None:
+    """Either shared durable branch or worktree identity fails closed by itself."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    second = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 13,
+                "source_branch": (
+                    first.source_branch
+                    if identity_field == "source_branch"
+                    else "agent/issue-13"
+                ),
+                "worktree": (
+                    first.worktree
+                    if identity_field == "worktree"
+                    else tmp_path / "worktrees" / "13"
+                ),
+            }
+        )
+    )
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+        lambda _issue_iid: "stale",
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=second.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert report.operational_plan is not None
+    assert report.operational_plan.action == "identity_conflict"
+
+
+def test_loop_recover_apply_advances_exact_stale_target_beside_stale_peer(
+    tmp_path: Path,
+) -> None:
+    """Reviewed exact recovery bypasses only the generic stale-peer scheduler stop."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    peer = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "issue_iid": 13,
+                "source_branch": "agent/issue-13",
+                "worktree": tmp_path / "worktrees" / "13",
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(iid=13).model_copy(update={"labels": ("agent::running",)})
+    )
+    repository = FakeRepository(config)
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, gitlab, repository), lambda _issue_iid: "stale"
+    )
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=13, max_segments=1),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    report = dispatch(
+        CommandRequest(
+            command="loop.recover",
+            issue_iid=13,
+            max_segments=1,
+            plan_file=tmp_path / "13.json",
+        ),
+        apply=True,
+        dependencies=replace(
+            dependencies, read_plan=lambda _path: _operational_plan_bytes(preview)
+        ),
+    )
+
+    assert report.items and report.items[0].issue_iid == 13
+    assert ledger.load(peer.issue_iid) == peer

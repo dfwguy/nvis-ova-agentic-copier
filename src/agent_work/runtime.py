@@ -51,9 +51,16 @@ from .human_recovery import (
     ResolutionRequest,
     build_inventory,
     build_resolution_plan,
+    classify_recovery_owner_capacity,
     verify_resolution_plan,
 )
-from .ledger import JsonLedger, XdgIssueLock, XdgProjectLock, observe_project_lock
+from .ledger import (
+    JsonLedger,
+    XdgIssueLock,
+    XdgProjectLock,
+    observe_issue_lock,
+    observe_project_lock,
+)
 from .migration import build_migration_plan
 from .models import (
     AgentWorkConfig,
@@ -166,6 +173,7 @@ def _status_corroboration(
     repository: RepositoryPort,
     clock: Callable[[], datetime],
     process_probe: Callable[[], str],
+    issue_owner_probe: Callable[[int], str],
 ) -> dict[str, str]:
     """Read bounded live evidence independently; status never mutates state."""
     evidence: dict[str, str] = {
@@ -219,6 +227,10 @@ def _status_corroboration(
         evidence["process"] = process_probe()
     except (OSError, RuntimeError, ValueError):
         pass
+    try:
+        evidence["owner_status"] = issue_owner_probe(record.issue_iid)
+    except (OSError, RuntimeError, ValueError):
+        evidence["owner_status"] = "unknown"
     return evidence
 
 
@@ -298,6 +310,7 @@ def _operational_evidence(
     gitlab: GitLabPort,
     repository: RepositoryPort,
     lifecycle_label_drift: tuple[str, ...],
+    owner_states: tuple[tuple[int, str], ...] = (),
 ) -> OperationalPlan:
     """Build compact public evidence for a reviewed non-claiming operation."""
     selected = next(
@@ -339,6 +352,9 @@ def _operational_evidence(
         if selected is None
         else hashlib.sha256(selected.model_dump_json().encode()).hexdigest(),
         "lifecycle_label_drift": ",".join(lifecycle_label_drift),
+        "owner_states": ",".join(
+            f"{issue_iid}={status}" for issue_iid, status in owner_states
+        ),
     }
     if selected is not None:
         try:
@@ -413,6 +429,7 @@ def _recovery_observation(
     repository: RepositoryPort | None = None,
     project: GitLabProject | None = None,
     controller_status: str | None = None,
+    owner_status: str = "unknown",
     split_dependencies: tuple[tuple[int, str], ...] = (),
 ) -> RecoveryObservation:
     """Build bounded recovery evidence without reading untrusted issue prose."""
@@ -520,7 +537,7 @@ def _recovery_observation(
         split_dependencies=split_dependencies,
         stale=record is not None
         and record.state in {RunnerState.EXECUTING, RunnerState.OBSERVING}
-        and controller_status != "active"
+        and owner_status in {"stale", "missing"}
         and not (
             record.state is RunnerState.OBSERVING
             and pipeline_status in NONTERMINAL_PIPELINE_STATUSES
@@ -529,6 +546,7 @@ def _recovery_observation(
         ledger_revision=None if record is None else record.revision,
         source_branch=None if record is None else record.source_branch,
         source_sha=None if record is None else record.source_sha,
+        worktree=None if record is None else str(record.worktree),
         worktree_exists=exists,
         worktree_head=head,
         worktree_dirty=None if exists is None else bool(paths),
@@ -539,6 +557,8 @@ def _recovery_observation(
         pipeline_id=pipeline_id,
         pipeline_sha=pipeline_sha,
         controller_status=controller_status,
+        owner_status=owner_status,
+        merge_request_url=None if record is None else record.merge_request_url,
         blocked_cause=blocked_cause,
     )
 
@@ -580,6 +600,7 @@ def _recovery_plan(
     gitlab: GitLabPort,
     repository: RepositoryPort | None = None,
     controller_status: str | None = None,
+    owner_status: str = "unknown",
     issue: GitLabIssue | None = None,
     merge_requests: tuple[MergeRequestEvidence, ...] | None = None,
 ) -> tuple[OperationalPlan, RecoveryObservation]:
@@ -594,6 +615,7 @@ def _recovery_plan(
             repository=repository,
             project=project,
             controller_status=controller_status,
+            owner_status=owner_status,
             issue=issue,
             merge_requests=merge_requests,
             split_dependencies=_recovery_split_dependencies(
@@ -681,6 +703,33 @@ def _normalization_is_exact(
         return False
 
 
+def _owner_capacity(
+    records: tuple[LedgerRecord, ...], *, target_iid: int, wired: RuntimeDependencies
+):
+    """Read every retained issue marker once for an evidence-bound recovery plan."""
+    observations = tuple(
+        RecoveryObservation(
+            issue_iid=record.issue_iid,
+            record_state=record.state,
+            source_branch=record.source_branch,
+            worktree=str(record.worktree),
+            merge_request_iid=record.merge_request_iid,
+            merge_request_url=record.merge_request_url,
+            owner_status=_issue_owner_status(wired, record.issue_iid),
+        )
+        for record in sorted(records, key=lambda item: item.issue_iid)
+    )
+    return classify_recovery_owner_capacity(observations, target_iid=target_iid)
+
+
+def _issue_owner_status(wired: RuntimeDependencies, issue_iid: int) -> str:
+    """Return bounded passive owner evidence when the probe is unavailable."""
+    try:
+        return wired.issue_owner_probe(issue_iid)
+    except (OSError, RuntimeError, ValueError):
+        return "unknown"
+
+
 def _repair_evidence_copy(evidence: Mapping[str, object]) -> dict[str, object]:
     """Copy reviewed operational evidence into the bounded repair record shape."""
     return {key: value for key, value in evidence.items()}
@@ -708,6 +757,9 @@ def _operational_preview(
     next_action = "Review the operational checkpoint; no issue was claimed."
     outcome = "checkpoint"
     label_drift = wired.lifecycle_label_drift()
+    capacity = None
+    if request.command == "loop.recover" and target is not None:
+        capacity = _owner_capacity(records, target_iid=target, wired=wired)
     if request.command == "loop.canary" and label_drift:
         action = "provision_lifecycle_labels"
         next_action = "Review and apply the fixed lifecycle-label provisioning plan."
@@ -736,6 +788,7 @@ def _operational_preview(
     else:
         if target is None:
             raise RuntimeError("recover requires an issue IID")
+        assert capacity is not None
         if (
             gate.repair_owner is not None
             and gate.repair_owner.issue_iid != target
@@ -760,6 +813,7 @@ def _operational_preview(
                 gitlab=wired.gitlab,
                 repository=wired.repository,
                 lifecycle_label_drift=label_drift,
+                owner_states=() if capacity is None else capacity.owner_states,
             )
             return _report(
                 request,
@@ -786,6 +840,7 @@ def _operational_preview(
                 gitlab=wired.gitlab,
                 repository=wired.repository,
                 lifecycle_label_drift=label_drift,
+                owner_states=() if capacity is None else capacity.owner_states,
             )
             return _report(
                 request,
@@ -802,14 +857,26 @@ def _operational_preview(
             next_action = (
                 f"Retained issue {target} does not exist; do not recover another item."
             )
-        conflicts = tuple(
-            record
-            for record in records
-            if record.issue_iid != target and record.state in IMMEDIATE_OWNER_STATES
-        )
-        if record is not None and (
-            record is not None
-            and record.state is RunnerState.EXECUTING
+        elif capacity.identity_conflict:
+            action = "identity_conflict"
+            next_action = (
+                "Resolve the shared retained identity before recovering issue "
+                f"{target}."
+            )
+        elif capacity.unknown_owner_iid is not None:
+            action = "ownership_unverified"
+            next_action = (
+                "Verify the owner marker for retained issue "
+                f"{capacity.unknown_owner_iid} before recovering issue {target}."
+            )
+        elif capacity.live_owner_iid is not None:
+            action = "capacity_blocked"
+            next_action = (
+                f"Retained issue {capacity.live_owner_iid} has the verified live owner; "
+                f"do not advance issue {target}."
+            )
+        elif record is not None and (
+            record.state is RunnerState.EXECUTING
             and record.phase is WorkflowPhase.WORKFLOW
         ):
             action = (
@@ -822,9 +889,6 @@ def _operational_preview(
             next_action = (
                 f"Apply the reviewed normalization for retained issue {target}."
             )
-        elif record is not None and conflicts:
-            conflict = min(conflicts, key=lambda record: record.issue_iid)
-            next_action = f"Recover retained issue {conflict.issue_iid} before advancing issue {target}."
         elif record is not None:
             action = (
                 "repair"
@@ -847,6 +911,7 @@ def _operational_preview(
         gitlab=wired.gitlab,
         repository=wired.repository,
         lifecycle_label_drift=label_drift,
+        owner_states=() if capacity is None else capacity.owner_states,
     )
     return _report(
         request,
@@ -875,6 +940,7 @@ class RuntimeDependencies:
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
     process_probe: Callable[[], str]
+    issue_owner_probe: Callable[[int], str] = lambda _issue_iid: "unknown"
     lifecycle_label_drift: Callable[[], tuple[str, ...]] = lambda: ()
     ensure_lifecycle_labels: Callable[[], None] = lambda: None
     issue_lock: Callable[[int], AbstractContextManager[None]] = lambda _issue_iid: (
@@ -1232,6 +1298,12 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
             config.state_root / "project.lock", process_alive=process_alive
         )
 
+    def probe_issue_owner(issue_iid: int) -> str:
+        """Passively report one retained issue's advisory owner marker."""
+        return observe_issue_lock(
+            config.state_root, issue_iid, process_alive=process_alive
+        )
+
     now = lambda: datetime.now(UTC)
     gitlab = GitLabGateway(config, run_subprocess)
     return RuntimeDependencies(
@@ -1253,6 +1325,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
         process_probe=probe_project_lock,
+        issue_owner_probe=probe_issue_owner,
         lifecycle_label_drift=gitlab.lifecycle_label_drift,
         ensure_lifecycle_labels=gitlab.ensure_lifecycle_labels,
     )
@@ -1397,6 +1470,7 @@ def _recovery_candidate_report(
         "pipeline_sha": observation.pipeline_sha,
         "split_dependencies": observation.split_dependencies,
         "controller_status": observation.controller_status,
+        "owner_status": observation.owner_status,
         "blocked_cause": observation.blocked_cause,
         "stale": observation.stale,
         "ambiguous": observation.ambiguous,
@@ -1710,6 +1784,7 @@ def dispatch(
                         repository=repository,
                         project=project,
                         controller_status=controller,
+                        owner_status=_issue_owner_status(wired, iid),
                         split_dependencies=tuple(
                             (dependency_iid, observed_issues[dependency_iid].state)
                             for dependency_iid in child_dependencies.get(iid, ())
@@ -1742,6 +1817,7 @@ def dispatch(
                             iter(observed_issues[candidate.issue_iid].labels), ""
                         ),
                         "controller": controller,
+                        "owner_status": candidate.observation.owner_status,
                         "pipeline_sha": next(
                             (
                                 mr.sha
@@ -1865,6 +1941,7 @@ def dispatch(
                 repository=repository,
                 project=project,
                 controller_status=snapshot_controller,
+                owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                 issue=snapshot_issue,
                 merge_requests=snapshot_mrs,
                 split_dependencies=_recovery_split_dependencies(
@@ -1881,6 +1958,7 @@ def dispatch(
                 gitlab=gitlab,
                 repository=repository,
                 controller_status=snapshot_controller,
+                owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                 issue=snapshot_issue,
                 merge_requests=snapshot_mrs,
             )
@@ -1920,6 +1998,7 @@ def dispatch(
                     repository=repository,
                     project=project,
                     controller_status=current_controller,
+                    owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                     issue=current_issue,
                     merge_requests=current_mrs,
                     split_dependencies=_recovery_split_dependencies(
@@ -1936,6 +2015,7 @@ def dispatch(
                     gitlab=gitlab,
                     repository=repository,
                     controller_status=current_controller,
+                    owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                     issue=current_issue,
                     merge_requests=current_mrs,
                 )
@@ -2310,6 +2390,7 @@ def dispatch(
                         timeout_seconds=request.max_activation_seconds,
                         now=wired.clock(),
                         issue_iid=target,
+                        allow_pinned_conflict=True,
                         issue_lock=wired.issue_lock,
                         remaining_seconds=lambda: (
                             request.max_activation_seconds
@@ -2363,12 +2444,14 @@ def dispatch(
                         repository=repository,
                         clock=wired.clock,
                         process_probe=lambda: process,
+                        issue_owner_probe=wired.issue_owner_probe,
                     )
                     if request.issue_iid is not None
                     else {
                         "gitlab": "unknown",
                         "worktree": "unknown",
                         "process": process,
+                        "owner_status": _issue_owner_status(wired, record.issue_iid),
                     },
                 )
                 for record in shown
