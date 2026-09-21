@@ -31,6 +31,15 @@ retaining the local Red ref. Use the role's one compare-and-swap compaction and
 return every precheck and postcheck. A failed check stops publication. A serial
 worker never commits. Do not add a check or change the validated tree.
 
+For coding reconciliation, Finalizer instead creates the single ordered
+two-parent commit by directly committing the Judge-approved staged tree from
+the still-pending merge state. It consumes `MERGE_HEAD`: captured old source is
+first and exact target/`MERGE_HEAD` is second. Main supplies freshly fetched
+ref proof; Finalizer checks it locally without remote or GitLab calls. It
+postchecks cleared merge state, clean index and worktree, exact parents, tree,
+message, and unchanged Red ref, without an intermediate passing commit or
+sole-parent compaction.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Architect router maps it to a

@@ -90,6 +90,10 @@ role is N/A only when facts show it does not apply.
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
 
+In coding reconciliation, the mechanically re-proved retained Red receipt is
+the Red preparation receipt. Do not delegate a fresh Test Writer. TDD Red must
+not manufacture new evidence for recovery.
+
 Red needs the approved design. Red also needs the acceptance criteria. Diátaxis Writer needs
 approved documentation boundaries. Conditional Policy Writer needs approved
 policy boundaries. Red returns failing focused behavior tests. Diátaxis Writer
@@ -239,6 +243,40 @@ call, approval, or merge occurred. The action creates the Judge tree commit with
 the base as sole parent and atomically compare-and-swaps the branch from the
 passing head. Postchecks prove the new head, sole parent, tree, unchanged Red
 ref, and clean state. Any failure stops publication.
+
+### Reconciliation mode
+
+First select the exact project, merge request, source, and target. Then prepare
+the pending target merge and conflict manifest. Architect freshly routes the
+complete joined diff. Coding reconciliation recovers complete post-policy
+source work. It does not start a new Red cycle. It mechanically re-proves the
+exact retained authentic Red checkpoint against the unchanged captured source.
+A missing pre-checkpoint merge request routes to issue #158. A missing or
+mismatched post-policy checkpoint stops safely for recovery.
+
+Green owns coding conflicts. Documentation Writer owns content-only conflicts.
+Each preserves only approved source and target intent. New behavior, product
+intent, or policy is scope expansion. It needs human direction. Coding
+reconciliation needs historical Red-to-source provenance and fresh three-way
+source-plus-target-to-candidate evidence. Fresh Judge and review receipts cover
+the joined candidate and name both proofs.
+
+In coding reconciliation, Finalizer directly commits the exact Judge-approved
+staged tree from the still-pending merge state. This creates one ordered
+two-parent commit. The captured old source is first. The captured
+target/`MERGE_HEAD` is second. The commit consumes `MERGE_HEAD` and atomically
+updates the local branch. Do not create an intermediate passing commit or a
+sole-parent compaction. Finalizer checks cleared merge state, a clean index and
+worktree, exact parents, tree, message, and unchanged Red ref. Main supplies
+freshly fetched exact source and target ref proof before finalization. Finalizer
+checks that proof and local identities. It makes no remote or GitLab calls. In
+content-only reconciliation, Documentation Finalizer approves the tree. Main
+makes the matching direct pending-merge commit and the same postchecks. Any
+source or target ref drift invalidates every receipt. Restart exact selection
+and preparation. Main fetches and rechecks both refs just before publishing
+with exact old-source `--force-with-lease` and authoritative same-merge-request
+readback. Keep that readback. Pipeline review still applies. Only humans approve
+and merge. The timer remains irrelevant. Keep each proof. Check each result.
 
 ### Documentation and agent-policy workflow
 

@@ -38,6 +38,13 @@ not add untested functionality.
    `base_sha`, `tree_oid`, `ref`, `test_paths`, `argv`, nonzero `exit_code`,
    `expected_failure`, and `output_sha256`. Each field must match the accepted
    Red receipt. On recovery, reuse this saved identity. Do not replace it.
+   In reconciliation mode, do not start a new Red cycle. Require mechanically
+   re-proved retained Red-to-source provenance, captured old source and exact
+   target identities, and Architect's complete conflict manifest. That receipt
+   is the Red preparation receipt. Do not delegate a fresh Test Writer. Resolve
+   only approved source and target intent. Record fresh three-way
+   source-plus-target-to-candidate evidence apart from historical
+   Red-to-source proof.
 2. **Read the code rules** — before production implementation, read
    `.agents/guidance/code-quality.md`. Use `AGENTS.md` to identify languages
    in changed files. Read each matching `.agents/lang/` file. Implement the
@@ -162,9 +169,15 @@ not add untested functionality.
    single validated final controller commit path. Pass the retained Red
    checkpoint and ordinary final Red-to-Green diff to Finalizer. In interactive
    work, Finalizer must produce one final passing publication commit over the
-   original base while retaining the local Red ref. In serial work, the
-   checkpoint is a local Git tree ref and the controller creates one final
-   commit. Never push either Red checkpoint. Do not rely on server-side squash.
+   original base while retaining the local Red ref. In reconciliation mode, it
+   directly commits the exact Judge-approved staged tree from the still-pending
+   merge state. It consumes `MERGE_HEAD`. Old source is first. Exact
+   target/`MERGE_HEAD` is second. Do not create an intermediate passing commit
+   or a sole-parent compaction. Finalizer checks cleared merge state, a clean
+   index and worktree, exact parents, tree, message, and unchanged Red ref. In serial work, the
+   checkpoint is a local Git tree ref. The controller creates one final commit.
+   Never push either Red checkpoint. Do not rely on server-side squash. Keep
+   each proof. Check each result. Keep the tree. Keep the refs. Check the state.
 
 ## Constraints
 

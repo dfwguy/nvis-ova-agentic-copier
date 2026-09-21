@@ -22,6 +22,12 @@ role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi. Verify the accepted checkpoint and ordinary
 Red-to-Green Git diff supplied by Green.
 
+For reconciliation, verify two proofs. Verify mechanically re-proved retained
+historical Red-to-source provenance. Verify fresh three-way
+source-plus-target-to-candidate evidence. Keep the proofs separate. Check both.
+Keep both proof sets in view. Read both sets. Check the source. Check the
+target. Check the new tree. Do not mix the two proof sets.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Architect router resolves its

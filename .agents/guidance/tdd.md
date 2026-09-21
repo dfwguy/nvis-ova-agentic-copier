@@ -93,6 +93,34 @@ one from prose. No Red checkpoint ref is pushed. Correctness does not depend on
 server-side squash. Serial workers still cannot commit. The trusted controller
 retains its single validated final commit path.
 
+## Reconciliation of completed coding work
+
+Reconciliation recovers completed post-policy source work. It is not a new TDD
+cycle. Architect mechanically re-proves the exact retained authentic Red
+checkpoint against the unchanged captured source. Never create Red evidence
+retrospectively. A pre-checkpoint merge request routes to issue #158. A missing
+or mismatched post-policy checkpoint stops safely for recovery. The re-proved
+retained receipt is the Red preparation receipt. Architect does not delegate a
+fresh Test Writer. TDD Red does not manufacture evidence.
+
+Architect prepares the pending target merge and conflict manifest. It freshly
+routes the joined diff. Green resolves coding conflicts by preserving approved
+source and target intent. Fresh validation and reviews cover the combined
+candidate. Judge and Finalizer keep historical Red-to-source proof apart from
+fresh three-way source-plus-target-to-candidate proof. Main supplies freshly
+fetched exact source and target ref proof before finalization. Finalizer checks
+it and local identities. It makes no remote or GitLab calls. It directly commits
+the exact Judge-approved staged tree from the still-pending merge state. This
+consumes `MERGE_HEAD`. Captured old source is first. Exact target/`MERGE_HEAD`
+is second. Do not create an intermediate passing commit or a sole-parent
+compaction. Postchecks require cleared merge state, a clean index and worktree,
+exact parents, tree, message, and unchanged Red ref. Any source or target ref
+drift invalidates receipts. Restart exact selection and preparation. Main
+fetches and rechecks both refs just before publishing with exact old-source
+`--force-with-lease` and same-merge-request readback. Humans alone approve and
+merge. Keep the readback. The factory timer is irrelevant to reconciliation.
+Keep each proof. Check each result. Keep the tree. Keep the refs. Check the state.
+
 Policy findings return through Architect to the Agent Policy Writer. Green
 consolidates the finding but does not repair policy. Each correction gets a
 fresh Judge before dependent review.

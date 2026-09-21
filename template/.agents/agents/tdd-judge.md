@@ -46,6 +46,12 @@ You are the read-only Judge for the staged candidate.
    for its full receipt. Return the joined Judge and non-functional handoff to
    Green before specialist review.
 
+For reconciliation, name two proofs in the receipt. Name mechanically re-proved
+historical Red-to-source provenance. Name fresh
+source-plus-target-to-candidate evidence. Keep the names separate. Fresh
+validation covers the joined candidate. It does not cover just marker paths.
+Reject identity drift or missing proof to Architect. Keep each proof. Check it.
+
 ## Constraints
 
 - Do not edit, stage, commit, push, or call GitLab.

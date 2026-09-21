@@ -35,6 +35,12 @@ accepted Red test paths. Use the diff to distinguish the checkpointed failing
 tests from later Green production and allowed test repairs. Missing, mismatched,
 or replaced checkpoint evidence is a Major provenance defect.
 
+For reconciliation, require the mechanically re-proved retained historical
+Red-to-source provenance plus fresh three-way source-plus-target-to-candidate
+evidence. Keep these proofs separate in the receipt. A missing proof or ref
+identity drift is a Major provenance defect and returns to Architect; never
+ask Test Writer to manufacture a new Red checkpoint.
+
 ## Severity taxonomy (same model as judge-quality)
 
 Every finding **must** be classified as one of:

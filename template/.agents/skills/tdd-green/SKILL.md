@@ -28,6 +28,12 @@ receipt/N/A and the accepted mode-specific Red checkpoint. It waits while
 Green owns all later worktree mutations and review feedback. Use this skill's
 `metadata.model-tier`. The Architect router picks the mapping.
 
+For reconciliation, Green receives the mechanically re-proved retained Red
+checkpoint as the Red preparation receipt. It also receives exact source,
+target, and conflict manifest. It records fresh three-way evidence apart from
+historical Red-to-source provenance. Finalization directly commits the approved
+staged tree from the pending merge state. Do not compact a passing commit.
+
 Green stages the implementation candidate tree. It records the tree before it
 delegates the serial validation Judge. Specialist review needs the Judge's
 validation-session receipt. That receipt has the unchanged tree OID, fixed

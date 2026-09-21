@@ -43,7 +43,19 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    suites, or pre-commit.
 4. Last, require `git write-tree` to equal the Judge-approved OID. Require no
    unstaged or untracked maintained files.
-5. Only in normal interactive work, make the checked passing-head commit after
+5. In coding reconciliation, require the captured old source SHA, exact target
+   SHA, mechanically re-proved retained Red-to-source provenance, and fresh
+   three-way reconciliation evidence. Require Main's freshly fetched exact
+   source and target ref proof; check that supplied proof and local identities
+   only. Do not fetch or call GitLab. Directly commit the exact Judge-approved
+   staged tree from the still-pending merge state, which consumes `MERGE_HEAD`.
+   This creates exactly one ordered two-parent commit with old source first and exact
+   target/`MERGE_HEAD` second. Do no passing-head commit or ordinary compaction.
+   Prove cleared merge state, clean index and worktree, exact parent order,
+   tree, message, unchanged Red ref, and unchanged supplied local identities.
+   Any drift invalidates every receipt and returns to exact selection and
+   preparation.
+6. Only in normal interactive work outside reconciliation, make the checked passing-head commit after
    approval or a safe draft verdict. Then run one bounded local compaction under
    Main's branch authority. Main supplies the exact branch ref, original base,
    durable Red ref, and approved final message. Before compaction, prove all of
