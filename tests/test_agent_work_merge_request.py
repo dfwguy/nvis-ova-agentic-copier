@@ -374,7 +374,7 @@ def test_publisher_verifies_one_exact_close_after_each_applied_path(
 
 
 @pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
-def test_publisher_retries_a_missing_closing_projection_then_succeeds(
+def test_publisher_retries_missing_closing_projection_after_one_one_second_wait(
     existing: tuple[MergeRequestEvidence, ...],
 ) -> None:
     port = PublicationPortFake(
@@ -403,12 +403,11 @@ def test_publisher_retries_a_missing_closing_projection_then_succeeds(
         "closes",
         "closes",
     ]
-    assert len(delays) == 1
-    assert 0 < delays[0] < 1
+    assert delays == [1.0]
 
 
 @pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
-def test_publisher_fails_closed_after_four_missing_closing_projection_reads(
+def test_publisher_fails_closed_after_three_one_second_waits(
     existing: tuple[MergeRequestEvidence, ...],
 ) -> None:
     port = PublicationPortFake(inventory=existing, closing_issue_projections=((),))
@@ -428,9 +427,7 @@ def test_publisher_fails_closed_after_four_missing_closing_projection_reads(
         )
 
     assert [call[0] for call in port.calls].count("closes") == 4
-    assert len(delays) == 3
-    assert delays == [delays[0]] * 3
-    assert 0 < delays[0] < 1
+    assert delays == [1.0, 1.0, 1.0]
 
 
 @pytest.mark.parametrize(

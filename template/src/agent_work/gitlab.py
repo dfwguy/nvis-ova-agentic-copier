@@ -109,7 +109,7 @@ _MAX_PIPELINE_JOB_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
 _MAX_CLOSING_PROJECTION_READS = 4
-_CLOSING_PROJECTION_RETRY_DELAY_SECONDS = 0.25
+_CLOSING_PROJECTION_RETRY_DELAY_SECONDS = 1.0
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:

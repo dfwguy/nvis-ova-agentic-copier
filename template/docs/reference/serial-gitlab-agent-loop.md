@@ -124,8 +124,9 @@ When `--issue-iid` is present, GitLab's trusted closing-issue projection must
 contain exactly that issue in the configured project. After create or update
 and the exact authoritative merge-request read-back, only an empty or missing
 projection is treated as GitLab projection lag. The publisher makes at most
-four projection reads: the initial read and three retries, each separated by a
-fixed short delay. It never repeats the create or update. An exact configured-
+four projection reads: the initial read and three retries, each separated by
+exactly one second. The total intentional wait is at most three seconds. It
+never repeats the create or update. An exact configured-
 project issue succeeds. A conflicting projection, identity drift, malformed
 projection, wrong project or IID, or extra or multiple projection fails closed
 immediately without retry. An empty or missing projection after the fourth
@@ -1141,7 +1142,7 @@ allow extra fields. They must never treat a diagnostic as authority or input.
 | `merge-request publish --apply` with no open MR for the source branch | Creates one MR, then rereads and verifies its identity and description. |
 | `merge-request publish --apply` with one open MR for the source branch | Updates that MR, then rereads and verifies its identity and description. |
 | Ambiguous MR result; conflicting projection; identity drift; malformed projection; wrong project or IID; or extra or multiple projection | Fails closed immediately without retry. |
-| Empty or missing closing-issue projection | Treats it as projection lag and makes at most four projection reads: the initial read plus three retries, each separated by a fixed short delay. It never repeats create or update; absence after the fourth read fails closed. |
+| Empty or missing closing-issue projection | Treats it as projection lag and makes at most four projection reads: the initial read plus three retries, each separated by exactly one second, for at most three seconds of intentional wait. It never repeats create or update; absence after the fourth read fails closed. |
 | `CommandReport` JSON | Includes the shared fields; an applied `loop run` also includes `segments_run`, `stop_reason`, and chronological `items[]`. |
 
 ## Safety constraints

@@ -972,7 +972,7 @@ def test_merge_request_publish_cli_default_dry_run_composes_numeric_port_without
     }
 
 
-def test_merge_request_publish_cli_forwards_the_injected_projection_sleeper() -> None:
+def test_merge_request_publish_cli_forwards_the_injected_one_second_sleeper() -> None:
     description = render_merge_request_description(
         problem="Problem",
         outcome="Outcome",
@@ -1038,7 +1038,7 @@ def test_merge_request_publish_cli_forwards_the_injected_projection_sleeper() ->
         )
         == 0
     )
-    assert delays == [0.25]
+    assert delays == [1.0]
     assert responses == []
 
 

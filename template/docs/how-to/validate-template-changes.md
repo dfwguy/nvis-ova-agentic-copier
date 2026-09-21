@@ -123,7 +123,8 @@ request for the source branch. With `--issue-iid`, the preview ends with
 read-back, GitLab must project exactly that configured-project issue as closing.
 Only an empty or missing projection means GitLab is still catching up. The
 publisher reads it at most four times: once, then up to three retries. Each
-retry waits a fixed short delay. It never repeats create or update. An exact
+retry waits exactly one second, for at most three seconds of intentional wait.
+It never repeats create or update. An exact
 configured-project issue succeeds. A conflicting or malformed projection fails
 closed at once. The same is true for identity drift, a wrong project or IID,
 or extra or multiple issues. An empty or missing projection after the fourth
