@@ -61,6 +61,22 @@ Require environment `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID`. Never get a
 project path from the Git remote. Confirm that returned `id` matches the ID.
 Read `default_branch` from JSON. On an error, stop and show it.
 
+### 1a. Review the repository cleanup policy
+
+After numeric project resolution and before any GitLab mutation, run the
+installed read-only check:
+
+```bash
+direnv exec . uv run agent-work repository cleanup-policy
+```
+
+This check is advisory and never blocks setup. It never writes project
+settings. Report only the observed fields that the command returns. Its output
+is authoritative for any Maintainer or Owner handoff and for a linked policy
+path or URL; do not invent retention values, ownership, links, or paths. If
+the command reports an API or permission failure, report that distinct outcome
+under the command contract. Do not describe it as a disabled or missing policy.
+
 ### 2. Prepare the dedicated bootstrap branch
 
 Require a clean, current default branch before changing GitLab settings or
