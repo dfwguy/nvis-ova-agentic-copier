@@ -64,6 +64,11 @@ agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  [--impact TEXT] [--human-action TEXT]
                                  [--tracking TEXT] [--issue-iid IID]
                                  [--apply] [--json]
+agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
+                         --acceptance TEXT [--acceptance TEXT ...]
+                         [--impact TEXT] [--additional-context TEXT]
+                         [--marker TEXT] [--priority TEXT] [--severity TEXT]
+                         [--label TEXT] [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work validation run --candidate-tree TREE [--apply] [--json]
 agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
@@ -86,6 +91,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Read-only helper; `--json` emits the envelope without delimiters. |
 | `red-checkpoint create` | Exact `--issue-iid` and bounded `--evidence-file` | Bare invocation previews; `--apply` verifies and retains one durable Red checkpoint. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
+| `issue publish` | Title, problem, outcome, and repeated acceptance criteria | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `migration preview` | None | Returns the planned migration actions. |
@@ -174,6 +180,38 @@ The command never pushes a branch, approves a merge request, or merges it.
 Push the branch first. See [how to validate template changes](../how-to/validate-template-changes.md#publish-the-verified-branch-for-review)
 for a practical publication sequence. `--json` returns the matching
 machine-readable result.
+
+### `issue publish`
+
+`issue publish` creates or updates one GitLab issue. It uses the configured
+checkout project.
+Its title and description are structured input. The description is rendered as
+real Markdown before publication. Literal escaped line breaks and
+percent-encoded line breaks are rejected; supply real line breaks instead.
+
+Without `--apply`, the command previews the title and rendered description
+locally. It makes no GitLab calls or changes. With `--apply`, it uses
+`<!-- agent-work-issue-publication:v1 -->` when `--marker` is absent. It
+selects one exact open-marker match. More than one exact match fails closed. It
+creates only when no exact open match exists. It then reads back that issue.
+The read-back must match the configured project,
+the returned IID, title, and rendered description. A mismatch fails closed. A
+malformed response or failed read-back does too. The command does not retry
+its create request after an uncertain result.
+
+An explicit `--issue-iid` is update-only. It must select exactly one open
+issue with the supplied marker. Missing, mismatched, or ambiguous evidence
+fails closed before any mutation. It never creates a replacement issue.
+
+`issue publish` is the configured-checkout boundary for policy callers. These
+include findings triage and pipeline feedback. Upstream-finding and split-child
+flows keep distinct deduplication and lifecycle transports. They reuse the
+shared escaped- and encoded-linebreak guard. They also reuse the exact
+authoritative read-back safety contract. Both checks apply to both flows. Both
+are required. Both are strict. The command applies only explicitly supplied,
+already verified labels. Callers, not the CLI boundary, must verify labels
+before supplying `--label`. It never assigns, approves, or merges an issue.
+`--json` returns the bounded publication result.
 
 ### `validation run` and `validation status`
 

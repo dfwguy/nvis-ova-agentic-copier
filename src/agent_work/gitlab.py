@@ -148,10 +148,246 @@ def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
     return f"{retained.rstrip()}\n\n{notice}\n\n{closing}"
 
 
+def reject_unsafe_issue_text(value: str) -> None:
+    """Reject encoded linebreak text before it reaches a GitLab transport."""
+    if re.search(r"\\(?:r\\n|r|n)|%0[ad]", value, re.IGNORECASE):
+        raise GitLabError("issue text contains an escaped linebreak")
+
+
 def _reject_escaped_linebreaks(description: str) -> None:
-    """Reject accidental literal newlines before an external mutation."""
-    if "\\n\\n" in description or "\\r\\n" in description:
-        raise GitLabError("merge request description contains escaped linebreaks")
+    """Apply the shared issue-text guard to merge-request Markdown too."""
+    try:
+        reject_unsafe_issue_text(description)
+    except GitLabError as error:
+        raise GitLabError(
+            "merge request description contains escaped linebreaks"
+        ) from error
+
+
+@dataclass(frozen=True)
+class IssuePublicationEvidence:
+    """The exact GitLab fields verified after one issue mutation."""
+
+    project_id: int
+    iid: int
+    title: str
+    description: str
+    labels: tuple[str, ...]
+    state: str
+    web_url: str | None = None
+
+
+@dataclass(frozen=True)
+class IssuePublicationReport:
+    """The preview or verified result of structured issue publication."""
+
+    applied: bool
+    action: str
+    issue: IssuePublicationEvidence | None
+    description: str
+    marker: str
+
+
+class IssuePublicationError(GitLabError):
+    """A structured issue publication request was rejected."""
+
+
+class IssuePublicationPort(Protocol):
+    """Minimal transport needed to select, mutate, and read back one issue."""
+
+    def list_issues(
+        self, *, project_id: int, marker: str
+    ) -> tuple[dict[str, object], ...]: ...
+
+    def create_issue(self, **kwargs: object) -> dict[str, object]: ...
+
+    def update_issue(self, **kwargs: object) -> dict[str, object]: ...
+
+    def fetch_issue(self, *, project_id: int, iid: int) -> dict[str, object]: ...
+
+
+def _issue_evidence(value: object) -> IssuePublicationEvidence:
+    """Project an untrusted transport result into exact issue evidence."""
+    if not isinstance(value, dict):
+        raise IssuePublicationError("issue read-back is invalid")
+    payload = cast("dict[str, object]", value)
+    project_id, iid = payload.get("project_id"), payload.get("iid")
+    title, description, labels, state = (
+        payload.get("title"),
+        payload.get("description"),
+        payload.get("labels"),
+        payload.get("state", "opened"),
+    )
+    if (
+        isinstance(project_id, bool)
+        or not isinstance(project_id, int)
+        or project_id <= 0
+        or isinstance(iid, bool)
+        or not isinstance(iid, int)
+        or iid <= 0
+        or not isinstance(title, str)
+        or not isinstance(description, str)
+        or not isinstance(labels, (tuple, list))
+        or not all(isinstance(label, str) for label in labels)
+        or not isinstance(state, str)
+    ):
+        raise IssuePublicationError("issue read-back is invalid")
+    web_url = payload.get("web_url")
+    if web_url is not None and not isinstance(web_url, str):
+        raise IssuePublicationError("issue read-back is invalid")
+    return IssuePublicationEvidence(
+        project_id,
+        iid,
+        title,
+        description,
+        tuple(cast(str, label) for label in labels),
+        state,
+        web_url,
+    )
+
+
+def _render_issue_description(
+    *,
+    problem: str,
+    impact: str | None,
+    outcome: str,
+    acceptance: tuple[str, ...],
+    additional_context: str | None,
+    marker: str,
+    priority: str | None,
+    severity: str | None,
+) -> str:
+    sections = [("Problem", problem)]
+    if impact is not None:
+        sections.append(("Impact", impact))
+    sections.extend(
+        (
+            ("Outcome", outcome),
+            ("Acceptance criteria", "\n".join(f"- {item}" for item in acceptance)),
+        )
+    )
+    if additional_context is not None:
+        sections.append(("Additional context", additional_context))
+    if priority is not None:
+        sections.append(("Priority", priority))
+    if severity is not None:
+        sections.append(("Severity", severity))
+    return "\n\n".join(
+        [*(f"## {heading}\n{body}" for heading, body in sections), marker]
+    )
+
+
+def publish_issue(
+    *,
+    project_id: int,
+    title: str,
+    problem: str,
+    outcome: str,
+    acceptance: tuple[str, ...],
+    impact: str | None = None,
+    additional_context: str | None = None,
+    marker: str | None = None,
+    priority: str | None = None,
+    severity: str | None = None,
+    labels: tuple[str, ...] = (),
+    issue_iid: int | None = None,
+    apply: bool = False,
+    port: IssuePublicationPort,
+) -> IssuePublicationReport:
+    """Preview or mutate one exact issue and verify its authoritative read-back."""
+    if marker == "":
+        raise IssuePublicationError("issue publication marker is invalid")
+    marker = marker or "<!-- agent-work-issue-publication:v1 -->"
+    values = (
+        title,
+        problem,
+        outcome,
+        *acceptance,
+        impact,
+        additional_context,
+        marker,
+        priority,
+        severity,
+        *labels,
+    )
+    try:
+        if (
+            isinstance(project_id, bool)
+            or not isinstance(project_id, int)
+            or project_id <= 0
+            or not title.strip()
+            or not problem.strip()
+            or not outcome.strip()
+            or not acceptance
+            or any(not item.strip() for item in acceptance)
+            or any(value is not None and not isinstance(value, str) for value in values)
+        ):
+            raise ValueError
+        for value in values:
+            if value is not None:
+                reject_unsafe_issue_text(value)
+    except (AttributeError, GitLabError, ValueError):
+        raise IssuePublicationError(
+            "issue publication contains invalid linebreak text"
+        ) from None
+    description = _render_issue_description(
+        problem=problem,
+        impact=impact,
+        outcome=outcome,
+        acceptance=acceptance,
+        additional_context=additional_context,
+        marker=marker,
+        priority=priority,
+        severity=severity,
+    )
+    if issue_iid is not None and (
+        isinstance(issue_iid, bool) or not isinstance(issue_iid, int) or issue_iid <= 0
+    ):
+        raise IssuePublicationError("issue IID must be a positive integer")
+    if not apply:
+        return IssuePublicationReport(False, "would-create", None, description, marker)
+    matches = port.list_issues(project_id=project_id, marker=marker)
+    if issue_iid is not None:
+        matches = tuple(item for item in matches if item.get("iid") == issue_iid)
+        if len(matches) != 1:
+            raise IssuePublicationError("requested issue IID has no exact marker match")
+    if len(matches) > 1:
+        raise IssuePublicationError("issue publication marker is ambiguous")
+    action = "would-update" if matches else "would-create"
+    fields: dict[str, object] = {
+        "project_id": project_id,
+        "title": title,
+        "description": description,
+        "labels": labels,
+    }
+    if matches:
+        selected = _issue_evidence(matches[0])
+        if selected.project_id != project_id or selected.state != "opened":
+            raise IssuePublicationError("selected issue evidence is not open")
+        port.update_issue(iid=selected.iid, **fields)
+        expected_iid = selected.iid
+    else:
+        submitted = port.create_issue(**fields)
+        if not isinstance(submitted, dict) or not isinstance(submitted.get("iid"), int):
+            raise IssuePublicationError("issue creation response is invalid")
+        expected_iid = cast(int, submitted["iid"])
+    read_back = _issue_evidence(
+        port.fetch_issue(project_id=project_id, iid=expected_iid)
+    )
+    if (
+        read_back.project_id != project_id
+        or read_back.iid != expected_iid
+        or read_back.title != title
+        or read_back.description != description
+        or read_back.labels != labels
+        or read_back.state != "opened"
+    ):
+        raise IssuePublicationError(
+            "issue read-back does not match requested publication"
+        )
+    return IssuePublicationReport(
+        True, action.removeprefix("would-"), read_back, description, marker
+    )
 
 
 def _validated_issue_iid(issue_iid: int | None) -> int | None:
@@ -473,6 +709,95 @@ class GitLabMergeRequestPublisher:
                 raise GitLabError("GitLab returned invalid closing issue list")
             projection.append((closing_project_id, closing_iid))
         return tuple(projection)
+
+
+class GitLabIssuePublisher:
+    """Numeric-project transport for the shared structured issue boundary."""
+
+    def __init__(
+        self, *, host: str, project_id: int, glab_path: str, run_command: CommandRunner
+    ) -> None:
+        self._host = host
+        self._project_id = project_id
+        self._glab_path = glab_path
+        self._run_command = run_command
+
+    def _call(
+        self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
+    ) -> object:
+        return _call_gitlab(
+            host=self._host,
+            glab_path=self._glab_path,
+            run_command=self._run_command,
+            endpoint=endpoint,
+            method=method,
+            fields=fields,
+        )
+
+    def _require_project(self, project_id: int) -> None:
+        if project_id != self._project_id:
+            raise GitLabError("publication project does not match configured project")
+
+    def list_issues(
+        self, *, project_id: int, marker: str
+    ) -> tuple[dict[str, object], ...]:
+        self._require_project(project_id)
+        matches: list[dict[str, object]] = []
+        for page in range(1, _MAX_ISSUE_PAGES + 1):
+            payload = self._call(
+                f"projects/{project_id}/issues",
+                fields=("state=opened", "per_page=100", f"page={page}"),
+            )
+            if not isinstance(payload, list) or not all(
+                isinstance(item, dict) for item in payload
+            ):
+                raise GitLabError("GitLab returned invalid issue publication list")
+            items = tuple(cast(dict[str, object], item) for item in payload)
+            matches.extend(
+                item for item in items if marker in str(item.get("description", ""))
+            )
+            if len(items) < 100:
+                return tuple(matches)
+        raise GitLabError("GitLab returned too many issue publication pages")
+
+    def create_issue(self, **kwargs: object) -> dict[str, object]:
+        project_id = cast(int, kwargs["project_id"])
+        self._require_project(project_id)
+        payload = self._call(
+            f"projects/{project_id}/issues",
+            method="POST",
+            fields=(
+                f"title={kwargs['title']}",
+                f"description={kwargs['description']}",
+                f"labels={','.join(cast(tuple[str, ...], kwargs['labels']))}",
+            ),
+        )
+        if not isinstance(payload, dict):
+            raise GitLabError("GitLab returned invalid issue publication data")
+        return cast(dict[str, object], payload)
+
+    def update_issue(self, **kwargs: object) -> dict[str, object]:
+        project_id, iid = cast(int, kwargs["project_id"]), cast(int, kwargs["iid"])
+        self._require_project(project_id)
+        payload = self._call(
+            f"projects/{project_id}/issues/{iid}",
+            method="PUT",
+            fields=(
+                f"title={kwargs['title']}",
+                f"description={kwargs['description']}",
+                f"labels={','.join(cast(tuple[str, ...], kwargs['labels']))}",
+            ),
+        )
+        if not isinstance(payload, dict):
+            raise GitLabError("GitLab returned invalid issue publication data")
+        return cast(dict[str, object], payload)
+
+    def fetch_issue(self, *, project_id: int, iid: int) -> dict[str, object]:
+        self._require_project(project_id)
+        payload = self._call(f"projects/{project_id}/issues/{iid}")
+        if not isinstance(payload, dict):
+            raise GitLabError("GitLab returned invalid issue publication data")
+        return cast(dict[str, object], payload)
 
 
 def _require_exact_metadata(
@@ -1429,6 +1754,9 @@ class GitLabGateway:
         self, *, title: str, description: str, marker: str
     ) -> GitLabIssue:
         """Create and verify one marker-bound child issue."""
+        reject_unsafe_issue_text(title)
+        reject_unsafe_issue_text(description)
+        reject_unsafe_issue_text(marker)
         try:
             payload = self._mapping(
                 self._call(
@@ -1446,7 +1774,15 @@ class GitLabGateway:
             raise GitLabError("GitLab returned invalid split child issue") from error
         if issue.title != title or marker not in issue.description:
             raise GitLabError("GitLab split child evidence is not exact")
-        return issue
+        read_back = self.fetch_issue(issue.iid)
+        if (
+            read_back.iid != issue.iid
+            or read_back.title != title
+            or read_back.description != description
+            or read_back.state != "opened"
+        ):
+            raise GitLabError("GitLab split child evidence is not exact")
+        return read_back
 
     def ensure_decomposition_note(self, iid: int, body: str) -> None:
         """Create at most one exact parent decomposition note."""
