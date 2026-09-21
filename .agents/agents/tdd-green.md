@@ -32,21 +32,12 @@ not add untested functionality.
    and applicable Policy Writer receipt from Architect. Review each receipt.
    N/A is allowed only for a role Architect records not applicable. A missing
    receipt is not N/A.
-2. **Identify applicable languages** from changed files, as `AGENTS.md` says.
-   Then implement the minimum code. Satisfy the tests. Do nothing more. Add no
-   extras. Do not expand scope:
-   - Pure functions: same inputs → same outputs. No hidden state.
-   - Small, composable functions. One responsibility each.
-   - Do not anticipate future requirements.
-   - For Python, prefer comprehensions. Avoid imperative loops.
-   - No global mutable state.
-   - **Apply dependency inversion.** Pass each external call as a parameter.
-     This includes subprocess, filesystem, HTTP, time, and environment calls.
-     Match the Architect's injection points. Match existing test fixtures.
-     Wire real implementations only at an entry point, such as `main()`.
-     Never import and call them from business logic.
-   - For Bash scripts, use `.agents/lang/bash.md`. Use strict mode and quoted
-     expansions. Use command arrays and validated inputs. Do not use `eval`.
+2. **Read the code rules** — before production implementation, read
+   `.agents/guidance/code-quality.md`. Use `AGENTS.md` to identify languages
+   in changed files. Read each matching `.agents/lang/` file. Implement the
+   minimum code. Satisfy the tests. Do nothing more. Add no extras. Do not
+   expand scope. Match the Architect's injection points and existing test
+   fixtures. Wire real dependencies only at the designed entry point.
    - For CLI code, implement the Architect's CLIG contract. Use `argparse` for
      Python. Use `getopts`/`getopt` for Bash.
 3. **Complete the user-facing change** — inspect the shared worktree. Before
