@@ -10,6 +10,7 @@
 FROM ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    KF_RULE_CACHE_DIR=/home/validation/.cache/kingfisher/rule-cache \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
 
 RUN apt-get update \
@@ -43,6 +44,7 @@ RUN --mount=type=secret,id=network-ca,target=/run/secrets/network-ca,uid=10001,r
     && UV_PROJECT_ENVIRONMENT=/opt/ci/py314 \
         uv sync --locked --all-groups --python 3.14.3 \
         --managed-python --no-install-project \
+    && /opt/ci/py311/bin/kingfisher rules compile-cache --no-update-check \
     && rm -f /tmp/network-ca-bundle \
     && rm -rf /home/validation/.cache/uv
 

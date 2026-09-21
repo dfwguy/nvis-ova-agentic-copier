@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -34,6 +35,15 @@ _VALIDATION_JOBS = {
 _CANDIDATE_JOB = "ci-image:candidate"
 _CANDIDATE_VALIDATION_IMAGE = (
     "$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+)
+_KINGFISHER_CACHE = "/home/validation/.cache/kingfisher/rule-cache"
+_KINGFISHER_COMPILE = (
+    "/opt/ci/py311/bin/kingfisher rules compile-cache --no-update-check"
+)
+_KINGFISHER_SCAN = (
+    "uv run --no-sync kingfisher scan . --git-history none --no-validate "
+    "--no-update-check --exclude .git --exclude .cache --exclude .venv "
+    "--exclude .tox --exclude .pytest_cache --exclude .ruff_cache"
 )
 
 
@@ -83,6 +93,70 @@ def test_validation_image_contains_the_locked_non_root_toolchain(
         "shellcheck --version",
     ):
         assert executable in dockerfile
+
+
+def test_validation_image_compiles_kingfisher_rules_once_after_locked_installs(
+    project_root: Path,
+) -> None:
+    """The non-root image build prepares rules before validating its tools."""
+    dockerfile = (project_root / "Dockerfile").read_text()
+
+    assert dockerfile.count(_KINGFISHER_COMPILE) == 1
+    first_sync = dockerfile.index("uv sync --locked --all-groups")
+    second_sync = dockerfile.index("uv sync --locked --all-groups", first_sync + 1)
+    compile_rules = dockerfile.index(_KINGFISHER_COMPILE)
+    verify_tools = dockerfile.index("RUN /opt/ci/py311/bin/python --version")
+    final_workdir = dockerfile.rindex("WORKDIR /workspace")
+    users_before_compile = re.findall(
+        r"^USER\s+(\S+)", dockerfile[:compile_rules], flags=re.MULTILINE
+    )
+
+    assert users_before_compile[-1] == "10001:10001"
+    assert first_sync < second_sync < compile_rules
+    assert compile_rules < verify_tools < final_workdir
+
+
+def test_validation_image_retains_the_stable_kingfisher_rule_cache(
+    project_root: Path,
+) -> None:
+    """Only uv's download cache is removed after the rule cache is compiled."""
+    dockerfile = (project_root / "Dockerfile").read_text()
+    normalized = re.sub(r"\\\n\s*", " ", dockerfile)
+    non_root_build = dockerfile[dockerfile.index("USER 10001:10001") :]
+    normalized_non_root_build = re.sub(r"\\\n\s*", " ", non_root_build)
+    cache_removals = tuple(
+        tuple(shlex.split(operands))
+        for operands in re.findall(r"rm -rf\s+([^&\n]+)", normalized_non_root_build)
+    )
+
+    assert re.search(
+        rf"\bKF_RULE_CACHE_DIR={re.escape(_KINGFISHER_CACHE)}(?:\s|$)",
+        normalized,
+    )
+    assert _KINGFISHER_COMPILE in normalized
+    assert normalized.index(
+        f"KF_RULE_CACHE_DIR={_KINGFISHER_CACHE}"
+    ) < normalized.index(_KINGFISHER_COMPILE)
+    assert cache_removals == (("/home/validation/.cache/uv",),)
+
+
+def test_precompiled_rules_preserve_the_root_kingfisher_scan_contract(
+    project_root: Path,
+) -> None:
+    """The image optimization keeps the established 1,055-rule scan behavior."""
+    root_ci = (project_root / ".gitlab-ci.yml").read_text()
+    template_ci = (project_root / "template" / ".gitlab-ci.yml").read_text()
+    configuration = yaml.safe_load(root_ci.replace("!reference ", ""))
+
+    assert configuration["kingfisher"] == {
+        "extends": ".base_uv",
+        "script": [_KINGFISHER_SCAN],
+    }
+    assert _KINGFISHER_COMPILE not in root_ci
+    assert "KF_RULE_CACHE_DIR" not in root_ci
+    assert _KINGFISHER_COMPILE not in template_ci
+    assert "KF_RULE_CACHE_DIR" not in template_ci
+    assert (project_root / "Dockerfile").read_text().count(_KINGFISHER_COMPILE) == 1
 
 
 def test_candidate_image_builds_and_pushes_current_checkout_for_every_admitted_pipeline(
