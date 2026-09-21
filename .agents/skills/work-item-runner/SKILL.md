@@ -58,14 +58,27 @@ the selected lane. Coding requires 12. Content requires 3. For capacity, stop
 only on an actual report from the active frontend or runtime. That report must
 show global capacity below the selected requirement.
 Continue when global capacity is unreported. Also stop if an actual delegation
-or tool refusal cannot be resolved safely. Never infer capacity from topology.
-Never block when the frontend omits other capacity dimensions.
+or tool refusal cannot be resolved safely. Diagnose an actual refusal first.
+Use a verified reuse plan when it preserves safeguards. Otherwise, use a fresh
+workflow session when it preserves safeguards. Stop only when the active runtime
+cannot safely execute either plan. Never infer capacity from topology. Never
+block when the frontend omits other capacity dimensions.
+
+Record the refusal. Name the plan. Check its result. Then continue or hand off.
+Keep the scope fixed. Keep authority clear. Keep the target exact.
 
 The worker exception changes who publishes. It does not weaken the workflow.
-For no progress or controversy, preserve the Architect and Finalizer Draft or
-proceed decision. Keep detailed findings and receipts. Keep the correction
-ledger in the result envelope and durable audit. Only the trusted runner owns
-publication. It owns exact pipeline observation. It owns recovery.
+For a recoverable command, API, retained-work, or review failure, diagnose the
+evidence. Pursue one bounded safeguard-preserving alternative. Preserve the
+Architect and Finalizer normal or Draft decision. A resolved, validated change
+proceeds to a normal MR. A mechanically safe, sufficiently validated change
+with a real human decision proceeds to a Draft MR. Keep detailed findings and
+receipts. Keep the correction ledger in the result envelope and durable audit.
+Only the trusted runner owns publication. It owns exact pipeline observation.
+It owns recovery.
+
+Record the failure. Name the alternative. Check its result. Then continue.
+Keep the same branch. Keep the same project. Keep the read-back.
 
 ## MR remediation issue exception
 
@@ -111,7 +124,13 @@ The XDG-local single-host lock is not a distributed lock. It is not a GitLab
 compare-and-set claim.
 Never run a second host or timer for this project.
 
-Never approve or merge. Stop for human direction when requirements are
-ambiguous. Stop when scope or authority would expand. Also stop when the
-dedicated checkout is unsafe. Stop when publication cannot be verified. Human
-approval and merge are the terminal gate for every resulting MR.
+Never approve or merge. Return `needs_human` without publication only when no
+safe validated diff exists. It may also apply when required authority is absent,
+exact targets cannot be established, or policy forbids the next action. This
+includes ambiguous requirements, scope or authority expansion, an unsafe
+dedicated checkout, or unverifiable publication. Human approval and merge are
+the terminal gate for every resulting MR.
+
+State the next action. Keep the detailed audit durable.
+Use the durable record. Keep the worker result complete.
+Keep all safeguards.
