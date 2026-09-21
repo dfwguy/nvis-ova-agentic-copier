@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -252,11 +252,11 @@ accepted for consistent invocation and changes nothing.
 
 | Inventory area | Contract |
 | --- | --- |
-| Corroborated evidence | Lifecycle-projected GitLab issues; local ledger; fixed branch and retained worktree; merge request and exact-source pipeline; default-branch pipeline; configured project and credential identity; controller, service, and project-lock evidence. |
+| Corroborated evidence | Lifecycle-projected GitLab issues; local ledger; each retained issue's passive advisory owner marker; fixed branch and retained worktree; merge request and exact-source pipeline; default-branch pipeline; configured project and credential identity; and controller, service, and short-lived project-lock evidence. |
 | JSON and human aggregates | `total`, `open`, `closed`, `active`, `blocked`, `dependency_gated`, `human_action`, and `no_action`. |
-| Detailed candidate | Active state; `human_action_required`; bounded blocked cause; dependency explanation naming open trusted prerequisites; current and intended prerequisite-label projections; exact next action. |
+| Detailed candidate | Per-issue owner state; active state; `human_action_required`; bounded blocked cause; dependency explanation naming open trusted prerequisites; current and intended prerequisite-label projections; exact next action. |
 | Classification | Legitimately waiting, dependency-gated, safely retryable, superseded or duplicate, closure candidate, or needing a specific human decision. |
-| Report order | Failed default-branch and open-merge-request pipelines; stale running items; safely retryable blocked items; dependency reconciliation; awaiting-human items; fresh ordinary work. |
+| Report order | Failed default-branch and open-merge-request pipelines; retained issues by deterministic owner-evidence and IID ordering; safely retryable blocked items; dependency reconciliation; awaiting-human items; fresh ordinary work. |
 | Fresh work | Reports it only. Never claims it. When trusted split prerequisites clear, recommends an explicit retry rather than starting a child item. |
 | `closed_no_action` | Takes precedence for a closed recordless split issue and a closed `COMPLETE` record. These terminal states need no action even when retained worktree, head, merge-request, or pipeline evidence drifted. |
 | Closed records | Closed nonterminal records need human review. An untargeted inventory collapses settled closed-item detail but keeps aggregate counts. `--issue-iid IID` returns that item's exact evidence. |
@@ -560,9 +560,9 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 
 | Gate input or state | Controller action |
 | --- | --- |
-| One active record other than `retry-wait` | An ordinary unpinned activation resumes it and leaves every `retry-wait` record unchanged. |
-| No such active record | Choose only the earliest due retry by `(retry_at, issue IID)`; future or undated retries remain queued. |
-| Multiple non-retry active records | Fail closed for ambiguous concurrent ownership. |
+| One immediate active record other than `retry-wait` | An ordinary unpinned activation resumes that record and leaves every `retry-wait` record unchanged. |
+| No immediate active record | Choose only the earliest due retry by `(retry_at, issue IID)`; future or undated retries remain queued. |
+| Multiple retained active records | Status and inventory report every record in deterministic order and classify each issue independently. Ordinary unpinned admission remains capacity-one and fails closed. A reviewed exact-IID recovery may advance its stale or missing target only when retained identities are disjoint and no different verified live owner exists. |
 | Successful pipeline | Clear its observation. |
 | `created`, `waiting_for_resource`, `preparing`, `scheduled`, `pending`, or `running` | Wait; do not select a new issue. |
 | Missing, malformed, inaccessible, identity, or check-pipeline evidence | Fail closed; do not allow unrelated work. |
@@ -593,9 +593,9 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 | Stage | Required order and boundary |
 | --- | --- |
 | Post-publication assessment | Start fresh after terminal exact-SHA evidence. Do not edit the published MR or enter a repair session directly. A concrete repository-actionable finding creates or reuses a deduplicated issue for later normal reconciliation and a new applicable workflow. Unverified evidence creates no repository work. |
-| Ordinary loop, canary checkpoint, and targeted recovery | Apply the pipeline and default-evidence gate; then an exact failed-MR pipeline with one corroborated retained owner for one eligible repair workflow; then the sole active resumable retained record, an exact-IID reviewed reclassification for exceptional retained work, and waits. Only then may ordinary `loop run` select new work. |
+| Ordinary loop, canary checkpoint, and targeted recovery | Apply the pipeline and default-evidence gate; then an exact failed-MR pipeline with one corroborated retained owner for one eligible repair workflow; then one durable immediate record, an exact-IID reviewed reclassification for exceptional retained work, and waits. A reviewed exact-IID plan may advance only its evidence-bound stale or missing target. Ordinary `loop run` remains capacity-one and fails closed before selecting new work. |
 | Repair retention and scope | A failed repair or changed exact evidence retains evidence, failure, timing, and worktree for safe later handling. Scheduled repair backoff and automatic-repair quarantine are item-local eligibility outcomes, not `retry-wait` or global blockers. |
-| Reclassification and conflict | Reclassify existing blocked records one IID at a time with live corroboration. Bulk status cannot corroborate every item; targeted status can. Two active retained records, a competing owner, or a higher-priority owner is an identity conflict. The command fails closed and reports the exact safe next action. |
+| Reclassification and conflict | Reclassify one exact IID at a time with that issue's live owner evidence. Status and inventory remain read-only; neither creates or acquires an owner marker. Distinct IIDs with disjoint branch, worktree, and MR identity are observable records, not a shared-identity conflict. Exact-IID recovery may reconcile a stale or missing target even when another retained record is stale or missing. Unknown owner evidence, duplicated or shared branch, worktree, or MR identity, or another verified live owner fails closed with the precise next action. |
 
 ### Durable scheduler states and liveness
 
@@ -605,8 +605,8 @@ project or item is safe to run.
 
 | State | Representative evidence | Scheduler result |
 | --- | --- | --- |
-| `PREPARING` | The selected record matches. The retained worktree is clean. | Resume this item. Repair it when safe. |
-| `EXECUTING` | There is one recoverable workflow owner. | Resume this item. Repair it when safe. |
+| `PREPARING` | The selected record matches. The retained worktree is clean. | Resume this item when it owns the one-item advancement capacity. Repair it when safe. |
+| `EXECUTING` | The issue's owner marker and retained-worktree evidence are recoverable. | Resume this item when it owns the one-item advancement capacity. Repair it when safe. |
 | `RETRY_WAIT` | `retry_at` is due. No owner is immediate. | Resume the earliest due retry. A future retry is deferred. Scan on. |
 | `PUBLISHING` | The retained branch is exact. Publication identity is pending. | Resume publication for this item. Repair it when safe. |
 | `OBSERVING` | The current source SHA is exact. Pipeline evidence exists. | Observe or resume. Nonterminal evidence waits. A safe failure must be exact. It can repair. |
@@ -621,8 +621,8 @@ project or item is safe to run.
 
 | Topic | Contract |
 | --- | --- |
-| Project-wide stop | Stop for project identity failure. Stop for credential failure. Stop for a held project lock. Stop for an ambiguous project lock. Stop for corrupt shared state. Stop for a truly ambiguous cross-item identity. |
-| Activation limit | Advance at most one active owner. Advance at most one repair workflow. Do both in one activation. The limit is per activation. It is strict. |
+| Project-wide stop | Stop for project identity failure. Stop for credential failure. Stop for a held project lock. Stop for an ambiguous project lock. Stop for corrupt shared state. Stop for a truly ambiguous cross-item identity, including duplicated or shared branch, worktree, or MR identity. |
+| Activation limit | Advance at most one workflow-owning item. Advance at most one repair workflow. Do both in one activation. A different verified live owner occupies that one-item capacity; multiple live owners are capacity evidence, not by themselves a shared-identity claim. The limit is per activation and is strict. |
 | No-progress rule | A fingerprint binds the item, state, and phase. It also binds relevant exact branch/MR/pipeline identity and action. A material change is progress. A closed earlier outcome is progress. Otherwise, defer, quarantine, or expose the item. Do not use later activations. |
 | Status and preview | Report the reason and attempt information. Report timing, an evidence summary, and the next action. Preview is read-only. It uses the same eligibility logic. It does not claim work. It does not change GitLab, the ledger, worktrees, branches, or services. |
 | Controller controls | Retry counts are trusted controller constants. Repair budgets, delay bounds, priorities, and lock rules are too. Untrusted issue or merge-request text cannot set, reset, or affect them. |
@@ -687,8 +687,8 @@ ledger state and coarse phase.
 | List bounds | A report gives total matching records and truncation metadata. Only an unfiltered list is capped at 100 records. |
 | Observation use | Treat a missing, stale, failed, or mismatched observation as that condition, never as current truth. |
 | Live corroboration | It is read-only and best effort. Injected GitLab, repository, and clock boundaries inspect the issue and retained worktree. |
-| Process field | Status reads it once from the passive activation-owner marker. It is `active` only for a verifiably live marker PID, `stale` for a verifiably dead PID, `missing` without a marker, and `unknown` for malformed or unverifiable legacy evidence. |
-| Lock and identity | Status never acquires, creates, or writes a lock. Configured project identity verification remains mandatory. If a source is unavailable, the whole report continues and reports `unknown`, `missing`, or `mismatch` for that source. |
+| Per-issue owner field | Status and recovery inventory read each retained issue's passive advisory owner marker. The state is `active` only for that marker's verifiably live PID, `stale` for a verifiably dead PID, `missing` without a marker, and `unknown` for malformed or unverifiable evidence. They report every issue independently in deterministic order. |
+| Project lock and identity | The project lock is short-lived coordinator evidence. It does not project a process state onto every retained issue. Status and inventory never acquire, create, or write either lock or owner marker. Configured project identity verification remains mandatory. If a source is unavailable, the whole report continues and reports `unknown`, `missing`, or `mismatch` for that source. |
 
 ## Worker protocol and publication
 

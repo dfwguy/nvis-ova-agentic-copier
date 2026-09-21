@@ -26,6 +26,7 @@ from agent_work.human_recovery import (
     ResolutionRequest,
     build_inventory,
     build_resolution_plan,
+    classify_recovery_owner_capacity,
     verify_resolution_plan,
 )
 
@@ -107,6 +108,58 @@ def test_inventory_prioritizes_failed_then_stale_then_blocked_dependencies_and_h
         inventory.candidates[1].classification
         is RecoveryClassification.NEEDS_HUMAN_DECISION
     )
+
+
+@given(
+    st.lists(st.integers(min_value=1, max_value=1_000), unique=True, min_size=1),
+    st.sampled_from(
+        (None, "source_branch", "worktree", "merge_request_iid", "merge_request_url")
+    ),
+)
+def test_owner_capacity_orders_each_retained_iid_deterministically(
+    issue_iids: list[int], identity_collision: str | None
+) -> None:
+    """The pure owner classifier orders IIDs and rejects every shared identity."""
+    assume(identity_collision is None or len(issue_iids) >= 2)
+    observations = [
+        RecoveryObservation(
+            issue_iid=issue_iid,
+            record_state=RunnerState.EXECUTING,
+            source_branch=(
+                "agent/shared"
+                if identity_collision == "source_branch" and position == 1
+                else "agent/shared"
+                if identity_collision == "source_branch" and position == 0
+                else f"agent/issue-{issue_iid}"
+            ),
+            worktree=(
+                "/worktrees/shared"
+                if identity_collision == "worktree" and position < 2
+                else f"/worktrees/{issue_iid}"
+            ),
+            merge_request_iid=(
+                88
+                if identity_collision == "merge_request_iid" and position < 2
+                else None
+            ),
+            merge_request_url=(
+                "https://mr/shared"
+                if identity_collision == "merge_request_url" and position < 2
+                else None
+            ),
+            owner_status="stale",
+        )
+        for position, issue_iid in enumerate(issue_iids)
+    ]
+
+    capacity = classify_recovery_owner_capacity(
+        tuple(observations), target_iid=issue_iids[0]
+    )
+
+    assert [issue_iid for issue_iid, _status in capacity.owner_states] == sorted(
+        issue_iids
+    )
+    assert capacity.identity_conflict is (identity_collision is not None)
 
 
 @pytest.mark.parametrize(
