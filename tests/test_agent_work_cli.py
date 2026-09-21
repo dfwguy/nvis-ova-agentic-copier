@@ -276,6 +276,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
             terminal=False,
             exit_code=None,
             diagnostic=None,
+            hook_failures=(),
         )
 
     output: list[str] = []
@@ -296,6 +297,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
         "terminal": False,
         "exit_code": None,
         "diagnostic": None,
+        "hook_failures": [],
     }
 
 
@@ -314,6 +316,7 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
             terminal=False,
             exit_code=None,
             diagnostic=None,
+            hook_failures=(),
         )
 
     output: list[str] = []
@@ -354,6 +357,7 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
             terminal=True,
             exit_code=0,
             diagnostic=None,
+            hook_failures=(),
         )
 
     assert (
@@ -391,6 +395,12 @@ def test_validation_cli_projects_terminal_failure_diagnostic(
             terminal=True,
             exit_code=5,
             diagnostic=diagnostic,
+            hook_failures=(
+                SimpleNamespace(
+                    hook_id="ruff",
+                    diagnostic_lines=("src/agent_work/example.py:7:3: F401",),
+                ),
+            ),
         )
 
     output: list[str] = []
@@ -411,8 +421,16 @@ def test_validation_cli_projects_terminal_failure_diagnostic(
     )
     if as_json:
         assert json.loads(output[0])["diagnostic"] == diagnostic
+        assert json.loads(output[0])["hook_failures"] == [
+            {
+                "hook_id": "ruff",
+                "diagnostic_lines": ["src/agent_work/example.py:7:3: F401"],
+            }
+        ]
     else:
         assert f"diagnostic={diagnostic}" in output[0]
+        assert "failed_hook=ruff" in output[0]
+        assert "src/agent_work/example.py:7:3: F401" in output[0]
 
 
 def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
@@ -428,6 +446,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             terminal=False,
             exit_code=None,
             diagnostic=None,
+            hook_failures=(),
         )
 
     def validation_status(
@@ -442,6 +461,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             terminal=True,
             exit_code=0,
             diagnostic=None,
+            hook_failures=(),
         )
 
     assert (

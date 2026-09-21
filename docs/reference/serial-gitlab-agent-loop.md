@@ -184,38 +184,56 @@ change state or start a hook without `--apply`.
 With `--apply`, `validation run` first checks that `TREE` is the current staged
 tree. It records the session as running. It invokes exactly one `git hook run
 pre-commit` command. It then atomically records that command's terminal exit
-code. A terminal-failure record can also have a bounded, canonical
-`diagnostic`. The command returns only when the hook has a terminal result.
+code. A terminal-failure record can also have the existing bounded, canonical
+`diagnostic` and additive structured `hook_failures` from that one invocation.
+The command returns only when the hook has a terminal result.
 
 When fixed supported-version JUnit artifacts are usable, the diagnostic has
 only their total numeric failure and error counts. Else, it uses a fixed generic
 diagnostic. That names `git hook run pre-commit` and its nonzero exit code.
-Neither the record nor command output contains test-case names or messages, raw
-JUnit XML, hook standard output or standard error, prompts, credentials,
-environment values, secrets, or other unbounded text.
 
-Only a terminal zero permits inspection of the unchanged tree and JUnit
-evidence. A terminal nonzero blocks the check. An existing record for the same
-candidate tree is trusted. Another applied run returns it. It does not run the
-hook again or rewrite the record. This also applies to a legacy record that
-predates `diagnostic`. The command does not backfill the field.
+`hook_failures` stores parsed failed hook IDs and short canonical lines. A
+readability line has a safe relative path and grade. A Ruff or type line has a
+safe relative location and code. A tox line has fixed supported-version JUnit
+aggregate counts. Other hooks, and hooks without usable JUnit data, use the
+fixed fallback line. The array keeps the first 16 entries. An ID is at most 128
+ASCII bytes. An entry has at most four lines. A line is at most 256 UTF-8 bytes.
+The serialized evidence is at most 4096 UTF-8 bytes. A terminal record stores
+one snapshot. It never keeps history.
+
+The record and command output exclude raw standard output and standard error.
+They also exclude arbitrary source, messages, carets, context, test names,
+exception text, raw JUnit XML, environment values, prompts, credentials,
+secrets, controls, ANSI sequences, and unrecognized data.
+
+Inspect an unchanged tree and JUnit evidence only after terminal zero. A
+terminal nonzero blocks that check. An existing record for the same candidate
+tree is trusted. Another applied run returns it without rerunning the hook or
+rewriting the record. This rule also covers legacy records without `diagnostic`
+or structured hook failures. The command does not backfill either field.
+Legacy records without structured hook failures expose an empty collection.
 
 `validation status --candidate-tree TREE` is read-only. It never starts a hook.
 It reports `running`, `terminal-success`, or `terminal-failure`. With
-`--wait-seconds`, it polls a running session for at most that bounded interval.
-It stops when the session is terminal. Use it after a yielded or lost frontend
-command handle. Keep querying the same `TREE`. Do not start another check run.
-It accepts `--apply` for command consistency but stays read-only. Human output
-includes the optional diagnostic when available. JSON exposes `diagnostic` as
-its canonical string or `null`. Status reads legacy records that omit the
-field. Absence means the same as `null`: no diagnostic is available.
+`--wait-seconds`, it polls a running session only for that bounded interval.
+It stops at a terminal session. Use it after a yielded or lost command handle.
+Keep querying the same `TREE`; do not start another check. It accepts `--apply`
+for command consistency but remains read-only. Human output includes the
+optional diagnostic. A terminal failure with evidence also includes failed IDs
+and canonical lines. JSON exposes `diagnostic` as its canonical string or
+`null`, plus bounded `hook_failures` objects with `hook_id` and
+`diagnostic_lines`. Fields, flags, and exit codes do not change. Preview,
+running, terminal-success, and legacy terminal-failure results have no hook
+entries. Status reads legacy records that omit either field. An absent
+`diagnostic` is `null`: no diagnostic is available.
 
-Exit code `0` means a preview or terminal success. An applied run that remains
-running exits `1`. A terminal failure, missing or malformed session, or
-operational failure also exits `1`. Invalid usage exits `2`. JSON reports at
-least the candidate tree, whether the action was applied, the action and state,
-whether it is terminal, the final exit code only after the session is terminal,
-and the optional diagnostic.
+Exit code `0` means a preview or terminal success. An applied running session
+exits `1`. A terminal failure, missing or malformed session, or operational
+failure also exits `1`. Invalid usage exits `2`. JSON reports the candidate
+tree, applied state, action, state, terminal state, final exit code, and
+optional diagnostic. Repeated apply or status requests for the same candidate
+tree never rerun the combined hook or an individual hook. They never rewrite
+the record.
 
 ### `credential rotate`
 
