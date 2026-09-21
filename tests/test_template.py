@@ -357,20 +357,26 @@ def test_ci_jobs_publish_independent_reports(
     configuration = _ci_configuration(project_root)
     pytest_template = configuration[".pytest"]
     assert pytest_template["artifacts"]["reports"] == {
-        "junit": [
-            "test-results-$TEST_ENVIRONMENT-shard-1.xml",
-            "test-results-$TEST_ENVIRONMENT-shard-2.xml",
-            "test-results-$TEST_ENVIRONMENT-shard-3.xml",
-            "test-results-$TEST_ENVIRONMENT-shard-4.xml",
-        ],
+        "junit": "test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml"
+    }
+    assert pytest_template["artifacts"]["paths"] == [
+        ".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX"
+    ]
+    assert pytest_template["artifacts"]["when"] == "always"
+    coverage_template = configuration[".pytest_coverage"]
+    assert coverage_template["artifacts"]["reports"] == {
         "coverage_report": {
             "coverage_format": "cobertura",
             "path": "coverage-$TEST_ENVIRONMENT.xml",
         },
     }
-    assert pytest_template["artifacts"]["when"] == "always"
+    assert coverage_template["artifacts"]["paths"] == ["coverage-$TEST_ENVIRONMENT.xml"]
+    assert coverage_template["artifacts"]["when"] == "always"
     for environment in ("py311", "py314"):
         assert configuration[f"pytest-{environment}"]["variables"] == {
+            "TEST_ENVIRONMENT": environment,
+        }
+        assert configuration[f"coverage-{environment}"]["variables"] == {
             "TEST_ENVIRONMENT": environment,
         }
     assert configuration["ruff-check"]["artifacts"]["reports"] == {

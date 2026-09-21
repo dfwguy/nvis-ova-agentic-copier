@@ -107,47 +107,39 @@ ruff-format:
           py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
-      run_shard() {
-          local shard="$1"
-          shift
-          PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
-              COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$shard" \
-              UV_PROJECT_ENVIRONMENT="$python_environment" \
-              uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
-                  --cov=src/agent_work \
-                  --junitxml="test-results-$TEST_ENVIRONMENT-shard-$shard.xml" \
-                  -o "junit_suite_name=$TEST_ENVIRONMENT" \
-                  -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$shard" \
-                  "$@" &
-      }
-      run_shard 1 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=0 \
-          --serial-runtime-shard-count=4
-      shard_1_pid=$!
-      run_shard 2 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=1 \
-          --serial-runtime-shard-count=4
-      shard_2_pid=$!
-      run_shard 3 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=2 \
-          --serial-runtime-shard-count=4
-      shard_3_pid=$!
-      run_shard 4 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=3 \
-          --serial-runtime-shard-count=4
-      shard_4_pid=$!
-      shard_status=0
-      wait "$shard_1_pid" || shard_status=1
-      wait "$shard_2_pid" || shard_status=1
-      wait "$shard_3_pid" || shard_status=1
-      wait "$shard_4_pid" || shard_status=1
-      if [ "$shard_status" -ne 0 ]; then
-          exit "$shard_status"
+      if [[ ! "$CI_NODE_INDEX" =~ ^[1-4]$ ]] || [[ "$CI_NODE_TOTAL" != 4 ]]; then
+          printf 'Invalid GitLab parallel metadata: index=%s total=%s\n' \
+              "$CI_NODE_INDEX" "$CI_NODE_TOTAL" >&2
+          exit 2
       fi
+      shard_index=$((CI_NODE_INDEX - 1))
+      PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
+          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX" \
+          UV_PROJECT_ENVIRONMENT="$python_environment" \
+          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
+              --cov=src/agent_work \
+              --junitxml="test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml" \
+              -o "junit_suite_name=$TEST_ENVIRONMENT" \
+              -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$CI_NODE_INDEX" \
+          -p tests.helpers.serial_runtime_shard \
+          --serial-runtime-shard-index="$shard_index" \
+          --serial-runtime-shard-count=4
+  artifacts:
+    reports:
+      junit: test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml
+    paths:
+      - .coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX
+    when: always
+
+.pytest_coverage:
+  extends: .base_uv
+  script:
+    - |
+      case "$TEST_ENVIRONMENT" in
+          py311) python_environment="$CI_PY311_ENVIRONMENT" ;;
+          py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
+          *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
+      esac
       coverage_combine_status=0
       UV_PROJECT_ENVIRONMENT="$python_environment" \
           uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage combine \
@@ -173,11 +165,6 @@ ruff-format:
       exit "$coverage_xml_status"
   artifacts:
     reports:
-      junit:
-        - test-results-$TEST_ENVIRONMENT-shard-1.xml
-        - test-results-$TEST_ENVIRONMENT-shard-2.xml
-        - test-results-$TEST_ENVIRONMENT-shard-3.xml
-        - test-results-$TEST_ENVIRONMENT-shard-4.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage-$TEST_ENVIRONMENT.xml
@@ -187,11 +174,33 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
+  parallel: 4
   variables:
     TEST_ENVIRONMENT: py311
 
 pytest-py314:
   extends: .pytest
+  parallel: 4
+  variables:
+    TEST_ENVIRONMENT: py314
+
+coverage-py311:
+  extends: .pytest_coverage
+  needs:
+    - job: ci-image:candidate
+      artifacts: false
+    - job: pytest-py311
+      artifacts: true
+  variables:
+    TEST_ENVIRONMENT: py311
+
+coverage-py314:
+  extends: .pytest_coverage
+  needs:
+    - job: ci-image:candidate
+      artifacts: false
+    - job: pytest-py314
+      artifacts: true
   variables:
     TEST_ENVIRONMENT: py314
 

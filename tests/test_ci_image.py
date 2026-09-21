@@ -22,6 +22,8 @@ import yaml
 _VALIDATION_JOBS = {
     "kingfisher",
     "license-check",
+    "coverage-py311",
+    "coverage-py314",
     "readability-check",
     "pytest-py311",
     "pytest-py314",
@@ -184,7 +186,7 @@ def test_root_validation_consumes_its_pipeline_candidate_without_bootstrap(
         assert runtime_setup not in validation_contract
     pytest_template = configuration[".base_uv"] | configuration[".pytest"]
     assert configuration[".pytest"]["extends"] == ".base_uv"
-    for job_name in _VALIDATION_JOBS:
+    for job_name in _VALIDATION_JOBS - {"coverage-py311", "coverage-py314"}:
         inherited_job = (
             pytest_template
             if job_name.startswith("pytest-")
@@ -202,6 +204,8 @@ def test_root_validation_consumes_its_pipeline_candidate_without_bootstrap(
     assert configuration["pytest-py314"]["variables"] == {
         "TEST_ENVIRONMENT": "py314",
     }
+    assert configuration["pytest-py311"]["parallel"] == 4
+    assert configuration["pytest-py314"]["parallel"] == 4
     pytest_script = "\n".join(configuration[".pytest"]["script"])
     assert 'py311) python_environment="$CI_PY311_ENVIRONMENT"' in pytest_script
     assert 'py314) python_environment="$CI_PY314_ENVIRONMENT"' in pytest_script
@@ -230,7 +234,13 @@ def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
         {"when": "never"},
     ]
     for name in _VALIDATION_JOBS:
-        expected_base = ".pytest" if name.startswith("pytest-") else ".base_uv"
+        expected_base = (
+            ".pytest"
+            if name.startswith("pytest-")
+            else ".pytest_coverage"
+            if name.startswith("coverage-")
+            else ".base_uv"
+        )
         assert configuration[name]["extends"] == expected_base
         effective_job = configuration[expected_base] | configuration[name]
         assert effective_job["script"]
@@ -273,6 +283,8 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
             "OBSERVED": str(observed),
             "PATH": f"{fake_bin}:{environment['PATH']}",
             "TEST_ENVIRONMENT": test_environment,
+            "CI_NODE_INDEX": "1",
+            "CI_NODE_TOTAL": "4",
         }
     )
 
@@ -293,37 +305,35 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
         assert observed.read_text().strip() == expected_environment
 
 
-def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
+def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment runs four exhaustive, balanced test partitions."""
+    """Native GitLab shards publish isolated inputs for per-version coverage."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
     pytest_template = configuration[".pytest"]
-    script = "\n".join(pytest_template["script"])
+    pytest_script = "\n".join(pytest_template["script"])
 
-    assert pytest_template["artifacts"]["reports"]["junit"] == [
-        "test-results-$TEST_ENVIRONMENT-shard-1.xml",
-        "test-results-$TEST_ENVIRONMENT-shard-2.xml",
-        "test-results-$TEST_ENVIRONMENT-shard-3.xml",
-        "test-results-$TEST_ENVIRONMENT-shard-4.xml",
-    ]
-    assert "tests/test_template.py" not in script
-    assert "tests/test_agent_work_serial_runtime.py" not in script
-    assert "--ignore=" not in script
-    assert "--cov=src/agent_work" in script
-    assert "coverage combine \\" in script
-    assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
-    assert '".coverage.$TEST_ENVIRONMENT-shard-2"' in script
-    assert '".coverage.$TEST_ENVIRONMENT-shard-3"' in script
-    assert '".coverage.$TEST_ENVIRONMENT-shard-4"' in script
-    assert "coverage report --fail-under=85" in script
-    assert 'coverage xml -o "coverage-$TEST_ENVIRONMENT.xml"' in script
-    assert script.index("coverage report --fail-under=85") < script.index(
-        "coverage xml"
+    for environment in ("py311", "py314"):
+        pytest_job = configuration[f"pytest-{environment}"]
+        assert pytest_job["parallel"] == 4
+        assert pytest_job["variables"] == {"TEST_ENVIRONMENT": environment}
+    assert pytest_template["artifacts"]["reports"]["junit"] == (
+        "test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml"
     )
+    assert pytest_template["artifacts"]["paths"] == [
+        ".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX"
+    ]
+    assert "coverage_report" not in pytest_template["artifacts"]["reports"]
+    assert "tests/test_template.py" not in pytest_script
+    assert "tests/test_agent_work_serial_runtime.py" not in pytest_script
+    assert "--ignore=" not in pytest_script
+    assert "--cov=src/agent_work" in pytest_script
+    assert "coverage combine" not in pytest_script
+    assert "coverage report" not in pytest_script
+    assert "coverage xml" not in pytest_script
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -331,41 +341,153 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
     fake_uv = fake_bin / "uv"
     fake_uv.write_text(
         "#!/usr/bin/env bash\n"
-        'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
+        'printf "%s|%s|%s\\n" "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
         '>> "$INVOCATIONS"\n'
-        'case "$*" in\n'
-        "    *'--serial-runtime-shard-index=0'*) shard=partition-0 ;;\n"
-        "    *'--serial-runtime-shard-index=1'*) shard=partition-1 ;;\n"
-        "    *'--serial-runtime-shard-index=2'*) shard=partition-2 ;;\n"
-        "    *'--serial-runtime-shard-index=3'*) shard=partition-3 ;;\n"
-        "    *) shard=other ;;\n"
-        "esac\n"
-        'if [[ "${FAIL_SHARD:-}" = "$shard" ]]; then\n'
-        "    exit 7\n"
-        "fi\n"
-        "if [[ \"$*\" == *'coverage report --fail-under=85'* ]] && "
-        '[[ "${FAIL_COVERAGE_REPORT:-0}" = 1 ]]; then\n'
-        "    exit 9\n"
-        "fi\n"
-        "if [[ \"$*\" == *'coverage combine'* ]] && "
-        '[[ "${FAIL_COVERAGE_COMBINE:-0}" = 1 ]]; then\n'
-        "    exit 8\n"
-        "fi\n"
+        '[[ "${FAIL_PYTEST:-0}" != 1 ]] || exit 7\n'
     )
     fake_uv.chmod(0o755)
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "CI_PROJECT_DIR": str(tmp_path),
-            "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
-            "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
-            "INVOCATIONS": str(invocations),
-            "PATH": f"{fake_bin}:{environment['PATH']}",
-            "TEST_ENVIRONMENT": "py311",
-        }
+    environment = os.environ.copy() | {
+        "CI_PROJECT_DIR": str(tmp_path),
+        "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
+        "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
+        "CI_NODE_INDEX": "3",
+        "CI_NODE_TOTAL": "4",
+        "INVOCATIONS": str(invocations),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TEST_ENVIRONMENT": "py311",
+    }
+    result = subprocess.run(
+        ["bash", "-c", pytest_script],
+        check=False,
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+    assert result.returncode == 0
+    calls = invocations.read_text().splitlines()
+    assert len(calls) == 1
+    expected_import_path = os.pathsep.join((str(tmp_path), str(tmp_path / "src")))
+    assert calls[0].startswith(f"{expected_import_path}|")
+    assert calls[0].split("|", maxsplit=2)[1] == ".coverage.py311-shard-3"
+    assert (
+        calls[0]
+        .split("|", maxsplit=2)[2]
+        .startswith("run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest ")
+    )
+    assert "--cov=src/agent_work" in calls[0]
+    assert "-p tests.helpers.serial_runtime_shard" in calls[0]
+    assert "--serial-runtime-shard-index=2" in calls[0]
+    assert "--serial-runtime-shard-count=4" in calls[0]
+    assert "tests/" not in calls[0]
+    assert "--ignore=" not in calls[0]
+
+    failed = subprocess.run(
+        ["bash", "-c", pytest_script],
+        check=False,
+        cwd=tmp_path,
+        env=environment | {"FAIL_PYTEST": "1"},
+    )
+    assert failed.returncode == 7
+
+    coverage_template = configuration[".pytest_coverage"]
+    coverage_script = "\n".join(coverage_template["script"])
+    assert coverage_template["extends"] == ".base_uv"
+    for environment_name in ("py311", "py314"):
+        coverage_job = configuration[f"coverage-{environment_name}"]
+        assert coverage_job["extends"] == ".pytest_coverage"
+        assert coverage_job["needs"] == [
+            {"job": _CANDIDATE_JOB, "artifacts": False},
+            {"job": f"pytest-{environment_name}", "artifacts": True},
+        ]
+    assert coverage_template["artifacts"]["reports"]["coverage_report"] == {
+        "coverage_format": "cobertura",
+        "path": "coverage-$TEST_ENVIRONMENT.xml",
+    }
+    assert coverage_template["artifacts"]["paths"] == ["coverage-$TEST_ENVIRONMENT.xml"]
+    for shard in range(1, 5):
+        assert f'".coverage.$TEST_ENVIRONMENT-shard-{shard}"' in coverage_script
+    assert (
+        coverage_script.index("coverage combine")
+        < coverage_script.index("coverage report --fail-under=85")
+        < coverage_script.index("coverage xml")
     )
 
+    coverage_invocations = tmp_path / "coverage-invocations"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$COVERAGE_INVOCATIONS"\n'
+        'if [[ "$*" == *"coverage combine"* ]] && [[ "${FAIL_COMBINE:-0}" = 1 ]]; then exit 8; fi\n'
+        'if [[ "$*" == *"coverage report"* ]] && [[ "${FAIL_REPORT:-0}" = 1 ]]; then exit 9; fi\n'
+        'if [[ "$*" == *"coverage xml"* ]] && [[ "${FAIL_XML:-0}" = 1 ]]; then exit 10; fi\n'
+    )
+    coverage_environment = environment | {
+        "COVERAGE_INVOCATIONS": str(coverage_invocations)
+    }
     succeeded = subprocess.run(
+        ["bash", "-c", coverage_script],
+        check=False,
+        cwd=tmp_path,
+        env=coverage_environment,
+    )
+    assert succeeded.returncode == 0
+    assert len(coverage_invocations.read_text().splitlines()) == 3
+    for failure, status, expected_calls in (
+        ("FAIL_COMBINE", 8, 1),
+        ("FAIL_REPORT", 9, 3),
+        ("FAIL_XML", 10, 3),
+    ):
+        coverage_invocations.unlink()
+        failed = subprocess.run(
+            ["bash", "-c", coverage_script],
+            check=False,
+            cwd=tmp_path,
+            env=coverage_environment | {failure: "1"},
+        )
+        assert failed.returncode == status
+        assert len(coverage_invocations.read_text().splitlines()) == expected_calls
+
+
+@pytest.mark.parametrize(
+    ("test_environment", "node_index", "node_total"),
+    (
+        ("unknown", "1", "4"),
+        ("py311", "0", "4"),
+        ("py311", "5", "4"),
+        ("py311", "not-a-number", "4"),
+        ("py311", "1", "3"),
+        ("py311", "1", "not-a-number"),
+    ),
+)
+def test_root_pytest_job_rejects_invalid_node_metadata_before_uv(
+    project_root: Path,
+    tmp_path: Path,
+    test_environment: str,
+    node_index: str,
+    node_total: str,
+) -> None:
+    """Untrusted environment and GitLab parallel metadata must fail closed."""
+    configuration = yaml.safe_load(
+        (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
+    )
+    script = "\n".join(configuration[".pytest"]["script"])
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    observed = tmp_path / "uv-ran"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/usr/bin/env bash\ntouch "$OBSERVED"\n')
+    fake_uv.chmod(0o755)
+    environment = os.environ.copy() | {
+        "CI_PROJECT_DIR": str(tmp_path),
+        "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
+        "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
+        "CI_NODE_INDEX": node_index,
+        "CI_NODE_TOTAL": node_total,
+        "OBSERVED": str(observed),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TEST_ENVIRONMENT": test_environment,
+    }
+    result = subprocess.run(
         ["bash", "-c", script],
         check=False,
         capture_output=True,
@@ -373,105 +495,8 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         env=environment,
         text=True,
     )
-
-    assert succeeded.returncode == 0
-    calls = invocations.read_text().splitlines()
-    assert len(calls) == 7
-    assert {call.split("|", maxsplit=2)[1] for call in calls[:4]} == {
-        ".coverage.py311-shard-1",
-        ".coverage.py311-shard-2",
-        ".coverage.py311-shard-3",
-        ".coverage.py311-shard-4",
-    }
-    shard_calls = calls[:4]
-    expected_import_path = os.pathsep.join((str(tmp_path), str(tmp_path / "src")))
-    assert all(call.startswith(f"{expected_import_path}|") for call in shard_calls)
-    assert all(
-        call.split("|", maxsplit=2)[2].startswith(
-            "run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest "
-        )
-        for call in shard_calls
-    )
-    assert all("--cov=src/agent_work" in call for call in shard_calls)
-    assert all("-p tests.helpers.serial_runtime_shard" in call for call in shard_calls)
-    partition_indices = tuple(
-        tuple(
-            option
-            for option in (
-                "--serial-runtime-shard-index=0",
-                "--serial-runtime-shard-index=1",
-                "--serial-runtime-shard-index=2",
-                "--serial-runtime-shard-index=3",
-            )
-            if option in call
-        )
-        for call in shard_calls
-    )
-    assert set(partition_indices) == {
-        ("--serial-runtime-shard-index=0",),
-        ("--serial-runtime-shard-index=1",),
-        ("--serial-runtime-shard-index=2",),
-        ("--serial-runtime-shard-index=3",),
-    }
-    assert all("--serial-runtime-shard-count=4" in call for call in shard_calls)
-    assert all("tests/" not in call for call in shard_calls)
-    assert all("--ignore=" not in call for call in shard_calls)
-
-    for failed_shard in ("partition-0", "partition-1", "partition-2", "partition-3"):
-        failure_start = len(invocations.read_text().splitlines())
-        failed = subprocess.run(
-            ["bash", "-c", script],
-            check=False,
-            capture_output=True,
-            cwd=tmp_path,
-            env=environment | {"FAIL_SHARD": failed_shard},
-            text=True,
-        )
-
-        assert failed.returncode != 0
-        failure_calls = invocations.read_text().splitlines()[failure_start:]
-        assert len(failure_calls) == 4
-        assert all("coverage combine" not in call for call in failure_calls)
-        assert all("coverage report" not in call for call in failure_calls)
-        assert all("coverage xml" not in call for call in failure_calls)
-
-    coverage_failed = subprocess.run(
-        ["bash", "-c", script],
-        check=False,
-        capture_output=True,
-        cwd=tmp_path,
-        env=environment | {"FAIL_COVERAGE_REPORT": "1"},
-        text=True,
-    )
-
-    assert coverage_failed.returncode == 9
-    coverage_failure_calls = invocations.read_text().splitlines()[-7:]
-    report_index = next(
-        index
-        for index, call in enumerate(coverage_failure_calls)
-        if "coverage report --fail-under=85" in call
-    )
-    xml_index = next(
-        index
-        for index, call in enumerate(coverage_failure_calls)
-        if "coverage xml" in call
-    )
-    assert report_index < xml_index
-
-    combine_failed = subprocess.run(
-        ["bash", "-c", script],
-        check=False,
-        capture_output=True,
-        cwd=tmp_path,
-        env=environment | {"FAIL_COVERAGE_COMBINE": "1"},
-        text=True,
-    )
-
-    assert combine_failed.returncode == 8
-    combine_failure_calls = invocations.read_text().splitlines()[-5:]
-    assert any("coverage combine" in call for call in combine_failure_calls)
-    assert all("coverage report" not in call for call in combine_failure_calls)
-    assert all("coverage xml" not in call for call in combine_failure_calls)
+    assert result.returncode == 2
+    assert not observed.exists()
 
 
 def test_portable_template_keeps_its_independent_validation_bootstrap(

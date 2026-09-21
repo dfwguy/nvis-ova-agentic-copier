@@ -36,10 +36,10 @@ rootless BuildKit candidate from the current `Dockerfile`, `pyproject.toml`,
 and `uv.lock`. It does this before root validation. Its tag is
 `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
 
-The ten native root jobs wait for that candidate and run in it:
-`ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
-`kingfisher`, `type-check`, `license-check`, `readability-check`, and
-`shellcheck`. The image has the Python tools and locked dependencies. Most use
+Eight single root jobs—`ruff-check`, `ruff-format`, `yamllint`, `kingfisher`,
+`type-check`, `license-check`, `readability-check`, and `shellcheck`—and four
+parallel pytest shards for each Python version wait for that candidate and run
+in it. The image has the Python tools and locked dependencies. Most use
 `uv run --no-sync`. `readability-check` uses `uv run --locked --all-groups`.
 Do not install tools or dependencies in these jobs. This avoids a stale digest
 or stale dependency set.
@@ -59,27 +59,22 @@ commands or credentials in the template.
 
 ## 3. Verify the root validation jobs.
 
-Inspect the ten named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
-`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
-`readability-check`, and `shellcheck`. Each waits for the candidate and uses
-its prepared environment. None may run `apt-get`, `uv python install`, `uv
-sync`, or an install fallback.
+Inspect the eight single root jobs and the four `pytest-py311` and four
+`pytest-py314` GitLab-native parallel jobs. Each waits for the candidate and
+uses its prepared environment. None may run `apt-get`, `uv python install`,
+`uv sync`, or an install fallback.
 
-Inspect those jobs directly. There is no root aggregate job or aggregate JUnit
-gate suite. Each pytest job starts four shards in parallel that exhaustively
-partition the full collected suite. They use `tests.helpers.serial_runtime_shard`
-with indices 0 through 3 of 4. The job waits for every shard PID before it
-combines coverage.
+Each pytest shard uses `CI_NODE_INDEX` and `CI_NODE_TOTAL` for one deterministic,
+exhaustive suite partition. It uploads one unique JUnit report and raw coverage
+file. The small per-version aggregation job uses `needs` to wait for all four
+shards, combines exactly their four raw coverage files, enforces the 85% floor, and publishes one
+Cobertura report. Check the failed shard's JUnit report or the aggregation job's
+Cobertura report and log. Any shard or aggregation failure fails the pipeline.
 
-Check every shard JUnit report. Check the one per-version Cobertura report when
-it exists. Otherwise, check the job log. The combined report covers only
-maintained `src/agent_work` code. A shard, coverage combine, coverage floor,
-or report failure fails its named job.
-
-Use the longest terminal job with a numeric run time for the budget. Prefer 60
-seconds or less. Reject more than 120 seconds. Report skipped, canceled, and
-manual jobs separately. Also report pipeline span and queue time. Runner wait
-time is not part of this budget.
+Use the longest terminal job with a numeric execution time for the budget.
+Prefer 60 seconds or less. Reject more than 120 seconds. Report skipped,
+canceled, and manual jobs separately. Also report pipeline span and queue time.
+Queue time is excluded from this budget.
 
 If the image needs a dependency, update the inputs. The next pipeline makes a
 new commit candidate. Do not add bootstrap work to root jobs. Do not open a

@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -57,7 +57,18 @@ generated repository root.
 
 This split makes two kinds of change clear. Template maintainers improve shared scaffolding, such as tooling, CI, workflow guidance, and defaults, in one place. Generated-project owners choose when to take those improvements through Copier's three-way update process.
 
-The root repository also has its own CI boundary. Each merge-request and default-branch pipeline builds and pushes a project-only validation candidate for its commit. Ten native jobs use it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`, and `shellcheck`. Its tag includes the commit SHA and pipeline ID. The jobs therefore validate the Dockerfile and locked dependencies from that commit, rather than stale dependencies from a fixed digest. The image contains the jobs' interpreter, system tools, and locked dependencies, so they do not install them again. BuildKit uses a registry-backed cache. Its metadata and output digest remain evidence.
+The root repository also has its own CI boundary. Each merge-request and
+default-branch pipeline builds a validation image for its commit. Eight single
+validation jobs and four native pytest shards for each Python version use it.
+Each shard runs one full-suite partition. It uploads its own JUnit and raw
+coverage files. A small job for each version waits for all four shards. It
+combines coverage, keeps the 85% floor, and publishes one Cobertura report.
+A shard or aggregation failure fails the pipeline.
+
+The tag has the commit SHA and pipeline ID. Jobs therefore test that commit's
+Dockerfile and locked dependencies, not a fixed digest. The image has the
+interpreter, tools, and locked dependencies, so jobs do not install them again.
+BuildKit uses a registry cache. Its metadata and output digest remain evidence.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
