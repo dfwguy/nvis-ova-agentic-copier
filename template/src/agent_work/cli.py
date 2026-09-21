@@ -121,6 +121,13 @@ class _PrepareIssueDraft(Protocol):
     ) -> PreparedIssueDraft: ...
 
 
+class _HookFailure(Protocol):
+    """Bounded structured failed-hook detail consumed by CLI rendering."""
+
+    hook_id: str
+    diagnostic_lines: Sequence[str]
+
+
 class _ValidationReport(Protocol):
     """Bounded validation report consumed by CLI rendering."""
 
@@ -131,6 +138,9 @@ class _ValidationReport(Protocol):
     terminal: bool
     exit_code: int | None
     diagnostic: str | None
+
+    @property
+    def hook_failures(self) -> Sequence[_HookFailure]: ...
 
 
 class _ValidationRunAction(Protocol):
@@ -1172,11 +1182,34 @@ def main(
             "terminal": report.terminal,
             "exit_code": report.exit_code if report.terminal else None,
             "diagnostic": report.diagnostic,
+            "hook_failures": [
+                {
+                    "hook_id": failure.hook_id,
+                    "diagnostic_lines": list(failure.diagnostic_lines),
+                }
+                for failure in report.hook_failures
+            ],
         }
         write_stdout(
             json.dumps(payload, separators=(",", ":"))
             if parsed.json
-            else " ".join(f"{key}={value}" for key, value in payload.items())
+            else " ".join(
+                [
+                    *(
+                        f"{key}={value}"
+                        for key, value in payload.items()
+                        if key != "hook_failures"
+                    ),
+                    *(
+                        part
+                        for failure in report.hook_failures
+                        for part in (
+                            f"failed_hook={failure.hook_id}",
+                            *failure.diagnostic_lines,
+                        )
+                    ),
+                ]
+            )
         )
         if parsed.action == "run" and not getattr(parsed, "apply", False):
             return 0

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -199,6 +200,258 @@ def test_terminal_failure_without_usable_artifacts_persists_fixed_fallback() -> 
     )
     assert report.diagnostic == expected
     assert state.records[_CANDIDATE]["diagnostic"] == expected
+    assert report.hook_failures == ()
+
+
+def test_terminal_failure_projects_only_allowlisted_hook_evidence_in_command_order() -> (
+    None
+):
+    state = ValidationStateFake()
+    dependencies, calls, _artifact_reads = _diagnostic_dependencies(
+        state,
+        stdout="""
+readability-check.....................................................Failed
+- hook id: readability-check
+docs/guide.md: grade 9.2
+ruff..................................................................Failed
+- hook id: ruff
+src/agent_work/example.py:7:3: F401 unused import
+ty....................................................................Failed
+- hook id: ty
+error[invalid-assignment]: private source text
+--> src/agent_work/example.py:8:2
+tox...................................................................Failed
+- hook id: tox
+""",
+        artifacts={
+            Path("test-results-py311.xml"): b"<testsuite failures='2' errors='1'/>",
+            Path("test-results-py314.xml"): b"<testsuite failures='4' errors='3'/>",
+        },
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    expected = (
+        {
+            "hook_id": "readability-check",
+            "diagnostic_lines": ["docs/guide.md: grade 9.2"],
+        },
+        {
+            "hook_id": "ruff",
+            "diagnostic_lines": ["src/agent_work/example.py:7:3: F401"],
+        },
+        {
+            "hook_id": "ty",
+            "diagnostic_lines": ["src/agent_work/example.py:8:2: invalid-assignment"],
+        },
+        {
+            "hook_id": "tox",
+            "diagnostic_lines": [
+                "JUnit py311 failures=2 errors=1; py314 failures=4 errors=3"
+            ],
+        },
+    )
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert (
+        tuple(
+            {"hook_id": item.hook_id, "diagnostic_lines": list(item.diagnostic_lines)}
+            for item in report.hook_failures
+        )
+        == expected
+    )
+    assert state.records[_CANDIDATE]["hook_failures"] == list(expected)
+
+
+def test_readability_hook_projects_highest_safe_grades_before_lower_rows() -> None:
+    """Readability evidence makes the highest safe grades visible first."""
+    state = ValidationStateFake()
+    dependencies, _calls, _artifact_reads = _diagnostic_dependencies(
+        state,
+        stdout="""
+readability-check.....................................................Failed
+- hook id: readability-check
+docs/lower.md: grade 7.8
+docs/higher.md: grade 8.1
+docs/tie-b.md: grade 8.0
+docs/tie-a.md: grade 8.0
+""",
+        artifacts={},
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.hook_failures[0].diagnostic_lines == (
+        "docs/higher.md: grade 8.1",
+        "docs/tie-a.md: grade 8.0",
+        "docs/tie-b.md: grade 8.0",
+        "docs/lower.md: grade 7.8",
+    )
+
+
+def test_terminal_failure_drops_hostile_output_and_uses_fixed_generic_hook_detail() -> (
+    None
+):
+    state = ValidationStateFake()
+    hostile = (
+        "\x1b[31mAPI_TOKEN=do-not-store\x1b[0m\n"
+        "PASSWORD=do-not-store\n"
+        "enter credential now> \n"
+        "/absolute/private.py:1:1: F401 source text\n"
+        "../escape.py:1:1: F401 source text\n"
+        "ruff..................................................................Failed\n"
+        "- hook id: ruff\n"
+        "private_source.py:1:1: F401 arbitrary source and secret-like text\n"
+        "shellcheck............................................................Failed\n"
+        "- hook id: shellcheck\n"
+        "free-form message with private source context and a caret ^^^\n"
+        "spoof.................................................................Failed\n"
+        "- hook id: ../../not-safe\n"
+        + "oversized..............................................................Failed\n"
+        + "- hook id: "
+        + ("x" * 129)
+        + "\n"
+    )
+    dependencies, _calls, _artifact_reads = _diagnostic_dependencies(
+        state, stdout=hostile, stderr=hostile, artifacts={}
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert tuple(
+        {"hook_id": item.hook_id, "diagnostic_lines": list(item.diagnostic_lines)}
+        for item in report.hook_failures
+    ) == (
+        {
+            "hook_id": "ruff",
+            "diagnostic_lines": ["private_source.py:1:1: F401"],
+        },
+        {
+            "hook_id": "shellcheck",
+            "diagnostic_lines": ["No safe structured diagnostic available."],
+        },
+    )
+    persisted = str(state.records[_CANDIDATE])
+    for forbidden in (
+        "API_TOKEN",
+        "PASSWORD",
+        "credential",
+        "do-not-store",
+        "private source",
+        "free-form message",
+        "\x1b",
+        "../../not-safe",
+    ):
+        assert forbidden not in persisted
+
+
+def test_unsupported_hook_never_projects_ruff_shaped_output() -> None:
+    """Unsupported hooks retain only their ID and the fixed fallback."""
+    state = ValidationStateFake()
+    dependencies, _calls, _artifact_reads = _diagnostic_dependencies(
+        state,
+        stdout="""
+unknown-hook..........................................................Failed
+- hook id: unknown-hook
+safe/path.py:1:2: E101 private message
+""",
+        artifacts={},
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.hook_failures[0].hook_id == "unknown-hook"
+    assert report.hook_failures[0].diagnostic_lines == (
+        "No safe structured diagnostic available.",
+    )
+
+
+def test_overlong_recognized_hook_line_falls_back_without_stranding_record() -> None:
+    """An overlong canonical detail cannot leave a durable session running."""
+    state = ValidationStateFake()
+    long_path = f"pkg/{'a' * 250}.py"
+    dependencies, calls, _artifact_reads = _diagnostic_dependencies(
+        state,
+        stdout=(
+            "ruff..................................................................Failed\n"
+            "- hook id: ruff\n"
+            f"{long_path}:1:2: E101 private message\n"
+        ),
+        artifacts={},
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-failure"
+    assert report.hook_failures[0].diagnostic_lines == (
+        "No safe structured diagnostic available.",
+    )
+    assert state.records[_CANDIDATE]["state"] == "terminal-failure"
+
+
+def test_hook_failure_evidence_keeps_only_the_earliest_bounded_safe_entries() -> None:
+    state = ValidationStateFake()
+    safe_path = f"pkg/{'a' * 231}.py"
+    ruff_frame = "\n".join(
+        (
+            "ruff..................................................................Failed",
+            "- hook id: ruff",
+            *(
+                f"{safe_path}:{line}:2: E{100 + line} ignored source text"
+                for line in range(1, 7)
+            ),
+        )
+    )
+    unsupported_frames = "\n".join(
+        f"hook-{index:02d}.......................................................Failed\n"
+        f"- hook id: hook-{index:02d}\n"
+        f"{safe_path}:1:2: E101 private source text\n"
+        "free-form private message"
+        for index in range(17)
+    )
+    dependencies, _calls, _artifact_reads = _diagnostic_dependencies(
+        state, stdout=f"{ruff_frame}\n{unsupported_frames}", artifacts={}
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert len(report.hook_failures) == 16
+    assert [item.hook_id for item in report.hook_failures] == [
+        "ruff",
+        *(f"hook-{index:02d}" for index in range(15)),
+    ]
+    assert len(report.hook_failures[0].diagnostic_lines) == 4
+    assert all(
+        item.diagnostic_lines == ("No safe structured diagnostic available.",)
+        for item in report.hook_failures[1:]
+    )
+    assert all(
+        item.hook_id.isascii() and len(item.hook_id.encode()) <= 128
+        for item in report.hook_failures
+    )
+    assert all(
+        line.isprintable() and len(line.encode("utf-8")) <= 256
+        for item in report.hook_failures
+        for line in item.diagnostic_lines
+    )
+    serialized = json.dumps(
+        state.records[_CANDIDATE]["hook_failures"], separators=(",", ":")
+    ).encode("utf-8")
+    assert len(serialized) <= 4096
+    assert b"private source" not in serialized
+    assert b"free-form" not in serialized
 
 
 @pytest.mark.parametrize(
@@ -384,6 +637,7 @@ def test_legacy_terminal_failure_without_diagnostic_remains_readable() -> None:
 
     assert report.state == "terminal-failure"
     assert report.diagnostic is None
+    assert report.hook_failures == ()
     assert calls == []
     assert state.writes == []
 
@@ -422,6 +676,7 @@ def test_preview_success_and_running_reports_never_expose_diagnostics() -> None:
     assert preview.diagnostic is None
     assert success.diagnostic is None
     assert running.diagnostic is None
+    assert preview.hook_failures == success.hook_failures == running.hook_failures == ()
     assert success_artifact_reads == []
 
 
@@ -697,3 +952,84 @@ def test_observation_fails_closed_for_malformed_or_unbounded_record(
 
     assert calls == []
     assert state.writes == []
+
+
+def test_observation_fails_closed_for_malformed_hook_failure_evidence() -> None:
+    valid_line = "pkg/example.py:1:2: E101"
+    valid_entry = {"hook_id": "ruff", "diagnostic_lines": [valid_line]}
+    records: tuple[dict[str, object], ...] = (
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [{"hook_id": "x" * 129, "diagnostic_lines": [valid_line]}],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [
+                {"hook_id": "../../unsafe", "diagnostic_lines": [valid_line]}
+            ],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [
+                {"hook_id": "ruff", "diagnostic_lines": ["arbitrary secret text"]}
+            ],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [{"hook_id": "ruff", "diagnostic_lines": ["x" * 257]}],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [valid_entry for _ in range(17)],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [
+                {"hook_id": "ruff", "diagnostic_lines": [valid_line] * 5}
+            ],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-success",
+            "returncode": 0,
+            "hook_failures": [valid_entry],
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 1,
+            "hook_failures": [
+                {
+                    "hook_id": f"hook-{index}",
+                    "diagnostic_lines": [
+                        f"pkg/{'a' * 231}.py:1:2: E101" for _ in range(4)
+                    ],
+                }
+                for index in range(16)
+            ],
+        },
+    )
+
+    for record in records:
+        state = ValidationStateFake(records={_CANDIDATE: record})
+        dependencies, calls = _dependencies(state)
+
+        with pytest.raises(JudgeValidationError):
+            observe_judge_validation(
+                candidate_tree=_CANDIDATE, dependencies=dependencies
+            )
+
+        assert calls == []
+        assert state.writes == []

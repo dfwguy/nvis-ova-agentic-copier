@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -39,6 +40,77 @@ _JUNIT_ARTIFACTS = (
 _MAX_ARTIFACT_BYTES = 1_048_576
 _MAX_COUNTER = 999_999_999
 _MAX_DIAGNOSTIC_BYTES = 512
+_MAX_HOOK_FAILURES = 16
+_MAX_HOOK_ID_BYTES = 128
+_MAX_HOOK_LINES = 4
+_MAX_HOOK_LINE_BYTES = 256
+_MAX_HOOK_FAILURE_BYTES = 4_096
+_HOOK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_SAFE_PATH = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$")
+_READABILITY_LINE = re.compile(
+    r"^(?P<path>[^:\s]+): grade (?P<grade>[0-9]+(?:\.[0-9]+)?)$"
+)
+_RUFF_LINE = re.compile(
+    r"^(?P<path>[^:\s]+):(?P<line>[0-9]+):(?P<column>[0-9]+): "
+    r"(?P<code>[A-Z][0-9]{1,5})(?: .*)?$"
+)
+_TY_ERROR = re.compile(r"^error\[(?P<code>[a-z][a-z0-9-]*)\]:.*$")
+_TY_LOCATION = re.compile(
+    r"^--> (?P<path>[^:\s]+):(?P<line>[0-9]+):(?P<column>[0-9]+)$"
+)
+_CANONICAL_HOOK_LINE = re.compile(
+    r"^(?:No safe structured diagnostic available\.|"
+    r"JUnit (?:(?:py311 failures=[0-9]+ errors=[0-9]+)(?:; py314 failures=[0-9]+ errors=[0-9]+)?|py314 failures=[0-9]+ errors=[0-9]+)|"
+    r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+: grade [0-9]+(?:\.[0-9]+)?|"
+    r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+:[0-9]+:[0-9]+: (?:[A-Z][0-9]{1,5}|[a-z][a-z0-9-]*))$"
+)
+_FALLBACK_HOOK_LINE = "No safe structured diagnostic available."
+
+
+def _safe_path(value: str) -> bool:
+    return bool(
+        _SAFE_PATH.fullmatch(value)
+        and not value.startswith("/")
+        and all(part not in {".", ".."} for part in value.split("/"))
+    )
+
+
+def _safe_hook_id(value: str) -> bool:
+    return bool(
+        value.isascii()
+        and _HOOK_ID.fullmatch(value)
+        and len(value.encode("ascii")) <= _MAX_HOOK_ID_BYTES
+    )
+
+
+@dataclass(frozen=True)
+class HookFailure:
+    """One bounded, allowlisted failure detail from the aggregate hook run."""
+
+    hook_id: str
+    diagnostic_lines: tuple[str, ...]
+
+
+class _PersistedHookFailure(BaseModel):
+    """Strict persisted counterpart to :class:`HookFailure`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    hook_id: str = Field(strict=True)
+    diagnostic_lines: tuple[str, ...]
+
+    def model_post_init(self, _context: object) -> None:
+        if (
+            not _safe_hook_id(self.hook_id)
+            or not self.diagnostic_lines
+            or len(self.diagnostic_lines) > _MAX_HOOK_LINES
+            or any(
+                not line.isprintable()
+                or len(line.encode("utf-8")) > _MAX_HOOK_LINE_BYTES
+                or _CANONICAL_HOOK_LINE.fullmatch(line) is None
+                for line in self.diagnostic_lines
+            )
+        ):
+            raise ValueError("invalid hook failure evidence")
 
 
 class JudgeValidationError(RuntimeError):
@@ -53,6 +125,7 @@ class _Record(BaseModel):
     state: Literal["running", "terminal-success", "terminal-failure"]
     returncode: int | None = Field(default=None, strict=True)
     diagnostic: str | None = None
+    hook_failures: tuple[_PersistedHookFailure, ...] = ()
 
     def model_post_init(self, _context: object) -> None:
         terminal = self.state in {"terminal-success", "terminal-failure"}
@@ -82,6 +155,19 @@ class _Record(BaseModel):
                 )
             ):
                 raise ValueError("invalid validation diagnostic")
+        if (
+            self.hook_failures
+            and self.state != "terminal-failure"
+            or len(self.hook_failures) > _MAX_HOOK_FAILURES
+            or len(
+                json.dumps(
+                    [item.model_dump(mode="json") for item in self.hook_failures],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            > _MAX_HOOK_FAILURE_BYTES
+        ):
+            raise ValueError("invalid hook failure evidence")
 
 
 @dataclass(frozen=True)
@@ -95,6 +181,7 @@ class JudgeValidationReport:
     terminal: bool
     returncode: int | None
     diagnostic: str | None
+    hook_failures: tuple[HookFailure, ...] = ()
 
     @property
     def exit_code(self) -> int | None:
@@ -184,11 +271,8 @@ def _junit_failure_counts(artifact: bytes | None) -> tuple[int, int] | None:
     return counts
 
 
-def _failure_diagnostic(
-    returncode: int, read_artifact: Callable[[Path], bytes | None]
-) -> str:
-    if returncode == 0 or abs(returncode) > _MAX_COUNTER:
-        raise JudgeValidationError("validation hook returned an invalid exit code")
+def _junit_summaries(read_artifact: Callable[[Path], bytes | None]) -> tuple[str, ...]:
+    """Read each fixed artifact once and return safe aggregate summaries."""
     summaries: list[str] = []
     for label, path in _JUNIT_ARTIFACTS:
         try:
@@ -197,12 +281,152 @@ def _failure_diagnostic(
             counts = None
         if counts is not None:
             summaries.append(f"{label} failures={counts[0]} errors={counts[1]}")
+    return tuple(summaries)
+
+
+def _failure_diagnostic(returncode: int, summaries: tuple[str, ...]) -> str:
+    if returncode == 0 or abs(returncode) > _MAX_COUNTER:
+        raise JudgeValidationError("validation hook returned an invalid exit code")
     suffix = (
         f"JUnit {'; '.join(summaries)}"
         if summaries
         else "no failing JUnit summary available"
     )
     return f"git hook run pre-commit failed with exit code {returncode}; {suffix}"
+
+
+def _canonical_readability(lines: tuple[str, ...]) -> tuple[str, ...]:
+    details: list[tuple[float, str, str]] = []
+    for line in lines:
+        match = _READABILITY_LINE.fullmatch(line)
+        if match is not None and _safe_path(match.group("path")):
+            details.append(
+                (
+                    float(match.group("grade")),
+                    match.group("path"),
+                    f"{match.group('path')}: grade {match.group('grade')}",
+                )
+            )
+    return tuple(
+        line
+        for _grade, _path, line in sorted(
+            details, key=lambda item: (-item[0], item[1])
+        )[:_MAX_HOOK_LINES]
+    )
+
+
+def _canonical_ruff(lines: tuple[str, ...]) -> tuple[str, ...]:
+    details: list[str] = []
+    for line in lines:
+        match = _RUFF_LINE.fullmatch(line)
+        if match is not None and _safe_path(match.group("path")):
+            details.append(
+                f"{match.group('path')}:{match.group('line')}:{match.group('column')}: "
+                f"{match.group('code')}"
+            )
+    return tuple(details[:_MAX_HOOK_LINES])
+
+
+def _canonical_ty(lines: tuple[str, ...]) -> tuple[str, ...]:
+    details: list[str] = []
+    pending_code: str | None = None
+    for line in lines:
+        error = _TY_ERROR.fullmatch(line)
+        if error is not None:
+            pending_code = error.group("code")
+            continue
+        location = _TY_LOCATION.fullmatch(line)
+        if (
+            location is not None
+            and pending_code is not None
+            and _safe_path(location.group("path"))
+        ):
+            details.append(
+                f"{location.group('path')}:{location.group('line')}:"
+                f"{location.group('column')}: {pending_code}"
+            )
+            pending_code = None
+    return tuple(details[:_MAX_HOOK_LINES])
+
+
+def _safe_canonical_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep only a bounded canonical detail set safe for persistence."""
+    if not lines or any(
+        not line.isprintable()
+        or len(line.encode("utf-8")) > _MAX_HOOK_LINE_BYTES
+        or _CANONICAL_HOOK_LINE.fullmatch(line) is None
+        for line in lines
+    ):
+        return ()
+    return lines
+
+
+def _hook_frames(stdout: str, stderr: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Extract deduplicated standard pre-commit failed-hook frames in order."""
+    lines = tuple((stdout + "\n" + stderr).splitlines())
+    frames: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    index = 0
+    while index + 1 < len(lines):
+        if not re.fullmatch(r".+\.{2,}Failed", lines[index]):
+            index += 1
+            continue
+        match = re.fullmatch(r"- hook id: (?P<hook_id>.+)", lines[index + 1])
+        if match is None:
+            index += 1
+            continue
+        hook_id = match.group("hook_id")
+        end = index + 2
+        while end < len(lines) and not re.fullmatch(r".+\.{2,}Failed", lines[end]):
+            end += 1
+        if _safe_hook_id(hook_id) and hook_id not in seen:
+            frames.append((hook_id, lines[index + 2 : end]))
+            seen.add(hook_id)
+        index = end
+    return tuple(frames[:_MAX_HOOK_FAILURES])
+
+
+def _canonical_hook_failures(
+    stdout: str, stderr: str, summaries: tuple[str, ...]
+) -> tuple[HookFailure, ...]:
+    """Return bounded typed diagnostics without retaining unrecognized output."""
+    candidates: list[HookFailure] = []
+    junit_line = f"JUnit {'; '.join(summaries)}" if summaries else None
+    for hook_id, lines in _hook_frames(stdout, stderr):
+        details = _safe_canonical_lines(
+            _canonical_readability(lines)
+            if hook_id == "readability-check"
+            else _canonical_ruff(lines)
+            if hook_id == "ruff"
+            else _canonical_ty(lines)
+            if hook_id == "ty"
+            else (junit_line,)
+            if hook_id == "tox" and junit_line is not None
+            else ()
+        )
+        candidates.append(HookFailure(hook_id, details or (_FALLBACK_HOOK_LINE,)))
+
+    packed = [HookFailure(item.hook_id, (_FALLBACK_HOOK_LINE,)) for item in candidates]
+    for index, candidate in enumerate(candidates):
+        details: list[str] = []
+        for line in candidate.diagnostic_lines:
+            proposed = [*packed]
+            proposed[index] = HookFailure(candidate.hook_id, (*details, line))
+            serialized = json.dumps(
+                [
+                    {
+                        "hook_id": item.hook_id,
+                        "diagnostic_lines": list(item.diagnostic_lines),
+                    }
+                    for item in proposed
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(serialized) > _MAX_HOOK_FAILURE_BYTES:
+                break
+            details.append(line)
+            packed = proposed
+    return tuple(packed)
 
 
 def _report(
@@ -221,6 +445,12 @@ def _report(
         terminal,
         record.returncode,
         record.diagnostic,
+        tuple(
+            HookFailure(item.hook_id, item.diagnostic_lines)
+            for item in record.hook_failures
+        )
+        if record.state == "terminal-failure"
+        else (),
     )
 
 
@@ -244,24 +474,42 @@ def run_judge_validation(
             )
         running = _Record(candidate_tree=candidate_tree, state="running")
         dependencies.atomic_write_record(
-            candidate_tree, running.model_dump(exclude_none=True)
+            candidate_tree,
+            running.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
         )
         result = dependencies.run_command(("git", "hook", "run", "pre-commit"))
         state: Literal["terminal-success", "terminal-failure"] = (
             "terminal-success" if result.returncode == 0 else "terminal-failure"
+        )
+        summaries = (
+            _junit_summaries(dependencies.read_artifact)
+            if state == "terminal-failure"
+            else ()
+        )
+        hook_failures = (
+            _canonical_hook_failures(result.stdout, result.stderr, summaries)
+            if state == "terminal-failure"
+            else ()
         )
         terminal = _Record(
             candidate_tree=candidate_tree,
             state=state,
             returncode=result.returncode,
             diagnostic=(
-                _failure_diagnostic(result.returncode, dependencies.read_artifact)
+                _failure_diagnostic(result.returncode, summaries)
                 if state == "terminal-failure"
                 else None
             ),
+            hook_failures=tuple(
+                _PersistedHookFailure(
+                    hook_id=item.hook_id, diagnostic_lines=item.diagnostic_lines
+                )
+                for item in hook_failures
+            ),
         )
         dependencies.atomic_write_record(
-            candidate_tree, terminal.model_dump(exclude_none=True)
+            candidate_tree,
+            terminal.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
         )
         return _report(candidate_tree, applied=True, action="ran", record=terminal)
 
