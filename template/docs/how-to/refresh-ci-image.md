@@ -36,13 +36,14 @@ rootless BuildKit candidate from the current `Dockerfile`, `pyproject.toml`,
 and `uv.lock`. It does this before root validation. Its tag is
 `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
 
-The ten native root jobs wait for that candidate and run in it:
-`ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`,
-`kingfisher`, `type-check`, `license-check`, `readability-check`, and
-`shellcheck`. The image has the Python tools and locked dependencies. Most use
-`uv run --no-sync`. `readability-check` uses `uv run --locked --all-groups`.
-Do not install tools or dependencies in these jobs. This avoids a stale digest
-or stale dependency set.
+The eight single root validation jobs wait for that candidate and run in it:
+`ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `type-check`,
+`license-check`, `readability-check`, and `shellcheck`. Six native pytest
+shards for each supported Python also use it. The image has the Python tools
+and locked dependencies. Most jobs use `uv run --no-sync`.
+`readability-check` uses `uv run --locked --all-groups`. Do not install tools
+or dependencies in these jobs. This avoids a stale digest or stale dependency
+set.
 
 The image build runs the locked Kingfisher version as its non-root user. It
 precompiles Kingfisher's unchanged built-in Vectorscan rules into a stable
@@ -99,23 +100,22 @@ validation candidates.
 
 ## 4. Verify the root validation jobs.
 
-Inspect the ten named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
-`pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
-`readability-check`, and `shellcheck`. Each waits for the candidate and uses
-its prepared environment. None may run `apt-get`, `uv python install`, `uv
-sync`, or an install fallback.
+Inspect the eight named root validation jobs: `ruff-check`, `ruff-format`,
+`yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`,
+and `shellcheck`, plus all six pytest shards and their aggregation job for each
+supported Python. Each waits for the candidate and uses its prepared
+environment. None may run `apt-get`, `uv python install`, `uv sync`, or an
+install fallback.
 
-Inspect those jobs directly. There is no root aggregate job or aggregate JUnit
-gate suite. Each pytest job starts four shards in parallel. One runs the full
-serial-runtime file. One runs the full template file. The other two split all
-remaining tests without overlap. They use `tests.helpers.serial_runtime_shard`
-with indices 0 and 1 of 2. They ignore both dedicated files. The job waits for
-every shard PID before it combines coverage.
-
-Check every shard JUnit report. Check the one per-version Cobertura report when
-it exists. Otherwise, check the job log. The combined report covers only
-maintained `src/agent_work` code. A shard, coverage combine, coverage floor,
-or report failure fails its named job.
+Inspect those jobs directly. The root has no aggregate validation job or
+aggregate JUnit gate suite. For each Python, the six shards use validated
+`CI_NODE_INDEX` and `CI_NODE_TOTAL` values to make one deterministic,
+exhaustive full-suite partition. Invalid metadata must fail before pytest.
+Each shard publishes a unique JUnit report and raw coverage file. Its matching
+aggregation job waits for all six shards, combines exactly six coverage files,
+measures only maintained `src/agent_work` code, enforces the 85% floor, and
+publishes Cobertura. A shard, coverage combine, coverage floor, report, or
+aggregation failure fails the pipeline.
 
 Use the longest terminal job with a numeric run time for the budget. Prefer 60
 seconds or less. Reject more than 120 seconds. Report skipped, canceled, and

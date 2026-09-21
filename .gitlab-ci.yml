@@ -107,52 +107,63 @@ ruff-format:
           py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
-      run_shard() {
-          local shard="$1"
-          shift
-          PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
-              COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$shard" \
-              UV_PROJECT_ENVIRONMENT="$python_environment" \
-              uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
-                  --cov=src/agent_work \
-                  --junitxml="test-results-$TEST_ENVIRONMENT-shard-$shard.xml" \
-                  -o "junit_suite_name=$TEST_ENVIRONMENT" \
-                  -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$shard" \
-                  "$@" &
-      }
-      run_shard 1 tests/test_agent_work_serial_runtime.py
-      shard_1_pid=$!
-      run_shard 2 tests/test_template.py
-      shard_2_pid=$!
-      run_shard 3 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=0 \
-          --serial-runtime-shard-count=2 \
-          --ignore=tests/test_agent_work_serial_runtime.py \
-          --ignore=tests/test_template.py
-      shard_3_pid=$!
-      run_shard 4 \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index=1 \
-          --serial-runtime-shard-count=2 \
-          --ignore=tests/test_agent_work_serial_runtime.py \
-          --ignore=tests/test_template.py
-      shard_4_pid=$!
-      shard_status=0
-      wait "$shard_1_pid" || shard_status=1
-      wait "$shard_2_pid" || shard_status=1
-      wait "$shard_3_pid" || shard_status=1
-      wait "$shard_4_pid" || shard_status=1
-      if [ "$shard_status" -ne 0 ]; then
-          exit "$shard_status"
+      case "${CI_NODE_INDEX-}" in
+          [1-6]) ;;
+          *) printf 'Invalid CI_NODE_INDEX: %s\n' "${CI_NODE_INDEX-}" >&2; exit 2 ;;
+      esac
+      if [ "${CI_NODE_TOTAL-}" != 6 ]; then
+          printf 'Invalid CI_NODE_TOTAL: %s\n' "${CI_NODE_TOTAL-}" >&2
+          exit 2
       fi
+      shard_index=$((CI_NODE_INDEX - 1))
+      PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
+          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX" \
+          UV_PROJECT_ENVIRONMENT="$python_environment" \
+          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
+          -p tests.helpers.serial_runtime_shard \
+          --serial-runtime-shard-index="$shard_index" \
+          --serial-runtime-shard-count=6 \
+          --cov=src/agent_work \
+          --junitxml="test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml" \
+          -o "junit_suite_name=$TEST_ENVIRONMENT" \
+          -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$CI_NODE_INDEX"
+  artifacts:
+    reports:
+      junit: test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml
+    paths:
+      - .coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX
+    when: always
+
+.pytest_coverage:
+  extends: .base_uv
+  script:
+    - |
+      case "$TEST_ENVIRONMENT" in
+          py311)
+              python_environment="$CI_PY311_ENVIRONMENT"
+              set -- \
+                  .coverage.py311-shard-1 \
+                  .coverage.py311-shard-2 \
+                  .coverage.py311-shard-3 \
+                  .coverage.py311-shard-4 \
+                  .coverage.py311-shard-5 \
+                  .coverage.py311-shard-6
+              ;;
+          py314)
+              python_environment="$CI_PY314_ENVIRONMENT"
+              set -- \
+                  .coverage.py314-shard-1 \
+                  .coverage.py314-shard-2 \
+                  .coverage.py314-shard-3 \
+                  .coverage.py314-shard-4 \
+                  .coverage.py314-shard-5 \
+                  .coverage.py314-shard-6
+              ;;
+          *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
+      esac
       coverage_combine_status=0
       UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage combine \
-              ".coverage.$TEST_ENVIRONMENT-shard-1" \
-              ".coverage.$TEST_ENVIRONMENT-shard-2" \
-              ".coverage.$TEST_ENVIRONMENT-shard-3" \
-              ".coverage.$TEST_ENVIRONMENT-shard-4" \
+          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage combine "$@" \
           || coverage_combine_status=$?
       if [ "$coverage_combine_status" -ne 0 ]; then
           exit "$coverage_combine_status"
@@ -171,11 +182,6 @@ ruff-format:
       exit "$coverage_xml_status"
   artifacts:
     reports:
-      junit:
-        - test-results-$TEST_ENVIRONMENT-shard-1.xml
-        - test-results-$TEST_ENVIRONMENT-shard-2.xml
-        - test-results-$TEST_ENVIRONMENT-shard-3.xml
-        - test-results-$TEST_ENVIRONMENT-shard-4.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage-$TEST_ENVIRONMENT.xml
@@ -185,11 +191,33 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
+  parallel: 6
   variables:
     TEST_ENVIRONMENT: py311
 
 pytest-py314:
   extends: .pytest
+  parallel: 6
+  variables:
+    TEST_ENVIRONMENT: py314
+
+coverage-py311:
+  extends: .pytest_coverage
+  needs:
+    - job: ci-image:candidate
+      artifacts: false
+    - job: pytest-py311
+      artifacts: true
+  variables:
+    TEST_ENVIRONMENT: py311
+
+coverage-py314:
+  extends: .pytest_coverage
+  needs:
+    - job: ci-image:candidate
+      artifacts: false
+    - job: pytest-py314
+      artifacts: true
   variables:
     TEST_ENVIRONMENT: py314
 
