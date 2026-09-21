@@ -89,6 +89,11 @@ from .ports import (
     ProjectLockFactory,
     RepositoryPort,
 )
+from .red_checkpoint import (
+    RedCheckpointError,
+    RedCheckpointEvidence,
+    RedCheckpointStore,
+)
 from .repository import (
     GitRepository,
     RepositoryError,
@@ -948,6 +953,9 @@ class RuntimeDependencies:
     issue_lock: Callable[[int], AbstractContextManager[None]] = lambda _issue_iid: (
         nullcontext()
     )
+    load_red_checkpoint: (
+        Callable[[int, int, str], RedCheckpointEvidence | None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -956,6 +964,9 @@ class WorkerResultDependencies:
 
     load_record: Callable[[int], LedgerRecord | None]
     changed_paths: Callable[[Path], tuple[str, ...]]
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] = (
+        lambda _project_id, _issue_iid, _base_sha: None
+    )
 
 
 @dataclass(frozen=True)
@@ -1308,16 +1319,29 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
 
     now = lambda: datetime.now(UTC)
     gitlab = GitLabGateway(config, run_subprocess)
+    repository = GitRepository(
+        config,
+        run_subprocess,
+        service_environment=os.environ,
+        diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
+    )
+    checkpoint_store = RedCheckpointStore(config.state_root)
+
+    def load_red_checkpoint(
+        project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        evidence = checkpoint_store.read(project_id, issue_iid, base_sha)
+        if evidence is not None and repository.checkpoint_tree(evidence.ref) != (
+            evidence.tree_oid
+        ):
+            raise RedCheckpointError("red checkpoint ref does not match retained tree")
+        return evidence
+
     return RuntimeDependencies(
         config=config,
         ledger=JsonLedger(config.state_root, clock=now),
         gitlab=gitlab,
-        repository=GitRepository(
-            config,
-            run_subprocess,
-            service_environment=os.environ,
-            diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
-        ),
+        repository=repository,
         invoke=AgentInvoker(run_subprocess, environment=os.environ),
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
         issue_lock=lambda issue_iid: XdgIssueLock(config.state_root, issue_iid),
@@ -1330,6 +1354,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         issue_owner_probe=probe_issue_owner,
         lifecycle_label_drift=gitlab.lifecycle_label_drift,
         ensure_lifecycle_labels=gitlab.ensure_lifecycle_labels,
+        load_red_checkpoint=load_red_checkpoint,
     )
 
 
@@ -1354,9 +1379,22 @@ def build_worker_result_dependencies(
         service_environment=environment,
         diagnostic_sink=lambda _diagnostic: None,
     )
+    checkpoint_store = RedCheckpointStore(config.state_root)
+
+    def load_red_checkpoint(
+        project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        evidence = checkpoint_store.read(project_id, issue_iid, base_sha)
+        if evidence is not None and repository.checkpoint_tree(evidence.ref) != (
+            evidence.tree_oid
+        ):
+            raise RedCheckpointError("red checkpoint ref does not match retained tree")
+        return evidence
+
     return WorkerResultDependencies(
         load_record=ledger.load_read_only,
         changed_paths=repository.changed_paths,
+        load_red_checkpoint=load_red_checkpoint,
     )
 
 
@@ -2395,6 +2433,7 @@ def dispatch(
                         issue_iid=target,
                         allow_pinned_conflict=True,
                         issue_lock=wired.issue_lock,
+                        load_red_checkpoint=wired.load_red_checkpoint,
                         remaining_seconds=lambda: (
                             request.max_activation_seconds
                             - (wired.monotonic() - started)
@@ -2955,6 +2994,7 @@ def dispatch(
                 clock=wired.clock,
                 issue_iid=issue_iid,
                 issue_lock=wired.issue_lock,
+                load_red_checkpoint=wired.load_red_checkpoint,
                 remaining_seconds=remaining_activation_seconds,
             )
             if record is None:

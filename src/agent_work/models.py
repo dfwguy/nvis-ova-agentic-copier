@@ -39,6 +39,7 @@ from .domain import (
     WorkflowPhase,
     WorkKind,
 )
+from .red_checkpoint import RedCheckpointEvidence
 
 
 class BoundaryModel(BaseModel):
@@ -650,6 +651,7 @@ class AuditReceiptSummary(BoundaryModel):
     reviewers: tuple[str, ...] = Field(max_length=32)
     findings: tuple[str, ...] = Field(max_length=64)
     corrections: tuple[str, ...] = Field(max_length=64)
+    red_checkpoint: RedCheckpointEvidence | None = None
 
     @field_validator(
         "role_receipts",

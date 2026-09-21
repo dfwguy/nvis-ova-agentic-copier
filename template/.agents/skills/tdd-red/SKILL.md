@@ -22,7 +22,9 @@ defines the role. This skill works with Claude Code, Codex, and Pi.
 
 ## Model selection
 
-The live Architect delegates this work with `$diataxis-writer` and conditional
-`$agent-policy-writer`. It waits for every preparation receipt or N/A before
-Green starts. Use this skill's `metadata.model-tier`. The live Architect router
-maps it to a model.
+The live Architect runs this work with `$diataxis-writer` and conditional
+`$agent-policy-writer`. It waits for each needed preparation receipt or N/A. It
+accepts Red's exact evidence. For interactive work, Main creates the local Red
+commit and ref. For serial work, the trusted executable creates the tree ref.
+Green starts after that checkpoint. Use this skill's
+`metadata.model-tier`. The live Architect router maps the tier.

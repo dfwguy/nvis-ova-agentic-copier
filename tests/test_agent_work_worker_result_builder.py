@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -68,6 +70,32 @@ def _record(tmp_path: Path) -> LedgerRecord:
         source_branch="agent/issue-81",
         worktree=tmp_path / "retained-worktree",
         source_sha="a" * 40,
+    )
+
+
+def _red_checkpoint_evidence(
+    test_path: str = "tests/test_agent_work_worker_result_builder.py",
+) -> Any:
+    """Return trusted checkpoint evidence bound to the ordinary test record."""
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+    return checkpoint.RedCheckpointEvidence(
+        schema_version=1,
+        project_id=310967,
+        issue_iid=81,
+        source_branch="agent/issue-81",
+        base_sha="a" * 40,
+        tree_oid="b" * 40,
+        ref=f"refs/agent-work/red-checkpoints/81/{'a' * 40}",
+        test_paths=(test_path,),
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            f"{test_path}::test_red",
+        ),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
     )
 
 
@@ -237,7 +265,12 @@ def test_builder_requires_complete_current_topology_and_retained_object_evidence
     audit.update(_topology_audit())
     build_input = WorkerResultBuildInput.model_validate(payload)
 
-    result = build_worker_result(_record(tmp_path), build_input, changed_paths=())
+    result = build_worker_result(
+        _record(tmp_path),
+        build_input,
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
 
     assert result.audit_summary is not None
     summary = result.audit_summary.model_dump(mode="json", exclude_none=True)
@@ -263,6 +296,7 @@ def test_builder_rejects_new_success_with_legacy_scalar_only_capacity_audit(
             _record(tmp_path),
             legacy,
             changed_paths=(),
+            red_checkpoint=None,
         )
 
 
@@ -368,7 +402,12 @@ def test_builder_rejects_valid_global_arithmetic_with_too_few_fresh_handles(
     build_input = parse_worker_result_build_input(json.dumps(payload))
 
     with pytest.raises(WorkerProtocolError, match="fresh handles"):
-        build_worker_result(_record(tmp_path), build_input, changed_paths=())
+        build_worker_result(
+            _record(tmp_path),
+            build_input,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
 
 @pytest.mark.parametrize("owner", ("$missing-owner", "$tdd-green"))
@@ -401,6 +440,7 @@ def test_builder_derives_trusted_identity_and_validates_completed_workflow(
         record,
         _completed_input(),
         changed_paths=("src/agent_work/worker.py", "tests/test_agent_work_worker.py"),
+        red_checkpoint=_red_checkpoint_evidence("tests/test_agent_work_worker.py"),
     )
 
     assert result.protocol_version == 2
@@ -437,7 +477,8 @@ def test_builder_accepts_complete_coding_receipts_with_the_policy_writer(
     result = build_worker_result(
         _record(tmp_path),
         _completed_coding_input_with_policy_writer(),
-        changed_paths=(),
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
     )
 
     assert result.receipts == tuple(
@@ -478,7 +519,12 @@ def test_builder_rejects_coding_receipts_without_the_policy_writer(
     )
 
     with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
-        build_worker_result(_record(tmp_path), build_input, changed_paths=())
+        build_worker_result(
+            _record(tmp_path),
+            build_input,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
 
 def test_legacy_coding_red_docs_receipts_exclude_the_policy_writer() -> None:
@@ -540,7 +586,9 @@ def test_builder_produces_a_structured_human_only_close_suggestion(
         }
     )
 
-    result = build_worker_result(record, build_input, changed_paths=())
+    result = build_worker_result(
+        record, build_input, changed_paths=(), red_checkpoint=None
+    )
     outcome = apply_worker_result(record, result, now=datetime(2026, 9, 16, tzinfo=UTC))
 
     assert result.phase_status == "complete"
@@ -572,7 +620,7 @@ def test_builder_rejects_a_close_suggestion_bound_to_another_issue(
     )
 
     with pytest.raises(WorkerProtocolError):
-        build_worker_result(record, build_input, changed_paths=())
+        build_worker_result(record, build_input, changed_paths=(), red_checkpoint=None)
 
 
 def test_builder_preserves_a_complete_multiline_coding_receipt_audit(
@@ -595,7 +643,11 @@ def test_builder_preserves_a_complete_multiline_coding_receipt_audit(
     result = build_worker_result(
         record,
         build_input,
-        changed_paths=("src/agent_work/worker.py",),
+        changed_paths=(
+            "src/agent_work/worker.py",
+            "tests/test_agent_work_worker_result_builder.py",
+        ),
+        red_checkpoint=_red_checkpoint_evidence(),
     )
     transitioned = apply_worker_result(
         record, result, now=datetime(2026, 9, 14, tzinfo=UTC)
@@ -623,7 +675,9 @@ def test_builder_completes_successful_post_publication_assessment_for_human_hand
         }
     )
 
-    result = build_worker_result(record, assessment, changed_paths=())
+    result = build_worker_result(
+        record, assessment, changed_paths=(), red_checkpoint=None
+    )
     transitioned = apply_worker_result(
         record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
     ).record
@@ -664,7 +718,9 @@ def test_builder_keeps_actionable_post_publication_assessments_rejected(
         }
     )
 
-    result = build_worker_result(record, assessment, changed_paths=())
+    result = build_worker_result(
+        record, assessment, changed_paths=(), red_checkpoint=None
+    )
     transitioned = apply_worker_result(
         record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
     ).record
@@ -708,6 +764,7 @@ def test_builder_rejects_incoherent_successful_post_publication_assessments(
             record,
             WorkerResultBuildInput.model_validate(assessment),
             changed_paths=(),
+            red_checkpoint=None,
         )
 
 
@@ -852,7 +909,12 @@ def test_controller_invariant_diagnostic_keeps_exact_corrective_reason(
     tmp_path: Path,
 ) -> None:
     record = _record(tmp_path)
-    result = build_worker_result(record, _completed_input(), changed_paths=())
+    result = build_worker_result(
+        record,
+        _completed_input(),
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
     assert result.audit_summary is not None
     tampered_result = result.model_copy(
         update={
@@ -863,7 +925,12 @@ def test_controller_invariant_diagnostic_keeps_exact_corrective_reason(
     )
 
     with pytest.raises(WorkerProtocolError) as captured:
-        validate_worker_result(record, tampered_result, changed_paths=())
+        validate_worker_result(
+            record,
+            tampered_result,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
     assert format_worker_result_diagnostic(captured.value) == (
         "controller_invariant.audit_summary.changed_paths: "
@@ -875,7 +942,12 @@ def test_controller_rejects_current_capacity_that_disagrees_with_lane(
     tmp_path: Path,
 ) -> None:
     record = _record(tmp_path)
-    result = build_worker_result(record, _completed_input(), changed_paths=())
+    result = build_worker_result(
+        record,
+        _completed_input(),
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
     assert result.audit_summary is not None
     prior_capacity = AuditCapacity(
         required=13, available=16, shortfall=0, decision="run"
@@ -889,7 +961,12 @@ def test_controller_rejects_current_capacity_that_disagrees_with_lane(
     )
 
     with pytest.raises(WorkerProtocolError) as captured:
-        validate_worker_result(record, tampered_result, changed_paths=())
+        validate_worker_result(
+            record,
+            tampered_result,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
     assert format_worker_result_diagnostic(captured.value) == (
         "controller_invariant.audit_summary: "
@@ -900,7 +977,12 @@ def test_controller_rejects_current_capacity_that_disagrees_with_lane(
 def test_controller_rejects_scalar_only_direct_workflow_result(tmp_path: Path) -> None:
     """A direct envelope cannot use recovery-compatible scalar evidence to publish."""
     record = _record(tmp_path)
-    result = build_worker_result(record, _completed_input(), changed_paths=())
+    result = build_worker_result(
+        record,
+        _completed_input(),
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
     assert result.audit_summary is not None
     scalar_only = result.model_copy(
         update={
@@ -911,7 +993,12 @@ def test_controller_rejects_scalar_only_direct_workflow_result(tmp_path: Path) -
     )
 
     with pytest.raises(WorkerProtocolError, match="topology"):
-        validate_worker_result(record, scalar_only, changed_paths=())
+        validate_worker_result(
+            record,
+            scalar_only,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -933,7 +1020,12 @@ def test_builder_rejects_incomplete_duplicate_or_malformed_receipts(
     invalid = _completed_input().model_copy(update={"receipts": resolved})
 
     with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
-        build_worker_result(_record(tmp_path), invalid, changed_paths=())
+        build_worker_result(
+            _record(tmp_path),
+            invalid,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1024,7 +1116,7 @@ def test_builder_rejects_split_required_outside_fresh_ordinary_intake(
     with pytest.raises(
         WorkerProtocolError, match="split_required: is limited to fresh ordinary intake"
     ):
-        build_worker_result(record, split, changed_paths=())
+        build_worker_result(record, split, changed_paths=(), red_checkpoint=None)
 
 
 @pytest.mark.parametrize(
@@ -1044,6 +1136,7 @@ def test_worker_validation_failures_keep_the_retained_worktree_retryable(
             record,
             _completed_input().model_copy(update={"receipts": ("$architect",)}),
             changed_paths=(),
+            red_checkpoint=None,
         )
 
     retry = plan_retry(record, now=datetime(2026, 9, 14, tzinfo=UTC)).record
@@ -1104,6 +1197,76 @@ def test_worker_prompt_requires_all_applicable_phase_two_receipts(
     assert "Green owns production, tests, and docs" in prompt
 
 
+def test_coding_ready_to_publish_requires_matching_trusted_red_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The builder derives Red identity and paths instead of trusting worker JSON."""
+    evidence = _red_checkpoint_evidence()
+    changed_paths = (
+        "src/agent_work/worker.py",
+        "tests/test_agent_work_worker_result_builder.py",
+    )
+
+    result = build_worker_result(
+        _record(tmp_path),
+        _completed_input(),
+        changed_paths=changed_paths,
+        red_checkpoint=evidence,
+    )
+
+    assert result.audit_summary is not None
+    assert result.audit_summary.red_checkpoint == evidence
+    assert result.audit_summary.red_checkpoint is not None
+    assert result.audit_summary.red_checkpoint.test_paths == (
+        "tests/test_agent_work_worker_result_builder.py",
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        None,
+        "wrong-project",
+        "wrong-issue",
+        "wrong-branch",
+        "wrong-base",
+        "missing-test-path",
+    ),
+)
+def test_coding_ready_to_publish_rejects_missing_or_stale_red_checkpoint(
+    tmp_path: Path, evidence: str | None
+) -> None:
+    checkpoint = None if evidence is None else _red_checkpoint_evidence()
+    if evidence == "wrong-project":
+        assert checkpoint is not None
+        checkpoint = checkpoint.model_copy(update={"project_id": 99})
+    elif evidence == "wrong-issue":
+        assert checkpoint is not None
+        checkpoint = checkpoint.model_copy(update={"issue_iid": 82})
+    elif evidence == "wrong-branch":
+        assert checkpoint is not None
+        checkpoint = checkpoint.model_copy(update={"source_branch": "other"})
+    elif evidence == "wrong-base":
+        assert checkpoint is not None
+        checkpoint = checkpoint.model_copy(update={"base_sha": "c" * 40})
+    elif evidence == "missing-test-path":
+        assert checkpoint is not None
+        checkpoint = checkpoint.model_copy(
+            update={"test_paths": ("tests/test_other.py",)}
+        )
+
+    with pytest.raises(WorkerProtocolError, match="red checkpoint"):
+        build_worker_result(
+            _record(tmp_path),
+            _completed_input(),
+            changed_paths=(
+                "src/agent_work/worker.py",
+                "tests/test_agent_work_worker_result_builder.py",
+            ),
+            red_checkpoint=checkpoint,
+        )
+
+
 def test_coding_receipts_put_the_judge_before_every_phase_five_reviewer() -> None:
     """Whole-workflow receipt order matches the serial review dependency."""
     receipts = WORKFLOW_RECEIPTS[WorkflowLane.CODING]
@@ -1131,7 +1294,15 @@ def test_worker_result_build_cli_writes_only_one_envelope_to_stdout(
             "--apply",
         ],
         load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda worktree: ("src/agent_work/worker.py",),
+        changed_paths=lambda worktree: (
+            "src/agent_work/worker.py",
+            "tests/test_agent_work_worker_result_builder.py",
+        ),
+        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
+            _red_checkpoint_evidence()
+            if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
+            else None
+        ),
         read_bytes=Path.read_bytes,
         write_stdout=stdout.append,
         write_stderr=stderr.append,
@@ -1164,7 +1335,15 @@ def test_worker_result_build_json_writes_one_bare_compact_object(
             "--json",
         ],
         load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda worktree: ("src/agent_work/worker.py",),
+        changed_paths=lambda worktree: (
+            "src/agent_work/worker.py",
+            "tests/test_agent_work_worker_result_builder.py",
+        ),
+        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
+            _red_checkpoint_evidence()
+            if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
+            else None
+        ),
         read_bytes=Path.read_bytes,
         write_stdout=stdout.append,
         write_stderr=lambda _message: None,
@@ -1303,6 +1482,47 @@ def test_builder_runtime_uses_read_only_ledger_loading(
         dependencies.load_record(81)
 
     assert not (config.state_root / "recovery").exists()
+
+
+def test_builder_runtime_verifies_retained_checkpoint_against_local_ref(
+    tmp_path: Path,
+) -> None:
+    """Production composition rejects missing or mismatched local ref identity."""
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+    config = AgentWorkConfig(
+        host="git.example.test",
+        project_id=310967,
+        checkout=tmp_path,
+        state_root=tmp_path / "state",
+        git_path=Path("/usr/bin/git"),
+        glab_path=Path("/usr/bin/glab"),
+        base_branch="agent/issue-81",
+    )
+    evidence = _red_checkpoint_evidence()
+    checkpoint.RedCheckpointStore(config.state_root).write(evidence)
+    observed_tree: str | None = evidence.tree_oid
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-4:-1] == ("rev-parse", "-q", "--verify"):
+            return (
+                CommandResult(1, "", "")
+                if observed_tree is None
+                else CommandResult(0, f"{observed_tree}\n", "")
+            )
+        return CommandResult(1, "", "")
+
+    dependencies = build_worker_result_dependencies(
+        config=config, run_command=run_command
+    )
+    assert dependencies.load_red_checkpoint(310967, 81, "a" * 40) == evidence
+
+    observed_tree = "c" * 40
+    with pytest.raises(RuntimeError, match="ref does not match"):
+        dependencies.load_red_checkpoint(310967, 81, "a" * 40)
+    observed_tree = None
+    with pytest.raises(RuntimeError, match="ref does not match"):
+        dependencies.load_red_checkpoint(310967, 81, "a" * 40)
+    assert dependencies.load_red_checkpoint(310967, 82, "a" * 40) is None
 
 
 def test_cli_default_builder_dependencies_do_not_preserve_corrupt_ledger(
@@ -1444,7 +1664,9 @@ def test_builder_derives_no_content_reviewers(tmp_path: Path) -> None:
         }
     )
 
-    result = build_worker_result(record, build_input, changed_paths=())
+    result = build_worker_result(
+        record, build_input, changed_paths=(), red_checkpoint=None
+    )
 
     assert result.audit_summary is not None
     assert result.audit_summary.reviewers == ()

@@ -23,9 +23,10 @@ Green owns the worktree. Reviewers do not edit it.
 
 ## Model selection
 
-The live Architect delegates this work after all preparation receipts or N/A
-records arrive. It waits while Green owns all later worktree edits and review
-feedback. Use this skill's `metadata.model-tier`. Architect maps it to a model.
+The live Architect delegates this work after each applicable preparation
+receipt/N/A and the accepted mode-specific Red checkpoint. It waits while
+Green owns all later worktree mutations and review feedback. Use this skill's
+`metadata.model-tier`. The Architect router picks the mapping.
 
 Green stages the implementation candidate tree. It records the tree before it
 delegates the serial validation Judge. Specialist review needs the Judge's
