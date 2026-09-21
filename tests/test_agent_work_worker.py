@@ -101,8 +101,12 @@ def test_parse_worker_result_exposes_a_bounded_field_specific_protocol_reason() 
             _envelope(untrusted_extra_field="worker-secret-value"),
             "final_envelope: unsupported field",
         ),
+        (
+            _envelope(phase_timings=[{"elapsed_seconds": 1.0}]),
+            "final_envelope: unsupported field",
+        ),
     ],
-    ids=("known-nested-path", "unknown-extra-field"),
+    ids=("known-nested-path", "unknown-extra-field", "worker-timing-field"),
 )
 def test_parse_worker_result_reports_safe_final_envelope_paths_without_input(
     payload: dict[str, object], expected: str
@@ -541,6 +545,7 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     assert "shortfall" in normalized
     assert "missing, stale, internally inconsistent, or insufficient" in normalized
     assert "result_kind=needs_human" in normalized
+    assert "error_code=agent_capacity_unavailable" in normalized
     assert "available=unknown" in normalized
     assert "shortfall=unknown" in normalized
     assert "active frontend" in normalized

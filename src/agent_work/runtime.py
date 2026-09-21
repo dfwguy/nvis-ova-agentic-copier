@@ -108,6 +108,7 @@ from .serial import (
 )
 from .state_machine import transition_record
 from .status import project_status
+from .timing import is_bounded_timing_append
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
 
 
@@ -140,6 +141,7 @@ def _item(
         worker_exit=record.worker_exit,
         audit_evidence=record.audit_evidence,
         condition_history=record.condition_history,
+        phase_timings=record.phase_timings,
         current_condition=_current_condition(record),
         activation_started_at=record.activation_started_at,
         latest_meaningful_update_at=record.latest_meaningful_update_at,
@@ -2389,6 +2391,7 @@ def dispatch(
                         invoke=wired.invoke,
                         timeout_seconds=request.max_activation_seconds,
                         now=wired.clock(),
+                        clock=wired.clock,
                         issue_iid=target,
                         allow_pinned_conflict=True,
                         issue_lock=wired.issue_lock,
@@ -2931,6 +2934,7 @@ def dispatch(
         prior_revision = (
             immediate_owners[0].revision if len(immediate_owners) == 1 else None
         )
+        prior_record = immediate_owners[0] if len(immediate_owners) == 1 else None
         issue_iid = (
             immediate_owners[0].issue_iid if len(immediate_owners) == 1 else None
         )
@@ -2948,6 +2952,7 @@ def dispatch(
                 invoke=wired.invoke,
                 timeout_seconds=request.max_activation_seconds,
                 now=wired.clock(),
+                clock=wired.clock,
                 issue_iid=issue_iid,
                 issue_lock=wired.issue_lock,
                 remaining_seconds=remaining_activation_seconds,
@@ -2972,9 +2977,28 @@ def dispatch(
                 raise RuntimeError("one activation cannot advance multiple issues")
             records.append(record)
             prior_state = record.state
-            if record.revision != prior_revision:
+            timing_only_pipeline_poll = (
+                segment_start_state is RunnerState.OBSERVING
+                and record.state is RunnerState.OBSERVING
+                and prior_record is not None
+                and is_bounded_timing_append(
+                    prior_record.phase_timings, record.phase_timings
+                )
+                and prior_record.model_copy(
+                    update={
+                        "revision": record.revision,
+                        "phase_timings": record.phase_timings,
+                        "latest_meaningful_update_at": (
+                            record.latest_meaningful_update_at
+                        ),
+                    }
+                )
+                == record
+            )
+            if record.revision != prior_revision and not timing_only_pipeline_poll:
                 segments_run += 1
             prior_revision = record.revision
+            prior_record = record
             if segment_start_state is RunnerState.REPAIR:
                 repair_workflow_ran = True
             if record.state is RunnerState.REPAIR and repair_workflow_ran:
