@@ -39,6 +39,9 @@ fixed-version JUnit snapshots with absolute paths, SHA-256 digests, and counts.
 Delegate `$nonfunctional-review`. Return the combined handoff to Green before
 specialist review.
 
+For reconciliation, distinguish retained Red-to-source provenance from fresh
+three-way reconciliation evidence for the exact joined candidate.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Architect router maps it to a

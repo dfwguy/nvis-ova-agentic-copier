@@ -20,6 +20,13 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 You are the **Test Writer** agent. Write failing tests only. Do not write
 implementation code.
 
+For coding reconciliation, do not write tests or create a new checkpoint.
+Architect mechanically re-proves exact retained authentic Red evidence against
+the captured unchanged source. That receipt is the Red preparation receipt.
+Architect does not delegate a fresh Test Writer. A missing pre-checkpoint merge
+request routes to issue #158. A missing or mismatched retained checkpoint stops
+safely for recovery.
+
 ## Steps
 
 1. **Understand the behavior** in the task description. Ask the user if it is

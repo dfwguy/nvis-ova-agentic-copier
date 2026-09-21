@@ -134,11 +134,34 @@ Set `reconciling` only when the list is complete. Use `needs_human` when an
 intent is not safe to infer. Use it when the fix needs a new product or policy
 choice.
 
-## Resolve intent, not markers
+## Route the joined diff
 
-Keep the valid intent from both sides. Do not take all source content or all
-target content as a general fix. Do not keep conflict markers. Check behavior
-and policy at the sources that own them.
+After exact selection and the complete manifest, Architect freshly routes the
+complete source-plus-target candidate. A reconciliation of a coding merge
+request recovers already-completed post-policy source work; it is not a new TDD
+implementation cycle. It mechanically re-proves the exact retained authentic
+Red checkpoint bound to the captured source work. Never create Red evidence
+retrospectively.
+
+A source merge request from before the checkpoint policy routes to issue #158.
+A missing, changed, or mismatched post-policy checkpoint stops safely for
+recovery. A target or source ref change at any time invalidates every receipt
+from this run and restarts exact selection and preparation. An unchanged
+pre-existing checkpoint may be accepted only after mechanical re-proof against
+the unchanged captured source; it is never recreated.
+
+For coding reconciliation, Green resolves coding conflicts. It may preserve
+only already-approved source and target intent. A new behavior, product, or
+policy choice is scope expansion and `needs_human`. It needs both the retained
+source-work Red provenance and fresh three-way evidence for
+source-plus-target-to-candidate. Fresh validation and reviews cover the joined
+candidate. Test Judge and Finalizer must distinguish the historical
+Red-to-source proof from the fresh reconciliation proof.
+
+For a content-only reconciliation, Documentation Writer resolves the approved
+content conflict. It uses no Red. Documentation Finalizer approves the exact
+joined tree before finalization. In either lane, do not keep conflict markers
+or take all source or target content as a general fix.
 
 Keep all declared root and `template/` mirrors byte-identical. Keep ownership
 rules for generated files and config.
@@ -153,31 +176,31 @@ Use these terms by meaning:
 
 Do not replace terms by search alone. Check each use against its contract.
 
-After the fix, require a clean conflict index. Prove that the captured latest
-target SHA is an ancestor of the new tip. Keep the prior source work through
-the strategy allowed by repository rules. Do not hide lost source changes in
-a conflict fix.
+After resolution, require a clean conflict index and prove that the captured
+target SHA will be the second parent of the resulting ordered merge commit.
+The pre-commit candidate is the exact approved tree, not an ancestry object.
+Keep the prior source work through the allowed strategy. Do not hide lost source
+changes.
 
-## Route and check the full result
+For a coding reconciliation, TDD Finalizer alone creates the final local
+publication object by directly committing the exact Judge-approved staged tree
+from the still-pending merge state. That consumes `MERGE_HEAD` and creates
+exactly one ordered two-parent commit: captured old source first and exact
+target/`MERGE_HEAD` second. It atomically updates the local branch, creates no
+intermediate passing commit or ordinary sole-parent compaction, and leaves the
+Red ref unchanged. Finalizer postchecks the cleared merge state, clean index
+and worktree, exact parents, tree, and message, and unchanged Red ref.
+For content-only reconciliation, Documentation Finalizer approves the tree and
+Main directly commits that exact staged tree from the still-pending merge state,
+with the corresponding parent order and postchecks.
 
-Treat the new tree as a full new diff against the latest target. Send it to
-Architect for a fresh route. Do not reuse check or review receipts from before
-the conflict fix.
+Before finalization, Main supplies freshly fetched exact source and target ref
+proof. Finalizer checks that supplied proof and local identities only; it makes
+no remote or GitLab call. Main fetches and rechecks both refs again immediately
+before exact-lease publication.
 
-Run every check for the new diff. This includes all required:
-
-- tests;
-- reviews;
-- mirror and license checks;
-- finalizer checks; and
-- content or code gates.
-
-Test behavior from both sides, not just files that had markers. Fix all safe
-findings through their owning workflow. Run the checks again.
-
-Set `validated` only for the exact commit and tree that the finalizer accepts.
-That candidate must have no conflict markers. The captured latest target SHA
-must be its ancestor.
+Set `validated` only for that exact finalizer-approved tree and ordered-parent
+commit. The candidate must have no conflict markers.
 
 Use a Draft handoff only for a real human choice. The finalizer must name that
 choice. Repository policy must allow the Draft. Unsafe or partly checked work
@@ -192,15 +215,14 @@ Prove all of these facts:
 - Its source and target branches have not changed.
 - The remote source SHA still matches the SHA saved at `selected`.
 - The remote target SHA still matches the SHA used for checks.
-- That target SHA is still an ancestor of the candidate.
+- That target SHA is the second parent of the resulting ordered merge commit.
 
-If the target changed, start the work and all checks again on the new target.
-If the source changed, stop as `blocked`. Keep the proof. Start selection again
-from the new source. Never overwrite it.
+If either ref changed, invalidate every receipt and restart exact selection and
+preparation. Never overwrite a changed source.
 
-Update only the current source branch. Use an exact compare-and-set lease
-against the saved remote source SHA. Stop safely if the lease fails. Never try
-again with a force push that has no lease.
+Update only the current source branch with `--force-with-lease` naming the
+captured old source SHA exactly. Stop safely if that lease fails. Never use a
+broad force push.
 
 Set `published` only when the remote source tip equals the exact checked SHA.
 Do not make another merge request.
@@ -236,3 +258,18 @@ merge request ready for review.
 Only a human may approve and merge. Clean up only after a
 numeric-project readback proves that a human merged the request. Repository
 policy must also allow cleanup.
+
+## Policy evaluation scenarios
+
+- A coding merge request has conflicts and a valid retained Red checkpoint:
+  mechanically re-prove that checkpoint against the captured source, prepare
+  the three-way manifest, route the joined diff through Green and fresh review,
+  then publish only the ordered two-parent finalizer commit.
+- A content-only merge request has conflicts: route the manifest to
+  Documentation Writer and Documentation Finalizer; no Red is required; Main
+  creates the approved ordered two-parent commit.
+- The target changes while validation runs: invalidate the receipts, retain the
+  unchanged Red ref without recreating it, and restart selection and preparation
+  against the new exact target.
+- A merge request predates the checkpoint policy: do not manufacture evidence;
+  route its migration decision to issue #158.

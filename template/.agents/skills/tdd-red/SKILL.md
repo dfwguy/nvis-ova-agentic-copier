@@ -20,6 +20,10 @@ Use this portable skill for test writing. Read and follow
 [the role instructions](../../agents/tdd-red.md) before acting. That file
 defines the role. This skill works with Claude Code, Codex, and Pi.
 
+Reconciliation reuses and mechanically re-proves an exact retained authentic
+Red checkpoint as the Red preparation receipt; it never delegates a fresh Test
+Writer or writes Red evidence retrospectively.
+
 ## Model selection
 
 The live Architect runs this work with `$diataxis-writer` and conditional
