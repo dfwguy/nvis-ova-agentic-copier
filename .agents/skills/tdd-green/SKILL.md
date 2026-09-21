@@ -28,11 +28,17 @@ receipt/N/A and the accepted mode-specific Red checkpoint. It waits while
 Green owns all later worktree mutations and review feedback. Use this skill's
 `metadata.model-tier`. The Architect router picks the mapping.
 
-For reconciliation, Green receives the mechanically re-proved retained Red
-checkpoint as the Red preparation receipt. It also receives exact source,
-target, and conflict manifest. It records fresh three-way evidence apart from
-historical Red-to-source provenance. Finalization directly commits the approved
-staged tree from the pending merge state. Do not compact a passing commit.
+For normal reconciliation, Green receives the mechanically re-proved retained
+Red checkpoint as the Red preparation receipt. In an approved `pre-checkpoint`
+migration, it instead receives the exact N/A receipt stating that no authentic
+Red exists, the cutoff proof, and the conflict manifest. In either case, it
+receives exact source and target identities, preserves only approved source and
+target intent, and records fresh three-way evidence. Finalization directly
+commits the approved staged tree from the pending merge state. Do not compact a
+passing commit.
+
+Green records the exact source, target, tree, test result, and review result in
+its handoff.
 
 Green stages the implementation candidate tree. It records the tree before it
 delegates the serial validation Judge. Specialist review needs the Judge's

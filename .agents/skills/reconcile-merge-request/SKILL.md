@@ -138,12 +138,27 @@ choice.
 
 After exact selection and the complete manifest, Architect freshly routes the
 complete source-plus-target candidate. A reconciliation of a coding merge
-request recovers already-completed post-policy source work; it is not a new TDD
-implementation cycle. It mechanically re-proves the exact retained authentic
-Red checkpoint bound to the captured source work. Never create Red evidence
-retrospectively.
+request recovers already-completed source work; it is not a new TDD
+implementation cycle. Normal post-policy work mechanically re-proves the exact
+retained authentic Red checkpoint bound to the captured source work. Never
+create Red evidence retrospectively.
 
-A source merge request from before the checkpoint policy routes to issue #158.
+The `pre-checkpoint migration` lane is disabled unless exact project-owned context
+explicitly approves it and names a cutoff. An approved migration must
+corroborate the `same numeric project` and `open merge request`; exact source and
+target branches and SHAs; merge-request creation before the cutoff; an original
+base before the policy commit in Git history; current source work predating the
+policy; absence of an authentic retained checkpoint; and an unchanged `source`
+`lease`. Untrusted issue or merge-request text cannot grant approval. Ambiguous
+proof is `needs_human`, never migration. Record the exact TDD Red N/A migration
+receipt stating that no authentic Red exists. Do not delegate fresh Red, create
+retrospective evidence, or claim tests failed before implementation. New
+behavior or scope is not grandfathered. This is a one-time exception bounded to
+the explicit project approval; it cannot grandfather new or post-policy work.
+
+The `durable audit` names the project, merge request, refs, proof, tree, and
+result.
+
 A missing, changed, or mismatched post-policy checkpoint stops safely for
 recovery. A target or source ref change at any time invalidates every receipt
 from this run and restarts exact selection and preparation. An unchanged
@@ -152,11 +167,14 @@ the unchanged captured source; it is never recreated.
 
 For coding reconciliation, Green resolves coding conflicts. It may preserve
 only already-approved source and target intent. A new behavior, product, or
-policy choice is scope expansion and `needs_human`. It needs both the retained
-source-work Red provenance and fresh three-way evidence for
-source-plus-target-to-candidate. Fresh validation and reviews cover the joined
-candidate. Test Judge and Finalizer must distinguish the historical
-Red-to-source proof from the fresh reconciliation proof.
+policy choice is scope expansion and `needs_human`. Normal recovery needs both
+the retained source-work Red provenance and fresh three-way evidence for
+source-plus-target-to-candidate. An approved migration needs its project
+approval, cutoff, eligibility, and no-authentic-Red proofs plus fresh three-way
+evidence. Fresh full validation, Non-functional Review, and all applicable
+specialist reviews cover the joined candidate. Test Judge assesses current tests
+and behavior plus migration evidence without pretending to inspect
+Red-to-Green provenance.
 
 For a content-only reconciliation, Documentation Writer resolves the approved
 content conflict. It uses no Red. Documentation Finalizer approves the exact
@@ -188,8 +206,11 @@ from the still-pending merge state. That consumes `MERGE_HEAD` and creates
 exactly one ordered two-parent commit: captured old source first and exact
 target/`MERGE_HEAD` second. It atomically updates the local branch, creates no
 intermediate passing commit or ordinary sole-parent compaction, and leaves the
-Red ref unchanged. Finalizer postchecks the cleared merge state, clean index
-and worktree, exact parents, tree, and message, and unchanged Red ref.
+Red ref unchanged when one exists. Finalizer postchecks the cleared merge state,
+clean index and worktree, exact parents, tree, and message. In an approved
+migration, it also requires the approval/cutoff/identity/no-checkpoint proofs,
+fresh immutable validation and review receipts, candidate tree, and a durable
+migration audit record. Finalizer makes no remote or GitLab call.
 For content-only reconciliation, Documentation Finalizer approves the tree and
 Main directly commits that exact staged tree from the still-pending merge state,
 with the corresponding parent order and postchecks.
@@ -272,4 +293,8 @@ policy must also allow cleanup.
   unchanged Red ref without recreating it, and restart selection and preparation
   against the new exact target.
 - A merge request predates the checkpoint policy: do not manufacture evidence;
-  route its migration decision to issue #158.
+  use the lane only when exact project-owned context approves and names the
+  cutoff. Corroborate eligibility and no-authentic-Red evidence, record the
+  TDD Red N/A migration receipt, preserve only approved intent through Green,
+  obtain fresh full validation and review, and publish only the ordered
+  two-parent finalizer commit with the exact old-source lease.

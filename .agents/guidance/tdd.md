@@ -95,31 +95,51 @@ retains its single validated final commit path.
 
 ## Reconciliation of completed coding work
 
-Reconciliation recovers completed post-policy source work. It is not a new TDD
-cycle. Architect mechanically re-proves the exact retained authentic Red
-checkpoint against the unchanged captured source. Never create Red evidence
-retrospectively. A pre-checkpoint merge request routes to issue #158. A missing
-or mismatched post-policy checkpoint stops safely for recovery. The re-proved
-retained receipt is the Red preparation receipt. Architect does not delegate a
-fresh Test Writer. TDD Red does not manufacture evidence.
+Reconciliation recovers completed source work. It is not a new TDD cycle.
+Normal `post-policy` recovery mechanically re-proves the exact retained
+`authentic Red checkpoint` against the unchanged captured source. Never create Red evidence
+retrospectively. A missing or mismatched post-policy checkpoint stops safely
+for recovery. The re-proved retained receipt is the Red preparation receipt.
+Architect does not delegate a fresh Test Writer. TDD Red does not manufacture
+evidence.
+
+The `pre-checkpoint migration` lane is disabled unless exact `project-owned`
+context explicitly approves it and names a cutoff. For an approved coding merge
+request open before that cutoff, Architect must corroborate the `same numeric`
+`project` and `open merge request`; exact `source and target branches and SHAs`;
+`creation before the cutoff`; an `original base` before the `policy commit` in Git
+history; `source work predating that policy`; no `authentic retained checkpoint`;
+and an unchanged `source lease`. Ambiguous proof is `needs_human`, never
+migration. Record the exact `TDD Red N/A migration receipt` and explicitly state
+that no `authentic Red` exists. Do not delegate fresh Red or claim historical
+failure. This is a `one-time exception` bounded to the explicit project approval;
+it cannot grandfather new or post-policy work. New behavior or scope is not
+grandfathered.
 
 Architect prepares the pending target merge and conflict manifest. It freshly
 routes the joined diff. Green resolves coding conflicts by preserving approved
 source and target intent. Fresh validation and reviews cover the combined
 candidate. Judge and Finalizer keep historical Red-to-source proof apart from
-fresh three-way source-plus-target-to-candidate proof. Main supplies freshly
-fetched exact source and target ref proof before finalization. Finalizer checks
-it and local identities. It makes no remote or GitLab calls. It directly commits
-the exact Judge-approved staged tree from the still-pending merge state. This
-consumes `MERGE_HEAD`. Captured old source is first. Exact target/`MERGE_HEAD`
-is second. Do not create an intermediate passing commit or a sole-parent
-compaction. Postchecks require cleared merge state, a clean index and worktree,
-exact parents, tree, message, and unchanged Red ref. Any source or target ref
-drift invalidates receipts. Restart exact selection and preparation. Main
-fetches and rechecks both refs just before publishing with exact old-source
-`--force-with-lease` and same-merge-request readback. Humans alone approve and
-merge. Keep the readback. The factory timer is irrelevant to reconciliation.
-Keep each proof. Check each result. Keep the tree. Keep the refs. Check the state.
+fresh `three-way source-plus-target-to-candidate proof`. In an approved migration,
+Judge assesses current tests and behavior plus migration evidence; it does not
+pretend to inspect Red-to-Green provenance. Main supplies freshly fetched exact
+source and target ref proof before finalization. Finalizer checks it and local
+identities. It makes no remote or GitLab calls. It directly commits the exact
+Judge-approved staged tree from the still-pending merge state. This consumes
+`MERGE_HEAD`. Captured old source is first. Exact target/`MERGE_HEAD` is second.
+Do not create an intermediate passing commit or a sole-parent compaction.
+Postchecks require cleared merge state, a clean index and worktree, exact
+parents, tree, message, and unchanged Red ref when one exists. Any source or
+target ref drift invalidates receipts. Restart exact selection and preparation.
+Main fetches and rechecks both refs just before publishing with exact old-source
+`--force-with-lease`, authoritative same-merge-request readback, preserved
+metadata, pipeline review, and a durable migration receipt. Humans alone
+approve and merge. Keep the readback. The factory timer is irrelevant to
+reconciliation. Keep each proof. Check each result. Keep the tree. Keep the
+refs. Check the state.
+
+The `durable audit` names the project, branches, SHAs, cutoff, tree, and result.
+It binds each fact to that tree.
 
 Policy findings return through Architect to the Agent Policy Writer. Green
 consolidates the finding but does not repair policy. Each correction gets a

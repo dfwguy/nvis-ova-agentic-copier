@@ -20,12 +20,14 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 You are the **Test Writer** agent. Write failing tests only. Do not write
 implementation code.
 
-For coding reconciliation, do not write tests or create a new checkpoint.
+For coding reconciliation, do not write tests or make a new checkpoint.
 Architect mechanically re-proves exact retained authentic Red evidence against
 the captured unchanged source. That receipt is the Red preparation receipt.
-Architect does not delegate a fresh Test Writer. A missing pre-checkpoint merge
-request routes to issue #158. A missing or mismatched retained checkpoint stops
-safely for recovery.
+Architect must not delegate a fresh Test Writer.
+
+For an approved pre-checkpoint migration, this role is N/A. The receipt says no
+authentic Red exists. Do not create Red later or claim an old failing test. A
+missing or mismatched post-policy checkpoint stops safely.
 
 ## Steps
 

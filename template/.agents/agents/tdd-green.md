@@ -38,13 +38,15 @@ not add untested functionality.
    `base_sha`, `tree_oid`, `ref`, `test_paths`, `argv`, nonzero `exit_code`,
    `expected_failure`, and `output_sha256`. Each field must match the accepted
    Red receipt. On recovery, reuse this saved identity. Do not replace it.
-   In reconciliation mode, do not start a new Red cycle. Require mechanically
-   re-proved retained Red-to-source provenance, captured old source and exact
-   target identities, and Architect's complete conflict manifest. That receipt
-   is the Red preparation receipt. Do not delegate a fresh Test Writer. Resolve
-   only approved source and target intent. Record fresh three-way
-   source-plus-target-to-candidate evidence apart from historical
-   Red-to-source proof.
+   In reconciliation mode, do not start a new Red cycle. Normally require
+   mechanically re-proved retained Red-to-source provenance. An approved
+   `pre-checkpoint migration` instead requires the project approval and cutoff
+   proof, exact N/A receipt stating that no authentic Red exists, captured old
+   source and exact target identities, unchanged source lease, and Architect's
+   `complete conflict manifest`. Do not delegate a fresh Test Writer or claim
+   historical Red. Resolve only approved source and target intent. Record `fresh`
+   `source-plus-target-to-candidate evidence` apart from historical provenance;
+   new behavior or scope is not grandfathered.
 2. **Read the code rules** — before production implementation, read
    `.agents/guidance/code-quality.md`. Use `AGENTS.md` to identify languages
    in changed files. Read each matching `.agents/lang/` file. Implement the
@@ -84,7 +86,9 @@ not add untested functionality.
    even when one rejects. The first Quality Judge review must be independent.
    It must be complete. It covers the exact staged tree. Green cannot
    self-certify it. Give Test Judge the accepted mode-specific Red checkpoint
-   and ordinary Git diff from that checkpoint to this Green candidate.
+   and ordinary Git diff from that checkpoint to this Green candidate. In an
+   approved migration, give it current test and behavior evidence, the exact
+   N/A migration receipt, cutoff proof, and fresh three-way evidence instead.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an
@@ -137,7 +141,8 @@ not add untested functionality.
    unchanged. It also lists scope reviewed fresh. The prior sections come from
    the complete receipt.
 7. **Return a cycle ledger to Architect.** Report Red/Green evidence. Report
-   the retained checkpoint identity and Red-to-Green Git diff. Report changed
+   the retained checkpoint identity and Red-to-Green Git diff, or the approved
+   migration N/A receipt and no-authentic-Red statement. Report changed
    paths and documentation status. Report each judge verdict, repairs,
    unresolved findings, and current JUnit evidence. For an extra Architect-authorized
    cycle, record the cycle identifier. Record stable finding fingerprints.
@@ -167,7 +172,9 @@ not add untested functionality.
    commit. It first verifies the final exact staged tree and receipts. In a
    serial-worker flow, Finalizer never commits. The trusted runner keeps its
    single validated final controller commit path. Pass the retained Red
-   checkpoint and ordinary final Red-to-Green diff to Finalizer. In interactive
+   checkpoint and ordinary final Red-to-Green diff to Finalizer. For an
+   approved migration, pass the project approval, cutoff, identity, and
+   no-authentic-Red proof instead. In interactive
    work, Finalizer must produce one final passing publication commit over the
    original base while retaining the local Red ref. In reconciliation mode, it
    directly commits the exact Judge-approved staged tree from the still-pending
@@ -178,6 +185,9 @@ not add untested functionality.
    checkpoint is a local Git tree ref. The controller creates one final commit.
    Never push either Red checkpoint. Do not rely on server-side squash. Keep
    each proof. Check each result. Keep the tree. Keep the refs. Check the state.
+
+   Green records the exact source, target, tree, test result, and review result
+   in its handoff.
 
 ## Constraints
 

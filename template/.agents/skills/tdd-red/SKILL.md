@@ -24,6 +24,10 @@ Reconciliation reuses and mechanically re-proves an exact retained authentic
 Red checkpoint as the Red preparation receipt; it never delegates a fresh Test
 Writer or writes Red evidence retrospectively.
 
+For an approved pre-checkpoint migration, this skill is N/A. Its receipt states
+that no authentic Red exists. It does not create a retrospective checkpoint or
+claim a historical failing test.
+
 ## Model selection
 
 The live Architect runs this work with `$diataxis-writer` and conditional

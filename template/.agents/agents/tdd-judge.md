@@ -46,11 +46,17 @@ You are the read-only Judge for the staged candidate.
    for its full receipt. Return the joined Judge and non-functional handoff to
    Green before specialist review.
 
-For reconciliation, name two proofs in the receipt. Name mechanically re-proved
-historical Red-to-source provenance. Name fresh
-source-plus-target-to-candidate evidence. Keep the names separate. Fresh
-validation covers the joined candidate. It does not cover just marker paths.
-Reject identity drift or missing proof to Architect. Keep each proof. Check it.
+For normal coding reconciliation, name mechanically re-proved retained
+Red-to-source provenance and fresh source-plus-target-to-candidate evidence.
+Keep the proofs separate. Fresh validation must cover the joined candidate.
+
+For an approved pre-checkpoint migration, name the exact N/A receipt stating
+that no authentic Red exists, plus approval, cutoff, eligibility, and fresh
+three-way evidence. Judge current tests and behavior. Do not claim
+Red-to-Green provenance. Send identity drift or a missing receipt to Architect.
+
+The receipt names the exact tree, test run, and each review. It binds each
+proof to that tree. It names the fresh checks on that tree.
 
 ## Constraints
 

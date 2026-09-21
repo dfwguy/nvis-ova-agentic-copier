@@ -39,8 +39,10 @@ fixed-version JUnit snapshots with absolute paths, SHA-256 digests, and counts.
 Delegate `$nonfunctional-review`. Return the combined handoff to Green before
 specialist review.
 
-For reconciliation, distinguish retained Red-to-source provenance from fresh
-three-way reconciliation evidence for the exact joined candidate.
+For normal reconciliation, distinguish retained Red-to-source provenance from
+fresh three-way reconciliation evidence for the exact joined candidate. For an
+approved pre-checkpoint migration, assess current tests and behavior plus the
+exact migration evidence; do not claim Red-to-Green provenance.
 
 ## Model selection
 

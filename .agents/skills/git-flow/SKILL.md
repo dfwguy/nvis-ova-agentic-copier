@@ -418,6 +418,21 @@ Keep the same branch. Keep the same project. Keep the read-back.
    **single new commit on `main` with a different hash** when it merges. The
    reported hash is the branch tip, not the future merged SHA.
 
+### Reconciliation publication
+
+For reconciliation, Main follows `$reconcile-merge-request` instead of the
+ordinary push shown above. It freshly fetches and proves the exact source and
+target refs, pushes only the checked ordered two-parent finalizer commit with an
+exact old-source `--force-with-lease`, then reads back the same merge request
+by numeric project ID. It preserves title, description, labels, reviewers, and
+closing links unless an accepted workflow names an exact metadata change. For
+an approved `pre-checkpoint migration`, it also retains the `durable migration`
+receipt. Any ref movement invalidates receipts and restarts selection and
+preparation. Humans alone approve and merge.
+
+Main stores the exact ref proof and same-merge-request readback in the `durable`
+audit.
+
 ## Step 4: Hand off without waiting for merge
 
 After publication, ordinary interactive work delegates and completes the

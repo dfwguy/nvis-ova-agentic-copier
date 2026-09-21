@@ -44,17 +44,26 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 4. Last, require `git write-tree` to equal the Judge-approved OID. Require no
    unstaged or untracked maintained files.
 5. In coding reconciliation, require the captured old source SHA, exact target
-   SHA, mechanically re-proved retained Red-to-source provenance, and fresh
-   three-way reconciliation evidence. Require Main's freshly fetched exact
-   source and target ref proof; check that supplied proof and local identities
-   only. Do not fetch or call GitLab. Directly commit the exact Judge-approved
-   staged tree from the still-pending merge state, which consumes `MERGE_HEAD`.
-   This creates exactly one ordered two-parent commit with old source first and exact
+   SHA, and `fresh three-way reconciliation evidence`. Normal `post-policy` work
+   also requires `mechanically re-proved retained Red-to-source provenance`. An
+   approved `pre-checkpoint migration` instead requires exact project approval and
+   cutoff proof; exact project, merge request, source branch/source SHA,
+   original base, target branch/target SHA; proof that no authentic checkpoint
+   exists; the exact N/A receipt stating that no authentic Red exists; the
+   Judge-approved candidate tree; and `fresh immutable validation and review`
+   `receipts`. Require Main's freshly fetched exact source and target ref proof;
+   check that supplied proof and local identities only. Do not fetch or call
+   GitLab. Directly commit the exact Judge-approved staged tree from the
+   still-pending merge state, which consumes `MERGE_HEAD`. This creates exactly
+   one ordered `two-parent commit` with old source first and exact
    target/`MERGE_HEAD` second. Do no passing-head commit or ordinary compaction.
-   Prove cleared merge state, clean index and worktree, exact parent order,
-   tree, message, unchanged Red ref, and unchanged supplied local identities.
-   Any drift invalidates every receipt and returns to exact selection and
-   preparation.
+   Write the durable migration audit record when applicable. Prove cleared merge
+   state, clean index and worktree, exact parent order, tree, message, unchanged
+   Red ref when one exists, and unchanged supplied local identities. Any drift
+   invalidates every receipt and returns to exact selection and preparation.
+
+   The `durable audit` names each proof, tree, parent, and final result. Finalizer
+   checks that record before the commit.
 6. Only in normal interactive work outside reconciliation, make the checked passing-head commit after
    approval or a safe draft verdict. Then run one bounded local compaction under
    Main's branch authority. Main supplies the exact branch ref, original base,

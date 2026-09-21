@@ -90,9 +90,13 @@ role is N/A only when facts show it does not apply.
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
 
-In coding reconciliation, the mechanically re-proved retained Red receipt is
-the Red preparation receipt. Do not delegate a fresh Test Writer. TDD Red must
-not manufacture new evidence for recovery.
+In normal coding reconciliation, the mechanically re-proved retained Red
+receipt is the Red preparation receipt. Do not delegate a fresh Test Writer.
+TDD Red must not manufacture new evidence for recovery. The pre-checkpoint
+migration lane is disabled unless exact project-owned context explicitly
+approves it and names a cutoff. For an approved migration, Architect records
+the exact TDD Red N/A receipt stating that no authentic Red exists; it does not
+delegate fresh Red or claim historical failure.
 
 Red needs the approved design. Red also needs the acceptance criteria. Diátaxis Writer needs
 approved documentation boundaries. Conditional Policy Writer needs approved
@@ -248,18 +252,32 @@ ref, and clean state. Any failure stops publication.
 
 First select the exact project, merge request, source, and target. Then prepare
 the pending target merge and conflict manifest. Architect freshly routes the
-complete joined diff. Coding reconciliation recovers complete post-policy
-source work. It does not start a new Red cycle. It mechanically re-proves the
-exact retained authentic Red checkpoint against the unchanged captured source.
-A missing pre-checkpoint merge request routes to issue #158. A missing or
-mismatched post-policy checkpoint stops safely for recovery.
+complete joined diff. Coding reconciliation recovers complete source work. It
+does not start a new Red cycle. Normal `post-policy` work mechanically re-proves
+the exact retained `authentic Red checkpoint` against the `unchanged captured`
+`source`. An approved `pre-checkpoint migration` requires `corroborated proof` of
+the `same numeric project` and `open merge request`, exact source and target
+branches and SHAs, `creation before the project-owned cutoff`, `original base`
+before the `policy commit in Git history`, `source work predating the policy`, no
+`authentic retained checkpoint`, and an unchanged `source lease`. `Ambiguous proof` is
+`needs_human`, never migration. A missing or mismatched `post-policy checkpoint`
+stops safely for recovery.
+
+Architect records the project, merge request, refs, cutoff, and proof in the
+`durable audit` before work starts.
+Architect checks each fact in that audit.
+It stops on a gap.
+It does not guess.
 
 Green owns coding conflicts. Documentation Writer owns content-only conflicts.
 Each preserves only approved source and target intent. New behavior, product
 intent, or policy is scope expansion. It needs human direction. Coding
 reconciliation needs historical Red-to-source provenance and fresh three-way
-source-plus-target-to-candidate evidence. Fresh Judge and review receipts cover
-the joined candidate and name both proofs.
+source-plus-target-to-candidate evidence. Approved migration instead needs its
+exact N/A no-authentic-Red receipt, approval/cutoff/eligibility proof, and fresh
+three-way evidence. New behavior, product intent, or policy is not
+grandfathered. Fresh Judge and review receipts cover the joined candidate and
+name the applicable proof.
 
 In coding reconciliation, Finalizer directly commits the exact Judge-approved
 staged tree from the still-pending merge state. This creates one ordered
@@ -267,7 +285,7 @@ two-parent commit. The captured old source is first. The captured
 target/`MERGE_HEAD` is second. The commit consumes `MERGE_HEAD` and atomically
 updates the local branch. Do not create an intermediate passing commit or a
 sole-parent compaction. Finalizer checks cleared merge state, a clean index and
-worktree, exact parents, tree, message, and unchanged Red ref. Main supplies
+worktree, exact parents, tree, message, and unchanged Red ref when one exists. Main supplies
 freshly fetched exact source and target ref proof before finalization. Finalizer
 checks that proof and local identities. It makes no remote or GitLab calls. In
 content-only reconciliation, Documentation Finalizer approves the tree. Main

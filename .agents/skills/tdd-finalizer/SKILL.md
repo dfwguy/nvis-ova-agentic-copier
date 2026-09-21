@@ -20,8 +20,12 @@ Use this portable skill for finalization. Read and follow [the role
 instructions](../../agents/tdd-finalizer.md) before acting. That file defines
 the role. This skill works with Claude Code, Codex, and Pi.
 Use the Judge handoff. Check each item. Keep the staged tree the same. Give a
-clear receipt. Require the accepted Red checkpoint. Require Test Judge's
-approval of the final Red-to-Green Git diff.
+clear receipt. Require the accepted Red checkpoint and Test Judge's approval of
+the final Red-to-Green Git diff, except for an approved `pre-checkpoint migration`.
+That exception requires exact project approval and cutoff proof, exact project,
+merge request, source/source SHA, original base, and target SHA, proof that no
+authentic checkpoint exists, the N/A migration receipt, candidate tree, and
+fresh immutable validation and review receipts. It never claims historical Red.
 
 During interactive finalization, Finalizer may commit with `--no-verify` only after all
 proof matches the Judge handoff. Match the staged tree. Match the JUnit files,
@@ -38,7 +42,10 @@ first and exact target/`MERGE_HEAD` is second. Main supplies freshly fetched
 ref proof; Finalizer checks it locally without remote or GitLab calls. It
 postchecks cleared merge state, clean index and worktree, exact parents, tree,
 message, and unchanged Red ref, without an intermediate passing commit or
-sole-parent compaction.
+sole-parent compaction. In an approved migration, it also writes the required
+`durable migration audit record`. It must not call remote or GitLab.
+
+The final receipt names each proof, tree, parent, and result.
 
 ## Model selection
 
