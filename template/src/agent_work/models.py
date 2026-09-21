@@ -16,7 +16,7 @@ import html
 import json
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
@@ -685,6 +685,32 @@ class ConditionEvidence(BoundaryModel):
     detail: str = Field(min_length=1, max_length=2_048)
 
 
+class PhaseTiming(BoundaryModel):
+    """One bounded controller-authored workflow timing observation."""
+
+    phase_or_role: str = Field(min_length=1, max_length=128)
+    attempt: int = Field(gt=0)
+    started_at: datetime
+    finished_at: datetime
+    elapsed_seconds: float = Field(ge=0, allow_inf_nan=False)
+    outcome: str = Field(min_length=1, max_length=4_096)
+    classification: Literal["execution", "wait"]
+
+    @model_validator(mode="after")
+    def validate_chronology(self) -> PhaseTiming:
+        """Require exact UTC chronology and controller-computed elapsed time."""
+        if self.started_at.utcoffset() != timedelta(
+            0
+        ) or self.finished_at.utcoffset() != timedelta(0):
+            raise ValueError("phase timing timestamps must be timezone-aware UTC")
+        elapsed = (self.finished_at - self.started_at).total_seconds()
+        if elapsed < 0:
+            raise ValueError("phase timing finish must not precede its start")
+        if self.elapsed_seconds != elapsed:
+            raise ValueError("phase timing elapsed_seconds must match chronology")
+        return self
+
+
 class LedgerRecord(BoundaryModel):
     """Durable state for one issue."""
 
@@ -725,6 +751,7 @@ class LedgerRecord(BoundaryModel):
     completed_at: datetime | None = None
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = "unknown"
     condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
+    phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
     summary: str = ""
     next_action: str = ""
 
@@ -911,6 +938,7 @@ class CommandItemReport(BoundaryModel):
     worker_exit: WorkerExitEvidence | None = None
     current_condition: ConditionEvidence | None = None
     condition_history: tuple[ConditionEvidence, ...] = ()
+    phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = None
     activation_started_at: datetime | None = None
     latest_meaningful_update_at: datetime | None = None

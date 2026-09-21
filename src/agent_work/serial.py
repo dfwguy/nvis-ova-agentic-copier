@@ -65,6 +65,7 @@ from .state_machine import (
     plan_retry,
     transition_record,
 )
+from .timing import append_phase_timing
 from .worker import (
     WorkerProtocolError,
     build_worker_prompt,
@@ -3461,6 +3462,7 @@ def run_segment(
     invoke: InvokerPort,
     timeout_seconds: int,
     now: datetime,
+    clock: Callable[[], datetime] | None = None,
     issue_iid: int | None = None,
     allow_pinned_conflict: bool = False,
     remaining_seconds: Callable[[], float] | None = None,
@@ -3707,8 +3709,10 @@ def run_segment(
             repository=repository,
             now=now,
         )
+    boundary_clock = clock or (lambda: now)
     if record.state in {RunnerState.EXECUTING, RunnerState.REPAIR}:
-        return _execute(
+        started_at = boundary_clock()
+        outcome = _execute(
             record,
             issue,
             ledger=ledger,
@@ -3720,20 +3724,105 @@ def run_segment(
             remaining_seconds=remaining_seconds,
             issue_lock=issue_lock,
         )
+        finished_at = boundary_clock()
+        if outcome is None:
+            return None
+        capacity_wait = (
+            record.phase is WorkflowPhase.WORKFLOW
+            and outcome.error_code is ErrorCode.AGENT_CAPACITY_UNAVAILABLE
+        )
+        phase_or_role = "capacity-wait" if capacity_wait else record.phase.value
+        if capacity_wait:
+            timing_outcome = ErrorCode.AGENT_CAPACITY_UNAVAILABLE.value
+        elif outcome.worker_exit is not None:
+            timing_outcome = ErrorCode.WORKER_EXIT.value
+        elif outcome.error_code is not None:
+            timing_outcome = outcome.error_code.value
+        else:
+            timing_outcome = "complete"
+        return ledger.persist(
+            outcome.model_copy(
+                update={
+                    "phase_timings": append_phase_timing(
+                        outcome.phase_timings,
+                        phase_or_role=phase_or_role,
+                        attempt=record.retry_count + 1,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=timing_outcome,
+                        classification="wait" if capacity_wait else "execution",
+                    )
+                }
+            )
+        )
     if record.state is RunnerState.PUBLISHING:
-        return _publish(
+        started_at = boundary_clock()
+        outcome = _publish(
             record,
             ledger=ledger,
             gitlab=gitlab,
             repository=repository,
             now=now,
         )
+        finished_at = boundary_clock()
+        timing_outcome = (
+            "published"
+            if outcome.state is RunnerState.OBSERVING
+            else (
+                outcome.error_code.value
+                if outcome.error_code is not None
+                else outcome.state.value
+            )
+        )
+        return ledger.persist(
+            outcome.model_copy(
+                update={
+                    "phase_timings": append_phase_timing(
+                        outcome.phase_timings,
+                        phase_or_role=record.phase.value,
+                        attempt=record.retry_count + 1,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=timing_outcome,
+                        classification="execution",
+                    )
+                }
+            )
+        )
     if record.state is RunnerState.OBSERVING:
-        return _observe(
+        started_at = boundary_clock()
+        outcome = _observe(
             record,
             ledger=ledger,
             gitlab=gitlab,
             repository=repository,
             now=now,
+        )
+        finished_at = boundary_clock()
+        if (
+            outcome.state is RunnerState.EXECUTING
+            and outcome.phase is WorkflowPhase.POST_PUBLICATION
+        ):
+            timing_outcome = "success"
+        elif outcome.error_code is not None:
+            timing_outcome = outcome.error_code.value
+        elif outcome.state is RunnerState.OBSERVING:
+            timing_outcome = "pending"
+        else:
+            timing_outcome = outcome.state.value
+        return ledger.persist(
+            outcome.model_copy(
+                update={
+                    "phase_timings": append_phase_timing(
+                        outcome.phase_timings,
+                        phase_or_role="pipeline-wait",
+                        attempt=record.retry_count + 1,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=timing_outcome,
+                        classification="wait",
+                    )
+                }
+            )
         )
     raise SegmentError("record is not runnable")

@@ -61,6 +61,7 @@ from agent_work.models import (
     MergeRequestFeedbackCursor,
     OperationalPlan,
     PendingMergeRequestFeedback,
+    PhaseTiming,
     PipelineEvidence,
     TransitionIntentRecord,
     WorkerExitEvidence,
@@ -3243,6 +3244,137 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
     assert len(outcome.receipts) == 1
 
 
+@pytest.mark.parametrize(
+    ("invocation", "expected_state", "expected_outcome"),
+    [
+        ("success", RunnerState.EXECUTING, "complete"),
+        ("failure", RunnerState.RETRY_WAIT, "worker_exit"),
+    ],
+)
+def test_controller_clock_records_deterministic_worker_phase_timing(
+    tmp_path: Path,
+    invocation: str,
+    expected_state: RunnerState,
+    expected_outcome: str,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    payload = {
+        "protocol_version": 2,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "coding-green",
+        "workflow_lane": "coding",
+        "result_kind": "ready_to_publish",
+        "phase_status": "complete",
+        "completed_phase": "coding-green",
+        "receipts": ["$tdd-green: green"],
+        "change_summary": "Green complete.",
+        "next_action": "Continue validation.",
+    }
+    invoker = (
+        FakeInvoker(f"<agent-work-result>{json.dumps(payload)}</agent-work-result>")
+        if invocation == "success"
+        else FakeInvoker(returncode=23)
+    )
+    finished = NOW + timedelta(seconds=3.25)
+    moments = iter((NOW, finished))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        clock=lambda: next(moments),
+    )
+
+    assert outcome is not None and outcome.state is expected_state
+    assert outcome.phase_timings[-1].model_dump() == {
+        "phase_or_role": "coding-green",
+        "attempt": 1,
+        "started_at": NOW,
+        "finished_at": finished,
+        "elapsed_seconds": 3.25,
+        "outcome": expected_outcome,
+        "classification": "execution",
+    }
+
+
+def test_controller_clock_records_successful_due_retry_as_attempt_two(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.RETRY_WAIT,
+            phase=WorkflowPhase.CODING_GREEN,
+        ).model_copy(
+            update={
+                "retry_count": 1,
+                "retry_at": NOW,
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.CODING_GREEN,
+                "error_code": ErrorCode.WORKER_EXIT,
+            }
+        )
+    )
+    finished = NOW + timedelta(seconds=6)
+    moments = iter((NOW, finished))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=BatchingInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        clock=lambda: next(moments),
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase_timings[-1].attempt == 2
+    assert outcome.phase_timings[-1].phase_or_role == "coding-green"
+    assert outcome.phase_timings[-1].outcome == "complete"
+    assert outcome.phase_timings[-1].elapsed_seconds == 6.0
+
+
+def test_missing_optional_clock_uses_supplied_now_without_hidden_wall_time(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=BatchingInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    assert outcome.phase_timings[-1].started_at == NOW
+    assert outcome.phase_timings[-1].finished_at == NOW
+    assert outcome.phase_timings[-1].elapsed_seconds == 0.0
+
+
 def test_split_required_workflow_creates_children_and_completes_parent_in_one_segment(
     tmp_path: Path,
 ) -> None:
@@ -3363,7 +3495,7 @@ def test_split_retry_reruns_semantic_intake_and_reuses_exact_children(
         "change_summary": "Split the parent into two mergeable slices.",
         "next_action": "Create the durable child issues.",
     }
-    retry_payload = {**payload, "ledger_revision": record.revision + 2}
+    retry_payload = {**payload, "ledger_revision": record.revision + 3}
     invoker = FakeInvoker(
         [
             f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
@@ -4373,7 +4505,7 @@ def test_nonfresh_split_envelope_blocks_repeat_and_exposes_safe_recovery(
         repository=repository,  # type: ignore[arg-type]
         invoke=FakeInvoker(
             "<agent-work-result>"
-            f"{json.dumps({**payload, 'ledger_revision': record.revision + 2})}"
+            f"{json.dumps({**payload, 'ledger_revision': record.revision + 3})}"
             "</agent-work-result>"
         ),  # type: ignore[arg-type]
         timeout_seconds=10,
@@ -5425,6 +5557,133 @@ def test_terminal_exact_pipeline_starts_post_publication_worker(
     assert post.phase is (
         WorkflowPhase.WORKFLOW if status == "failed" else WorkflowPhase.POST_PUBLICATION
     )
+
+
+def test_controller_clock_records_publication_and_pipeline_observation_boundaries(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Record timings", description="Validated timing change."
+                )
+            }
+        )
+    )
+    publication_finished = NOW + timedelta(seconds=2)
+    publication_moments = iter((NOW, publication_finished))
+    gitlab = FakeGitLab()
+
+    published = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        clock=lambda: next(publication_moments),
+    )
+
+    assert published is not None and published.state is RunnerState.OBSERVING
+    assert published.phase_timings[-1].model_dump() == {
+        "phase_or_role": "ready-to-publish",
+        "attempt": 1,
+        "started_at": NOW,
+        "finished_at": publication_finished,
+        "elapsed_seconds": 2.0,
+        "outcome": "published",
+        "classification": "execution",
+    }
+
+    pipeline_finished = publication_finished + timedelta(seconds=5)
+    pipeline_moments = iter((publication_finished, pipeline_finished))
+    gitlab.pipeline = PipelineEvidence(
+        id=4,
+        status="success",
+        sha=published.publication_sha or "a" * 40,
+        web_url="https://pipeline/4",
+    )
+    observed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=publication_finished,
+        clock=lambda: next(pipeline_moments),
+    )
+
+    assert observed is not None and observed.phase is WorkflowPhase.POST_PUBLICATION
+    assert observed.phase_timings[-1].model_dump() == {
+        "phase_or_role": "pipeline-wait",
+        "attempt": 1,
+        "started_at": publication_finished,
+        "finished_at": pipeline_finished,
+        "elapsed_seconds": 5.0,
+        "outcome": "success",
+        "classification": "wait",
+    }
+
+
+def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_timing(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    payload = {
+        "protocol_version": 2,
+        "project_id": 310967,
+        "issue_iid": 12,
+        "ledger_revision": record.revision,
+        "expected_state": "executing",
+        "expected_phase": "workflow",
+        "workflow_lane": "coding",
+        "result_kind": "needs_human",
+        "phase_status": "rejected",
+        "completed_phase": "workflow",
+        "rejection_route": "workflow",
+        "receipts": [],
+        "change_summary": "Capacity admission did not pass.",
+        "error_code": "agent_capacity_unavailable",
+        "redacted_summary": "Fresh live-agent capacity was unavailable.",
+        "next_action": "Start a new workflow session with sufficient live slots.",
+    }
+    finished = NOW + timedelta(seconds=7.5)
+    moments = iter((NOW, finished))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),
+        timeout_seconds=10,
+        now=NOW,
+        clock=lambda: next(moments),
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert str(outcome.error_code) == "agent_capacity_unavailable"
+    assert outcome.phase_timings[-1].model_dump() == {
+        "phase_or_role": "capacity-wait",
+        "attempt": 1,
+        "started_at": NOW,
+        "finished_at": finished,
+        "elapsed_seconds": 7.5,
+        "outcome": "agent_capacity_unavailable",
+        "classification": "wait",
+    }
 
 
 @pytest.mark.parametrize(
@@ -6735,7 +6994,13 @@ def test_nonterminal_pipeline_status_waits_without_repair(
         now=NOW,
     )
 
-    assert outcome == record
+    assert outcome is not None
+    assert (
+        outcome.model_copy(update={"revision": record.revision, "phase_timings": ()})
+        == record
+    )
+    assert outcome.phase_timings[-1].phase_or_role == "pipeline-wait"
+    assert outcome.phase_timings[-1].outcome == "pending"
 
 
 def test_failed_exact_pipeline_enters_autonomous_repair_with_bounded_evidence(
@@ -12220,6 +12485,46 @@ def test_apply_never_reconciles_another_issue_after_pinning_active_work(
     assert all(iid == 12 for iid, _label in gitlab.transitions)
 
 
+def test_apply_dispatch_wires_controller_clock_into_segment_timing(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
+    )
+    tick = 0
+
+    def stepping_clock() -> datetime:
+        nonlocal tick
+        current = NOW + timedelta(seconds=tick)
+        tick += 1
+        return current
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=replace(
+            _dependencies(
+                config,
+                ledger,
+                FakeGitLab(),
+                FakeRepository(config),
+            ),
+            clock=stepping_clock,
+            invoke=BatchingInvoker(),
+        ),
+    )
+
+    timing = report.items[-1].phase_timings[-1]
+    assert timing.elapsed_seconds == 1.0
+    assert timing.finished_at - timing.started_at == timedelta(seconds=1)
+
+
 def test_apply_continues_after_pending_pipeline_observation(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -12333,13 +12638,35 @@ def test_apply_retained_pipeline_polls_do_not_consume_segment_budget(
 ) -> None:
     """Unchanged pipeline observations leave the work-segment budget intact."""
     config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger_tick = 0
+
+    def advancing_ledger_clock() -> datetime:
+        nonlocal ledger_tick
+        current = NOW + timedelta(seconds=ledger_tick)
+        ledger_tick += 1
+        return current
+
+    ledger = JsonLedger(config.state_root, clock=advancing_ledger_clock)
+    retained_timings = tuple(
+        PhaseTiming(
+            phase_or_role=f"prior-{index}",
+            attempt=1,
+            started_at=NOW,
+            finished_at=NOW,
+            elapsed_seconds=0.0,
+            outcome="pending",
+            classification="wait",
+        )
+        for index in range(64)
+    )
     ledger.persist(
         _record(
             tmp_path,
             state=RunnerState.OBSERVING,
             phase=WorkflowPhase.PIPELINE_WAIT,
-        ).model_copy(update={"merge_request_iid": 88})
+        ).model_copy(
+            update={"merge_request_iid": 88, "phase_timings": retained_timings}
+        )
     )
     gitlab = SequencedPipelineGitLab(
         merge_request_statuses=(
@@ -12368,6 +12695,7 @@ def test_apply_retained_pipeline_polls_do_not_consume_segment_budget(
     assert report.stop_reason == "awaiting_human"
     assert report.segments_run == 2
     assert clock.delays == [5, 10, 20, 30, 30]
+    assert len(report.items[-1].phase_timings) == 64
 
 
 def test_apply_pipeline_polling_uses_capped_exponential_backoff(tmp_path: Path) -> None:

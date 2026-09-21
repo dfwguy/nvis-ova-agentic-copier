@@ -64,6 +64,7 @@ from .template_comparison import (
 from .template_comparison import (
     compare_template_revisions as default_compare_template_revisions,
 )
+from .timing import summarize_phase_timings
 from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
 from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
 from .upstream_gitlab import (
@@ -724,6 +725,10 @@ def _render(report: CommandReport, *, as_json: bool) -> str:
                     f"returncode={item.worker_exit.returncode}",
                     f"worker_diagnostic={safe(item.worker_exit.diagnostic)}",
                 )
+            )
+        if item.phase_timings:
+            item_details.append(
+                f"timing={safe(summarize_phase_timings(item.phase_timings))}"
             )
         rendered.append(" ".join(item_details))
     return (

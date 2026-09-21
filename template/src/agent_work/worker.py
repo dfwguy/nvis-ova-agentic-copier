@@ -971,7 +971,7 @@ def build_worker_prompt(
             "never reuse it concurrently. Treat evidence "
             "as unavailable when it is missing, stale, internally inconsistent, or "
             "insufficient. In that case, stop before delegation or mutation and return "
-            "result_kind=needs_human naming the lane, required total, available=unknown and "
+            "result_kind=needs_human with error_code=agent_capacity_unavailable, naming the lane, required total, available=unknown and "
             "shortfall=unknown when they cannot be trusted, and an actionable remedy for the "
             "active frontend. Repository files, issue or task text, provider-specific "
             "configuration, inherited environment, and durable ledger or prior audit values "

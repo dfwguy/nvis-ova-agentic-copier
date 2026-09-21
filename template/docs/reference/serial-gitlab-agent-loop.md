@@ -664,10 +664,11 @@ The ledger is the durable audit record. It keeps facts a restart must use.
 | --- | --- |
 | Location and worktree | State is below the XDG state directory, keyed by configured GitLab host and numeric project ID. Each `loop status` ledger item names its durable worktree path. Each active issue has one atomic, restrictive-permission ledger record and durable worktree. |
 | Version 2 fields | Bounded issue title; activation, latest-meaningful-event, and completion timestamps; main, source, publication, and merge-request identities; and bounded retry and failure history apart from the current actionable error. |
+| Phase timing | `phase_timings` keeps the newest 64 controller-computed entries. Phase timing is the public schema term because entries identify a durable `WorkflowPhase` value or a controller-observed role; the ordered human workflow groups remain stages. Each entry has `phase_or_role`, `attempt`, `started_at`, `finished_at`, `elapsed_seconds`, `outcome`, and `classification`. Classification is `execution` or `wait`. The timestamps come from controller clock boundaries, not agent narration. The controller records only boundaries it can observe; the list does not claim timing for unobserved subagent internals. |
 | Exhausted retry | The current condition is `retry_exhausted`. Bounded history keeps the latest sanitized underlying condition code and detail. Human and JSON status show the retained actionable cause, and the safe lifecycle result is `agent::blocked`. |
 | Final workflow summary | A typed, bounded summary keeps selected lane, capacity decision, nested roles, changed paths, tests and JUnit evidence, reviewers, findings, and corrections. The runner checks its canonical changed-path list against the durable worktree. Checked worker receipts must contain the other entries, but the runner does not independently verify AI claims. |
-| Excluded audit data | The ledger never stores prompts, chain-of-thought, credentials, environment values, issue bodies, comments, transcripts, or unbounded output. |
-| Legacy records | Old records stay readable. Missing legacy evidence is `unknown`. The next persist adds current fields and never invents past values. |
+| Excluded audit data | The ledger never stores prompts, chain-of-thought, credentials, environment values, issue bodies, comments, transcripts, raw output, or unbounded data. |
+| Legacy records | Old records stay readable. A missing `phase_timings` field loads as an empty list. Other missing legacy evidence is `unknown`. The next persist adds current fields and never invents past values. |
 | Local log | The application writes `agent-work.log` in that XDG project-state directory. It is application-owned evidence beside, not instead of, the systemd service journal. |
 | Mutation evidence | The runner saves intent before an external mutation and observed evidence after it, so it can reconcile interrupted idempotent work. |
 | Dirty worktree and stashes | A dirty durable worktree stays for its next workflow attempt. The runner inventories recovery stashes only; it never applies or drops them. |
@@ -689,8 +690,8 @@ ledger state and coarse phase.
 
 | Output or evidence | Contract |
 | --- | --- |
-| Human item line | States whether work runs, what changed, the current failure or condition, and the next action. It includes issue, projected and raw state, phase, identity facts, and available worker-exit evidence. |
-| JSON detail | Includes detailed check evidence—tests, reviewers, and audit receipts—plus timestamps, conditions, and corroboration. |
+| Human item line | States whether work runs, what changed, the current failure or condition, and the next action. It includes issue, projected and raw state, phase, identity facts, and available worker-exit evidence. When phase timing evidence exists, it includes one concise `timing=` token with the entry count, summed execution seconds, summed wait seconds, and the latest phase, outcome, and elapsed seconds. |
+| JSON detail | Includes the full bounded `phase_timings` list, detailed check evidence—tests, reviewers, and audit receipts—plus timestamps, conditions, and corroboration. |
 | JSON form | It is compact, versioned `CommandReport` version 2. Status records have the human view's identity, projection, current-versus-history, bounded audit, and observation data. |
 | List bounds | A report gives total matching records and truncation metadata. Only an unfiltered list is capped at 100 records. |
 | Observation use | Treat a missing, stale, failed, or mismatched observation as that condition, never as current truth. |
@@ -1141,7 +1142,7 @@ The shared top-level fields are `schema_version`, `command`, `applied`,
 housekeeping is not a segment. It also includes `stop_reason`, which says why
 the activation yielded. Its `items[]` lists workflow results in time order.
 Per-issue values are objects in `items[]`. They include `issue_iid`, state,
-coarse workflow phase, attempt, retry timing, source branch, durable worktree,
+coarse workflow phase, attempt, retry timing, `phase_timings`, source branch, durable worktree,
 MR reference, error code, `automatic_repair_count`, `automatic_repair_at`, other
 repair attempt or quarantine data when present, optional `worker_exit`, summary,
 and next action. Human output renders `returncode=<integer>` and
