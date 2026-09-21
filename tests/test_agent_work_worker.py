@@ -402,6 +402,96 @@ def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
     assert "revise its design once" not in prompt
 
 
+def test_workflow_prompt_binds_targeted_quality_reruns_to_trusted_provenance() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        project_id=310967,
+        issue_iid=137,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+    post_publication_prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "post-publication",
+        },
+        project_id=310967,
+        issue_iid=137,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "initial $judge-quality review is complete" in prompt
+    assert "prior and current staged tree oids" in prompt
+    assert "prior complete $judge-quality receipt" in prompt
+    assert "stable finding fingerprints" in prompt
+    assert "correction ledger" in prompt
+    assert "exact changed paths" in prompt
+    assert "targeted-review provenance is missing or internally inconsistent" in prompt
+    assert "non-code overall: provenance reject" in prompt
+    assert "quality judge to green to architect" in prompt
+    assert "do not silently fall back to a complete review" in prompt
+    assert "run a complete $judge-quality review" not in prompt
+    assert "$judge-quality" not in post_publication_prompt
+
+
+def test_workflow_prompt_defines_targeted_quality_scope_and_widening() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        project_id=310967,
+        issue_iid=137,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "addressed findings" in prompt
+    assert "changed production files" in prompt
+    assert "relevant callers, consumers, shared helpers, and contracts" in prompt
+    for widening_boundary in (
+        "public interfaces",
+        "schemas",
+        "shared constants",
+        "finite state machines",
+        "dependency inversion",
+        "security or authority boundaries",
+        "cross-module invariants",
+        "unproven scope",
+    ):
+        assert widening_boundary in prompt
+    assert "unchanged-supported prior sections" in prompt
+    assert "freshly reviewed scope" in prompt
+    assert "independent $judge-quality review" in prompt
+
+
+def test_workflow_prompt_keeps_quality_rerun_accounting_with_controller() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        project_id=310967,
+        issue_iid=137,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "controller, not the model" in prompt
+    assert "records timing" in prompt
+    assert "compact, token-neutral scope metadata" in prompt
+    assert "future #134 comparison" in prompt
+    assert "do not add timing storage" in prompt
+    assert "serial finalizer never commits" in prompt
+    assert "trusted runner retains its normal controller commit path" in prompt
+    assert "normal interactive work, finalizer owns one verified commit" in prompt
+    assert "finalizer alone may commit" not in prompt
+    assert "no intermediate commits" in prompt
+
+
 @pytest.mark.parametrize(
     "record",
     (
