@@ -217,6 +217,7 @@ def _configured_merge_request_publisher(
     environment: Mapping[str, str],
     find_executable: Callable[[str], str | None],
     run_command: CommandRunner,
+    sleeper: Callable[[float], None],
 ) -> _PublishMergeRequest:
     """Compose the structured publisher at the CLI's external boundaries."""
     host = environment.get("GITLAB_HOST", "")
@@ -266,6 +267,7 @@ def _configured_merge_request_publisher(
             issue_iid=issue_iid,
             apply=apply,
             port=port,
+            sleeper=sleeper,
         )
 
     return publish
@@ -872,6 +874,7 @@ def main(
     apply_upstream: _ApplyUpstream | None = None,
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
+    sleeper: Callable[[float], None] = time.sleep,
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
     current_checkout: Callable[[], Path] = Path.cwd,
@@ -1034,6 +1037,7 @@ def main(
                 environment=environment,
                 find_executable=find_executable,
                 run_command=run_command,
+                sleeper=sleeper,
             )
             report = publisher(
                 source_branch=parsed.source_branch,

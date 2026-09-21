@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, cast
@@ -107,6 +108,8 @@ _MAX_LABEL_PAGES = 100
 _MAX_PIPELINE_JOB_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
+_MAX_CLOSING_PROJECTION_READS = 4
+_CLOSING_PROJECTION_RETRY_DELAY_SECONDS = 1.0
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -265,6 +268,7 @@ def publish_merge_request(
     issue_iid: int | None = None,
     apply: bool,
     port: MergeRequestPublicationPort,
+    sleeper: Callable[[float], None],
 ) -> MergeRequestPublicationReport:
     """Preview or publish exactly one merge request and verify it by read-back."""
     issue_iid = _validated_issue_iid(issue_iid)
@@ -313,6 +317,7 @@ def publish_merge_request(
         or read_back.target_branch != target_branch
         or read_back.title != title
         or read_back.description != description
+        or read_back.has_conflicts
         or (
             read_back.source_project_id is not None
             and read_back.source_project_id != project_id
@@ -325,10 +330,16 @@ def publish_merge_request(
         raise GitLabError(
             "merge request read-back does not match the requested publication"
         )
-    if issue_iid is not None and port.fetch_closing_issues(
-        project_id=project_id, iid=read_back.iid
-    ) != ((project_id, issue_iid),):
-        raise GitLabError("merge request closing issue projection is not exact")
+    if issue_iid is not None:
+        for read_number in range(_MAX_CLOSING_PROJECTION_READS):
+            projection = port.fetch_closing_issues(
+                project_id=project_id, iid=read_back.iid
+            )
+            if projection == ((project_id, issue_iid),):
+                break
+            if projection or read_number == _MAX_CLOSING_PROJECTION_READS - 1:
+                raise GitLabError("merge request closing issue projection is not exact")
+            sleeper(_CLOSING_PROJECTION_RETRY_DELAY_SECONDS)
     return MergeRequestPublicationReport(
         True, action.removeprefix("would-"), read_back, description
     )

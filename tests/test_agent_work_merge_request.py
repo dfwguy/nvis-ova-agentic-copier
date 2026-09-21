@@ -31,6 +31,10 @@ from agent_work.ports import CommandRunner
 from agent_work.repository import CommandResult
 
 
+def _no_sleep(_seconds: float) -> None:
+    """Keep direct publication tests deterministic."""
+
+
 def _evidence(
     *,
     iid: int = 88,
@@ -64,9 +68,11 @@ class PublicationPortFake:
     inventory: tuple[MergeRequestEvidence, ...] = ()
     read_back: MergeRequestEvidence | None = None
     closing_issues: tuple[tuple[int, int], ...] = ((310967, 123),)
+    closing_issue_projections: tuple[object, ...] | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.closing_issue_reads = 0
 
     def list_merge_requests(
         self, *, project_id: int, source_branch: str
@@ -129,6 +135,12 @@ class PublicationPortFake:
         self, *, project_id: int, iid: int
     ) -> tuple[tuple[int, int], ...]:
         self.calls.append(("closes", (project_id, iid)))
+        if self.closing_issue_projections is not None:
+            projection = self.closing_issue_projections[
+                min(self.closing_issue_reads, len(self.closing_issue_projections) - 1)
+            ]
+            self.closing_issue_reads += 1
+            return cast("tuple[tuple[int, int], ...]", projection)
         return self.closing_issues
 
 
@@ -336,6 +348,7 @@ def test_publisher_verifies_the_exact_canonical_closing_issue() -> None:
         issue_iid=123,
         apply=True,
         port=port,
+        sleeper=_no_sleep,
     )
     assert report.applied is True
     assert port.calls[-1] == ("closes", (310967, 88))
@@ -355,8 +368,153 @@ def test_publisher_verifies_one_exact_close_after_each_applied_path(
         issue_iid=123,
         apply=True,
         port=port,
+        sleeper=_no_sleep,
     )
     assert [call[0] for call in port.calls].count("closes") == 1
+
+
+@pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
+def test_publisher_retries_missing_closing_projection_after_one_one_second_wait(
+    existing: tuple[MergeRequestEvidence, ...],
+) -> None:
+    port = PublicationPortFake(
+        inventory=existing,
+        closing_issue_projections=((), ((310967, 123),)),
+    )
+    delays: list[float] = []
+
+    report = publish_merge_request(
+        project_id=310967,
+        source_branch="clanker/structured-mr-descriptions",
+        target_branch="main",
+        title="Render merge-request descriptions",
+        description="Body\n\nCloses #123",
+        issue_iid=123,
+        apply=True,
+        port=port,
+        sleeper=delays.append,
+    )
+
+    assert report.applied is True
+    assert [call[0] for call in port.calls] == [
+        "list",
+        "update" if existing else "create",
+        "fetch",
+        "closes",
+        "closes",
+    ]
+    assert delays == [1.0]
+
+
+@pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
+def test_publisher_fails_closed_after_three_one_second_waits(
+    existing: tuple[MergeRequestEvidence, ...],
+) -> None:
+    port = PublicationPortFake(inventory=existing, closing_issue_projections=((),))
+    delays: list[float] = []
+
+    with pytest.raises(GitLabError, match="closing"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch="clanker/structured-mr-descriptions",
+            target_branch="main",
+            title="Render merge-request descriptions",
+            description="Body\n\nCloses #123",
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=delays.append,
+        )
+
+    assert [call[0] for call in port.calls].count("closes") == 4
+    assert delays == [1.0, 1.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    "projection",
+    (
+        ((310967, 999),),
+        ((999, 123),),
+        ((310967, 123), (310967, 124)),
+        cast("tuple[tuple[int, int], ...]", ((310967,),)),
+    ),
+    ids=("wrong-iid", "wrong-project", "multiple", "malformed"),
+)
+def test_publisher_rejects_nonempty_or_malformed_closing_projection_without_retry(
+    projection: tuple[tuple[int, int], ...],
+) -> None:
+    port = PublicationPortFake(
+        closing_issue_projections=(projection, ((310967, 123),)),
+    )
+    delays: list[float] = []
+
+    with pytest.raises(GitLabError, match="closing"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch="topic",
+            target_branch="main",
+            title="Title",
+            description="Body\n\nCloses #123",
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=delays.append,
+        )
+
+    assert [call[0] for call in port.calls].count("closes") == 1
+    assert delays == []
+
+
+def test_publisher_rejects_a_conflicted_authoritative_read_back_without_retrying() -> (
+    None
+):
+    conflicted = _evidence(
+        title="Title", source_branch="topic", description="Body\n\nCloses #123"
+    ).model_copy(update={"has_conflicts": True})
+    port = PublicationPortFake(read_back=conflicted)
+    delays: list[float] = []
+
+    with pytest.raises(GitLabError, match="read-back"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch="topic",
+            target_branch="main",
+            title="Title",
+            description="Body\n\nCloses #123",
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=delays.append,
+        )
+
+    assert all(call[0] != "closes" for call in port.calls)
+    assert delays == []
+
+
+def test_publisher_rejects_authoritative_identity_drift_without_retrying() -> None:
+    drifted = _evidence(
+        title="Unexpected title",
+        source_branch="topic",
+        description="Body\n\nCloses #123",
+    )
+    port = PublicationPortFake(read_back=drifted)
+    delays: list[float] = []
+
+    with pytest.raises(GitLabError, match="read-back"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch="topic",
+            target_branch="main",
+            title="Title",
+            description="Body\n\nCloses #123",
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=delays.append,
+        )
+
+    assert all(call[0] != "closes" for call in port.calls)
+    assert delays == []
 
 
 @pytest.mark.parametrize(
@@ -384,6 +542,7 @@ def test_publisher_rejects_noncanonical_closing_projection(
             issue_iid=123,
             apply=True,
             port=port,
+            sleeper=_no_sleep,
         )
 
 
@@ -399,6 +558,7 @@ def test_issue_less_publication_never_queries_closing_projection() -> None:
         description="Body",
         apply=True,
         port=port,
+        sleeper=_no_sleep,
     )
     assert all(call[0] != "closes" for call in port.calls)
 
@@ -418,6 +578,7 @@ def test_publisher_rejects_invalid_issue_iid_before_port_calls(
             issue_iid=cast("int | None", issue_iid),
             apply=False,
             port=port,  # type: ignore[arg-type]
+            sleeper=_no_sleep,
         )
     assert port.calls == []
 
@@ -482,6 +643,7 @@ def test_publisher_dry_run_lists_one_branch_but_never_mutates() -> None:
         description="## Problem\nReadable bodies.",
         apply=False,
         port=port,
+        sleeper=_no_sleep,
     )
 
     assert report.applied is False
@@ -505,6 +667,7 @@ def test_publisher_applies_one_create_or_update_then_authoritatively_reads_back(
         description=description,
         apply=True,
         port=port,
+        sleeper=_no_sleep,
     )
 
     assert report.applied is True
@@ -534,6 +697,7 @@ def test_publisher_fails_closed_when_branch_has_multiple_merge_requests() -> Non
             description="## Problem\nReadable bodies.",
             apply=True,
             port=port,
+            sleeper=_no_sleep,
         )
 
     assert [call[0] for call in port.calls] == ["list"]
@@ -552,6 +716,7 @@ def test_publisher_rejects_closed_list_candidate_before_update() -> None:
             description="## Problem\nReadable bodies.",
             apply=True,
             port=port,
+            sleeper=_no_sleep,
         )
 
     assert [call[0] for call in port.calls] == ["list"]
@@ -569,6 +734,7 @@ def test_publisher_rejects_a_read_back_that_does_not_match_exact_request() -> No
             description="## Problem\nReadable bodies.",
             apply=True,
             port=port,
+            sleeper=_no_sleep,
         )
 
 
@@ -586,6 +752,7 @@ def test_publisher_rejects_closed_authoritative_read_back() -> None:
             description=created.description,
             apply=True,
             port=port,
+            sleeper=_no_sleep,
         )
 
 
