@@ -1,7 +1,7 @@
 ---
 title: How to update a generated project
 type: how-to
-summary: Bring template improvements into an existing generated project.
+summary: Add template improvements to an existing generated project.
 audience: practitioner
 tags: [template-maintenance]
 status: current
@@ -9,6 +9,8 @@ last_reviewed: 2026-09-06
 related:
   - path: customize-a-generated-project.md
     why: Shows how to preserve local choices during template updates.
+  - path: ../explanation/template-and-generated-project.md
+    why: Explains the boundary between template maintenance and project-owned updates.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

@@ -49,6 +49,7 @@ clear outcomes. Name one safe next step.
 
 Approve only if classification, mirrors, documentation structure, policy, and
 source-of-truth synchronization pass. Return all blocking findings in one
-receipt. The writer corrects the full set while progress is material. Send
+receipt. The writer corrects the complete set while material progress is
+recorded. Send
 repeated findings, unchanged evidence, scope expansion, or authority ambiguity
 to Architect for human direction or coding-lane reclassification.

@@ -21,21 +21,25 @@
 
 ## Priority
 
-<!-- Choose one. Delete the rest. -->
+Pick the one level that best fits the work. Use the list to show when it needs work.
 
-- [ ] P0 — Stop work. Act now.
-- [ ] P1 — High. Address this current milestone.
-- [ ] P2 — Normal. Plan it.
-- [ ] P3 — Low. Worthwhile, but no current commitment.
+<!-- Pick one box. Mark one box. Delete all the rest. Use this list to set the work need. -->
+
+- [ ] P0 — Stop-ship: immediate action required.
+- [ ] P1 — High: address in the current milestone.
+- [ ] P2 — Normal: planned work.
+- [ ] P3 — Low: worthwhile, but no current commitment.
 
 ## Severity
 
-<!-- Choose one. Severity is lost value. Priority is urgency. -->
+Pick the one level that best shows the harm. Use the list to show what breaks and who it may hurt.
 
-- [ ] S1 — Critical. It blocks a release, safety, security, or contractual need.
-- [ ] S2 — Major. A core flow is substantially impaired without it.
-- [ ] S3 — Moderate. A key gain has a workaround.
-- [ ] S4 — Minor. A small or cosmetic gain.
+<!-- Pick one box. Mark one box. Delete all the rest. Severity is the impact of not delivering it. Priority measures urgency. -->
+
+- [ ] S1 — Critical: missing capability blocks a release, safety, security, or contractual need.
+- [ ] S2 — Major: a core workflow is substantially impaired without it.
+- [ ] S3 — Moderate: important improvement with a reasonable workaround.
+- [ ] S4 — Minor: incremental or cosmetic improvement.
 
 ## Scope and dependencies
 

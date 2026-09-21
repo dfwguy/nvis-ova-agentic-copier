@@ -13,14 +13,15 @@ type: index
 <!-- its affiliates is strictly prohibited. -->
 
 Find facts here. This index is not a task guide. It lists a read-only revision
-check. It also lists the loop and how it can recover.
+check and the loop recovery facts.
+Use it to look up a fact.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
 <!-- BEGIN GENERATED -->
 ### Template
 - [Template contract](template-contract.md) — Look up template inputs, output, setup, and updates.
-- [Template revision preview](template-revision-preview.md) — Compare the saved template commit with a new upstream commit.
+- [Template revision preview](template-revision-preview.md) — Compare the recorded template revision with a candidate revision.
 - [License compliance](license-compliance.md) — Look up license rules, checked files, and allowed exemptions.
 
 ### Writing

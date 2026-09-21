@@ -42,8 +42,9 @@ In Phase 3, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
 `uv run ty check`. It then runs focused behavior tests. It stages the exact
 candidate and records its tree OID. These fast commands are repair tools.
 Phase 4 verifies the candidate. It owns the one expensive tox/full-suite run.
-In serial Phase 4, Judge runs the installed hook through Git on that staged
-tree. It returns the unchanged tree OID. It returns immutable
+In serial Phase 4, Judge invokes exactly one mutation-gated durable validation
+session for that staged tree. The session runs the installed hook and persists
+evidence. Judge checks and returns the unchanged tree OID plus immutable
 supported-version JUnit snapshot paths and SHA-256 digests. It also returns
 test counts and its Non-functional Reviewer child receipt. Every coding
 candidate runs the full hook. Only then may Green start concurrent Phase-5

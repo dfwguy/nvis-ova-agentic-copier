@@ -1,7 +1,7 @@
 ---
 title: How to customize a generated project's workflow
 type: how-to
-summary: Tailor generated code and tooling without losing template compatibility.
+summary: Change generated code and tools. Keep them compatible with template updates.
 audience: practitioner
 tags: [project-generation]
 status: current

@@ -31,21 +31,25 @@
 
 ## Priority
 
-<!-- Choose one. Delete the rest. -->
+Pick the one level that best fits the work. Use the list to show when it needs work.
 
-- [ ] P0 — Stop work. Act now.
-- [ ] P1 — High. Do this cycle.
-- [ ] P2 — Normal. Plan it.
-- [ ] P3 — Low. Keep for later.
+<!-- Pick one box. Mark one box. Delete all the rest. Use this list to set the work need. -->
+
+- [ ] P0 — Stop-ship: immediate action required.
+- [ ] P1 — High: address in the current milestone.
+- [ ] P2 — Normal: planned work.
+- [ ] P3 — Low: worthwhile, but no current commitment.
 
 ## Severity
 
-<!-- Choose one. Severity is impact. Priority is urgency. -->
+Pick the one level that best shows the harm. Use the list to show what breaks and who it may hurt.
 
-- [ ] S1 — Critical. Outage, data loss, or risk. No workaround.
-- [ ] S2 — Major. Core work is substantially impaired.
-- [ ] S3 — Moderate. A workaround exists. Or, impact is limited.
-- [ ] S4 — Minor. Cosmetic or copy issue.
+<!-- Pick one box. Mark one box. Delete all the rest. Severity measures impact. Priority measures urgency. -->
+
+- [ ] S1 — Critical: outage, data loss, security exposure, or no viable workaround.
+- [ ] S2 — Major: a core workflow is substantially impaired.
+- [ ] S3 — Moderate: a workaround exists or impact is limited.
+- [ ] S4 — Minor: cosmetic, copy, or negligible-impact defect.
 
 ## Additional context
 

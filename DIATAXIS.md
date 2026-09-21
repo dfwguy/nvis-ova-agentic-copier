@@ -57,7 +57,8 @@ missing or generic summary before other documentation work.
 
 ## Classification and placement
 
-Classify in order. A fixed learning lesson with a guaranteed outcome is a
+Every page lives in exactly one type directory. Classify in this order; the
+first match wins. A fixed learning lesson with a guaranteed outcome is a
 tutorial. A real-world task with variation is a how-to. APIs, CLIs,
 configuration, and schemas are reference. Rationale, trade-offs, and background
 are explanation. Split a page that answers both how and why. Add reciprocal
@@ -124,7 +125,7 @@ MERGE: how-to/rotate-keys.md + how-to/rotate-keys-staging.md
 
 ## Documentation change report
 
-For every docs change, use these headings: **Classified** (a
+For every docs change, use exactly these headings: **Classified** (a
 `file | type | reason` table), **Written/edited**, **Regenerated**, **Flags**
 (a `check | file | detail` table), and **Proposals**. Write `none` below an
 empty heading. Do not repeat content across types. Link instead. Structure
