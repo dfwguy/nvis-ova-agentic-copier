@@ -22,8 +22,8 @@ when you need more detail.
 <!-- BEGIN GENERATED -->
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
-- [How to refresh the CI validation image](refresh-ci-image.md) — Refresh CI image.
-- [How to validate template changes](validate-template-changes.md) — Check a change.
+- [How to refresh the CI validation image](refresh-ci-image.md) — Build the root CI image.
+- [How to validate template changes](validate-template-changes.md) — Check a template change.
 
 ### Agent Workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Set live-agent capacity for a workflow lane.

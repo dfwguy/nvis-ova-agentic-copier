@@ -1,11 +1,11 @@
 ---
 title: How to refresh the CI validation image
 type: how-to
-summary: Refresh CI image.
+summary: Build the root CI image.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -66,11 +66,10 @@ its prepared environment. None may run `apt-get`, `uv python install`, `uv
 sync`, or an install fallback.
 
 Inspect those jobs directly. There is no root aggregate job or aggregate JUnit
-gate suite. Each pytest job starts four shards in parallel. One runs the full
-serial-runtime file. One runs the full template file. The other two split all
-remaining tests without overlap. They use `tests.helpers.serial_runtime_shard`
-with indices 0 and 1 of 2. They ignore both dedicated files. The job waits for
-every shard PID before it combines coverage.
+gate suite. Each pytest job starts four shards in parallel that exhaustively
+partition the full collected suite. They use `tests.helpers.serial_runtime_shard`
+with indices 0 through 3 of 4. The job waits for every shard PID before it
+combines coverage.
 
 Check every shard JUnit report. Check the one per-version Cobertura report when
 it exists. Otherwise, check the job log. The combined report covers only

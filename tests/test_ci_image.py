@@ -297,7 +297,7 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Each image environment isolates long suites before balancing the remainder."""
+    """Each image environment runs four exhaustive, balanced test partitions."""
     configuration = yaml.safe_load(
         (project_root / ".gitlab-ci.yml").read_text().replace("!reference ", "")
     )
@@ -310,9 +310,9 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         "test-results-$TEST_ENVIRONMENT-shard-3.xml",
         "test-results-$TEST_ENVIRONMENT-shard-4.xml",
     ]
-    assert "tests/test_template.py" in script
-    assert "--ignore=tests/test_agent_work_serial_runtime.py" in script
-    assert "--ignore=tests/test_template.py" in script
+    assert "tests/test_template.py" not in script
+    assert "tests/test_agent_work_serial_runtime.py" not in script
+    assert "--ignore=" not in script
     assert "--cov=src/agent_work" in script
     assert "coverage combine \\" in script
     assert '".coverage.$TEST_ENVIRONMENT-shard-1"' in script
@@ -334,10 +334,10 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         'printf \'%s|%s|%s\\n\' "$PYTHONPATH" "$COVERAGE_FILE" "$*" '
         '>> "$INVOCATIONS"\n'
         'case "$*" in\n'
-        "    *'--serial-runtime-shard-index=0'*) shard=remaining-0 ;;\n"
-        "    *'--serial-runtime-shard-index=1'*) shard=remaining-1 ;;\n"
-        "    *'tests/test_template.py'*) shard=template ;;\n"
-        "    *'tests/test_agent_work_serial_runtime.py'*) shard=serial-runtime ;;\n"
+        "    *'--serial-runtime-shard-index=0'*) shard=partition-0 ;;\n"
+        "    *'--serial-runtime-shard-index=1'*) shard=partition-1 ;;\n"
+        "    *'--serial-runtime-shard-index=2'*) shard=partition-2 ;;\n"
+        "    *'--serial-runtime-shard-index=3'*) shard=partition-3 ;;\n"
         "    *) shard=other ;;\n"
         "esac\n"
         'if [[ "${FAIL_SHARD:-}" = "$shard" ]]; then\n'
@@ -393,47 +393,31 @@ def test_root_pytest_job_runs_four_shards_and_combines_stable_source_coverage(
         for call in shard_calls
     )
     assert all("--cov=src/agent_work" in call for call in shard_calls)
-    serial_runtime_calls = [
-        call
-        for call in shard_calls
-        if "tests/test_agent_work_serial_runtime.py" in call
-        and "--ignore=tests/test_agent_work_serial_runtime.py" not in call
-    ]
-    template_call = next(
-        call
-        for call in shard_calls
-        if "tests/test_template.py" in call
-        and "--ignore=tests/test_template.py" not in call
-    )
-    assert len(serial_runtime_calls) == 1
-    assert "-p tests.helpers.serial_runtime_shard" not in serial_runtime_calls[0]
-    assert "--serial-runtime-shard-index" not in serial_runtime_calls[0]
-    assert serial_runtime_calls[0] != template_call
-
-    remaining_calls = [
-        call for call in shard_calls if "-p tests.helpers.serial_runtime_shard" in call
-    ]
-    assert len(remaining_calls) == 2
-    assert {
-        "--serial-runtime-shard-index=0",
-        "--serial-runtime-shard-index=1",
-    } == {
-        option
-        for call in remaining_calls
-        for option in (
-            "--serial-runtime-shard-index=0",
-            "--serial-runtime-shard-index=1",
+    assert all("-p tests.helpers.serial_runtime_shard" in call for call in shard_calls)
+    partition_indices = tuple(
+        tuple(
+            option
+            for option in (
+                "--serial-runtime-shard-index=0",
+                "--serial-runtime-shard-index=1",
+                "--serial-runtime-shard-index=2",
+                "--serial-runtime-shard-index=3",
+            )
+            if option in call
         )
-        if option in call
-    }
-    assert all("--serial-runtime-shard-count=2" in call for call in remaining_calls)
-    assert all(
-        "--ignore=tests/test_agent_work_serial_runtime.py" in call
-        and "--ignore=tests/test_template.py" in call
-        for call in remaining_calls
+        for call in shard_calls
     )
+    assert set(partition_indices) == {
+        ("--serial-runtime-shard-index=0",),
+        ("--serial-runtime-shard-index=1",),
+        ("--serial-runtime-shard-index=2",),
+        ("--serial-runtime-shard-index=3",),
+    }
+    assert all("--serial-runtime-shard-count=4" in call for call in shard_calls)
+    assert all("tests/" not in call for call in shard_calls)
+    assert all("--ignore=" not in call for call in shard_calls)
 
-    for failed_shard in ("serial-runtime", "template", "remaining-0", "remaining-1"):
+    for failed_shard in ("partition-0", "partition-1", "partition-2", "partition-3"):
         failure_start = len(invocations.read_text().splitlines())
         failed = subprocess.run(
             ["bash", "-c", script],

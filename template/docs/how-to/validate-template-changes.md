@@ -1,11 +1,11 @@
 ---
 title: How to validate template changes
 type: how-to
-summary: Check a change.
+summary: Check a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -56,18 +56,16 @@ The BuildKit job uses a registry-backed cache. It keeps build metadata and the
 image digest as pipeline evidence. The root has no aggregate validation job or
 aggregate JUnit suite. Inspect each check in its named GitLab job.
 
-Each root pytest job runs four fixed concurrent shards. One runs all of
-`tests/test_agent_work_serial_runtime.py`. One runs all of
-`tests/test_template.py`. The other two split the remaining suite without
-overlap. They use `tests.helpers.serial_runtime_shard`, with indices 0 and 1
-of 2, and ignore both dedicated files. The job waits for every shard PID and
-publishes one JUnit report per shard. It then combines coverage, measures only
-the maintained `src/agent_work` tree, enforces the existing 85% floor, and
-publishes one Cobertura report per Python version. Any shard, coverage combine,
-coverage check, or coverage report failure fails its named pytest job. For a
-failed job, inspect every shard JUnit report. Inspect its combined coverage
-report when it exists; otherwise, use the job log. Root coverage excludes the
-generated Copier payload.
+Each root pytest job runs four fixed concurrent shards that exhaustively
+partition the full collected suite. They use `tests.helpers.serial_runtime_shard`
+with indices 0 through 3 of 4. The job waits for every shard PID and publishes
+one JUnit report per shard. It then combines coverage, measures only the
+maintained `src/agent_work` tree, enforces the existing 85% floor, and publishes
+one Cobertura report per Python version. Any shard, coverage combine, coverage
+check, or coverage report failure fails its named pytest job. For a failed job,
+inspect every shard JUnit report. Inspect its combined coverage report when it
+exists; otherwise, use the job log. Root coverage excludes the generated Copier
+payload.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary
