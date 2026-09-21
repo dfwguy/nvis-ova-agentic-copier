@@ -27,7 +27,7 @@ the links when you need more facts, rules, tips, or help to make a safe choice.
 
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
-- [How to refresh the CI validation image](refresh-ci-image.md) — Rebuild and check the root CI image.
+- [How to refresh the CI validation image](refresh-ci-image.md) — Check the CI image and registry cleanup.
 - [How to update a generated project](update-a-generated-project.md) — Add template improvements to an existing generated project.
 - [How to validate template changes](validate-template-changes.md) — Check a change.
 

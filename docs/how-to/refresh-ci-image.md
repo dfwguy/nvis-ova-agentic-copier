@@ -1,7 +1,7 @@
 ---
 title: How to refresh the CI validation image
 type: how-to
-summary: Rebuild and check the root CI image.
+summary: Rebuild and check the root CI image and registry cleanup.
 audience: maintainer
 tags: [template-maintenance]
 status: current
@@ -65,7 +65,39 @@ match `sha256:<64 hexadecimal characters>`.
 Keep the metadata and digest with the pipeline evidence. Do not put login
 commands or credentials in the template.
 
-## 3. Verify the root validation jobs.
+## 3. Check the container registry cleanup policy during repository setup.
+
+Repository setup runs `uv run agent-work repository cleanup-policy` as a
+read-only check. It does not change GitLab settings, including when the
+consistency interface accepts `--apply`. Use `--json` when a structured status,
+observations, advisory, and settings URL are needed. The normal output uses
+real line breaks.
+
+Open the validated project URL followed by
+`/-/settings/packages_and_registries`, then follow **Settings → Packages and
+registries → Container registry → Cleanup policies**. The check observes
+`container_registry_access_level`, whether a policy is visible and present,
+and its `enabled`, `cadence`, `keep_n`, and `older_than` values. The current
+deletion-pattern field is `name_regex_delete`; older responses can use the
+deprecated `name_regex`. The check reports the field that GitLab actually
+returns. Its `name_regex_keep` applies to tag names within each repository.
+
+A concise healthy result means the visible policy can cover the transient
+`validation` candidates, whose tag suffix is `$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
+Only disabled registry access is a concise not-applicable success. Private
+registry access is active and still needs cleanup assessment. When
+the registry is enabled, no policy, a disabled or incomplete policy, or regexes
+unlikely to cover those tags is advisory: setup continues and exits 0. An API,
+permission, malformed response, wrong-project, or wrong-host result is a
+separate failure and exits 1. Give that failure to a Maintainer or Owner with
+access to the settings page.
+
+Use bounded retention for transient validation tags, but do not choose a
+cadence, count, age, or regex value from this check. Keep the mutable
+`validation-cache` BuildKit cache usable; it is separate from commit-specific
+validation candidates.
+
+## 4. Verify the root validation jobs.
 
 Inspect the ten named root jobs: `ruff-check`, `ruff-format`, `pytest-py311`,
 `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`,

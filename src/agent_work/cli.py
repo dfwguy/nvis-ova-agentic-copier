@@ -26,7 +26,7 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol
 
-from . import template_comparison
+from . import registry_cleanup, template_comparison
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -133,6 +133,12 @@ class _ValidationStatusAction(Protocol):
     def __call__(
         self, *, candidate_tree: str, wait_seconds: int | None
     ) -> _ValidationReport: ...
+
+
+class _RegistryCleanupAction(Protocol):
+    """Injected read-only registry cleanup assessment boundary."""
+
+    def __call__(self, *, apply: bool) -> registry_cleanup.CleanupAssessment: ...
 
 
 class _ApplyUpstream(Protocol):
@@ -565,6 +571,15 @@ def build_parser() -> argparse.ArgumentParser:
         validation_status,
         apply_help="accepted for command consistency; validation status remains read-only",
     )
+    repository = resources.add_parser("repository", help="inspect repository policy")
+    repository_actions = repository.add_subparsers(dest="action", required=True)
+    cleanup_policy = repository_actions.add_parser(
+        "cleanup-policy", help="read the container registry cleanup policy"
+    )
+    _common(
+        cleanup_policy,
+        apply_help="accepted for command consistency; cleanup-policy remains read-only",
+    )
     return parser
 
 
@@ -897,11 +912,38 @@ def main(
     read_validation_artifact: Callable[[Path], bytes | None] = (
         _read_validation_artifact
     ),
+    registry_cleanup_action: _RegistryCleanupAction | None = None,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "repository" and parsed.action == "cleanup-policy":
+        try:
+            if registry_cleanup_action is None:
+                glab = environment.get("AGENT_WORK_GLAB") or find_executable("glab")
+                if glab is None:
+                    raise registry_cleanup.RegistryBoundaryError(
+                        "registry cleanup configuration is invalid"
+                    )
+                observed = registry_cleanup.fetch_registry_cleanup_policy(
+                    host=environment.get("GITLAB_HOST", ""),
+                    project_id=environment.get("GITLAB_PROJECT_ID", ""),
+                    glab_path=Path(glab),
+                    run_command=run_command,
+                )
+                assessment = registry_cleanup.evaluate_cleanup_policy(observed)
+            else:
+                assessment = registry_cleanup_action(apply=parsed.apply)
+        except (OSError, RuntimeError, registry_cleanup.RegistryBoundaryError) as error:
+            write_stderr(str(error))
+            return 1
+        write_stdout(
+            json.dumps(assessment.json_payload, separators=(",", ":"))
+            if parsed.json
+            else assessment.human_message
+        )
+        return assessment.exit_code
     if parsed.resource == "validation":
         try:
             if (parsed.action == "run" and validation_run is None) or (
