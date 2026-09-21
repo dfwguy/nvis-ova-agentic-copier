@@ -197,10 +197,28 @@ def test_apply_rechecks_marker_then_posts_once_with_only_canonical_fields() -> N
 
     def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
         commands.append((command, kwargs))
-        if command[-1] == "projects/77":
+        endpoint = command[-1]
+        if endpoint == "projects/77":
             return CommandResult(0, _project(), "")
-        if command[5] == "GET":
+        if endpoint.startswith("projects/77/issues?state=opened"):
             return CommandResult(0, next(scans), "")
+        if endpoint == "projects/77/issues/41":
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "project_id": 77,
+                        "iid": 41,
+                        "state": "opened",
+                        "confidential": False,
+                        "title": draft.title,
+                        "description": draft.description,
+                        "labels": [],
+                        "web_url": "https://upstream.example.com/group/project/-/issues/41",
+                    }
+                ),
+                "",
+            )
         return CommandResult(
             0,
             json.dumps(
@@ -231,6 +249,123 @@ def test_apply_rechecks_marker_then_posts_once_with_only_canonical_fields() -> N
     }
     for _command, kwargs in commands:
         assert kwargs["environment"] == {"GITLAB_TOKEN": "dedicated-token"}
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    (
+        pytest.param("literal\\nnewline", id="literal-backslash-n"),
+        pytest.param("literal\\r\\nnewline", id="literal-backslash-r-n"),
+        pytest.param("percent%0anewline", id="lowercase-percent-lf"),
+        pytest.param("percent%0Dnewline", id="uppercase-percent-cr"),
+    ),
+)
+def test_apply_rejects_unsafe_draft_text_before_any_gitlab_command(
+    unsafe_text: str,
+) -> None:
+    """Untrusted finding text cannot reach either the read or write transport."""
+    draft = prepare_issue_draft(
+        Path("finding.yaml"),
+        read_bytes=lambda _path: _manifest().replace(
+            b"Generated widget rejects input.", unsafe_text.encode()
+        ),
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, "", "")
+
+    with pytest.raises(UpstreamGitLabError, match="linebreak"):
+        UpstreamGitLabReader(
+            _config(), read_credential=lambda _path: b"dedicated-token", run_command=run
+        ).apply(draft.preview, draft)
+
+    assert commands == []
+
+
+def test_apply_reads_created_issue_back_and_requires_exact_authoritative_evidence() -> (
+    None
+):
+    """A successful POST is not publication evidence until the issue GET matches."""
+    preview = _preview()
+    draft = _draft(preview)
+    commands: list[tuple[str, ...]] = []
+
+    def issue_payload(*, state: str = "opened") -> str:
+        return json.dumps(
+            {
+                "project_id": 77,
+                "iid": 41,
+                "state": state,
+                "confidential": False,
+                "title": draft.title,
+                "description": draft.description,
+                "labels": [],
+                "web_url": "https://upstream.example.com/group/project/-/issues/41",
+            }
+        )
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[-1]
+        if endpoint == "projects/77":
+            return CommandResult(0, _project(), "")
+        if endpoint.startswith("projects/77/issues?state=opened"):
+            return CommandResult(0, "[]", "")
+        if endpoint == "projects/77/issues":
+            return CommandResult(0, issue_payload(), "")
+        if endpoint == "projects/77/issues/41":
+            return CommandResult(0, issue_payload(), "")
+        raise AssertionError(endpoint)
+
+    result = UpstreamGitLabReader(
+        _config(), read_credential=lambda _path: b"dedicated-token", run_command=run
+    ).apply(preview, draft)
+
+    assert (result.outcome, result.matching_iid) == ("created", 41)
+    assert commands[-1][-1] == "projects/77/issues/41"
+
+
+def test_apply_fails_closed_when_created_issue_readback_does_not_match() -> None:
+    """A closed or altered authoritative read-back never confirms the POST."""
+    preview = _preview()
+    draft = _draft(preview)
+    commands: list[tuple[str, ...]] = []
+
+    def payload(*, state: str) -> str:
+        return json.dumps(
+            {
+                "project_id": 77,
+                "iid": 41,
+                "state": state,
+                "confidential": False,
+                "title": draft.title,
+                "description": draft.description,
+                "labels": [],
+                "web_url": "https://upstream.example.com/group/project/-/issues/41",
+            }
+        )
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[-1]
+        if endpoint == "projects/77":
+            return CommandResult(0, _project(), "")
+        if endpoint.startswith("projects/77/issues?state=opened"):
+            return CommandResult(0, "[]", "")
+        if endpoint == "projects/77/issues":
+            return CommandResult(0, payload(state="opened"), "")
+        if endpoint == "projects/77/issues/41":
+            return CommandResult(0, payload(state="closed"), "")
+        raise AssertionError(endpoint)
+
+    with pytest.raises(UpstreamGitLabError, match="upstream response is invalid"):
+        UpstreamGitLabReader(
+            _config(), read_credential=lambda _path: b"dedicated-token", run_command=run
+        ).apply(preview, draft)
+
+    assert sum("POST" in command for command in commands) == 1
 
 
 def test_apply_second_scan_match_recovers_without_a_post() -> None:

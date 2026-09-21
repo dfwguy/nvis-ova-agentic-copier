@@ -39,9 +39,12 @@ from .credential_rotation import rotate_credential as default_rotate_credential
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .gitlab import (
     GitLabError,
+    GitLabIssuePublisher,
     GitLabMergeRequestPublisher,
+    IssuePublicationReport,
     render_merge_request_description,
 )
+from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
 from .ledger import JsonLedger, LockBusy, state_home
 from .models import CommandReport, LedgerRecord, MergeRequestEvidence
@@ -228,6 +231,27 @@ class _PublishMergeRequest(Protocol):
     ) -> _MergeRequestPublicationReport: ...
 
 
+class _PublishIssue(Protocol):
+    """Structured issue publication boundary shared by CLI composition and tests."""
+
+    def __call__(
+        self,
+        *,
+        title: str,
+        problem: str,
+        outcome: str,
+        acceptance: tuple[str, ...],
+        impact: str | None,
+        additional_context: str | None,
+        marker: str | None,
+        priority: str | None,
+        severity: str | None,
+        labels: tuple[str, ...],
+        issue_iid: int | None,
+        apply: bool,
+    ) -> IssuePublicationReport: ...
+
+
 class _CompareTemplateRevisions(Protocol):
     """Typed template-preview composition boundary."""
 
@@ -304,6 +328,65 @@ def _configured_merge_request_publisher(
             apply=apply,
             port=port,
             sleeper=sleeper,
+        )
+
+    return publish
+
+
+def _configured_issue_publisher(
+    *,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+    run_command: CommandRunner,
+) -> _PublishIssue:
+    """Compose the configured numeric-project issue publisher once at the CLI edge."""
+    host = environment.get("GITLAB_HOST", "")
+    try:
+        project_id = int(environment.get("GITLAB_PROJECT_ID", ""))
+    except ValueError as error:
+        raise GitLabError(
+            "GitLab issue publication configuration is invalid"
+        ) from error
+    glab = find_executable("glab")
+    if not host or project_id <= 0 or glab is None or not Path(glab).is_absolute():
+        raise GitLabError("GitLab issue publication configuration is invalid")
+    port = GitLabIssuePublisher(
+        host=host,
+        project_id=project_id,
+        glab_path=str(Path(glab).resolve()),
+        run_command=run_command,
+    )
+
+    def publish(
+        *,
+        title: str,
+        problem: str,
+        outcome: str,
+        acceptance: tuple[str, ...],
+        impact: str | None,
+        additional_context: str | None,
+        marker: str | None,
+        priority: str | None,
+        severity: str | None,
+        labels: tuple[str, ...],
+        issue_iid: int | None,
+        apply: bool,
+    ) -> IssuePublicationReport:
+        return default_publish_issue(
+            project_id=project_id,
+            title=title,
+            problem=problem,
+            outcome=outcome,
+            acceptance=acceptance,
+            impact=impact,
+            additional_context=additional_context,
+            marker=marker,
+            priority=priority,
+            severity=severity,
+            labels=labels,
+            issue_iid=issue_iid,
+            apply=apply,
+            port=port,
         )
 
     return publish
@@ -600,6 +683,23 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--tracking")
     publish.add_argument("--issue-iid", type=_positive_integer)
     _common(publish, apply_help="create or update the merge request; omit for preview")
+    issue = resources.add_parser("issue", help="preview or publish one issue")
+    issue_actions = issue.add_subparsers(dest="action", required=True)
+    issue_publish = issue_actions.add_parser(
+        "publish", help="render and publish one structured issue"
+    )
+    issue_publish.add_argument("--title", required=True)
+    issue_publish.add_argument("--problem", required=True)
+    issue_publish.add_argument("--outcome", required=True)
+    issue_publish.add_argument("--acceptance", action="append", required=True)
+    issue_publish.add_argument("--impact")
+    issue_publish.add_argument("--additional-context")
+    issue_publish.add_argument("--marker")
+    issue_publish.add_argument("--priority")
+    issue_publish.add_argument("--severity")
+    issue_publish.add_argument("--label", action="append", default=[])
+    issue_publish.add_argument("--issue-iid", type=_positive_integer)
+    _common(issue_publish, apply_help="create or update the issue; omit for preview")
     validation = resources.add_parser(
         "validation", help="run or observe one durable Judge validation"
     )
@@ -954,6 +1054,7 @@ def main(
     | None = None,
     create_red_checkpoint: _CreateRedCheckpoint | None = None,
     publish_merge_request: _PublishMergeRequest | None = None,
+    publish_issue: _PublishIssue | None = None,
     rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
     migrate_service_environment: Callable[
         ..., ServiceEnvironmentReport
@@ -976,6 +1077,51 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "issue" and parsed.action == "publish":
+        try:
+            publisher = publish_issue or _configured_issue_publisher(
+                environment=environment,
+                find_executable=find_executable,
+                run_command=run_command,
+            )
+            report = publisher(
+                title=parsed.title,
+                problem=parsed.problem,
+                outcome=parsed.outcome,
+                acceptance=tuple(parsed.acceptance),
+                impact=parsed.impact,
+                additional_context=parsed.additional_context,
+                marker=parsed.marker,
+                priority=parsed.priority,
+                severity=parsed.severity,
+                labels=tuple(parsed.label),
+                issue_iid=parsed.issue_iid,
+                apply=parsed.apply,
+            )
+        except (GitLabError, RuntimeError, ValueError, OSError) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        if report.applied != parsed.apply:
+            write_stderr("publication result did not match requested apply state")
+            return 1
+        payload: dict[str, object] = {
+            "applied": report.applied,
+            "action": report.action,
+        }
+        if report.issue is not None:
+            payload["iid"] = report.issue.iid
+            payload["web_url"] = report.issue.web_url
+        else:
+            payload["title"] = parsed.title
+            payload["description"] = report.description
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else f"{parsed.title}\n\n{report.description}"
+        )
+        return 0
     if parsed.resource == "repository" and parsed.action == "cleanup-policy":
         try:
             if registry_cleanup_action is None:

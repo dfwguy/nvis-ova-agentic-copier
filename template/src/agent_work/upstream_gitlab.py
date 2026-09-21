@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .gitlab import GitLabError, reject_unsafe_issue_text
 from .ports import CommandResult, CommandRunner
 from .upstream_finding import (
     MAX_ISSUE_DESCRIPTION,
@@ -365,6 +366,14 @@ class UpstreamGitLabReader:
     ) -> UpstreamFindingPreview:
         """Create one verified issue only after two full exact-marker scans."""
         try:
+            reject_unsafe_issue_text(draft.title)
+            reject_unsafe_issue_text(draft.description)
+            reject_unsafe_issue_text(draft.marker)
+        except GitLabError as error:
+            raise UpstreamGitLabError(
+                "upstream draft contains unsafe linebreak text"
+            ) from error
+        try:
             validate_prepared_issue_draft(draft)
         except ValueError:
             raise UpstreamGitLabError("upstream draft is invalid") from None
@@ -379,4 +388,10 @@ class UpstreamGitLabReader:
             return second
         created = _parse_create(self._post(draft, token))
         _verify_created(created, draft, self._config, project.path_with_namespace)
+        read_back = _parse_create(
+            self._get(f"projects/{self._config.project_id}/issues/{created.iid}", token)
+        )
+        _verify_created(read_back, draft, self._config, project.path_with_namespace)
+        if read_back.iid != created.iid:
+            raise UpstreamGitLabError("upstream response is invalid")
         return replace(preview, outcome="created", matching_iid=created.iid)

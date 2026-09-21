@@ -2010,6 +2010,8 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
         method = command[command.index("-X") + 1]
         if endpoint.endswith("/issues") and method == "POST":
             return CommandResult(0, json.dumps(child), "")
+        if endpoint.endswith("/issues/20") and method == "GET":
+            return CommandResult(0, json.dumps(child), "")
         if endpoint.endswith("/issues/12/notes") and method == "GET":
             return CommandResult(0, "[]", "")
         if endpoint.endswith("/issues/12/notes"):
@@ -2034,6 +2036,101 @@ def test_gitlab_split_mutations_use_exact_marker_bound_evidence(tmp_path: Path) 
     )
     assert any("body=note" in command for command in commands)
     assert any("state_event=close" in command for command in commands)
+
+
+@pytest.mark.parametrize(
+    "unsafe_description",
+    (
+        pytest.param("marker\\nunsafe", id="literal-backslash-n"),
+        pytest.param("marker\\r\\nunsafe", id="literal-backslash-r-n"),
+        pytest.param("marker%0aunsafe", id="lowercase-percent-lf"),
+        pytest.param("marker%0Dunsafe", id="uppercase-percent-cr"),
+    ),
+)
+def test_gitlab_split_child_rejects_unsafe_text_before_post(
+    tmp_path: Path, unsafe_description: str
+) -> None:
+    """Split children share the publication text boundary before any transport call."""
+    commands: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, "{}", "")
+
+    with pytest.raises(GitLabError, match="linebreak"):
+        GitLabGateway(_config(tmp_path), fake).create_split_child(
+            title="Child", description=unsafe_description, marker="<!-- marker -->"
+        )
+
+    assert commands == []
+
+
+def test_gitlab_split_child_reads_back_exact_created_issue_evidence(
+    tmp_path: Path,
+) -> None:
+    """A child POST is confirmed only by a same-project GET of its exact issue."""
+    marker = "<!-- agent-work-split:v1 fingerprint=" + "a" * 64 + " -->"
+    description = f"Child body\n\n{marker}"
+    child = _issue_payload(20)
+    child.update(
+        {
+            "title": "Child",
+            "description": description,
+            "labels": ["agent::factory"],
+            "state": "opened",
+        }
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        if endpoint == "projects/310967/issues":
+            return CommandResult(0, json.dumps(child), "")
+        if endpoint == "projects/310967/issues/20":
+            return CommandResult(0, json.dumps(child), "")
+        raise AssertionError(endpoint)
+
+    issue = GitLabGateway(_config(tmp_path), fake).create_split_child(
+        title="Child", description=description, marker=marker
+    )
+
+    assert (issue.iid, issue.title, issue.description, issue.labels, issue.state) == (
+        20,
+        "Child",
+        description,
+        ("agent::factory",),
+        "opened",
+    )
+    assert marker.encode() in description.encode()
+    assert commands[-1][commands[-1].index("-X") + 2] == "projects/310967/issues/20"
+
+
+def test_gitlab_split_child_rejects_corrupt_post_and_readback_description(
+    tmp_path: Path,
+) -> None:
+    marker = "<!-- agent-work-split:v1 fingerprint=" + "a" * 64 + " -->"
+    requested = f"Requested body\n\n{marker}"
+    corrupt = _issue_payload(20)
+    corrupt.update(
+        {
+            "title": "Child",
+            "description": f"Corrupt\n\n{marker}",
+            "labels": ["agent::factory"],
+            "state": "opened",
+        }
+    )
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        if endpoint in {"projects/310967/issues", "projects/310967/issues/20"}:
+            return CommandResult(0, json.dumps(corrupt), "")
+        raise AssertionError(endpoint)
+
+    with pytest.raises(GitLabError, match="split child evidence"):
+        GitLabGateway(_config(tmp_path), fake).create_split_child(
+            title="Child", description=requested, marker=marker
+        )
 
 
 @pytest.mark.parametrize(

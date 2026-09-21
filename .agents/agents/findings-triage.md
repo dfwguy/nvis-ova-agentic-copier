@@ -69,24 +69,30 @@ a short problem, impact, outcome, and validation or acceptance criteria. Give
 only the evidence needed to act. State each fact once. Put the marker in
 Additional context. Keep only the commit or MR facts needed to dedupe.
 
-Use the numeric project ID for each API call. If `.envrc` supplies
+Use the numeric project ID for each API read. If `.envrc` supplies
 `GITLAB_TOKEN`, use `direnv exec . /usr/bin/env bash -c 'exec glab api
 --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'` for reads. Use the
-same quoted form with needed API arguments for writes. Variables expand only
-after `.envrc` loads. Never print or inspect token values. Before the first
-write, complete the required submission-identity and approval-policy audits.
+same quoted form only for direct reads. Variables expand only after `.envrc`
+loads. Never print or inspect token values. Preserve direct GitLab reads for
+deduplication and submission-identity audits.
 
-Create only the issue without a duplicate:
+After an exact open-match check, complete the required submission-identity and
+approval-policy audits. Publish only through the checkout-owned CLI boundary.
+Run `<checkout>/bin/agent-work-from-checkout issue publish`. Supply scalar
+`--title`, `--problem`, and `--outcome`; optional scalar `--impact` and
+`--additional-context`; repeated `--acceptance`; scalar `--priority P3` and
+`--severity S4`; and repeated `--label` only for verified existing labels.
+Supply the marker through scalar `--marker` without changing any marker bytes.
+Use `--additional-context` only for ordinary context or evidence. Use `--json`
+for the machine-readable receipt. Use `--apply` only to persist the issue.
+Dry-run is the default. The boundary renders canonical Markdown with real
+newlines. It rejects literal escaped or percent-encoded linebreak text. Exact
+readback verifies the project, issue internal ID (IID), title, body, and labels.
+Never call a GitLab issue POST or PUT endpoint directly. A reuse read needs no
+publication command.
 
-```bash
-direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" -X POST \
-  "projects/$GITLAB_PROJECT_ID/issues" \
-  -f title="<concise finding title>" \
-  -f description="<Bug-template body>"'
-```
-
-If auth, search, or create fails, record the safe error as `unfiled`. Never
-claim persistence.
+If auth, search, or boundary publication fails, record the safe error as
+`unfiled`. Never claim persistence.
 
 ## Output and handoff
 

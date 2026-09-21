@@ -209,19 +209,29 @@ marker in the issue body.
 
 Before writing, search open GitLab issues for the stable marker. Compare exact
 marker text. Reuse an exact open match. If none exists, complete the required
-submission-identity and approval-policy audits. Then create one GitLab Bug
-template ordinary issue through numeric `projects/$GITLAB_PROJECT_ID/issues`.
-Keep the body concise. State the problem and impact. State the requested
-outcome and validation or acceptance criteria. Include only run evidence needed
-to act. State each fact once. Include the marker. Use the same contract for an
-unfiled fallback. This is not an `agent-mr-remediation` issue. A later serial
-worker uses its normal issue branch. The feedback remains valid after observed
-MR or SHA changes.
+submission-identity and approval-policy audits. Then publish one GitLab Bug
+template ordinary issue only through the checkout-owned CLI boundary. Run
+`<checkout>/bin/agent-work-from-checkout issue publish`. Supply scalar
+`--title`, `--problem`, and `--outcome`. Supply optional scalar `--impact` and
+`--additional-context`. Supply repeated `--acceptance`; scalar `--priority`
+and `--severity`; and repeated `--label` only for verified existing labels.
+Supply the marker through scalar `--marker`. Do not change any marker bytes.
+Use `--additional-context` only for ordinary context or evidence. Use `--json`
+for the machine-readable receipt. Use `--apply` only to persist the issue.
+Dry-run is the default. The boundary renders canonical Markdown with real
+newlines. It rejects literal escaped or percent-encoded linebreak text. Exact
+readback verifies the project and issue internal ID (IID). It verifies title,
+body, and labels. Never call a GitLab issue POST or PUT endpoint directly. Keep the body concise. State
+the problem and impact. State the requested outcome and validation or
+acceptance criteria. Include only run evidence needed to act. State each fact
+once. Include the marker. Use the same contract for an unfiled fallback. This
+is not an `agent-mr-remediation` issue. A later serial worker uses its normal
+issue branch. The feedback stays valid after observed MR or SHA changes.
 
-If search or creation fails, do not claim persistence. Return `unfiled` with
-the non-secret error. Include a complete loop-ready fallback. Give a proposed
-title, Bug body, labels if verified, and exact marker. Do not write a Markdown
-backlog.
+If search or boundary publication fails, do not claim persistence. Return
+`unfiled` with the non-secret error. Include a complete loop-ready fallback.
+Give a proposed title, Bug body, labels if verified, and exact marker. Do not
+write a Markdown backlog.
 
 ## Output contracts
 
@@ -267,8 +277,8 @@ Later action: start one new complete reconciliation invocation for MR <iid> and 
 
 ## Constraints
 
-- Read-only on repository files; GitLab issue creation is the only permitted
-  remote mutation.
+- Read-only on repository files; checkout-owned GitLab issue publication is the
+  only permitted remote mutation.
 - Do not run local validation or edit code, branches, merge requests, jobs, or
   pipeline state.
 - Do not push, retry, cancel, approve, or merge.
