@@ -972,6 +972,76 @@ def test_merge_request_publish_cli_default_dry_run_composes_numeric_port_without
     }
 
 
+def test_merge_request_publish_cli_forwards_the_injected_projection_sleeper() -> None:
+    description = render_merge_request_description(
+        problem="Problem",
+        outcome="Outcome",
+        validation=("pytest",),
+        issue_iid=123,
+    )
+    evidence = {
+        "iid": 88,
+        "web_url": "https://gitlab.example.com/mr/88",
+        "state": "opened",
+        "source_project_id": 310967,
+        "target_project_id": 310967,
+        "source_branch": "topic",
+        "target_branch": "main",
+        "sha": "a" * 40,
+        "has_conflicts": False,
+        "description": description,
+        "title": "Title",
+        "draft": False,
+    }
+    responses: list[object] = [
+        [],
+        evidence,
+        evidence,
+        [],
+        [{"project_id": 310967, "iid": 123}],
+    ]
+    delays: list[float] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        del command
+        return CommandResult(0, json.dumps(responses.pop(0)), "")
+
+    assert (
+        main(
+            [
+                "merge-request",
+                "publish",
+                "--source-branch",
+                "topic",
+                "--target-branch",
+                "main",
+                "--title",
+                "Title",
+                "--problem",
+                "Problem",
+                "--outcome",
+                "Outcome",
+                "--validation",
+                "pytest",
+                "--issue-iid",
+                "123",
+                "--apply",
+            ],
+            environment={
+                "GITLAB_HOST": "gitlab.example.com",
+                "GITLAB_PROJECT_ID": "310967",
+            },
+            find_executable=lambda _name: "/dedicated/bin/glab",
+            run_command=run_command,
+            sleeper=delays.append,
+            write_stdout=lambda _value: None,
+        )
+        == 0
+    )
+    assert delays == [0.25]
+    assert responses == []
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

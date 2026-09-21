@@ -5,7 +5,7 @@ summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -119,10 +119,15 @@ Review the preview. Run the same command with `--apply` to create a merge
 request or update the one open merge request for that source branch. The
 command does not push, approve, or merge. It rejects more than one open merge
 request for the source branch. With `--issue-iid`, the preview ends with
-`Closes #139`. After create or update, it reads the merge request back. GitLab
-must project exactly that configured-project issue as closing. A missing or
-conflicting projection fails closed. Omit `--issue-iid` for an issue-less merge
-request.
+`Closes #139`. After create or update and the exact authoritative merge-request
+read-back, GitLab must project exactly that configured-project issue as closing.
+Only an empty or missing projection means GitLab is still catching up. The
+publisher reads it at most four times: once, then up to three retries. Each
+retry waits a fixed short delay. It never repeats create or update. An exact
+configured-project issue succeeds. A conflicting or malformed projection fails
+closed at once. The same is true for identity drift, a wrong project or IID,
+or extra or multiple issues. An empty or missing projection after the fourth
+read also fails closed. Omit `--issue-iid` for an issue-less merge request.
 
 Add `--impact`, `--human-action`, or `--tracking` only when it helps the
 reviewer. `--tracking` may accompany `--issue-iid`, but cannot contain a
