@@ -487,6 +487,8 @@ def test_root_pytest_job_rejects_invalid_node_metadata_before_uv(
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "TEST_ENVIRONMENT": test_environment,
     }
+    environment.pop("CI_NODE_INDEX", None)
+    environment.pop("CI_NODE_TOTAL", None)
     if node_index is not None:
         environment["CI_NODE_INDEX"] = node_index
     if node_total is not None:
