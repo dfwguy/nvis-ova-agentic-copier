@@ -96,6 +96,25 @@ Agent-policy Writer joins mixed coding work that touches portable policy. Green
 implements production changes. It reconciles docs with behavior, tests, and final
 interfaces. Green never edits agent-policy paths.
 
+Red keeps its verified failing-test boundary in one of two ways. In an
+interactive workflow, Main creates one approved checkpoint commit and local
+ref after Red proves the expected failures. The Finalizer later replaces the branch tip with exactly one passing commit
+over the original base while retaining the local Red ref. The failing tip is
+never pushed. Correctness does not depend on GitLab squash.
+
+In a serial workflow, the AI worker cannot commit. The controller uses
+`red-checkpoint create` to save the declared changed tests as a local Git tree.
+The trusted controller later makes the one final commit for the whole change.
+
+The serial checkpoint is a complete tree for the recorded base with only the
+declared test changes overlaid. It lives in an issue-namespaced local ref. Git
+keeps the snapshot durable and makes it easy to inspect with `git diff <ref>`.
+It is not branch history, and the ref is never pushed. Green, test review, and
+final audit receive its exact ref, tree, and path identity. Recovery can reuse
+it after an interruption only when that identity and the recorded base still
+match. Invalid, stale, missing, or changed evidence stops the workflow. It
+cannot weaken the Red boundary.
+
 During implementation, Green runs the fast formatter and lint. It runs type checks. It runs
 focused behavior tests. It stages one exact candidate. It records its tree OID.
 During serial validation, TDD Judge uses an applied durable session. The session uses

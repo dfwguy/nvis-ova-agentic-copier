@@ -51,6 +51,7 @@ class CommandRunner(Protocol):
         stdin: str | None = None,
         timeout_seconds: float | None = None,
         environment: Mapping[str, str] | None = None,
+        current_directory: Path | None = None,
     ) -> CommandResult: ...
 
 

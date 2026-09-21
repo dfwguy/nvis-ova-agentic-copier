@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import logging
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 import pytest
 from hypothesis import given
@@ -952,6 +953,29 @@ def _dependencies(
     gitlab: FakeGitLab,
     repository: FakeRepository,
 ) -> RuntimeDependencies:
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+
+    def load_red_checkpoint(
+        project_id: int, issue_iid: int, base_sha: str
+    ) -> Any | None:
+        record = ledger.load_read_only(issue_iid)
+        if record is None or record.source_sha != base_sha:
+            return None
+        test_path = "tests/test_agent_work_serial_runtime.py"
+        return checkpoint.RedCheckpointEvidence(
+            project_id=project_id,
+            issue_iid=issue_iid,
+            source_branch=record.source_branch,
+            base_sha=base_sha,
+            tree_oid="b" * 40,
+            ref=f"refs/agent-work/red-checkpoints/{issue_iid}/{base_sha}",
+            test_paths=(test_path,),
+            argv=("uv", "run", "pytest", f"{test_path}::test_red"),
+            exit_code=1,
+            expected_failure="assert expected failure",
+            output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+        )
+
     return RuntimeDependencies(
         config=config,
         ledger=ledger,
@@ -966,6 +990,7 @@ def _dependencies(
         read_plan=lambda path: path.read_bytes(),
         process_probe=lambda: "missing",
         issue_owner_probe=lambda _issue_iid: "stale",
+        load_red_checkpoint=load_red_checkpoint,
     )
 
 
@@ -1161,6 +1186,9 @@ class BatchingInvoker:
                     },
                 }
             )
+            if "red_checkpoint" in record:
+                audit_summary = cast(dict[str, object], payload["audit_summary"])
+                audit_summary["red_checkpoint"] = record["red_checkpoint"]
         return WorkerInvocation(
             0,
             f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
@@ -1269,6 +1297,8 @@ class SingleSessionInvoker:
                 "findings": [],
                 "corrections": [],
             }
+            if "red_checkpoint" in record:
+                payload["audit_summary"]["red_checkpoint"] = record["red_checkpoint"]
         if self.needs_human:
             payload.update(
                 {
@@ -1350,6 +1380,141 @@ def _operational_plan_bytes(report: object) -> bytes:
     plan = payload["operational_plan"]
     assert plan["fingerprint"]
     return json.dumps(plan).encode()
+
+
+def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
+    tmp_path: Path,
+) -> None:
+    """A resumed workflow receives only the checkpoint bound to its current base."""
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    assert record.source_sha is not None
+    evidence = checkpoint.RedCheckpointEvidence(
+        schema_version=1,
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        source_branch=record.source_branch,
+        base_sha=record.source_sha,
+        tree_oid="b" * 40,
+        ref=f"refs/agent-work/red-checkpoints/{record.issue_iid}/{record.source_sha}",
+        test_paths=("tests/test_agent_work_serial_runtime.py",),
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "tests/test_agent_work_serial_runtime.py::test_red",
+        ),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+    )
+    invoker = FakeInvoker(returncode=1)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
+            evidence
+            if (project_id, issue_iid, base_sha)
+            == (record.project_id, record.issue_iid, record.source_sha)
+            else None
+        ),
+    )
+
+    assert len(invoker.prompts) == 1
+    assert "retained Red checkpoint" in invoker.prompts[0]
+    assert evidence.tree_oid in invoker.prompts[0]
+
+
+@pytest.mark.parametrize("matches", (True, False))
+def test_workflow_runtime_reloads_checkpoint_created_during_worker_invocation(
+    tmp_path: Path, matches: bool
+) -> None:
+    """The first valid result uses the checkpoint created by that worker turn."""
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    assert record.source_sha is not None
+    test_path = "tests/test_agent_work_serial_runtime.py"
+    evidence = checkpoint.RedCheckpointEvidence(
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        source_branch=record.source_branch,
+        base_sha=record.source_sha,
+        tree_oid="b" * 40,
+        ref=f"refs/agent-work/red-checkpoints/{record.issue_iid}/{record.source_sha}",
+        test_paths=(test_path,),
+        argv=("uv", "run", "pytest", f"{test_path}::test_red"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/example.py", test_path)
+    delegate = SingleSessionInvoker()
+    delegate.changed_paths = repository.paths
+    available = False
+
+    class CheckpointCreatingInvoker:
+        def preflight(self) -> None:
+            delegate.preflight()
+
+        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+            nonlocal available
+            invocation = delegate.invoke(checkout, prompt, timeout)
+            payload = json.loads(
+                invocation.stdout.removeprefix("<agent-work-result>").removesuffix(
+                    "</agent-work-result>"
+                )
+            )
+            payload["audit_summary"]["red_checkpoint"] = evidence.model_dump(
+                mode="json"
+            )
+            available = True
+            return replace(
+                invocation,
+                stdout=f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
+            )
+
+    loads: list[bool] = []
+
+    def load_checkpoint(project_id: int, issue_iid: int, base_sha: str) -> Any | None:
+        assert (project_id, issue_iid, base_sha) == (
+            record.project_id,
+            record.issue_iid,
+            record.source_sha,
+        )
+        loads.append(available)
+        if not available:
+            return None
+        return (
+            evidence if matches else evidence.model_copy(update={"tree_oid": "c" * 40})
+        )
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=CheckpointCreatingInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=load_checkpoint,
+    )
+
+    assert loads == [False, True]
+    expected_state = RunnerState.PUBLISHING if matches else RunnerState.RETRY_WAIT
+    assert result is not None and result.state is expected_state
 
 
 def test_recovery_inventory_correlates_durable_evidence_without_claiming_or_mutating(

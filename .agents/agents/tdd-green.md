@@ -31,7 +31,13 @@ not add untested functionality.
 1. **Review preparation handoffs** — get all Red, Diátaxis, and applicable
    Policy Writer receipts from Architect. Review each one before you start.
    N/A is allowed only for a role Architect records not applicable. A missing
-   receipt is not N/A.
+   receipt is not N/A. Also require the exact Red identity for this mode. For
+   interactive work, require Main's commit SHA, approved test paths, and named
+   local ref. For serial work, require the applied report
+   with its `schema_version`, project and issue identity, source branch,
+   `base_sha`, `tree_oid`, `ref`, `test_paths`, `argv`, nonzero `exit_code`,
+   `expected_failure`, and `output_sha256`. Each field must match the accepted
+   Red receipt. On recovery, reuse this saved identity. Do not replace it.
 2. **Read the code rules** — before production implementation, read
    `.agents/guidance/code-quality.md`. Use `AGENTS.md` to identify languages
    in changed files. Read each matching `.agents/lang/` file. Implement the
@@ -41,7 +47,9 @@ not add untested functionality.
    - For CLI code, implement the Architect's CLIG contract. Use `argparse` for
      Python. Use `getopts`/`getopt` for Bash.
 3. **Complete the user-facing change** — inspect the shared worktree. Before
-   review, match required docs to the final interface. Update README when it is
+   review, inspect the ordinary Git diff from the Red checkpoint ref to the
+   current worktree. Keep that Red-to-Green diff as review evidence. Match
+   required docs to the final interface. Update README when it is
    needed. Do not delegate another worktree mutator. Do not use an extra
    mutator. Never edit root/template
    `AGENTS.md` or `.agents`. Send any policy need found in implementation to
@@ -68,7 +76,8 @@ not add untested functionality.
    test/JUnit evidence. Reviewers are read-only. Wait for every result. Wait
    even when one rejects. The first Quality Judge review must be independent.
    It must be complete. It covers the exact staged tree. Green cannot
-   self-certify it.
+   self-certify it. Give Test Judge the accepted mode-specific Red checkpoint
+   and ordinary Git diff from that checkpoint to this Green candidate.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an
@@ -121,7 +130,8 @@ not add untested functionality.
    unchanged. It also lists scope reviewed fresh. The prior sections come from
    the complete receipt.
 7. **Return a cycle ledger to Architect.** Report Red/Green evidence. Report
-   changed paths and documentation status. Report each judge verdict, repairs,
+   the retained checkpoint identity and Red-to-Green Git diff. Report changed
+   paths and documentation status. Report each judge verdict, repairs,
    unresolved findings, and current JUnit evidence. For an extra Architect-authorized
    cycle, record the cycle identifier. Record stable finding fingerprints.
    Use reviewer or owner + path/scope + stable summary/requested outcome.
@@ -149,7 +159,12 @@ not add untested functionality.
    correction. In a normal interactive flow, Finalizer owns the one verified
    commit. It first verifies the final exact staged tree and receipts. In a
    serial-worker flow, Finalizer never commits. The trusted runner keeps its
-   normal controller commit path.
+   single validated final controller commit path. Pass the retained Red
+   checkpoint and ordinary final Red-to-Green diff to Finalizer. In interactive
+   work, Finalizer must produce one final passing publication commit over the
+   original base while retaining the local Red ref. In serial work, the
+   checkpoint is a local Git tree ref and the controller creates one final
+   commit. Never push either Red checkpoint. Do not rely on server-side squash.
 
 ## Constraints
 

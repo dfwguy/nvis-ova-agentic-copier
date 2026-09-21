@@ -56,6 +56,8 @@ agent-work recovery resolve --issue-iid IID
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
+agent-work red-checkpoint create --issue-iid IID --evidence-file PATH
+                                 [--json] [--apply] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -82,6 +84,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Read-only helper; `--json` emits the envelope without delimiters. |
+| `red-checkpoint create` | Exact `--issue-iid` and bounded `--evidence-file` | Bare invocation previews; `--apply` verifies and retains one durable Red checkpoint. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
@@ -98,6 +101,41 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | Open factory MR awaiting review | `AGENT_WORK_FACTORY_USERNAME` is needed and must equal the authenticated GitLab service username. The loop reads bounded general comments and inline discussion replies. New human feedback wakes only that issue for existing-MR remediation. It acknowledges no-change feedback once. Code changes reuse the same MR and preserve its title, description, and closing reference. |
 
 The tables list the commands and their use.
+
+### `red-checkpoint create`
+
+`red-checkpoint create` retains the failing-test boundary from TDD Red. Its
+strict JSON evidence contains only `argv`, `expected_failure`, and
+`test_paths`. `argv` must begin with the exact `uv run pytest` argument vector.
+The other fields name the expected failure marker and declared changed test
+paths for one positive issue IID.
+
+Without `--apply`, the command checks and previews the intended action. It does
+not run the test command, create a Git ref, write a checkpoint record, change
+the worktree, or change GitLab. The first `--apply` reruns the recorded command
+with the exact argument vector. The command must exit nonzero and emit the
+expected marker. An exact replay verifies and reuses the retained checkpoint
+without rerunning the command. A passing command, missing marker, changed
+input, undeclared test path, or invalid or stale evidence fails closed.
+
+After verification, apply overlays only the declared changed tests onto the
+recorded base tree. It stores the complete tree under an issue-namespaced local
+ref and writes a bounded checkpoint record. The record binds the project, issue,
+branch, base, ref, tree OID, paths, argument vector, nonzero exit code, expected
+marker, and an output digest. It never retains raw command output or a worktree
+path. Green, test review, and the final audit must use that exact identity. The
+ref is local recovery evidence. It is never pushed.
+
+An interrupted retry reuses the checkpoint only when its record, ref, tree,
+paths, and recorded base identity still match. A missing or changed ref, tree
+or path mismatch, stale base identity, or malformed record fails closed. The
+trusted recovery prompt gives a later worker the checkpoint ref, tree, and
+declared paths so it can inspect the same Red boundary. Ordinary `git diff
+<ref>` can inspect the Git-native snapshot.
+
+`--json` returns the same bounded identity and outcome for automation.
+`--debug` does not weaken redaction. Checkpoint validation failures remain
+sanitized and never include rejected evidence values or raw test output.
 
 ### `merge-request publish`
 

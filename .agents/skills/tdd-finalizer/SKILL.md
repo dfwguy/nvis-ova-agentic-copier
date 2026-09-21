@@ -20,13 +20,16 @@ Use this portable skill for finalization. Read and follow [the role
 instructions](../../agents/tdd-finalizer.md) before acting. That file defines
 the role. This skill works with Claude Code, Codex, and Pi.
 Use the Judge handoff. Check each item. Keep the staged tree the same. Give a
-clear receipt.
+clear receipt. Require the accepted Red checkpoint. Require Test Judge's
+approval of the final Red-to-Green Git diff.
 
-During interactive finalization, Finalizer may commit with `--no-verify`. It
-must first match the staged tree, JUnit snapshots, digests, counts, and
-Non-functional Reviewer receipt to the Judge handoff. It never stages. A
-serial-worker Finalizer does not commit.
-Do not add a new check. Do not change the tree.
+During interactive finalization, Finalizer may commit with `--no-verify` only after all
+proof matches the Judge handoff. Match the staged tree. Match the JUnit files,
+digests, and counts. Match the Non-functional Reviewer receipt. Never stage.
+Create one final passing publication commit over the original base while
+retaining the local Red ref. Use the role's one compare-and-swap compaction and
+return every precheck and postcheck. A failed check stops publication. A serial
+worker never commits. Do not add a check or change the validated tree.
 
 ## Model selection
 

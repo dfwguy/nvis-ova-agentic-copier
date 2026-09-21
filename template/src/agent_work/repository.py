@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -200,6 +202,7 @@ def run_subprocess(
     stdin: str | None = None,
     timeout_seconds: float | None = None,
     environment: Mapping[str, str] | None = None,
+    current_directory: Path | None = None,
 ) -> CommandResult:
     """Run one command without invoking a shell."""
     try:
@@ -210,6 +213,7 @@ def run_subprocess(
             capture_output=True,
             timeout=timeout_seconds,
             env=None if environment is None else dict(environment),
+            cwd=current_directory,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
@@ -357,9 +361,18 @@ class GitRepository:
         stdin: str | None = None,
         timeout_seconds: float | None = None,
         environment: Mapping[str, str] | None = None,
+        current_directory: Path | None = None,
     ) -> CommandResultProtocol:
         """Run one Git command and preserve timeout retry semantics."""
         try:
+            if current_directory is not None:
+                return self._run_command(
+                    command,
+                    stdin=stdin,
+                    timeout_seconds=timeout_seconds,
+                    environment=environment,
+                    current_directory=current_directory,
+                )
             return self._run_command(
                 command,
                 stdin=stdin,
@@ -586,6 +599,109 @@ class GitRepository:
                 paths.append(entries[index])
                 index += 1
         return tuple(paths)
+
+    def run_red_command(
+        self, worktree: Path, argv: tuple[str, ...]
+    ) -> CommandResultProtocol:
+        """Run one bounded shell-free Red command in its durable worktree."""
+        return self._bounded_command(
+            argv,
+            environment=self._environment,
+            current_directory=worktree,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+
+    def checkpoint_tree(self, ref: str) -> str | None:
+        """Resolve a local checkpoint ref to its exact tree, if it exists."""
+        result = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(self.config.checkout),
+                "rev-parse",
+                "-q",
+                "--verify",
+                f"{ref}^{{tree}}",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if result.returncode == 1:
+            return None
+        if result.returncode != 0 or not re.fullmatch(
+            r"[0-9a-f]{40}", result.stdout.strip()
+        ):
+            raise RepositoryError("checkpoint ref could not be verified")
+        return result.stdout.strip()
+
+    def snapshot_tests(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...], ref: str
+    ) -> str:
+        """Snapshot only declared tests over a base tree into one local ref."""
+        descriptor, index_name = tempfile.mkstemp(prefix="agent-work-red-index-")
+        os.close(descriptor)
+        index_path = Path(index_name)
+        index_path.unlink()
+        environment = {**self._environment, "GIT_INDEX_FILE": str(index_path)}
+
+        def indexed(*arguments: str) -> CommandResultProtocol:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    *arguments,
+                ),
+                environment=environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                raise RepositoryError("Red checkpoint snapshot failed")
+            return result
+
+        try:
+            indexed("read-tree", base_sha)
+            indexed("add", "--", *paths)
+            tree_oid = indexed("write-tree").stdout.strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", tree_oid):
+                raise RepositoryError("Red checkpoint tree identity is invalid")
+            existing = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    f"{ref}^{{tree}}",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if existing.returncode == 0:
+                if existing.stdout.strip() != tree_oid:
+                    raise RepositoryError("checkpoint ref belongs to another tree")
+                return tree_oid
+            if existing.returncode != 1:
+                raise RepositoryError("checkpoint ref could not be verified")
+            updated = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "update-ref",
+                    ref,
+                    tree_oid,
+                    "",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if updated.returncode != 0:
+                raise RepositoryError("checkpoint ref could not be created")
+            return tree_oid
+        finally:
+            index_path.unlink(missing_ok=True)
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

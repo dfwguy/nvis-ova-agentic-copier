@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import ValidationError
@@ -44,12 +44,14 @@ from agent_work.models import (
     PipelineEvidence,
     TransitionIntentRecord,
 )
+from agent_work.red_checkpoint import RedCheckpointEvidence
 from agent_work.repository import (
     RepositoryError,
     RepositoryTransientError,
     discover_config,
 )
-from agent_work.serial import run_segment, select_record
+from agent_work.serial import run_segment as _run_segment
+from agent_work.serial import select_record
 from agent_work.state_machine import ALLOWED_TRANSITIONS
 from agent_work.worker import build_worker_prompt, worker_exit_evidence
 from tests.test_agent_work_serial_runtime import (
@@ -66,6 +68,36 @@ class _Result:
     returncode: int
     stdout: str
     stderr: str = ""
+
+
+def run_segment(*args: Any, **kwargs: Any) -> LedgerRecord | None:
+    """Run feedback fixtures with coherent controller-owned Red evidence."""
+    if "load_red_checkpoint" not in kwargs:
+        ledger = cast(JsonLedger, kwargs["ledger"])
+
+        def load_red_checkpoint(
+            project_id: int, issue_iid: int, base_sha: str
+        ) -> RedCheckpointEvidence | None:
+            record = ledger.load_read_only(issue_iid)
+            if record is None or record.source_sha != base_sha:
+                return None
+            test_path = "tests/test_agent_work_mr_feedback.py"
+            return RedCheckpointEvidence(
+                project_id=project_id,
+                issue_iid=issue_iid,
+                source_branch=record.source_branch,
+                base_sha=base_sha,
+                tree_oid="b" * 40,
+                ref=f"refs/agent-work/red-checkpoints/{issue_iid}/{base_sha}",
+                test_paths=(test_path,),
+                argv=("uv", "run", "pytest", f"{test_path}::test_red"),
+                exit_code=1,
+                expected_failure="assert expected failure",
+                output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+            )
+
+        kwargs["load_red_checkpoint"] = load_red_checkpoint
+    return _run_segment(*args, **kwargs)
 
 
 def _config(tmp_path: Path) -> AgentWorkConfig:

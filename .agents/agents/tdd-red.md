@@ -49,15 +49,26 @@ implementation code.
    For Bash, run the selected shell test command and `bash -n` on the script.
 4. **Confirm** that all new tests fail. If a test passes without
    implementation, revise it.
-5. **Return to Architect.** Do not write implementation code. Run concurrently with the
+5. **Prepare exact checkpoint evidence.** Give Architect the evidence-file path
+   and its exact JSON fields: `argv`, `expected_failure`, and `test_paths`.
+   `argv` is a bounded, shell-free tuple. It begins with exact `uv run pytest`.
+   Its positional test paths or node IDs represent every normalized changed
+   `tests/...` path. `expected_failure` is the stable failure marker observed
+   in the Red output. The same command must reproduce it with a nonzero exit.
+6. **Return to Architect.** Do not write implementation code. Run concurrently with the
    Diátaxis Writer and conditional Agent Policy Writer. Mutate only `tests/`.
-   Return the Red command, failure evidence, changed-test paths, and a short
-   test-diff summary. Architect waits for each applicable preparation receipt/N/A
-   before passing handoffs to `$tdd-green`.
+   Return the exact `argv`, evidence-file path and fields, failure evidence,
+   changed-test paths, and a short test-diff summary. Architect waits for each
+   applicable preparation receipt/N/A. It accepts the Red evidence. Main creates the
+   interactive commit checkpoint, or Architect invokes the trusted serial tree
+   checkpoint, before the handoffs go to `$tdd-green`.
 
 ## Constraints
 
 - Do not modify files outside `tests/`. Production code is not your concern in
   this phase.
+- Do not create a Git ref, commit, push, or publication. Main owns the
+  interactive checkpoint commit and ref. The trusted `agent-work
+  red-checkpoint create` executable owns the serial tree checkpoint.
 - If the architect's design is missing or unclear, stop and ask the user before
   writing tests.

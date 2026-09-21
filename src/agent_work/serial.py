@@ -58,6 +58,7 @@ from .models import (
     TransitionIntentRecord,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
+from .red_checkpoint import RedCheckpointEvidence
 from .repository import PublicationError, RepositoryError, RepositoryTransientError
 from .state_machine import (
     apply_worker_result,
@@ -2285,6 +2286,8 @@ def _execute(
     now: datetime,
     remaining_seconds: Callable[[], float] | None = None,
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> LedgerRecord | None:
     try:
         _verify_authenticated_user(gitlab)
@@ -2357,8 +2360,20 @@ def _execute(
             return None
         worker_timeout = max(1, math.ceil(remaining))
     try:
+        retained_checkpoint = (
+            load_red_checkpoint(record.project_id, record.issue_iid, record.source_sha)
+            if load_red_checkpoint is not None
+            and record.phase is WorkflowPhase.WORKFLOW
+            and record.source_sha is not None
+            else None
+        )
+        prompt_record = record.model_dump(mode="json")
+        if retained_checkpoint is not None:
+            prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
+                mode="json"
+            )
         prompt = build_worker_prompt(
-            record.model_dump(mode="json"),
+            prompt_record,
             project_id=record.project_id,
             issue_iid=record.issue_iid,
             effective_worker_budget_seconds=worker_timeout,
@@ -2486,11 +2501,23 @@ def _execute(
                     retry_delay=timedelta(),
                 )
             try:
-                validate_worker_result(
-                    record,
-                    result,
-                    changed_paths=repository.changed_paths(record.worktree),
-                )
+                if load_red_checkpoint is not None and record.source_sha is not None:
+                    retained_checkpoint = load_red_checkpoint(
+                        record.project_id, record.issue_iid, record.source_sha
+                    )
+                    validate_worker_result(
+                        record,
+                        result,
+                        changed_paths=repository.changed_paths(record.worktree),
+                        red_checkpoint=retained_checkpoint,
+                    )
+                else:
+                    validate_worker_result(
+                        record,
+                        result,
+                        changed_paths=repository.changed_paths(record.worktree),
+                        red_checkpoint=None,
+                    )
                 if result.result_kind == "split_required":
                     if result.split_plan is None:
                         raise WorkerProtocolError(
@@ -3467,6 +3494,8 @@ def run_segment(
     allow_pinned_conflict: bool = False,
     remaining_seconds: Callable[[], float] | None = None,
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     record, issue = select_record(
@@ -3723,6 +3752,7 @@ def run_segment(
             now=now,
             remaining_seconds=remaining_seconds,
             issue_lock=issue_lock,
+            load_red_checkpoint=load_red_checkpoint,
         )
         finished_at = boundary_clock()
         if outcome is None:

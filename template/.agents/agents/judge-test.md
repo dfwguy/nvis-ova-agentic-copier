@@ -27,6 +27,14 @@ Green invokes you with the other reviewers. The division of labour is clear:
 the complete report to Green. Where scopes overlap, describe the test defect.
 Do not duplicate the production review.
 
+Require the accepted mode-specific Red identity and the ordinary Git diff from
+that checkpoint to the Green candidate. For interactive work, use Main's commit
+SHA, approved test paths, and durable local ref. For serial work, use the
+trusted tree checkpoint report. Verify that the checkpoint paths match the
+accepted Red test paths. Use the diff to distinguish the checkpointed failing
+tests from later Green production and allowed test repairs. Missing, mismatched,
+or replaced checkpoint evidence is a Major provenance defect.
+
 ## Severity taxonomy (same model as judge-quality)
 
 Every finding **must** be classified as one of:
@@ -48,6 +56,10 @@ description.
 ## Review Checklist
 
 ### Meaningfulness (read this section first)
+- [ ] The Red checkpoint matches the accepted Red receipt, and the ordinary
+  Red-to-Green Git diff covers the candidate under review.
+- [ ] Tests changed after the checkpoint only under the test-repair rule. Their
+  evidence confirms they still fail against pre-fix behavior.
 - [ ] Each test asserts **behavior, not implementation detail**. It fails for
   a wrong implementation and does *not* break on a harmless refactor.
 - [ ] Assertions are specific. Do not use assertion-free tests. Do not assert
@@ -126,3 +138,5 @@ The orchestrator parses these lines literally. Keep the format consistent. The
 - Do not approve tests with any **Major** finding. Minor and Existing findings never cause a rejection.
 - Preserve every Minor in the standard output format for Green and Architect.
   Do not call GitLab or use a Markdown backlog file as a fallback.
+- Do not create, update, or push a checkpoint ref. Review the accepted local
+  checkpoint and Red-to-Green diff only.

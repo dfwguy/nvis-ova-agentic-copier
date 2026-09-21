@@ -30,18 +30,50 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Check the Diátaxis Writer and Judge comparison
    receipts, correction ledger, and allowed N/A records.
-2. Check that the TDD Judge receipt names each current supported-version JUnit
+2. Check the accepted Red identity for this mode. For interactive work, require
+   Main's commit SHA, approved test paths, local named ref, and original base.
+   For serial work, require the applied report. Check its project, issue,
+   branch, `base_sha`, `tree_oid`, `ref`, test paths, exact `argv`, nonzero exit,
+   failure marker, and output digest. Require Test Judge approval of the final
+   Git diff from Red to Green. The local ref must still match its saved identity.
+   Reject a missing, changed, or wrong checkpoint.
+3. Check that the TDD Judge receipt names each current supported-version JUnit
    artifact: its SHA-256 digest, test count, and exact staged-tree OID. Compare the
    docs and README verdicts to the final diff. Do not rerun language commands,
    suites, or pre-commit.
-3. Last, require `git write-tree` to equal the Judge-approved OID. Require no
+4. Last, require `git write-tree` to equal the Judge-approved OID. Require no
    unstaged or untracked maintained files.
-4. Only in normal interactive coding work, make the local commit with `git
-   commit --no-verify` after normal approval or a mechanically safe
-   draft-safety verdict. This is safe because the Judge checked that exact tree.
-   Return the commit SHA and verdict. A serial-worker Finalizer never commits;
-   its trusted runner uses the normal controller commit path and keeps Git
-   hooks.
+5. Only in normal interactive work, make the checked passing-head commit after
+   approval or a safe draft verdict. Then run one bounded local compaction under
+   Main's branch authority. Main supplies the exact branch ref, original base,
+   durable Red ref, and approved final message. Before compaction, prove all of
+   these facts:
+
+   - The branch and `HEAD` equal the passing head just created by Finalizer.
+   - The original base equals the accepted checkpoint base.
+   - The durable Red ref still equals the approved Red commit.
+   - `git write-tree` equals the Judge tree, and the worktree and index are clean.
+   - The Red commit's sole parent is the original base. The passing head descends
+     from that Red commit.
+   - No push, GitLab call, approval, or merge has occurred.
+
+   The one compaction action creates a commit object with the exact Judge tree,
+   sole parent original base, and approved final message. It then atomically
+   compare-and-swaps the branch ref from the passing head to that new commit:
+
+   ```bash
+   new_commit="$(git commit-tree "$judge_tree" -p "$base" -F "$message_file")"
+   git update-ref "$branch_ref" "$new_commit" "$passing_head"
+   ```
+
+   Do not move or delete the durable Red ref. After the action, prove that the
+   branch and `HEAD` equal `new_commit`, its sole parent equals the base, its tree
+   equals the Judge tree, the Red ref is unchanged, and the worktree and index
+   are clean. Return the new SHA, checkpoint proof, and verdict. Any failed
+   precheck, action, or postcheck stops without publication. Main may publish
+   only this final passing tip. A serial-worker Finalizer never commits. Its
+   trusted runner keeps the one checked final commit path and Git hooks. Never
+   push a Red ref. Do not rely on server-side squash.
 
 ## Verdict
 
@@ -52,5 +84,9 @@ not approve merge.
 ## Constraints
 
 - Never run standalone lint, format, type, test, tox, or pre-commit gates.
-- Never repair, stage, push, approve, merge, or call GitLab. Apart from the one
-  allowed verified interactive commit, do not change the worktree.
+- Never repair, stage, push, approve, merge, or call GitLab. Apart from the
+  allowed verified interactive publication commit and safe local compaction,
+  do not change the worktree or branch.
+- Never create or update the Red checkpoint. Main owns the interactive commit
+  and durable ref. Only the trusted checkpoint executable owns the serial tree
+  ref and state.

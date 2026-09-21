@@ -37,6 +37,11 @@ Emit exactly one versioned `<agent-work-result>` envelope. Use GitLab only for
 the configured numeric project. Do not commit. Do not push. Do not create an
 MR. Do not approve. Do not merge.
 
+The trusted `agent-work red-checkpoint create` boundary is the sole narrow
+Red-checkpoint Git mutation. Architect invokes it after accepting Red evidence. The
+executable owns its local Git tree ref and retained state. It does not grant the
+worker or an AI role commit, push, or publication authority.
+
 The deterministic controller, AI workflow, and required nested agents use the
 same scoped Developer GitLab credential. Humans provide product and policy
 inputs. Only humans may approve. Only humans may merge.
@@ -79,6 +84,14 @@ It owns recovery.
 
 Record the failure. Name the alternative. Check its result. Then continue.
 Keep the same branch. Keep the same project. Keep the read-back.
+
+For coding recovery, reuse only the exact retained Red checkpoint bound to the
+same project, issue, source branch, base SHA, tree OID, ref, test paths, command,
+nonzero exit, failure marker, and output digest. Never reconstruct it from
+prose. A missing or mismatched checkpoint returns a structured recovery
+blocker. The checkpoint ref stays local and is never pushed. It does not depend
+on squash. Finalizer still never commits in this serial flow. The controller
+retains the single validated final commit path.
 
 ## MR remediation issue exception
 
