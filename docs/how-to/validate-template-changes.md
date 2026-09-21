@@ -43,12 +43,13 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-the root pipeline has ten native validation jobs: `ruff-check`, `ruff-format`,
-`pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`,
-`license-check`, `readability-check`, and `shellcheck`. They extend the root
-`.base_uv` definition, whose image is the commit-specific candidate
+the root pipeline has eight single validation jobs: `ruff-check`,
+`ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
+`readability-check`, and `shellcheck`. Six native pytest shards run for each
+supported Python. They extend the root `.base_uv` definition, whose image is
+the commit-specific candidate
 `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. The separate
-`ci-image:candidate` BuildKit image-build job produces it, and all ten
+`ci-image:candidate` BuildKit image-build job produces it, and all root
 validation jobs wait for that job. They do not bootstrap with `apt-get`,
 `uv python install`, or `uv sync`. All except `readability-check` use
 `uv run --no-sync`; `readability-check` uses `uv run --locked --all-groups`.
@@ -56,18 +57,20 @@ The BuildKit job uses a registry-backed cache. It keeps build metadata and the
 image digest as pipeline evidence. The root has no aggregate validation job or
 aggregate JUnit suite. Inspect each check in its named GitLab job.
 
-Each root pytest job runs four fixed concurrent shards. One runs all of
-`tests/test_agent_work_serial_runtime.py`. One runs all of
-`tests/test_template.py`. The other two split the remaining suite without
-overlap. They use `tests.helpers.serial_runtime_shard`, with indices 0 and 1
-of 2, and ignore both dedicated files. The job waits for every shard PID and
-publishes one JUnit report per shard. It then combines coverage, measures only
-the maintained `src/agent_work` tree, enforces the existing 85% floor, and
-publishes one Cobertura report per Python version. Any shard, coverage combine,
-coverage check, or coverage report failure fails its named pytest job. For a
-failed job, inspect every shard JUnit report. Inspect its combined coverage
-report when it exists; otherwise, use the job log. Root coverage excludes the
-generated Copier payload.
+For each supported Python, six native pytest shards form one deterministic,
+exhaustive full-suite partition. Each validates `CI_NODE_INDEX` and
+`CI_NODE_TOTAL` before pytest; invalid metadata fails before tests begin. Each
+shard publishes a unique JUnit report and raw coverage file. One aggregation
+job waits for the six matching shards, combines exactly those six files,
+measures only maintained `src/agent_work` code, enforces the existing 85%
+floor, and publishes Cobertura. Any shard, combine, coverage-floor, report, or
+aggregation failure fails the pipeline. For a failed job, inspect the shard
+JUnit reports and the matching Cobertura report when it exists; otherwise, use
+the job log. Root coverage excludes the generated Copier payload.
+
+This is a simple CI DAG, not a state machine. Measure the longest terminal job
+only: prefer 60 seconds or less and reject more than 120 seconds. Queue time is
+not part of either limit. Improving the preferred time is out of scope here.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary

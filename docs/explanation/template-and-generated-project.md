@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -57,7 +57,24 @@ generated repository root.
 
 This split makes two kinds of change clear. Template maintainers improve shared scaffolding, such as tooling, CI, workflow guidance, and defaults, in one place. Generated-project owners choose when to take those improvements through Copier's three-way update process.
 
-The root repository also has its own CI boundary. Each merge-request and default-branch pipeline builds and pushes a project-only validation candidate for its commit. Ten native jobs use it: `ruff-check`, `ruff-format`, `pytest-py311`, `pytest-py314`, `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`, and `shellcheck`. Its tag includes the commit SHA and pipeline ID. The jobs therefore validate the Dockerfile and locked dependencies from that commit, rather than stale dependencies from a fixed digest. The image contains the jobs' interpreter, system tools, and locked dependencies, so they do not install them again. BuildKit uses a registry-backed cache. Its metadata and output digest remain evidence.
+The root repository has its own CI boundary. Each merge-request and
+default-branch pipeline builds and pushes a project-only validation candidate.
+Eight single validation jobs and six native pytest shards for each supported
+Python use it. The tag has the commit SHA and pipeline ID. The jobs validate
+that commit's Dockerfile and locked dependencies, not a stale fixed digest.
+The image has the interpreter, system tools, and locked dependencies. Jobs do
+not install them again. BuildKit uses a registry-backed cache. Its metadata and
+output digest remain evidence.
+
+The root pytest work is a simple DAG, not a state machine. For each Python,
+six shards make one deterministic, exhaustive partition of the full suite.
+Each validates `CI_NODE_INDEX` and `CI_NODE_TOTAL` before pytest. Each writes a
+JUnit report and raw coverage file. A per-Python aggregation job waits for the
+six matching shards. It combines exactly those six coverage files, measures
+`src/agent_work`, enforces the 85% floor, and publishes Cobertura. Invalid
+shard metadata, a shard failure, or an aggregation failure fails the pipeline.
+Queue time stays outside the unchanged 60-second preference and 120-second
+hard per-job limits.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
