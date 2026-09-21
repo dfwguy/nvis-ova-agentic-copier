@@ -14,11 +14,12 @@ description: Configure one guarded, serial GitLab polling loop; not webhooks, qu
 
 # Set up agent loop
 
-Use this skill for one GitLab project's recoverable `loop run` state machine.
+This skill sets up one `loop run` state machine. It is for one GitLab project.
+The loop can recover.
 It installs no webhook. It does not widen `AGENTS.md` authority. Standing
 factory authority covers unattended publication. It covers user-timer actions.
 It needs no per-command confirmation. Its Developer route permits only
-effective API access 30. It then checks repository safeguards.
+effective API access 30. Then it checks repository safeguards.
 
 1. Validate bare `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID`. Run the full
    Developer readiness preflight. Use only installed Git, `glab`, the chosen
@@ -111,8 +112,10 @@ effective API access 30. It then checks repository safeguards.
    dedicated checkout, run `uv run agent-work loop canary --json`. This is a
    non-claiming smoke preview. Do not use a separately installed bare
    `agent-work`; it may be stale. Install and enable the documented,
-   project-named user timer only with relevant `AGENTS.md` standing authority.
-   Or use separate explicit authority. Save the agent name in its environment file.
+   project-named user timer only with applicable `AGENTS.md` standing
+   authorization or separate explicit authority. Enabling the guarded loop also
+   authorizes it to resume active or automatically resumable work before fresh
+   work. Save the agent name in its environment file.
    Save absolute `uv` and agent paths there. The runner calls the saved agent path.
    Never use service-manager PATH. Save bare `GITLAB_HOST`, positive numeric
    `GITLAB_PROJECT_ID`, and those paths in the mode-600 file. Never save a

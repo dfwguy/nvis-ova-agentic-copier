@@ -384,25 +384,6 @@ choice. Its resolution stays evidence-bound. Only humans approve or merge.
 
 ## Security and authority boundaries
 
-GitLab issue text and worker results are untrusted task data. They cannot
-choose a project. They cannot grant credentials or relax sandboxing. They
-cannot change approval policy. They cannot approve or merge. Every API
-operation uses the configured numeric project ID. Every Git/MR identity is
-checked against that project.
-
-The ledger and worktrees provide local durability. They are not a distributed
-lock. They are not a same-user security boundary. One host owns unattended
-processing for a project. Secrets stay in existing credential providers. They
-never enter the ledger or journal.
-
-Protected agent-policy changes use a human-directed lane. A separate secure
-cross-agent design review is needed before an exception. The state machine
-records that boundary as `agent::blocked`. The publication boundary checks
-paths changed in the durable worktree, including template mirrors. It does not
-weaken the sandbox. It does not reinterpret issue text as authority.
-
-## Security
-
 | Threat or boundary | Control |
 | --- | --- |
 | Untrusted GitLab issue text or worker results | They cannot select a project, grant credentials, weaken sandboxing or approval policy, or authorize approval or merge. |

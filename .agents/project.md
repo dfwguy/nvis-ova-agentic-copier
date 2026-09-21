@@ -18,10 +18,10 @@ importable production code in `src/agent_work/`. Copier contract tests are in
 
 ## Factory objective and project context
 
-This repository owns the primary objective of a running, self-improving factory. It allows
-merge requests that improve the factory. This file owns that context.
-`AGENTS.md` owns portable authority, safeguards, and human approval and merge
-boundaries.
+This repository owns the primary objective of a running, self-improving
+factory. It allows merge requests that improve that factory. This file owns
+that context. `AGENTS.md` owns portable standing authority, safeguards, and
+human approval and merge boundaries.
 
 ## Architecture
 

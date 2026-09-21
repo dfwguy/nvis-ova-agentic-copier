@@ -114,9 +114,10 @@ projects/$GITLAB_PROJECT_ID/issues?state=opened&search=<stable-marker>
 projects/$GITLAB_PROJECT_ID/issues
 ```
 
-From the MR pipeline list, select the newest pipeline. Its SHA must exactly
-match the expected source SHA. Never substitute the newest `main` pipeline.
-Never substitute a pipeline for another source SHA.
+From the MR pipeline list, first select only pipelines whose SHA exactly
+matches the expected source SHA. Then choose the newest matching pipeline.
+Never substitute the newest `main` pipeline or a pipeline for another source
+SHA.
 
 ## Bounded, interruptible reconciliation
 

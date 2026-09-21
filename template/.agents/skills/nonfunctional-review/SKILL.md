@@ -27,6 +27,7 @@ Use this skill's `metadata.model-tier`. The live Architect router resolves its
 delegation mapping. Each frontend resolves that tier through its configured
 model mapping. Do not hard-code a provider-specific model name in this skill.
 
-The TDD Judge delegates this review after its one Git-hook run. Use only the
-exact staged tree and immutable absolute JUnit snapshot paths, digests, and
-counts it provides. Return the timing receipt to the Judge, never to Phase 5.
+The TDD Judge delegates this review after the validation session's one hook
+run. Use only the exact staged tree and immutable absolute JUnit snapshot
+paths, digests, and counts it provides. Return the timing receipt to the
+Judge, never to Phase 5.

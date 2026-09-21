@@ -113,8 +113,9 @@ non-trivial tests. It is not auto-loaded.
 
 - Include a shebang. Define `main()` and separate `parse_arguments()`.
 - Add `--debug` / `-d` for `logger.debug` output.
-- Operational logging stays local. A user-facing CLI or service must use a
-  `logging.FileHandler` or rotating file handler at an explicit application-owned local path.
+- Operational logging stays local. A user-facing CLI or service with
+  operational logging must use a `logging.FileHandler` or rotating file
+  handler at an explicit application-owned local path.
 - `--debug` / `-d` raises local-handler verbosity. Ordinary runs retain local
   lifecycle and failure events.
 - Do not add `logging.handlers.SysLogHandler`, another remote syslog handler,
