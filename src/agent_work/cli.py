@@ -38,9 +38,13 @@ from .credential_rotation import rotate_credential as default_rotate_credential
 from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
 from .gitlab import (
     GitLabError,
+    GitLabIssuePublisher,
     GitLabMergeRequestPublisher,
+    IssuePublicationDraft,
+    IssuePublicationEvidence,
     render_merge_request_description,
 )
+from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
 from .ledger import LockBusy, state_home
 from .models import CommandReport, LedgerRecord, MergeRequestEvidence
@@ -192,6 +196,25 @@ class _PublishMergeRequest(Protocol):
     ) -> _MergeRequestPublicationReport: ...
 
 
+class _IssuePublicationReport(Protocol):
+    """Minimal report shape returned by the issue publication boundary."""
+
+    applied: bool
+    action: str
+    project_id: int
+    selected_iid: int | None
+    issue: IssuePublicationEvidence | None
+    description: str
+
+
+class _PublishIssue(Protocol):
+    """Structured issue publication boundary shared by CLI and tests."""
+
+    def __call__(
+        self, *, draft: IssuePublicationDraft, apply: bool
+    ) -> _IssuePublicationReport: ...
+
+
 class _CompareTemplateRevisions(Protocol):
     """Typed template-preview composition boundary."""
 
@@ -266,6 +289,38 @@ def _configured_merge_request_publisher(
             issue_iid=issue_iid,
             apply=apply,
             port=port,
+        )
+
+    return publish
+
+
+def _configured_issue_publisher(
+    *,
+    environment: Mapping[str, str],
+    find_executable: Callable[[str], str | None],
+    run_command: CommandRunner,
+) -> _PublishIssue:
+    """Compose the structured issue publisher at external boundaries."""
+    host = environment.get("GITLAB_HOST", "")
+    try:
+        project_id = int(environment.get("GITLAB_PROJECT_ID", ""))
+    except ValueError as error:
+        raise GitLabError("GitLab publication configuration is invalid") from error
+    glab = find_executable("glab")
+    if not host or project_id <= 0 or glab is None or not Path(glab).is_absolute():
+        raise GitLabError("GitLab publication configuration is invalid")
+    port = GitLabIssuePublisher(
+        host=host,
+        project_id=project_id,
+        glab_path=str(Path(glab).resolve()),
+        run_command=run_command,
+    )
+
+    def publish(
+        *, draft: IssuePublicationDraft, apply: bool
+    ) -> _IssuePublicationReport:
+        return default_publish_issue(
+            project_id=project_id, draft=draft, apply=apply, port=port
         )
 
     return publish
@@ -541,6 +596,43 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--tracking")
     publish.add_argument("--issue-iid", type=_positive_integer)
     _common(publish, apply_help="create or update the merge request; omit for preview")
+    issue = resources.add_parser("issue", help="preview or publish one issue")
+    issue_actions = issue.add_subparsers(dest="action", required=True)
+    issue_publish = issue_actions.add_parser(
+        "publish",
+        help="preview or publish one marker-selected issue",
+        description="Dry run by default; --apply creates or updates one open marker-selected issue.",
+    )
+    issue_publish.add_argument("--title", required=True, help="exact issue title")
+    issue_publish.add_argument("--problem", required=True, help="problem section text")
+    issue_publish.add_argument(
+        "--outcome", required=True, help="proposed-outcome section text"
+    )
+    issue_publish.add_argument(
+        "--acceptance",
+        action="append",
+        required=True,
+        help="acceptance criterion; repeat for each criterion",
+    )
+    issue_publish.add_argument(
+        "--marker", required=True, help="one complete stable HTML comment"
+    )
+    issue_publish.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help="exact label; repeat for each label (default: none)",
+    )
+    issue_publish.add_argument("--impact", help="optional impact section text")
+    issue_publish.add_argument(
+        "--evidence",
+        action="append",
+        help="evidence item; repeat for each item",
+    )
+    _common(
+        issue_publish,
+        apply_help="create or update the issue; omit for a read-only preview",
+    )
     validation = resources.add_parser(
         "validation", help="run or observe one durable Judge validation"
     )
@@ -877,6 +969,7 @@ def main(
     current_checkout: Callable[[], Path] = Path.cwd,
     load_record: _LoadRecord | None = None,
     changed_paths: _ChangedPaths | None = None,
+    publish_issue: _PublishIssue | None = None,
     publish_merge_request: _PublishMergeRequest | None = None,
     rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
     migrate_service_environment: Callable[
@@ -899,6 +992,64 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "issue" and parsed.action == "publish":
+        try:
+            publisher = publish_issue or _configured_issue_publisher(
+                environment=environment,
+                find_executable=find_executable,
+                run_command=run_command,
+            )
+            draft = IssuePublicationDraft(
+                title=parsed.title,
+                problem=parsed.problem,
+                proposed_outcome=parsed.outcome,
+                acceptance_criteria=tuple(parsed.acceptance),
+                marker=parsed.marker,
+                labels=tuple(parsed.label),
+                impact=parsed.impact,
+                evidence=tuple(parsed.evidence) if parsed.evidence else None,
+            )
+            report = publisher(draft=draft, apply=parsed.apply)
+        except (GitLabError, RuntimeError, ValueError, OSError) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        if report.applied != parsed.apply:
+            write_stderr("publication result did not match requested apply state")
+            return 1
+        payload: dict[str, object] = {
+            "applied": report.applied,
+            "action": report.action,
+        }
+        if not parsed.apply:
+            payload["project_id"] = report.project_id
+            payload["selected_iid"] = report.selected_iid
+            payload["title"] = draft.title
+            payload["labels"] = list(draft.labels)
+            payload["marker"] = draft.marker
+            payload["description"] = report.description
+        elif report.issue is not None:
+            payload["iid"] = report.issue.iid
+            payload["web_url"] = report.issue.web_url
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else (
+                f"{report.action}: applied=false project={report.project_id} "
+                f"selected_iid={report.selected_iid} title={json.dumps(draft.title)} "
+                f"labels={json.dumps(list(draft.labels))} marker={draft.marker}\n\n"
+                f"{report.description}"
+                if not parsed.apply
+                else (
+                    f"{report.action}: applied=true iid={report.issue.iid} "
+                    f"url={report.issue.web_url}"
+                    if report.issue is not None
+                    else ""
+                )
+            )
+        )
+        return 0
     if parsed.resource == "validation":
         try:
             if (parsed.action == "run" and validation_run is None) or (

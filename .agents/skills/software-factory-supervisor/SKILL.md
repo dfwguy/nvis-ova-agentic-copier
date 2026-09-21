@@ -122,30 +122,46 @@ findings.
 Split separate fixes into separate issues. Each must stand alone for review and
 merge. Join proof for one fix. State needs. Do not pack in unrelated findings.
 
-For each lead, make a stable same-project marker from its project-owned
-category, scope, and summary. Leave out short-lived or run-only values: an
-issue, MR, pipeline, job, source SHA, or timestamp.
+For each lead, make one stable same-project marker on one line. Use its
+project-owned category, scope, and summary. Leave out short-lived or run-only
+values: an issue, MR, pipeline, job, source SHA, or time. Do not change the
+marker when you update the issue.
 
 ```text
-<!-- agent-supervisor-finding
-project_id: <numeric-project-id>
-fingerprint: <bug-or-inefficiency>|<stable-scope>|<stable-summary>
--->
+<!-- agent-supervisor-finding project_id=<numeric-project-id> fingerprint=<bug-or-inefficiency>|<stable-scope>|<stable-summary> -->
 ```
 
-Search open issues through numeric `projects/$GITLAB_PROJECT_ID/issues` and
-compare the exact marker. Reuse an exact open match. Otherwise, audit the
-required submission identity and approval policy. Then create through that
-numeric project endpoint using the configured authentication route without
-exposing credentials. The Bug or Feature body needs clear evidence, environment and
-context, expected outcome, acceptance criteria, priority and severity, scope
-or dependencies, and the marker. A prose endpoint name is enough. Add no
-runnable fenced command.
+Check the required identity and approval policy. Build the Bug or Feature issue
+from plain text fields. It needs a clear problem, impact, expected outcome,
+checks that anyone can repeat, and only the proof needed to act. Use one
+`--evidence` per environment, context, scope, or dependency item. Use one
+`--label` per verified Bug or Feature, priority, and severity label. Pass the
+stable marker through `--marker`. Do not copy it into evidence.
 
-If search, authority audit, or create fails, do not say it was saved. Report
-`unfiled` with the non-secret error and a ready-to-file fallback. If authority
-is absent, report `not filed`, not a write. For each lead, report `created
-<URL>`, `reused <URL>`, `not filed <reason>`, or `unfiled <non-secret failure +
+Use `uv run agent-work issue publish`. Do not call a GitLab issue create or
+update endpoint. First run the full command without `--apply`. This dry run
+looks in the set numeric project for the exact marker. It says if it would
+create or update. Its human or JSON result must show the configured numeric
+project, exact title, exact labels, exact body, exact top-level `marker`, and
+action `would-create` or `would-update`. Every preview must show
+`selected_iid`. It is `null` or `None` for create. It is the positive IID of
+the sole open exact-marker match for update. Check the body contains the exact
+marker. Then run the same command with `--apply`. If `.envrc` supplies
+`GITLAB_TOKEN`, run both commands through `direnv exec .` to load the set auth
+route. Never print or inspect token values.
+
+The command needs `--title`, `--problem`, `--outcome`, one or more
+`--acceptance` and `--label` values, and `--marker`. It may take `--impact` and
+one or more `--evidence` values. It writes real Markdown line breaks. It rejects
+escaped or encoded line breaks. With no exact marker match, it creates an
+issue. With one match, it updates that issue. With more than one, it stops.
+After a write, its trusted read-back must check the set project, positive IID,
+exact title, exact body, and exact labels.
+
+If selection, authority audit, publication, or read-back fails, do not say it
+was saved. Report `unfiled` with the non-secret error and a ready-to-file
+fallback. If authority is absent, report `not filed`, not a write. For each lead, report `created
+<URL>`, `updated <URL>`, `not filed <reason>`, or `unfiled <non-secret failure +
 fallback>`, plus totals, in the fixed result. Never call the loop.
 [work-item runner](../work-item-runner/SKILL.md) owns one issue. [Git flow](../git-flow/SKILL.md)
 owns publication.

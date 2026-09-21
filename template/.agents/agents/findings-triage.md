@@ -50,8 +50,9 @@ For each `- [Minor] path:line — description` record:
 
 ## Deduplication and issue creation
 
-Before each write, verify the source MR by numeric IID. Build this stable marker
-for the same project:
+Before each write, verify the source MR by numeric IID. Build this exact legacy
+marker for the same project. Keep its line breaks, field names, colons, order,
+and values unchanged when you update the issue:
 
 ```text
 <!-- agent-mr-remediation
@@ -63,39 +64,66 @@ finding: <judge>|<path>|<stable-summary>
 -->
 ```
 
-Search open issues at `projects/$GITLAB_PROJECT_ID/issues`. Compare the exact
-marker. Reuse an exact open match. Else build the Bug-template body. Give a
-short problem, impact, requested outcome, and validation or acceptance criteria.
-Give only evidence needed to act. State each fact once. Put the marker in
-Additional context. Keep only commit or MR context needed to dedupe.
+Build the Bug issue from plain text fields. Give a short problem, impact,
+requested outcome, and checks that anyone can repeat. Give only the proof
+needed to act. State each fact once. Keep only the commit or MR context needed
+to find a match. Pass the stable marker through `--marker`. Do not put it in
+free-form evidence.
 
-Use the numeric project ID for each API call. If `.envrc` supplies
-`GITLAB_TOKEN`, use `direnv exec . /usr/bin/env bash -c 'exec glab api
---hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"'` for reads. Use the
-same quoted form with needed API arguments for writes. Variables expand only
-after `.envrc` loads. Never print or inspect token values. Before the first
-write, complete the required submission-identity and approval-policy audits.
+The publication boundary must use the configured numeric project. If `.envrc`
+supplies `GITLAB_TOKEN`, run it through `direnv exec .` so the configured
+authentication route is loaded. Never print or inspect token values. Before
+the first write, complete the required submission-identity and approval-policy
+audits.
 
-Create only the deduplicated issue with:
+Use the issue publish command. Do not call a GitLab issue create or update
+endpoint. Pass the verified Bug, `P3`, and `S4` labels with one `--label` per
+label. Add `type::quality` only when that label exists. Use one `--acceptance`
+per check. Use one `--evidence` per optional item of proof.
+
+First run the full command without `--apply`. This dry run looks in the set
+numeric project for the exact marker. It says if it would create or update.
+Its human or JSON result must show the configured numeric project, exact title,
+exact labels, exact body, exact top-level `marker`, and action `would-create` or
+`would-update`. Every preview must show `selected_iid`. It is `null` or `None`
+for create. It is the positive IID of the sole open exact-marker match for
+update. Check the body contains the exact marker. Then run the same command
+with `--apply`:
 
 ```bash
-direnv exec . /usr/bin/env bash -c 'exec glab api --hostname "$GITLAB_HOST" -X POST \
-  "projects/$GITLAB_PROJECT_ID/issues" \
-  -f title="<concise finding title>" \
-  -f description="<Bug-template body>"'
+direnv exec . uv run agent-work issue publish \
+  --title "<concise finding title>" \
+  --problem "<problem>" \
+  --impact "<impact>" \
+  --outcome "<requested outcome>" \
+  --acceptance "<repeatable acceptance criterion>" \
+  --label Bug --label P3 --label S4 \
+  --marker "<!-- agent-mr-remediation
+project_id: <numeric-project-id>
+merge_request_iid: <originating-mr-iid>
+source_branch: <verified-originating-source-branch>
+source_sha: <verified-originating-source-sha>
+finding: <judge>|<path>|<stable-summary>
+-->" \
+  --apply
 ```
 
-If auth, search, or creation fails, record the non-secret error as `unfiled`.
-Never claim persistence.
+The command keeps real newlines in this exact legacy marker and writes real
+Markdown line breaks. It rejects escaped or encoded line breaks. With no exact
+marker match, it creates an issue. With one match, it updates that issue. With
+more than one, it stops. After a write, its trusted read-back must check the set
+project, positive IID, exact title, exact body, and exact labels. If auth,
+choice, write, or read-back fails, record the safe error as `unfiled`. Never
+claim that it was saved.
 
 ## Output and handoff
 
-For each input, report `created`, `reused`, or `not filed` with a reason. Report
+For each input, report `created`, `updated`, or `not filed` with a reason. Report
 `unfiled` with the non-secret failure. End with exactly one of:
 
 ```text
-Created <N> GitLab issues; reused <N> existing issues; <N> unfiled findings
-No new issues; reused <N> existing issues; <N> unfiled findings
+Created <N> GitLab issues; updated <N> existing issues; <N> unfiled findings
+No new issues; updated <N> existing issues; <N> unfiled findings
 ```
 
 Send issue URLs and the summary to the human-review handoff. A new MR

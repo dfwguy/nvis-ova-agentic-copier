@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .gitlab import GitLabError, reject_unsafe_issue_text
 from .ports import CommandResult, CommandRunner
 from .upstream_finding import (
     MAX_ISSUE_DESCRIPTION,
@@ -366,7 +367,10 @@ class UpstreamGitLabReader:
         """Create one verified issue only after two full exact-marker scans."""
         try:
             validate_prepared_issue_draft(draft)
-        except ValueError:
+            reject_unsafe_issue_text(draft.title)
+            reject_unsafe_issue_text(draft.description)
+            reject_unsafe_issue_text(draft.marker)
+        except (GitLabError, ValueError):
             raise UpstreamGitLabError("upstream draft is invalid") from None
         if draft.preview != preview:
             raise UpstreamGitLabError("upstream draft is invalid")

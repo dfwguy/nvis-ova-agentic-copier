@@ -17,9 +17,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -107,6 +107,8 @@ _MAX_LABEL_PAGES = 100
 _MAX_PIPELINE_JOB_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
+_ENCODED_LINEBREAK = re.compile(r"%0[ad]", re.IGNORECASE)
+_LITERAL_ESCAPED_LINEBREAK = re.compile(r"\\(?:r\\n|r|n)")
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -205,6 +207,274 @@ def render_merge_request_description(
         sections.append(("Tracking", tracking))
     description = "\n\n".join(f"## {heading}\n{body}" for heading, body in sections)
     return description if issue_iid is None else f"{description}\n\nCloses #{issue_iid}"
+
+
+def reject_unsafe_issue_text(value: str) -> None:
+    """Reject transport-escaped linebreaks while allowing actual newlines."""
+    if _LITERAL_ESCAPED_LINEBREAK.search(value) or _ENCODED_LINEBREAK.search(value):
+        raise GitLabError("issue text contains an escaped or encoded linebreak")
+
+
+@dataclass(frozen=True)
+class IssuePublicationDraft:
+    """Immutable structured input for one canonical issue publication."""
+
+    title: str
+    problem: str
+    proposed_outcome: str
+    acceptance_criteria: tuple[str, ...]
+    marker: str
+    labels: tuple[str, ...] = ()
+    impact: str | None = None
+    evidence: str | tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate every caller-owned value before transport access."""
+        values = (
+            self.title,
+            self.problem,
+            self.proposed_outcome,
+            *self.acceptance_criteria,
+            self.marker,
+            *self.labels,
+            self.impact,
+            *(self.evidence if isinstance(self.evidence, tuple) else (self.evidence,)),
+        )
+        for value in values:
+            if value is not None:
+                reject_unsafe_issue_text(value)
+        caller_content = (
+            self.title,
+            self.problem,
+            self.proposed_outcome,
+            *self.acceptance_criteria,
+            *self.labels,
+            self.impact,
+            *(self.evidence if isinstance(self.evidence, tuple) else (self.evidence,)),
+        )
+        if (
+            not self.title.strip()
+            or not self.problem.strip()
+            or not self.proposed_outcome.strip()
+            or not self.acceptance_criteria
+            or any(not item.strip() for item in self.acceptance_criteria)
+            or any(not label.strip() or "," in label for label in self.labels)
+            or len(frozenset(self.labels)) != len(self.labels)
+            or (self.impact is not None and not self.impact.strip())
+            or (isinstance(self.evidence, str) and not self.evidence.strip())
+            or (
+                isinstance(self.evidence, tuple)
+                and any(not item.strip() for item in self.evidence)
+            )
+            or self.evidence == ()
+            or re.fullmatch(r"<!--.*-->", self.marker, re.DOTALL) is None
+            or "<!--" in self.marker[4:-3]
+            or "-->" in self.marker[4:-3]
+            or any(
+                value is not None and self.marker in value for value in caller_content
+            )
+        ):
+            raise GitLabError("issue publication draft is invalid")
+
+
+@dataclass(frozen=True)
+class IssuePublicationEvidence:
+    """Authoritative projection required to verify one published issue."""
+
+    project_id: int
+    iid: int
+    title: str
+    description: str
+    labels: tuple[str, ...]
+    web_url: str
+    state: str
+
+
+class _IssuePublicationPayload(BaseModel):
+    """Strict GitLab response fields used by the issue publisher."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+    project_id: int = Field(gt=0)
+    iid: int = Field(gt=0)
+    title: str
+    description: str
+    labels: list[str]
+    web_url: str
+    state: str
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, value: object) -> object:
+        """Normalize GitLab's valid nullable issue description."""
+        return "" if value is None else value
+
+
+class IssuePublicationPort(Protocol):
+    """Transport operations used by the issue publication transaction."""
+
+    def list_issues(
+        self, *, project_id: int, marker: str
+    ) -> tuple[IssuePublicationEvidence, ...]: ...
+    def create_issue(
+        self,
+        *,
+        project_id: int,
+        title: str,
+        description: str,
+        labels: tuple[str, ...],
+    ) -> IssuePublicationEvidence: ...
+    def update_issue(
+        self,
+        *,
+        project_id: int,
+        iid: int,
+        title: str,
+        description: str,
+        labels: tuple[str, ...],
+    ) -> IssuePublicationEvidence: ...
+    def fetch_issue(self, *, project_id: int, iid: int) -> IssuePublicationEvidence: ...
+
+
+@dataclass(frozen=True)
+class IssuePublicationReport:
+    """Immutable result of an issue publication preview or apply."""
+
+    applied: bool
+    action: str
+    project_id: int
+    selected_iid: int | None
+    issue: IssuePublicationEvidence | None
+    description: str
+
+    def __post_init__(self) -> None:
+        """Require authoritative evidence only for an applied result."""
+        if self.applied != (self.issue is not None):
+            raise GitLabError("issue publication evidence does not match apply state")
+        if self.selected_iid is not None and self.selected_iid <= 0:
+            raise GitLabError("selected issue IID is invalid")
+
+
+def render_issue_description(draft: IssuePublicationDraft) -> str:
+    """Render one stable Markdown issue description from structured input."""
+    sections = [("Problem", draft.problem)]
+    if draft.impact is not None:
+        sections.append(("Impact", draft.impact))
+    sections.extend(
+        (
+            ("Proposed outcome", draft.proposed_outcome),
+            (
+                "Acceptance criteria",
+                "\n".join(f"- {item}" for item in draft.acceptance_criteria),
+            ),
+        )
+    )
+    if draft.evidence is not None:
+        evidence = (
+            "\n".join(f"- {item}" for item in draft.evidence)
+            if isinstance(draft.evidence, tuple)
+            else draft.evidence
+        )
+        sections.append(("Evidence", evidence))
+    return "\n\n".join(
+        (*[f"## {heading}\n{body}" for heading, body in sections], draft.marker)
+    )
+
+
+def _verify_issue_publication(
+    issue: IssuePublicationEvidence,
+    *,
+    project_id: int,
+    iid: int,
+    draft: IssuePublicationDraft,
+    description: str,
+) -> None:
+    """Fail closed unless authoritative evidence exactly matches the request."""
+    if issue.project_id != project_id:
+        raise GitLabError("issue read-back project is not exact")
+    if issue.iid != iid:
+        raise GitLabError("issue read-back IID is not exact")
+    if issue.title != draft.title:
+        raise GitLabError("issue read-back title is not exact")
+    if issue.description != description:
+        raise GitLabError("issue read-back description is not exact")
+    if frozenset(issue.labels) != frozenset(draft.labels):
+        raise GitLabError("issue read-back labels are not exact")
+    if issue.state != "opened":
+        raise GitLabError("issue read-back state is not opened")
+    try:
+        parsed_url = urlsplit(issue.web_url)
+    except ValueError:
+        raise GitLabError("issue read-back URL is not exact") from None
+    url_match = re.fullmatch(r"/.+/-/issues/(\d+)", parsed_url.path)
+    if url_match is not None and int(url_match.group(1)) != issue.iid:
+        raise GitLabError("issue read-back IID is not exact")
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+        or not parsed_url.netloc
+        or url_match is None
+    ):
+        raise GitLabError("issue read-back URL is not exact")
+
+
+def publish_issue(
+    *,
+    project_id: int,
+    draft: IssuePublicationDraft,
+    apply: bool,
+    port: IssuePublicationPort,
+) -> IssuePublicationReport:
+    """Preview or publish one marker-selected issue and verify its read-back."""
+    description = render_issue_description(draft)
+    if (
+        isinstance(project_id, bool)
+        or not isinstance(project_id, int)
+        or project_id <= 0
+    ):
+        raise GitLabError("issue publication project must be a positive integer")
+    matches = port.list_issues(project_id=project_id, marker=draft.marker)
+    if len(matches) > 1:
+        raise GitLabError("more than one issue contains the exact marker")
+    action = "would-update" if matches else "would-create"
+    selected_iid = matches[0].iid if matches else None
+    if not apply:
+        return IssuePublicationReport(
+            False, action, project_id, selected_iid, None, description
+        )
+    submitted = (
+        port.update_issue(
+            project_id=project_id,
+            iid=matches[0].iid,
+            title=draft.title,
+            description=description,
+            labels=draft.labels,
+        )
+        if matches
+        else port.create_issue(
+            project_id=project_id,
+            title=draft.title,
+            description=description,
+            labels=draft.labels,
+        )
+    )
+    if selected_iid is not None and submitted.iid != selected_iid:
+        raise GitLabError("updated issue IID does not match the selected IID")
+    read_back_iid = selected_iid if selected_iid is not None else submitted.iid
+    read_back = port.fetch_issue(project_id=project_id, iid=read_back_iid)
+    _verify_issue_publication(
+        read_back,
+        project_id=project_id,
+        iid=read_back_iid,
+        draft=draft,
+        description=description,
+    )
+    applied_action = "updated" if matches else "created"
+    return IssuePublicationReport(
+        True, applied_action, project_id, selected_iid, read_back, description
+    )
 
 
 class MergeRequestPublicationPort(Protocol):
@@ -462,6 +732,138 @@ class GitLabMergeRequestPublisher:
                 raise GitLabError("GitLab returned invalid closing issue list")
             projection.append((closing_project_id, closing_iid))
         return tuple(projection)
+
+
+class GitLabIssuePublisher:
+    """Numeric-project GitLab transport for structured issue publication."""
+
+    def __init__(
+        self, *, host: str, project_id: int, glab_path: str, run_command: CommandRunner
+    ) -> None:
+        self._host, self._project_id, self._glab_path, self._run_command = (
+            host,
+            project_id,
+            glab_path,
+            run_command,
+        )
+
+    def _require_project(self, project_id: int) -> None:
+        if project_id != self._project_id:
+            raise GitLabError("publication project does not match configured project")
+
+    def _call(
+        self, endpoint: str, *, method: str = "GET", fields: tuple[str, ...] = ()
+    ) -> object:
+        return _call_gitlab(
+            host=self._host,
+            glab_path=self._glab_path,
+            run_command=self._run_command,
+            endpoint=endpoint,
+            method=method,
+            fields=fields,
+        )
+
+    def _issue(self, payload: object) -> IssuePublicationEvidence:
+        try:
+            parsed = _IssuePublicationPayload.model_validate(payload)
+        except ValidationError:
+            raise GitLabError("GitLab returned invalid issue publication evidence")
+        issue = IssuePublicationEvidence(
+            project_id=parsed.project_id,
+            iid=parsed.iid,
+            title=parsed.title,
+            description=parsed.description,
+            labels=tuple(parsed.labels),
+            web_url=parsed.web_url,
+            state=parsed.state,
+        )
+        try:
+            issue_host = urlsplit(issue.web_url).hostname
+        except ValueError:
+            raise GitLabError("GitLab returned invalid issue publication URL") from None
+        if issue.project_id != self._project_id or issue_host != self._host:
+            raise GitLabError("GitLab returned invalid issue publication identity")
+        return issue
+
+    def list_issues(
+        self, *, project_id: int, marker: str
+    ) -> tuple[IssuePublicationEvidence, ...]:
+        """Return every opened issue containing the exact caller-owned marker."""
+        self._require_project(project_id)
+        matches: list[IssuePublicationEvidence] = []
+        for page in range(1, _MAX_ISSUE_PAGES + 1):
+            payload = self._call(
+                f"projects/{project_id}/issues",
+                fields=(
+                    "state=opened",
+                    "per_page=100",
+                    f"page={page}",
+                ),
+            )
+            if not isinstance(payload, list):
+                raise GitLabError("GitLab returned invalid issue publication list")
+            issues = tuple(self._issue(item) for item in payload)
+            for issue in issues:
+                if issue.state != "opened":
+                    raise GitLabError("GitLab issue inventory is not opened")
+                marker_count = issue.description.count(marker)
+                if marker_count > 1:
+                    raise GitLabError("GitLab issue marker appears more than once")
+                if marker_count == 1:
+                    matches.append(issue)
+            if len(payload) < 100:
+                return tuple(matches)
+        raise GitLabError("GitLab returned too many issue publication pages")
+
+    def create_issue(
+        self,
+        *,
+        project_id: int,
+        title: str,
+        description: str,
+        labels: tuple[str, ...],
+    ) -> IssuePublicationEvidence:
+        """Create one issue in the configured project."""
+        self._require_project(project_id)
+        return self._issue(
+            self._call(
+                f"projects/{project_id}/issues",
+                method="POST",
+                fields=(
+                    f"title={title}",
+                    f"description={description}",
+                    f"labels={','.join(labels)}",
+                ),
+            )
+        )
+
+    def update_issue(
+        self,
+        *,
+        project_id: int,
+        iid: int,
+        title: str,
+        description: str,
+        labels: tuple[str, ...],
+    ) -> IssuePublicationEvidence:
+        """Update only the selected issue in the configured project."""
+        self._require_project(project_id)
+        return self._issue(
+            self._call(
+                f"projects/{project_id}/issues/{iid}",
+                method="PUT",
+                fields=(
+                    f"title={title}",
+                    f"description={description}",
+                    f"labels={','.join(labels)}",
+                ),
+            )
+        )
+
+    def fetch_issue(self, *, project_id: int, iid: int) -> IssuePublicationEvidence:
+        """Fetch authoritative issue evidence after publication."""
+        self._require_project(project_id)
+        return self._issue(self._call(f"projects/{project_id}/issues/{iid}"))
 
 
 def _require_exact_metadata(
@@ -1418,6 +1820,9 @@ class GitLabGateway:
         self, *, title: str, description: str, marker: str
     ) -> GitLabIssue:
         """Create and verify one marker-bound child issue."""
+        reject_unsafe_issue_text(title)
+        reject_unsafe_issue_text(description)
+        reject_unsafe_issue_text(marker)
         try:
             payload = self._mapping(
                 self._call(

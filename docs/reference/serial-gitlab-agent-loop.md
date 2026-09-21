@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -56,6 +56,11 @@ agent-work recovery resolve --issue-iid IID
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
+agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
+                         --acceptance TEXT [--acceptance TEXT ...]
+                         --marker '<!-- ... -->'
+                         [--label LABEL ...] [--impact TEXT]
+                         [--evidence TEXT ...] [--apply] [--json] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -82,6 +87,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Read-only helper; `--json` emits the envelope without delimiters. |
+| `issue publish` | Title, problem, outcome, one or more acceptance criteria, and a stable marker | Labels, impact, and evidence are optional. The default is a dry run; `--apply` creates or updates the one marker-selected issue. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
@@ -98,6 +104,38 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | Open factory MR awaiting review | `AGENT_WORK_FACTORY_USERNAME` is needed and must equal the authenticated GitLab service username. The loop reads bounded general comments and inline discussion replies. New human feedback wakes only that issue for existing-MR remediation. It acknowledges no-change feedback once. Code changes reuse the same MR and preserve its title, description, and closing reference. |
 
 The tables list the commands and their use.
+
+### `issue publish`
+
+`issue publish` renders one structured GitLab issue. Its body has Problem,
+Proposed outcome, and Acceptance criteria sections. It adds Impact and
+Evidence only when their flags are supplied. Repeat `--acceptance` for each
+criterion, `--evidence` for each evidence item, and `--label` for each label.
+The renderer uses real Markdown line breaks. It rejects literal escaped or
+percent-encoded carriage returns and line feeds before it can change GitLab.
+
+The required `--marker` is one complete caller-owned HTML comment
+that provides stable issue identity, such as
+`<!-- agent-pipeline-feedback project=123 source=abc -->`. Keep it
+byte-for-byte unchanged when revising the title, body, or labels. The rendered
+body ends with exactly one copy of that marker. The command rejects a missing,
+malformed, or injected reserved marker.
+
+Without `--apply`, the command previews the project, title, body, labels,
+marker, action, and selected IID. It makes no change. With `--apply`, it looks
+for that exact marker on open issues in the configured project. It creates an
+issue when there is no open match. It updates the sole open match. Multiple
+open matches fail closed.
+
+Apply performs one mutation. It then reads that exact issue back and verifies
+the numeric project, positive IID, opened state, title, body, labels, and URL
+identity. A malformed or mismatched response fails closed. `--json` returns the matching
+machine-readable result. `--debug` adds only sanitized diagnostics.
+
+Automated upstream-finding and split-child publication paths reuse the same
+issue-text safety validation. They retain their distinct authentication,
+deduplication, and transport boundaries. Their reserved markers remain
+byte-for-byte unchanged.
 
 ### `merge-request publish`
 

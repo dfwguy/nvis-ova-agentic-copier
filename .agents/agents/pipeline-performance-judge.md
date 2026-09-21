@@ -22,7 +22,7 @@ a feature branch is published and its merge request is created or updated. In
 ordinary interactive work, you own bounded, interruptible waiting from
 publication. The serial controller does cheap exact-SHA waiting, then starts a
 fresh context. That context re-fetches exact evidence and diagnoses the result
-and timing. Create or reuse a
+and timing. Create or update a
 repository-actionable feedback issue only when the evidence warrants it.
 
 Serial work normally starts from a terminal snapshot. Ordinary interactive work
@@ -96,7 +96,7 @@ thresholds:
   `Preferred target: missed`. Also report `Hard limit: passed`.
 - If it exceeds the hard limit, report `Preferred target: missed` and `Hard
   limit: exceeded`. It is a current-change defect even if GitLab reports
-  success. Create or reuse a deduplicated repository feedback issue. Never
+  success. Create or update a deduplicated repository feedback issue. Never
   route it to the current MR.
 
 If no executed terminal job has a numeric `duration`, the budget result is
@@ -110,8 +110,6 @@ projects/$GITLAB_PROJECT_ID/merge_requests/<iid>/pipelines?per_page=100
 projects/$GITLAB_PROJECT_ID/pipelines/<pipeline-id>
 projects/$GITLAB_PROJECT_ID/pipelines/<pipeline-id>/jobs?include_retried=true&per_page=100
 projects/$GITLAB_PROJECT_ID/jobs/<job-id>/trace
-projects/$GITLAB_PROJECT_ID/issues?state=opened&search=<stable-marker>
-projects/$GITLAB_PROJECT_ID/issues
 ```
 
 From the MR pipeline list, first select only pipelines whose SHA exactly
@@ -183,7 +181,7 @@ Choose exactly one feedback path. It covers the whole concrete
 repository-actionable defect or remaining optimization. Use one path. Do not
 split it. Keep it whole:
 
-- A failure from repository-owned current-source evidence creates or reuses one
+- A failure from repository-owned current-source evidence creates or updates one
   ordinary issue. So does a hard-limit breach, root/template mismatch, or
   evidenced safe optimization. The later serial loop selects it as normal work
   in a fresh workflow and branch. Never modify the MR under review.
@@ -192,13 +190,11 @@ split it. Keep it whole:
   suspicion. These are not loop-ready repository work. Report `No pipeline
   feedback issue required`.
 
-For deferred feedback, build a stable problem marker. Keep it stable:
+For deferred feedback, build one stable problem marker on one line. Do not
+change its fields or values when you update the issue:
 
 ```text
-<!-- agent-pipeline-feedback
-project_id: <numeric-project-id>
-fingerprint: <normalized-category>|<stable-scope>|<stable-summary>
--->
+<!-- agent-pipeline-feedback project_id=<numeric-project-id> fingerprint=<normalized-category>|<stable-scope>|<stable-summary> -->
 ```
 
 Normalize category and stable scope from repository-owned concepts. Use a
@@ -207,16 +203,36 @@ fingerprint. Do not put pipeline ID, job ID, timestamps, or other run-specific
 identity there. Keep observed MR/source/pipeline/job evidence outside the
 marker in the issue body.
 
-Before writing, search open GitLab issues for the stable marker. Compare exact
-marker text. Reuse an exact open match. If none exists, complete the required
-submission-identity and approval-policy audits. Then create one GitLab Bug
-template ordinary issue through numeric `projects/$GITLAB_PROJECT_ID/issues`.
-Keep the body concise. State the problem and impact. State the requested
-outcome and validation or acceptance criteria. Include only run evidence needed
-to act. State each fact once. Include the marker. Use the same contract for an
-unfiled fallback. This is not an `agent-mr-remediation` issue. A later serial
-worker uses its normal issue branch. The feedback remains valid after observed
-MR or SHA changes.
+Before writing, complete the required identity and approval-policy checks.
+Build one short GitLab Bug issue from plain text fields. State the problem,
+impact, requested outcome, and checks that anyone can repeat. Use one
+`--evidence` per needed item of run proof. State each fact once. Pass the stable
+marker through `--marker`. Do not copy it into evidence. Use one `--label` per
+verified label.
+
+Use `uv run agent-work issue publish`. Do not call a GitLab issue create or
+update endpoint. First run the full command without `--apply`. This dry run
+looks in the set numeric project for the exact marker. It says if it would
+create or update. Its human or JSON result must show the configured numeric
+project, exact title, exact labels, exact body, exact top-level `marker`, and
+action `would-create` or `would-update`. Every preview must show
+`selected_iid`. It is `null` or `None` for create. It is the positive IID of
+the sole open exact-marker match for update. Check the body contains the exact
+marker. Then run the same command with `--apply`. If `.envrc` supplies
+`GITLAB_TOKEN`, run both commands through `direnv exec .` to load the set auth
+route. Never print or inspect token values.
+
+The command needs `--title`, `--problem`, `--outcome`, one or more
+`--acceptance` and `--label` values, and `--marker`. It may take `--impact` and
+one or more `--evidence` values. It writes real Markdown line breaks. It rejects
+escaped or encoded line breaks. With no exact marker match, it creates an
+issue. With one match, it updates that issue. With more than one, it stops.
+After a write, its trusted read-back must check the set project, positive IID,
+exact title, exact body, and exact labels.
+
+Use the same contract for an unfiled fallback. This is not an
+`agent-mr-remediation` issue. A later serial worker uses its normal issue
+branch. The feedback remains valid after observed MR or SHA changes.
 
 If search or creation fails, do not claim persistence. Return `unfiled` with
 the non-secret error. Include a complete loop-ready fallback. Give a proposed
@@ -243,7 +259,7 @@ Hard limit: passed | exceeded | needs verification
 Optimization assessment: improvement available | no evidenced improvement | needs verification | not applicable
 Dominant evidence: <job, queue, bootstrap, cache, or artifact evidence>
 Baseline comparison: <pipeline ID, signed seconds and percentage, or unavailable>
-Feedback: created <URL> | reused <URL> | unfiled <error and loop-ready fallback> | No issue required
+Feedback: created <URL> | updated <URL> | unfiled <error and loop-ready fallback> | No issue required
 Limitations and next action: <explicit>
 ```
 
@@ -261,7 +277,7 @@ Reconciliation: nonterminal
 Pipeline health: needs verification
 Reason: wait deadline reached | human action required | stale source | API failure | unknown status
 Last observation: <exact identity, status, URL, and incomplete elapsed>
-Feedback: <created/reused/unfiled deferred work or No issue required>
+Feedback: <created/updated/unfiled deferred work or No issue required>
 Later action: start one new complete reconciliation invocation for MR <iid> and source SHA <sha>
 ```
 

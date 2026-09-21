@@ -5,7 +5,7 @@ summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -97,6 +97,32 @@ the script or document a standards change.
 
 For the exact generated-project contract and the distinction between the
 template and its generated output, see the [template reference](../reference/template-contract.md#rendering-rules).
+
+## Publish a follow-up issue
+
+When validation finds separate work, preview a structured issue before
+changing GitLab:
+
+```bash
+uv run agent-work issue publish \
+  --title "Keep generated validation current" \
+  --problem "The generated validation contract no longer matches the template." \
+  --outcome "Generated projects use the current validation contract." \
+  --acceptance "The generated validation checks pass." \
+  --acceptance "The template contract describes the checks." \
+  --label Bug \
+  --marker '<!-- agent-template-validation-contract:v1 -->'
+```
+
+Review the body and reported action. Add `--apply` to run it. The command
+creates an issue when the marker has no open match. It updates the sole open
+exact match.
+Keep the marker unchanged on later runs. After a write, the command reads the
+issue back. It checks the project, IID, opened state, title, body, labels, and
+URL identity.
+
+See the [issue publication reference](../reference/serial-gitlab-agent-loop.md#issue-publish)
+for all options and checks.
 
 ## Publish the verified branch for review.
 
