@@ -397,9 +397,20 @@ preflight. Get one user approval for each remote-touching command.
    be safely relabeled, described, or verified, return `needs_human`; never
    create a duplicate MR. A Draft: handoff is never approval to merge.
 
-If `git push` or merge-request creation fails, stop and report the non-secret
-error and required next action. The failure blocks the work; do not call local
-edits or a local commit complete.
+If `git push` or merge-request creation fails, diagnose the non-secret error
+first. Then take one bounded safeguard-preserving alternative before returning
+a blocker. For example, recover an existing MR through its authoritative
+numeric-project read-back. Or retry a service-confirmed transient API
+inconsistency. Do not retry blindly. Keep credential, target, branch, approval,
+merge, and read-back gates unchanged. Return `needs_human` without publication
+only when no safe validated diff can be produced. It may also apply when
+required authority is absent, exact targets cannot be established, or policy
+forbids the next action. Do not call local edits or a local commit complete
+before a verified handoff.
+
+Record the error. Name the alternative. Check its result. Then continue or
+return the blocker.
+Keep the same branch. Keep the same project. Keep the read-back.
 
 4. **Report** to the user: the `web_url` from the API response (or the
    existing-MR lookup), the current local commit hash, and a one-line summary.

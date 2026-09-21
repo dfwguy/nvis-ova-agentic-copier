@@ -53,9 +53,14 @@ Do not ask for any other count. Do not work one out. This ban covers `widest-row
 `retained-object`, `current-use`, `fresh-handle`, `per-owner`, `direct-child`,
 `descendant`, `topology`, and all other derived capacity. A capacity stop needs
 an actual report from the active frontend or runtime. Stop only when that report
-shows global capacity below the selected requirement. Also stop if an actual
-delegation refusal cannot be resolved safely. Stop if an actual tool refusal
-cannot be resolved safely.
+shows global capacity below the selected requirement. After an actual delegation
+or tool refusal, diagnose it. First use a verified reuse plan when it preserves
+safeguards. Otherwise, use a fresh workflow session when it preserves
+safeguards. Do not infer capacity from either plan. Stop only when the active
+runtime cannot safely execute either plan.
+
+Record the refusal. Name the plan. Check its result. Then continue or hand off.
+Keep the scope fixed. Keep authority clear. Keep the target exact.
 
 The coding topology is Main → Architect → Red, Diátaxis Writer, and conditional
 Policy Writer. Next comes Green → Judge → Non-functional Reviewer and the
@@ -157,9 +162,14 @@ Green.
 Each correction cycle records its ID. It records finding fingerprints and
 classifications. It also records changed scope, checks, and reruns. It records
 finding disposition and the continuation or termination reason. Continue only with
-material progress. Stop for a repeated or reopened finding, unchanged evidence,
-or no approved-scope correction. Also stop for scope expansion or a
-human-judgment blocker.
+material progress. Diagnose recoverable command or API failures. Do the same
+for retained-work recovery and findings with approved-scope corrections. Take
+one bounded safeguard-preserving alternative. Stop for a repeated or reopened
+finding, unchanged evidence, or no approved-scope correction. Also stop for
+scope expansion or a human-judgment blocker.
+
+Record the failure. Name the alternative. Check its result. Then continue.
+Keep the evidence. Keep the scope. Keep the outcome clear.
 
 Quality Judge focused-rerun evidence has two parts. First, list prior complete
 receipt sections still supported unchanged. Then list findings reviewed fresh.
@@ -204,13 +214,19 @@ needs human judgment. So do conflicting valid requirements. Acceptance
 controversy needs human judgment. A project-owned value change needs human
 judgment. Scope expansion needs human judgment.
 
-If progress stops or a person must choose, ask Finalizer for a draft-safety
+When a terminal instruction requires progress, keep working while safe
+authorized work remains. Continue through implementation, correction,
+publication, and post-publication reconciliation. Use a normal MR for resolved
+findings. If a real human choice remains, ask Finalizer for a draft-safety
 verdict on the mechanically safe diff. Only a safe, validated, authority-clear
-verdict may support a `Draft:` MR. That MR states the open choice. It states the
-requested action. It states the impact and validation. A draft-safety verdict never grants merge. Unsafe or unvalidated
-work returns `needs_human`. So does ambiguous publication authority. A clean
-normal approval goes to
-`$git-flow`.
+verdict may support a `Draft:` MR. That MR states the open choice, requested
+action, impact, and validation. A draft-safety verdict never grants merge.
+Return `needs_human` without publication only when no safe validated diff
+exists. It may also apply when required authority is absent, exact targets
+cannot be established, or policy forbids the next action. A clean normal
+approval goes to `$git-flow`.
+
+Keep the handoff clear. State the next action. Keep the audit detail durable.
 
 ## When to Route Here
 
@@ -340,19 +356,26 @@ classifications. It records changed paths or scope. It records checks before and
     project-owned value change and scope
     expansion.
 
-    If progress stops or a person must choose, ask Finalizer for a Draft safety
-    verdict on the mechanically safe diff. Only a safe content/language and
-    authority verdict may publish a `Draft:` MR. State the human decision,
-    requested action, impact, and validation in brief. Keep detailed findings,
-    receipts, and the correction-cycle ledger
-    in the durable audit.
-
+    A terminal instruction requires autonomous work while safe authorized work
+    remains. Continue through implementation, correction, publication, and
+    post-publication reconciliation. Diagnose recoverable command, API,
+    retained-work, review, or delegation failures. Take one bounded
+    safeguard-preserving alternative. After an actual capacity or delegation
+    refusal, first use a verified reuse plan when possible. Otherwise, use a
+    fresh workflow session when possible. Never derive topology counts.
     Use Draft only while a real human choice stays open. If no such choice
-    remains and an in-scope fix exists, fix it and publish a normal MR. A
-    draft-safety verdict never grants merge. Unsafe or unvalidated diffs return
-    `needs_human`. So does ambiguous publication authority.
-    Documentation-writer correction uses this same evidence-based convergence
-    policy.
+    remains and an in-scope fix exists, fix it and publish a normal MR. Ask
+    Finalizer for a Draft safety verdict on a mechanically safe diff. Only a
+    safe content/language and authority verdict may publish a `Draft:` MR. State
+    the human decision, requested action, impact, and validation in brief. Keep
+    detailed findings, receipts, and the correction-cycle ledger in the durable
+    audit. A draft-safety verdict never grants merge. Return `needs_human`
+    without publication only when no safe validated diff exists. It may also
+    apply when required authority is absent, exact targets cannot be
+    established, or policy forbids the next action. Documentation-writer
+    correction uses this same evidence-based convergence policy.
+
+    Record the result. State the next action. Keep the audit detail durable.
 
 ## Output Format
 
