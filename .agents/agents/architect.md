@@ -94,6 +94,45 @@ Each Phase-5 reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
 not be waived.
 
+The first Quality Judge review is complete. It covers the exact staged tree
+OID. Green cannot self-certify quality. Architect may allow a focused rerun
+after a correction. The handoff must include these items:
+
+- prior and current immutable staged tree OIDs.
+- the prior complete Quality Judge receipt.
+- stable finding fingerprints.
+- the correction ledger.
+- exact changed paths.
+
+Reject missing or inconsistent provenance. Quality Judge sends Green a
+non-code provenance-rejection receipt. Green sends it to Architect. Do not
+route it to Implementer. Focused scope rechecks each
+addressed finding fresh. It rechecks each changed production file fresh. It
+checks relevant callers and consumers. It checks relevant shared helpers and
+contracts. Widen to a complete review when any item below applies:
+
+- public interface.
+- schema.
+- shared constant.
+- finite state machine.
+- dependency inversion.
+- security or authority boundary.
+- cross-module invariant.
+- scope that the evidence does not prove safe.
+
+The coordinating controller records elapsed seconds. It does so for each
+Quality Judge delegation. Keep this data outside the agent report. The
+controller also records compact, token-neutral scope metadata. Record:
+
+- the mode.
+- prior and current tree identities.
+- exact changed paths.
+- fresh scope.
+- the widening decision and reason.
+
+Agents do not narrate elapsed time. Use this data to compare review cost. It
+covers complete and focused review. It does not add timing persistence.
+
 Finalizer receives the final diff. It receives Judge evidence. It also receives
 all Phase-2 receipts. It receives the current license receipt. It receives
 applicable policy evidence and the repair ledger. It returns normal approval or a mechanically safe
@@ -121,6 +160,14 @@ finding disposition and the continuation or termination reason. Continue only wi
 material progress. Stop for a repeated or reopened finding, unchanged evidence,
 or no approved-scope correction. Also stop for scope expansion or a
 human-judgment blocker.
+
+Quality Judge focused-rerun evidence has two parts. First, list prior complete
+receipt sections still supported unchanged. Then list findings reviewed fresh.
+Also list paths and related scope reviewed fresh. Corrections remain staged-tree
+changes. They do not create intermediate commits. In a normal interactive
+flow, Finalizer owns one verified commit. It first accepts the final exact tree
+and all receipts. In a serial-worker flow, Finalizer never commits. The trusted
+runner keeps its normal controller commit path.
 
 ### Documentation and agent-policy workflow
 
@@ -277,6 +324,15 @@ classifications. It records changed paths or scope. It records checks before and
    identical closed finding. Stop for repetition, unchanged evidence, no
    approved-scope repair, scope expansion, or a human-judgment blocker. Do not
    waive or relabel a finding to manufacture progress.
+
+   Apply the Quality Judge rules above. Its first receipt covers the complete
+   exact staged tree. Reject bad provenance. A focused rerun must meet every
+   listed input and fresh-scope rule. Apply every widening trigger. Its receipt
+   separates unchanged-supported sections from fresh scope. The coordinating
+   controller records elapsed seconds and compact, token-neutral scope metadata.
+   Agents do not narrate this data. Do not persist new timing data. Green never
+   self-certifies. Do not create intermediate commits. Apply the commit boundary
+   above.
 10. **Choose the handoff** — A finding is resolvable only when it names the owner
     or domain, path or scope, evidence, requested outcome, and approved design
     or authority correction. Human judgment is required for policy ambiguity.

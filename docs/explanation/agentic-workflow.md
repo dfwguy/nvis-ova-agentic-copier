@@ -383,6 +383,39 @@ Rerun a reviewer only when its finding was fixed. Also rerun one whose domain
 or evidence changed. Rerun License Checker when maintained files in its checked
 scope change. Run the full test gate again only when behavior or tests change.
 
+The first `$judge-quality` review must be complete and independent. It reviews
+the exact staged tree. Its receipt names that tree OID. Green's own check cannot
+replace it.
+
+A later rerun may focus only when Green supplies all of this proof:
+
+- the prior and current staged tree OIDs;
+- the prior complete `$judge-quality` receipt;
+- stable fingerprints for the addressed findings;
+- the correction ledger; and
+- the exact paths changed between the trees.
+
+Missing or conflicting proof returns a non-code `Overall: Provenance Reject`
+receipt. Quality Judge sends it to Green, which routes it to Architect. The
+workflow does not silently fall back to a complete review.
+
+A focused rerun checks each addressed finding and changed production file
+again. It also checks the relevant callers, consumers, shared helpers, and
+contracts. It widens to a complete review for changes to public interfaces,
+schemas, shared constants, finite state machines, dependency inversion,
+security or authority boundaries, or cross-module invariants. It also widens
+when the proof does not show that focused scope is safe.
+
+The receipt marks prior sections that still have support. It also marks the
+scope checked again against the current tree. The reviewer uses staged tree
+identities, not intermediate commits. In normal interactive work, Finalizer
+owns one verified commit. In serial-worker work, Finalizer never commits. The
+trusted runner keeps its normal controller commit path.
+
+The controller, not the reviewer, measures review time. The receipt starts with
+compact, token-neutral scope metadata. A later cost study can compare complete
+and focused reviews without adding a timing story to the review.
+
 ### Finalization and draft safety
 
 Finalizer needs a current license receipt. It must approve the final in-scope

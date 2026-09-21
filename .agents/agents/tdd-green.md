@@ -75,7 +75,9 @@ not add untested functionality.
    in `AGENTS.md` at once when slots allow. Include `$license-checker`. Give
    each its related diff. Give each its instructions. Give each current
    test/JUnit evidence. Reviewers are read-only. Wait for every result. Wait
-   even when one rejects.
+   even when one rejects. The first Quality Judge review must be independent.
+   It must be complete. It covers the exact staged tree. Green cannot
+   self-certify it.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an
@@ -95,6 +97,34 @@ not add untested functionality.
    tests. Do the same if tests change. Require the full installed hook from the
    validation session. Each coding candidate needs it. Before changing a
    test, reconfirm that it fails against pre-fix behavior.
+   Architect must authorize a focused Quality Judge rerun. Green must supply:
+
+   - the prior and current immutable staged tree OIDs.
+   - the prior complete Quality Judge receipt.
+   - stable finding fingerprints.
+   - the correction ledger.
+   - exact changed paths.
+
+   Reject missing provenance. Reject inconsistent provenance. Quality Judge
+   returns its non-code provenance-rejection receipt to Green. Green sends it
+   to Architect. Do not treat it as a code finding. Do not route it to
+   Implementer. Review each addressed finding fresh. Review each changed
+   production file fresh. Also review relevant callers and consumers. Review
+   relevant shared helpers and contracts.
+   Require a complete review when any item below applies:
+
+   - public interface.
+   - schema.
+   - shared constant.
+   - finite state machine.
+   - dependency inversion.
+   - security or authority boundary.
+   - cross-module invariant.
+   - scope that the evidence does not prove safe.
+
+   The focused receipt lists prior sections. Mark those still supported
+   unchanged. It also lists scope reviewed fresh. The prior sections come from
+   the complete receipt.
 7. **Return a cycle ledger to Architect.** Report Red/Green evidence. Report
    changed paths and documentation status. Report each judge verdict, repairs,
    unresolved findings, and current JUnit evidence. For an extra Architect-authorized
@@ -109,6 +139,22 @@ not add untested functionality.
    related evidence. Stop for no approved-scope repair. Stop for scope
    expansion or genuine controversy.
    Never waive or relabel findings to manufacture progress.
+   The coordinating controller records elapsed seconds. It does so for each
+   Quality Judge delegation. Keep this data outside the reviewer report. Record
+   only compact, token-neutral scope metadata with it. Record:
+
+   - the mode.
+   - prior and current tree identities.
+   - exact changed paths.
+   - fresh scope.
+   - the widening decision and reason.
+
+   Do not ask the reviewer to narrate elapsed time. Do not implement timing
+   persistence. Do not create an intermediate commit. This applies during each
+   correction. In a normal interactive flow, Finalizer owns the one verified
+   commit. It first verifies the final exact staged tree and receipts. In a
+   serial-worker flow, Finalizer never commits. The trusted runner keeps its
+   normal controller commit path.
 
 ## Constraints
 
