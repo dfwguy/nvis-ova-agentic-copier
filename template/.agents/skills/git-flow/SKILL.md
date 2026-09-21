@@ -293,10 +293,13 @@ preflight. Get one user approval for each remote-touching command.
      outcome, and validation; state each fact once
    - `target_branch`: `main` (or the default branch returned by the GitLab target check)
 
-   Use the executable publication boundary after the push. It renders real
-   newlines from scalar fields and performs the numeric-project selection,
-   create-or-update, and exact authoritative read-back. Do not construct a
-   multiline shell variable or call GitLab's create/update endpoint directly.
+   After the push, use the publisher in the active feature worktree. Set
+   `active_worktree="$(git rev-parse --show-toplevel)"`. Then run the
+   checkout-owned publisher boundary at
+   `"$active_worktree/bin/agent-work-from-checkout"`. It renders real
+   newlines from scalar fields. It selects the numeric project, creates or
+   updates the MR, and reads it back exactly. Do not construct a multiline
+   shell variable or call GitLab's create/update endpoint directly.
    For ordinary issue-backed work, pass the already validated positive issue
    IID with `--issue-iid`. The boundary renders exactly one `Closes #IID` and
    read-back verifies that exact issue in the configured project. Never derive
@@ -306,13 +309,14 @@ preflight. Get one user approval for each remote-touching command.
    source_branch="$(git rev-parse --abbrev-ref HEAD)"
    target_branch="main"
    title="$(git log -1 --format=%s)"
+   active_worktree="$(git rev-parse --show-toplevel)"
    issue_iid="<validated-positive-issue-IID>"
    [[ "$issue_iid" =~ ^[1-9][0-9]*$ ]] || {
      printf '%s\n' "A validated positive issue IID is required" >&2
      exit 1
    }
    git push --set-upstream origin HEAD
-   uv run agent-work merge-request publish \
+   "$active_worktree/bin/agent-work-from-checkout" merge-request publish \
      --source-branch "$source_branch" --target-branch "$target_branch" --title "$title" \
      --problem "Review handoffs were hard to scan." \
      --impact "Reviewers could miss the action needed to move work forward." \
@@ -364,9 +368,12 @@ preflight. Get one user approval for each remote-touching command.
    fi
    ```
    GitLab updates the existing MR with new commits. To replace its title or
-   description, use `uv run agent-work merge-request publish` with scalar Problem,
-   Outcome, and Validation fields after this push; it updates exactly that
-   source branch and verifies the returned metadata. For issue-backed updates,
+   description, set `active_worktree="$(git rev-parse --show-toplevel)"` in
+   this active feature worktree. Then use
+   `"$active_worktree/bin/agent-work-from-checkout" merge-request publish`
+   with scalar Problem, Outcome, and Validation fields after this push. It
+   updates that source branch and verifies the returned metadata. For
+   issue-backed updates,
    pass the validated `--issue-iid`; free-form fields and `--tracking` must
    contain no GitLab closing pattern.
    For normal approval,

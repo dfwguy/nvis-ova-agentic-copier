@@ -19,7 +19,7 @@ notice = [
 ]
 hash_suffixes = [".py", ".sh", ".toml", ".yaml", ".yml", ".service", ".timer"]
 markdown_suffixes = [".md", ".mdc"]
-hash_names = [".gitignore", "Dockerfile", "{{ _copier_conf.answers_file }}"]
+hash_names = [".gitignore", "Dockerfile", "agent-work-from-checkout", "{{ _copier_conf.answers_file }}"]
 annotation_suffixes = [".json", ".lock"]
 annotations_file = ".license-annotations.toml"
 exclude_paths = [

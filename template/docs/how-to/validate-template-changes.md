@@ -5,7 +5,7 @@ summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -101,10 +101,13 @@ template and its generated output, see the [template reference](../reference/tem
 ## Publish the verified branch for review.
 
 After the checks pass, push the feature branch. Then preview the merge-request
-description before changing GitLab:
+description before changing GitLab. Git-flow resolves the active worktree root
+and calls its publisher wrapper. This uses the checkout's `agent-work`, rather
+than selecting an ambient command:
 
 ```bash
-uv run agent-work merge-request publish \
+active_worktree="$(git rev-parse --show-toplevel)"
+"$active_worktree/bin/agent-work-from-checkout" merge-request publish \
   --source-branch "$(git branch --show-current)" \
   --target-branch main \
   --title "Add concise merge-request publication" \
