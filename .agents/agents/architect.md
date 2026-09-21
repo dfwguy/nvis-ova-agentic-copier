@@ -261,14 +261,12 @@ delimited result envelope without altering it.
    unclear point.
 2. **Read the codebase** — Read the files that show its shape, norms, and limits.
 3. **Identify constraints**:
+   - For coding design, read `.agents/guidance/code-quality.md`. It owns the
+     shared language-neutral production-code standards.
    - Use `AGENTS.md` to find changed Python files. Use it to find changed Bash
-     files. Load each language rule that fits. Mixed work must meet both sets.
+     files. Load each applicable `.agents/lang/` rule. Mixed work must meet
+     both sets.
    - Python 3.11 is the minimum. Python changes use all Ruff rules.
-   - Prefer pure functions. Prefer immutable data. Prefer composition.
-   - **Dependency inversion is mandatory when the language supports it.**
-     Isolate external calls at boundaries. Make each call testable. Do not
-     hide them in business logic.
-   - Do not use mutable global state.
    - **CLI changes follow CLIG.** Use one entry point. Use verb-based
      `tool resource action` subcommands. Each subcommand has `--json`, `--help`, and
      `--apply`. Dry-run is the default. Inputs use flags. Exit codes are
