@@ -16,27 +16,24 @@ metadata:
 
 # Implementer
 
-Use this portable workflow skill for the implementer phase. Read and follow
-[the role instructions](../../agents/tdd-green.md) before acting. That file is
-role-reference material. This directory is the shared skill entry point for
-Claude Code, Codex, and Pi.
+Use this portable skill for implementation. Read and follow
+[the role instructions](../../agents/tdd-green.md) before acting. That file
+defines the role. This skill works with Claude Code, Codex, and Pi.
 Green owns the worktree. Reviewers do not edit it.
 
 ## Model selection
 
-The live Architect delegates this phase after each applicable `phase-2
-receipt/N/A`. It waits while Green owns all later worktree mutations and review
-feedback. Use this skill's `metadata.model-tier`. The Architect router picks
-the mapping.
+The live Architect delegates this work after all preparation receipts or N/A
+records arrive. It waits while Green owns all later worktree edits and review
+feedback. Use this skill's `metadata.model-tier`. Architect maps it to a model.
 
-Green stages and captures the Phase-3 candidate tree before it delegates the
-serial Phase-4 Judge. The Judge's validation-session receipt is needed for the
-Phase-5 review fanout. That receipt has the unchanged tree OID, immutable
-supported-version JUnit snapshots, SHA-256 digests, counts, and its
+Green stages the implementation candidate tree. It records the tree before it
+delegates the serial validation Judge. Specialist review needs the Judge's
+validation-session receipt. That receipt has the unchanged tree OID, fixed
+version JUnit snapshots, SHA-256 digests, counts, and the
 `$nonfunctional-review` child receipt.
 
-After any candidate-tree change, Green stages a new tree. It gets a fresh
-Phase-4 Judge receipt before dependent review or finalization. Each coding
-candidate needs the full hook. Green's fast formatter, lint, and type commands
-repair. The validation session owns one expensive tox/full-suite verification.
-It runs one hook.
+After a candidate-tree change, Green stages a new tree. It gets a fresh Judge
+receipt before review or finalization. Each coding candidate needs the full
+hook. Green uses fast format, lint, and type commands for repair. The validation
+session owns one costly tox or full-suite check. It runs one hook.

@@ -552,8 +552,8 @@ Use this note to review the shown work.
 | Approved design | Architect gives it to Red and the Diátaxis Writer concurrently. The conditional Agent-policy Writer joins when portable agent policy is in scope. |
 | Writer scope | Red changes only `tests/`. The Diátaxis Writer changes only `docs/`. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
 | Before Green | Architect waits for every applicable receipt, or the exact not-applicable record. |
-| Green | Aligns the documentation draft with the final interface. It never changes agent-policy paths or their mirrors. It then runs the serial Phase-4 TDD Judge against its staged tree. |
-| Before Phase-5 review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent Phase-5 reviewer, including `$license-checker`, then reviews the same stable post-Green diff. |
+| Green | Aligns the documentation draft with the final interface. It never changes agent-policy paths or their mirrors. It then runs the serial validation TDD Judge against its staged tree. |
+| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same stable post-Green diff. |
 | Findings | Green combines all initial findings. |
 | Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
 | Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |
@@ -749,6 +749,19 @@ expected ledger change.
 
 ### Live-agent capacity launch contract
 
+This section describes the serial worker's existing protocol and diagnostic
+fields. Its topology, retained-object, owner-headroom, and current-capacity
+values remain part of that runtime contract. Every serial wrapper invocation
+uses this strict preflight. This includes a terminal invocation, normal serial
+work, a retained-worktree retry, and the systemd controller. Missing, stale,
+conflicting, or low evidence returns `needs_human` before Architect starts.
+
+These fields do not define the admission check run by an Architect that has
+already been delegated. That check uses the fixed global requirement for its
+lane and only a trusted report's available-capacity fact. This remains true
+after the wrapper passes preflight. Architect does not derive another gate from
+the serial diagnostic fields.
+
 Check capacity at the start of each new workflow-owning worker. Check it before
 nested delegation or retained-worktree changes. Use live data from this run.
 Do not use stored data. Admit the run only when the data is sound and the
@@ -764,7 +777,7 @@ human help when the plan will not fit. Save the proof with the result.
 | Valid source | Trusted frontend or runtime session metadata for that launch. |
 | Invalid source | Repository data, issue and task text, user or provider setup, service environment values, and retained ledger or audit values are not capacity evidence. |
 | Admission record | Record the exact applicable manifest topology and its widest concurrent row. |
-| Coding topology | Main owns Architect. Architect owns the Phase-2 writers, Green, and Finalizer. Green owns Judge and each applicable Phase-5 reviewer. Judge owns Non-functional Reviewer. |
+| Coding topology | Main owns Architect. Architect owns the preparation writers, Green, and Finalizer. Green owns Judge and each applicable specialist reviewer. Judge owns Non-functional Reviewer. |
 | Conditional role | Reduce the topology only when its condition is demonstrably false. |
 
 The check reports one coherent set of values:
@@ -783,8 +796,8 @@ The check reports one coherent set of values:
 
 | Capacity and admission | Contract |
 | --- | --- |
-| Phase-2 row | With the conditional Agent-policy Writer, the widest Phase-2 row has five live slots: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer. |
-| Required coding total | The nine-reviewer Phase-5 row is wider. Fully applicable coding still needs 12. |
+| Preparation row | With the conditional Agent-policy Writer, the widest preparation row has five live slots: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer. |
+| Required coding total | The nine-reviewer specialist-review row is wider. Fully applicable coding still needs 12. |
 | Fresh handles | Architect and Green are fresh for each issue unless the verified handle plan shows safe reuse. |
 | Fresh evidence | Evidence must describe the active worker session. Earlier-call evidence is stale, even for the same issue, retained worktree, controller process, service, or frontend setup. |
 | Conflicting evidence | Conflicting current observations are inconsistent. Available total and shortfall become `unknown`. |

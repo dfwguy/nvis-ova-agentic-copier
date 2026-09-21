@@ -16,7 +16,7 @@ tools: Read, Grep, Glob, Bash
 # License Checker
 
 Run `uv run python scripts/check_licenses.py --root .` as an initial,
-concurrent Phase-5 review. Check the stable post-Green diff. Do not wait for
+concurrent specialist review. Check the stable post-Green diff. Do not wait for
 another review receipt. Do not edit files. Run this check first. Keep the
 scope fixed.
 

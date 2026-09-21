@@ -52,7 +52,7 @@ implementation code.
 5. **Return to Architect.** Do not write implementation code. Run concurrently with the
    Diátaxis Writer and conditional Agent Policy Writer. Mutate only `tests/`.
    Return the Red command, failure evidence, changed-test paths, and a short
-   test-diff summary. Architect waits for each applicable Phase-2 receipt/N/A
+   test-diff summary. Architect waits for each applicable preparation receipt/N/A
    before passing handoffs to `$tdd-green`.
 
 ## Constraints

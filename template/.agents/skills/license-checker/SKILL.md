@@ -19,7 +19,7 @@ metadata:
 Read and follow [the role instructions](../../agents/license-checker.md)
 before you run the checker. That file is role-reference material. This
 directory is the shared skill entry point for Claude Code, Codex, and Pi. It
-is an initial, concurrent Phase-5 review:
+is an initial, concurrent specialist review:
 
 ```bash
 uv run python scripts/check_licenses.py --root .

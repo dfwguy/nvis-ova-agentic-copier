@@ -25,16 +25,16 @@ MR. Publication hands work to a human reviewer. Waiting for a merge is not
 part of the active run. It does not block unrelated work. **There is no
 direct-to-`main` path.** Setup protects `main`. GitLab rejects pushes to it and
 requires approval to merge. Even a one-line typo fix needs an MR. For coding
-work, Phase 6 Finalizer owns the verified local commit. This main-thread skill
+work, Finalizer owns the verified local commit. This main-thread skill
 owns only the push and MR update. Content or trivial work keeps its normal
 main-thread commit. **Do not spawn a subagent for the main-thread publication
 steps below.** They are short, local-only, or one remote command.
 
-For coding work, Phase-6 Finalizer may use `git commit --no-verify`. First, it
+For coding work, Finalizer may use `git commit --no-verify`. First, it
 must mechanically match the staged tree and supported-version JUnit
-digests/counts to the Phase-4 Judge receipt. This avoids rerunning the recorded
+digests/counts to the validation Judge receipt. This avoids rerunning the recorded
 hook. The serial runner still uses ordinary `git commit -m`. It has no Judge
-identity shortcut. Phase-8 post-push pipeline observation is another defense.
+identity shortcut. Pipeline review after push is another defense.
 It never replaces Judge.
 
 **A readiness or policy audit is not publication permission.** A Developer may
