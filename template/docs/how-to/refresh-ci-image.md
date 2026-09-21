@@ -37,7 +37,7 @@ and `uv.lock`. It does this before root validation. Its tag is
 `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`.
 
 Eight single root jobs—`ruff-check`, `ruff-format`, `yamllint`, `kingfisher`,
-`type-check`, `license-check`, `readability-check`, and `shellcheck`—and four
+`type-check`, `license-check`, `readability-check`, and `shellcheck`—and six
 parallel pytest shards for each Python version wait for that candidate and run
 in it. The image has the Python tools and locked dependencies. Most use
 `uv run --no-sync`. `readability-check` uses `uv run --locked --all-groups`.
@@ -59,15 +59,15 @@ commands or credentials in the template.
 
 ## 3. Verify the root validation jobs.
 
-Inspect the eight single root jobs and the four `pytest-py311` and four
+Inspect the eight single root jobs and the six `pytest-py311` and six
 `pytest-py314` GitLab-native parallel jobs. Each waits for the candidate and
 uses its prepared environment. None may run `apt-get`, `uv python install`,
 `uv sync`, or an install fallback.
 
 Each pytest shard uses `CI_NODE_INDEX` and `CI_NODE_TOTAL` for one deterministic,
 exhaustive suite partition. It uploads one unique JUnit report and raw coverage
-file. The small per-version aggregation job uses `needs` to wait for all four
-shards, combines exactly their four raw coverage files, enforces the 85% floor, and publishes one
+file. The small per-version aggregation job uses `needs` to wait for all six
+shards, combines exactly their six raw coverage files, enforces the 85% floor, and publishes one
 Cobertura report. Check the failed shard's JUnit report or the aggregation job's
 Cobertura report and log. Any shard or aggregation failure fails the pipeline.
 

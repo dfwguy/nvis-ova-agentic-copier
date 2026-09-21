@@ -204,8 +204,8 @@ def test_root_validation_consumes_its_pipeline_candidate_without_bootstrap(
     assert configuration["pytest-py314"]["variables"] == {
         "TEST_ENVIRONMENT": "py314",
     }
-    assert configuration["pytest-py311"]["parallel"] == 4
-    assert configuration["pytest-py314"]["parallel"] == 4
+    assert configuration["pytest-py311"]["parallel"] == 6
+    assert configuration["pytest-py314"]["parallel"] == 6
     pytest_script = "\n".join(configuration[".pytest"]["script"])
     assert 'py311) python_environment="$CI_PY311_ENVIRONMENT"' in pytest_script
     assert 'py314) python_environment="$CI_PY314_ENVIRONMENT"' in pytest_script
@@ -284,7 +284,7 @@ def test_root_pytest_job_selects_the_image_environment_at_runtime(
             "PATH": f"{fake_bin}:{environment['PATH']}",
             "TEST_ENVIRONMENT": test_environment,
             "CI_NODE_INDEX": "1",
-            "CI_NODE_TOTAL": "4",
+            "CI_NODE_TOTAL": "6",
         }
     )
 
@@ -318,7 +318,7 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
 
     for environment in ("py311", "py314"):
         pytest_job = configuration[f"pytest-{environment}"]
-        assert pytest_job["parallel"] == 4
+        assert pytest_job["parallel"] == 6
         assert pytest_job["variables"] == {"TEST_ENVIRONMENT": environment}
     assert pytest_template["artifacts"]["reports"]["junit"] == (
         "test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml"
@@ -350,8 +350,8 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
         "CI_PROJECT_DIR": str(tmp_path),
         "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
         "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
-        "CI_NODE_INDEX": "3",
-        "CI_NODE_TOTAL": "4",
+        "CI_NODE_INDEX": "6",
+        "CI_NODE_TOTAL": "6",
         "INVOCATIONS": str(invocations),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "TEST_ENVIRONMENT": "py311",
@@ -369,7 +369,7 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
     assert len(calls) == 1
     expected_import_path = os.pathsep.join((str(tmp_path), str(tmp_path / "src")))
     assert calls[0].startswith(f"{expected_import_path}|")
-    assert calls[0].split("|", maxsplit=2)[1] == ".coverage.py311-shard-3"
+    assert calls[0].split("|", maxsplit=2)[1] == ".coverage.py311-shard-6"
     assert (
         calls[0]
         .split("|", maxsplit=2)[2]
@@ -377,8 +377,8 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
     )
     assert "--cov=src/agent_work" in calls[0]
     assert "-p tests.helpers.serial_runtime_shard" in calls[0]
-    assert "--serial-runtime-shard-index=2" in calls[0]
-    assert "--serial-runtime-shard-count=4" in calls[0]
+    assert "--serial-runtime-shard-index=5" in calls[0]
+    assert "--serial-runtime-shard-count=6" in calls[0]
     assert "tests/" not in calls[0]
     assert "--ignore=" not in calls[0]
 
@@ -405,7 +405,7 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
         "path": "coverage-$TEST_ENVIRONMENT.xml",
     }
     assert coverage_template["artifacts"]["paths"] == ["coverage-$TEST_ENVIRONMENT.xml"]
-    for shard in range(1, 5):
+    for shard in range(1, 7):
         assert f'".coverage.$TEST_ENVIRONMENT-shard-{shard}"' in coverage_script
     assert (
         coverage_script.index("coverage combine")
@@ -451,20 +451,22 @@ def test_root_pytest_jobs_use_native_parallel_shards_and_coverage_aggregation(
 @pytest.mark.parametrize(
     ("test_environment", "node_index", "node_total"),
     (
-        ("unknown", "1", "4"),
-        ("py311", "0", "4"),
-        ("py311", "5", "4"),
-        ("py311", "not-a-number", "4"),
-        ("py311", "1", "3"),
+        ("unknown", "1", "6"),
+        ("py311", "0", "6"),
+        ("py311", "7", "6"),
+        ("py311", "not-a-number", "6"),
+        ("py311", "1", "4"),
         ("py311", "1", "not-a-number"),
+        ("py311", None, "6"),
+        ("py311", "1", None),
     ),
 )
 def test_root_pytest_job_rejects_invalid_node_metadata_before_uv(
     project_root: Path,
     tmp_path: Path,
     test_environment: str,
-    node_index: str,
-    node_total: str,
+    node_index: str | None,
+    node_total: str | None,
 ) -> None:
     """Untrusted environment and GitLab parallel metadata must fail closed."""
     configuration = yaml.safe_load(
@@ -481,12 +483,14 @@ def test_root_pytest_job_rejects_invalid_node_metadata_before_uv(
         "CI_PROJECT_DIR": str(tmp_path),
         "CI_PY311_ENVIRONMENT": "/opt/ci/py311",
         "CI_PY314_ENVIRONMENT": "/opt/ci/py314",
-        "CI_NODE_INDEX": node_index,
-        "CI_NODE_TOTAL": node_total,
         "OBSERVED": str(observed),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "TEST_ENVIRONMENT": test_environment,
     }
+    if node_index is not None:
+        environment["CI_NODE_INDEX"] = node_index
+    if node_total is not None:
+        environment["CI_NODE_TOTAL"] = node_total
     result = subprocess.run(
         ["bash", "-c", script],
         check=False,

@@ -59,9 +59,10 @@ This split makes two kinds of change clear. Template maintainers improve shared 
 
 The root repository also has its own CI boundary. Each merge-request and
 default-branch pipeline builds a validation image for its commit. Eight single
-validation jobs and four native pytest shards for each Python version use it.
-Each shard runs one full-suite partition. It uploads its own JUnit and raw
-coverage files. A small job for each version waits for all four shards. It
+validation jobs and six native pytest shards for each Python version use it.
+Each shard runs one deterministic, exhaustive full-suite partition. This
+six-way shape leaves execution-time margin as the suite changes. It uploads its own JUnit and raw
+coverage files. A small job for each version uses `needs` to wait for all six shards. It
 combines coverage, keeps the 85% floor, and publishes one Cobertura report.
 A shard or aggregation failure fails the pipeline.
 

@@ -43,7 +43,7 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 ```
 
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
-eight single validation jobs and four native pytest shards for each Python
+eight single validation jobs and six native pytest shards for each Python
 version extend root `.base_uv`. The image is the commit candidate
 `$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. The single jobs
 are `ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `type-check`,
@@ -55,11 +55,11 @@ do not run `apt-get`, `uv python install`, or `uv sync`. All but
 `uv run --locked --all-groups`. BuildKit uses a registry cache. Its metadata
 and image digest are pipeline evidence.
 
-Each `pytest-py311` and `pytest-py314` group has four GitLab-native parallel
+Each `pytest-py311` and `pytest-py314` group has six GitLab-native parallel
 jobs. A job uses `CI_NODE_INDEX` and `CI_NODE_TOTAL` to run one deterministic,
 exhaustive partition of the collected suite. Each uploads one unique JUnit
 report and raw coverage file. A per-version coverage job uses `needs` to wait
-for all four shards. It combines those raw coverage files. It measures only
+for all six shards. It combines exactly those six raw coverage files. It measures only
 the maintained `src/agent_work` tree. It keeps the 85% floor and publishes one
 Cobertura report. A shard or aggregation failure fails the pipeline. For a
 failure, inspect the shard JUnit report or the coverage report and job log.

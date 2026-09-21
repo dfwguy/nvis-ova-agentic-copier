@@ -373,6 +373,7 @@ def test_ci_jobs_publish_independent_reports(
     assert coverage_template["artifacts"]["paths"] == ["coverage-$TEST_ENVIRONMENT.xml"]
     assert coverage_template["artifacts"]["when"] == "always"
     for environment in ("py311", "py314"):
+        assert configuration[f"pytest-{environment}"]["parallel"] == 6
         assert configuration[f"pytest-{environment}"]["variables"] == {
             "TEST_ENVIRONMENT": environment,
         }

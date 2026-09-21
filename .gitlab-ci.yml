@@ -107,7 +107,7 @@ ruff-format:
           py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
-      if [[ ! "$CI_NODE_INDEX" =~ ^[1-4]$ ]] || [[ "$CI_NODE_TOTAL" != 4 ]]; then
+      if [[ ! "$CI_NODE_INDEX" =~ ^[1-6]$ ]] || [[ "$CI_NODE_TOTAL" != 6 ]]; then
           printf 'Invalid GitLab parallel metadata: index=%s total=%s\n' \
               "$CI_NODE_INDEX" "$CI_NODE_TOTAL" >&2
           exit 2
@@ -123,7 +123,7 @@ ruff-format:
               -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$CI_NODE_INDEX" \
           -p tests.helpers.serial_runtime_shard \
           --serial-runtime-shard-index="$shard_index" \
-          --serial-runtime-shard-count=4
+          --serial-runtime-shard-count=6
   artifacts:
     reports:
       junit: test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml
@@ -147,6 +147,8 @@ ruff-format:
               ".coverage.$TEST_ENVIRONMENT-shard-2" \
               ".coverage.$TEST_ENVIRONMENT-shard-3" \
               ".coverage.$TEST_ENVIRONMENT-shard-4" \
+              ".coverage.$TEST_ENVIRONMENT-shard-5" \
+              ".coverage.$TEST_ENVIRONMENT-shard-6" \
           || coverage_combine_status=$?
       if [ "$coverage_combine_status" -ne 0 ]; then
           exit "$coverage_combine_status"
@@ -174,13 +176,13 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
-  parallel: 4
+  parallel: 6
   variables:
     TEST_ENVIRONMENT: py311
 
 pytest-py314:
   extends: .pytest
-  parallel: 4
+  parallel: 6
   variables:
     TEST_ENVIRONMENT: py314
 
