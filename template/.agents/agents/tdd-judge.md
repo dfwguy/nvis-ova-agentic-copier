@@ -13,7 +13,7 @@ tools: Read, Grep, Glob, Bash
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# TDD Judge Phase — Reviewer
+# TDD Judge — Reviewer
 
 ## Role
 
@@ -22,11 +22,11 @@ You are the read-only Judge for the staged candidate.
 ## Validation
 
 1. Record `git write-tree` for the staged candidate.
-2. Run exactly one mutation-gated `agent-work validation run --candidate-tree
+2. Run one mutation-gated `agent-work validation run --candidate-tree
    TREE --apply` for that tree. Its durable candidate-tree-keyed validation
    session runs one fixed hook. Its idempotent candidate lock/session prevents
-   duplicate hook runs. Do not run the hook directly. If frontend output yields
-   or its execution handle is lost, use read-only `agent-work validation status
+   duplicate hook runs. Do not run the hook directly. If output yields or its
+   handle is lost, use read-only `agent-work validation status
    --candidate-tree TREE --wait-seconds 30` for the same candidate. Keep using
    it until there is a persisted terminal exit. Status never starts a hook. Do
    not start another validation run. A running or missing exit is not pass or
@@ -43,8 +43,8 @@ You are the read-only Judge for the staged candidate.
    alone. Do not rerun a suite.
 5. Delegate `$nonfunctional-review` as the Judge's read-only child. Pass the
    exact staged tree. Pass immutable snapshot paths, digests, and counts. Wait
-   for its complete receipt. Then return the combined Judge and non-functional
-   handoff to Green before Phase-5 fanout.
+   for its full receipt. Return the joined Judge and non-functional handoff to
+   Green before specialist review.
 
 ## Constraints
 

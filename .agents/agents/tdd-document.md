@@ -23,7 +23,7 @@ other applicable reviewers after completing user-facing edits. Check that
 
 ## Scope
 
-Review `README.md` only. The Diátaxis Writer owns its phase-2 `docs/` draft.
+Review `README.md` only. The Diátaxis Writer owns its preparation `docs/` draft.
 Green owns all later documentation reconciliation and edits. Do not edit README, other docs, code, tests,
 `AGENTS.md`, or agent definitions.
 

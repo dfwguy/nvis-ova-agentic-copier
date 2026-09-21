@@ -40,8 +40,8 @@ Simplify the surrounding sentences.
 Make an applicability record before delegation. Each required row needs a
 receipt. For a false conditional row, record exactly `$skill-id: not applicable
 — <reason>`. Do not load that skill. Do not spawn it. A parent remains live.
-It must stay live while its children work. Rows with the same phase number run
-concurrently.
+It must stay live while its children work. Roles in the same concurrent stage
+run together.
 
 Each lane has one fixed global live-slot requirement. Coding requires 12 live
 slots. Content requires 3. Use a trusted current report from the active
@@ -59,24 +59,24 @@ cannot be resolved safely.
 
 The coding topology is Main → Architect → Red, Diátaxis Writer, and conditional
 Policy Writer. Next comes Green → Judge → Non-functional Reviewer and the
-applicable Phase-5 reviewers. Finalizer comes last. The content topology is
+applicable specialist reviewers. Finalizer comes last. The content topology is
 Main → Architect → the current Writer or Finalizer. These topologies define
 routing only. They also define parentage. Do not use them as capacity evidence. A conditional
 role is N/A only when facts show it does not apply.
 
 ### Coding workflow
 
-| Phase | Exact skill | Contract |
+| Stage | Exact skill | Contract |
 |---|---|---|
-| 0 | `$git-flow` | Main owns feature branch and publication preflight. |
-| 1 | `$architect` | Design and live coordination. |
-| 2 | `$tdd-red`, `$diataxis-writer`, conditional `$agent-policy-writer` | Concurrent children; each returns its required receipt. |
-| 3 | `$tdd-green` | Starts only after all Phase-2 receipts/N/A; sole production/test/docs mutator. |
-| 4 | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
-| 5 | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after Phase 4. |
-| 6 | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
-| 7 | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
-| 8 | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
+| Publication setup | `$git-flow` | Main owns feature branch and publication preflight. |
+| Design | `$architect` | Design and live coordination. |
+| Preparation | `$tdd-red`, `$diataxis-writer`, conditional `$agent-policy-writer` | Concurrent children; each returns its required receipt. |
+| Implementation | `$tdd-green` | Starts only after all preparation receipts/N/A; sole production/test/docs mutator. |
+| Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
+| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
+| Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
+| Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
+| Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
 
 Red needs the approved design. Red also needs the acceptance criteria. Diátaxis Writer needs
 approved documentation boundaries. Conditional Policy Writer needs approved
@@ -90,7 +90,7 @@ tree. Terminal nonzero returns to Green. Terminal zero may start its
 Non-functional Reviewer child only when the tree is unchanged. The JUnit
 snapshots, digests, and counts must also be immutable.
 
-Each Phase-5 reviewer receives the final relevant diff and Judge evidence.
+Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
 not be waived.
 
@@ -134,7 +134,7 @@ Agents do not narrate elapsed time. Use this data to compare review cost. It
 covers complete and focused review. It does not add timing persistence.
 
 Finalizer receives the final diff. It receives Judge evidence. It also receives
-all Phase-2 receipts. It receives the current license receipt. It receives
+all preparation receipts. It receives the current license receipt. It receives
 applicable policy evidence and the repair ledger. It returns normal approval or a mechanically safe
 draft-safety verdict here.
 
@@ -147,7 +147,7 @@ decision. Reviewers do not mutate. They do not fail fast when another reviewer
 rejects.
 
 Green waits for the Judge and Non-functional Reviewer handoff. It also waits
-for every initially applicable Phase-5 receipt. Green consolidates concrete,
+for every initially applicable specialist-review receipt. Green consolidates concrete,
 resolvable findings within the approved design. Each changed coding tree reruns
 Judge and Non-functional Review. Then rerun only a reviewer whose finding,
 domain, or evidence changed. Rerun License Checker when maintained in-scope
@@ -171,14 +171,14 @@ runner keeps its normal controller commit path.
 
 ### Documentation and agent-policy workflow
 
-| Phase | Exact skill | Contract |
+| Stage | Exact skill | Contract |
 |---|---|---|
-| 0 | `$git-flow` | Main owns branch and publication preflight. |
-| 1 | `$architect` | Content/mirror design and final decision. |
-| 2 | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
-| 3 | `$documentation-finalizer` | Consolidated content, policy, mirror, and source-of-truth verdict. |
-| 4 | `$git-flow` | Main publishes after Architect accepts the finalizer. |
-| 5 | `$pipeline-performance-judge` | Main delegates after every MR update. |
+| Publication setup | `$git-flow` | Main owns branch and publication preflight. |
+| Design | `$architect` | Content/mirror design and final decision. |
+| Writing | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
+| Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, and source-of-truth verdict. |
+| Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
+| Pipeline review | `$pipeline-performance-judge` | Main delegates after every MR update. |
 
 Writer needs the approved content design and shared worktree. Its receipt lists
 edits, source-of-truth comparisons, mirrors, the documentation report, and
@@ -187,9 +187,8 @@ validation. Scope expansion returns here for coding reclassification.
 Finalizer receives that report, the final diff, and applicable Diátaxis or
 policy context. It returns one consolidated verdict here. After approval,
 `$git-flow` returns commit, push, and verified MR evidence. Pipeline Judge
-returns its independent post-publication receipt. A Writer or Finalizer
-rejection returns to Writer only for an approved-scope, materially progressive
-correction.
+returns its own post-publication receipt. A Writer or Finalizer rejection goes
+back to Writer only for an approved fix that makes real progress.
 
 Writer repairs consolidated Finalizer findings only while evidence shows
 material progress.
@@ -230,8 +229,8 @@ Do it before you delegate a documentation writer. Do it before any worktree
 mutation.
 
 A suitable task has one independently reviewable delivery outcome. That outcome
-must also be independently mergeable. It can reasonably finish all applicable workflow phases
-within the effective bounded worker budget. Evaluate behavioral capability
+must also be mergeable on its own. It can finish all needed workflow stages
+within the bounded worker budget. Evaluate behavioral capability
 boundaries. Evaluate dependency and ordering boundaries. Evaluate required workflow breadth.
 Never use line count. Never use another brittle numeric content threshold.
 
@@ -301,7 +300,7 @@ delimited result envelope without altering it.
    allowed. Then start
    `$tdd-green`. Green owns production, tests, and docs only. Send a rule fix
    through Architect to Policy Writer. Do not overlap it with later Green work.
-9. **Use evidence to converge** — Invoke the applicable finalizer after Green or
+9. **Use evidence to converge** — Call the right finalizer after Green or
    the documentation writer returns approved evidence. For coding, authorize
    finalization only after checking the Diátaxis Judge comparison verdict. It
    verifies the design across the draft. It also verifies the final implemented interface.
@@ -309,7 +308,7 @@ delimited result envelope without altering it.
    shows material progress. Green does not use a fixed correction-count policy.
 
    For code work, get Green's staged tree and the joined Judge and
-   Non-functional handoff before Phase 5 starts. Finalizer may use
+   Non-functional handoff before specialist review starts. Finalizer may use
    `git commit --no-verify` only after it proves that same staged tree. A serial
    worker never commits.
 

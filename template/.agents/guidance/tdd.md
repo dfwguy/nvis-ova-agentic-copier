@@ -9,10 +9,9 @@
 <!-- its affiliates is strictly prohibited. -->
 # Test-Driven Development
 
-This is the TDD discipline for this repo's coding workflow. It is
-language-agnostic. `AGENTS.md` defines the route. Documentation and agent-policy
-work uses separate guidance. Do not load this file just because content is
-non-trivial.
+This is the TDD discipline for coding work in this repo. It applies to all
+languages. `AGENTS.md` defines the route. Docs and agent-policy work use other
+guidance. Do not load this file for content-only work.
 
 ## Always
 
@@ -22,9 +21,9 @@ non-trivial.
 - Confirm Green (all tests passing) before you refactor.
 - Refactor only while tests remain Green
 
-## Phases and roles
+## Stages and roles
 
-Use explicit phases. Each phase has a distinct role:
+Use explicit stages. Each stage has a distinct role:
 
 - **Test Writer** — concurrently writes failing tests for the desired behavior.
   Stops when tests are confirmed Red.
@@ -32,25 +31,27 @@ Use explicit phases. Each phase has a distinct role:
   why none are needed. Exclusively mutates `docs/`.
 - **Agent Policy Writer** — when applicable, concurrently edits only approved
   root/template agent-policy paths.
-- **Implementer** — starts only after all applicable phase-2 receipts/N/A.
+- **Implementer** — starts only after all preparation receipts or N/A records.
   Writes production, tests, and docs. Reconciles drafts against final
   interfaces. Never edits agent-policy paths.
 - **Judge** — validates the full cycle. It checks meaningful tests, clean
   implementation, passing tooling, and conventions.
 
-In Phase 3, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
-`uv run ty check`. It then runs focused behavior tests. It stages the exact
-candidate and records its tree OID. These fast commands are repair tools.
-Phase 4 verifies the candidate. It owns the one expensive tox/full-suite run.
-In serial Phase 4, Judge invokes exactly one mutation-gated durable validation
-session for that staged tree. The session runs the installed hook and persists
-evidence. Judge checks and returns the unchanged tree OID plus immutable
-supported-version JUnit snapshot paths and SHA-256 digests. It also returns
-test counts and its Non-functional Reviewer child receipt. Every coding
-candidate runs the full hook. Only then may Green start concurrent Phase-5
-read-only reviews. Phase 6 Finalizer verifies that evidence. It makes the
-interactive `--no-verify` commit. Phase 7 main publishes. Phase 8 independently
-observes the exact-source pipeline.
+During implementation, Green runs `uv run ruff check --fix`, `uv run ruff
+format`, and `uv run ty check`. It then runs focused behavior tests. It stages
+the exact candidate and records its tree OID. These fast commands repair the
+candidate.
+
+Validation owns the costly tox or full-suite run. For serial work, Judge starts
+one mutation-gated durable session for the staged tree. The session runs the
+installed hook and saves its evidence. Judge returns the unchanged tree OID.
+It also returns fixed-version JUnit snapshot paths, SHA-256 digests, test
+counts, and its Non-functional Reviewer receipt. Every coding candidate runs
+the full hook. Only then may Green start specialist reviews.
+
+Finalization checks that evidence and makes the interactive `--no-verify`
+commit. Publication pushes the work. Pipeline review checks the exact source
+pipeline on its own.
 
 Policy findings return through Architect to the Agent Policy Writer. Green
 consolidates the finding but does not repair policy. Each correction gets a

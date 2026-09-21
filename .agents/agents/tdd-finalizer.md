@@ -26,7 +26,7 @@ interactive work, you may make the one verified commit below.
 Use the full list. Check each item. Keep each proof. Stop on a gap.
 
 1. Check for the Judge's current non-functional child receipt and each needed
-   Phase-5 receipt, including the current approving license receipt. Check the
+   specialist-review receipt, including the current approving license receipt. Check the
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Check the Diátaxis Writer and Judge comparison
    receipts, correction ledger, and allowed N/A records.

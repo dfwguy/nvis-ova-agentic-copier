@@ -16,18 +16,17 @@ metadata:
 
 # Non-functional Reviewer
 
-Use this portable workflow skill for the non-functional review phase. Before
-you act, read and follow [the role instructions](../../agents/nonfunctional-review.md).
-That file is role-reference material. This directory is the shared skill entry
-point for Claude Code, Codex, and Pi.
+Use this portable skill for non-functional review. Before you act, read and
+follow [the role instructions](../../agents/nonfunctional-review.md). That file
+defines the role. This skill works with Claude Code, Codex, and Pi.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router resolves its
-delegation mapping. Each frontend resolves that tier through its configured
-model mapping. Do not hard-code a provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. The live Architect router maps it to a
+model. Each frontend uses its own configured map. Do not name a provider model
+in this skill.
 
 The TDD Judge delegates this review after the validation session's one hook
 run. Use only the exact staged tree and immutable absolute JUnit snapshot
 paths, digests, and counts it provides. Return the timing receipt to the
-Judge, never to Phase 5.
+Judge, never to specialist review.

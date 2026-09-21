@@ -5,7 +5,7 @@ summary: Set live-agent capacity for a workflow lane.
 audience: practitioner
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why capacity is a workflow precondition.
@@ -26,16 +26,10 @@ related:
 
 Check capacity now.
 
-Set capacity for the widest row that runs at once in your lane. A full coding
-workflow needs **12 total live slots**. Main uses one slot. Architect uses one.
-Green uses one. Nine Phase-5 reviewers use the rest. The documentation and
-agent-policy lane needs **3 total live slots**. Count the primary thread. Count
-every resident ancestor. Do not count only newly spawned agents.
-
-Admission also needs enough retained-agent objects and fresh handles. Check the
-global retained-object ceiling. Check its current use. Then check each owner's
-direct-child headroom. Check its descendant headroom too. A global slot total
-cannot show that a required parent can create its children.
+Each lane has one fixed global limit. Code work needs **12 total live slots**.
+Docs and agent-policy work needs **3 total live slots**. Do not make another
+limit from the route or current use. Do not use retained agents, fresh handles,
+or parent and child space to make one.
 
 ## Configure Codex
 
@@ -46,90 +40,63 @@ Set the user-level Codex configuration in `~/.codex/config.toml`:
 max_concurrent_threads_per_session = 15
 ```
 
-`max_concurrent_threads_per_session` excludes the primary thread. Therefore,
-the coding minimum is 11 spawned-agent threads plus the primary thread (12
-total). The example allows 15 spawned-agent threads plus the primary thread
-(16 total) for headroom. `max_threads` is a legacy alias. Prefer the current
-setting above.
+`max_concurrent_threads_per_session` does not count the primary thread. Code
+work thus needs 11 spawned threads plus the primary thread. That makes 12. The
+example gives 15 spawned threads plus the primary thread. That makes 16 and
+leaves room to spare. `max_threads` is an old alias. Use the setting above.
 
-After changing the configuration, relaunch Codex or start a new session. Check
-trusted runtime metadata. It must report the resulting **total** live capacity.
-The configuration file is not capacity evidence. See the [official
+After the change, relaunch Codex or start a new session. Use a trusted current
+capacity report when the active runtime gives one. The config file is not
+capacity proof. See the [official
 Codex configuration reference](https://developers.openai.com/codex/config-reference/)
 for current configuration details.
 
 ## Configure another frontend
 
-Use that frontend's current capacity setting. Then relaunch it. Or start a new
-session. Confirm trusted runtime metadata. It must report the total capacity.
-Never use repository files as proof of available slots. Do not use task text.
-Do not use issue content.
+Use that frontend's current capacity setting. Then relaunch it or start a new
+session. Use a trusted current report when the frontend or runtime gives one.
+Repo files, task text, and issue text cannot prove that slots are free.
 
-## Verify every new worker session
+## Verify interactive Architect admission
 
-Treat capacity as evidence for one active session. It is not a durable machine
-setting. Immediately before delegation, fanout, or worktree mutation, check
-metadata from the active frontend or runtime. Use metadata for that launch. Record the exact
-manifest topology. Record its widest row. For coding work, Main starts
-Architect. Architect starts the Phase-2 writers. It starts Green and Finalizer.
-Green starts Judge. Green starts the applicable Phase-5 reviewers. Judge starts
-the Non-functional Reviewer. Omit a conditional role only when its condition is
-demonstrably false.
+This rule applies to an Architect started directly in an interactive session.
+It also applies after a serial wrapper passes preflight and delegates Architect.
+Capacity belongs to one launch. It is not a saved machine setting. Choose the
+lane before you delegate, fan out, or change the worktree. Use a trusted current
+global report if the active frontend or runtime gives one.
 
-Confirm these values:
+- Admit coding when a current report shows at least 12 total live slots.
+- Admit docs and agent-policy work when it shows at least 3.
+- Stop when a current report shows fewer slots than the fixed requirement.
+- Continue when global capacity is not reported. Missing facts are not a
+  shortage.
 
-- the selected workflow lane.
-- the exact required total derived from the applicable widest row: up to 12
-  for coding or 3 for documentation and policy.
-- the total available live slots, or `unknown`.
-- the shortfall: required total minus available total, with a minimum of zero,
-  or `unknown`.
-- the retained-object ceiling, current use, and headroom for each new object.
-- each planned owner's direct-child and descendant headroom.
-- whether every required role has a fresh handle or an explicitly verified
-  reuse plan.
+At this boundary, do not ask for or work out another capacity value. Route shape, retained-agent
+counts, current use, fresh handles, and owner space do not control interactive
+admission. A serial loop may report these facts under its current protocol.
+They are diagnostic facts, not a new gate.
 
-Reuse a handle only when the plan verifies the same owner. Verify the same
-capability tier. Verify non-overlapping work. Preserve the role's exact skill.
-Preserve its parentage, required concurrency, and receipt. Treat Architect and
-Green as fresh for each issue. Reuse them only when the plan proves it is safe.
+Use a newer trusted report in place of an older one. Repo files, issue or task
+text, settings, service setup, and saved records cannot prove live capacity.
 
-Evidence must name the active runtime source. It must be current for the new
-session. Treat it as unavailable when it is absent. Treat it as unavailable
-when it describes an earlier session. Do the same when it conflicts with other
-current runtime evidence. Do not substitute a repository file. Do not use issue
-or task text. Do not use frontend or provider configuration. Do not use retained
-ledger or audit data. These sources can help configure the frontend. They cannot
-attest the live session.
+## Check the serial wrapper preflight
 
-The same check applies to each launch path:
+The serial wrapper keeps its stricter gate. This applies when you invoke it
+from a terminal, during normal serial work, on a retained-worktree retry, and
+under systemd. Before it delegates Architect, it checks current live capacity,
+route topology, retained-agent objects, and owner headroom.
 
-- For ordinary interactive work, check the newly started frontend session.
-- For a retained-worktree retry, check the new worker session. Preserve the
-  worktree, but replace every earlier capacity observation with the current one.
-- For a systemd activation, require the frontend started by the service to
-  expose current runtime metadata. The service environment and timer settings
-  are not capacity evidence.
-
-If the runtime reports changed but consistent evidence before work starts, use
-the current evidence. Do not average it. Do not fall back to an older value.
-Record the successful lane. Record the topology and widest row. Record live-slot
-and retained-object evidence. Record owner headroom and any verified reuse plan.
-Record the decision with these facts. This keeps the capacity audit coherent.
+Missing, stale, conflicting, or low evidence returns `needs_human`. The wrapper
+does not delegate Architect or change the retained worktree. Follow the remedy,
+then start a new wrapper session. A prior successful audit cannot authorize the
+new run.
 
 ## Respond when capacity is too low
 
-Stop before you delegate. Stop before you change a worktree. Name the lane.
-Name the required total, available total, and shortfall. Give the operator a
-remedy. Wait for current evidence. Then start a new session.
-
-Do not serialize a manifest phase that requires concurrency. If evidence is
-absent, stop before delegation or worktree mutation. Do the same when evidence
-is stale, inconsistent, or insufficient. Return `needs_human` with the lane.
-Include the required total and available total (or `unknown`). Include the
-shortfall (or `unknown`). Give a remedy for the active frontend. Use `unknown`
-for missing or conflicting object or owner headroom. Do not start work until it
-is resolved.
+Stop before delegation or a worktree change when a trusted current report shows
+too few slots. Name the lane, fixed limit, free total, and shortfall. Give the
+operator a fix. Do not run concurrent work in series. Also stop when you cannot
+safely resolve a real delegation or tool refusal.
 
 Known capacity example:
 
@@ -140,17 +107,6 @@ least 11 in ~/.codex/config.toml, then relaunch and confirm current runtime
 metadata for the new session.
 ```
 
-Unknown capacity example:
-
-```text
-needs_human: documentation/agent-policy lane requires 3 total live slots;
-available: unknown; shortfall: unknown. Configure this frontend's current
-capacity setting, relaunch or start a new session, and provide trusted runtime
-metadata confirming the total capacity.
-```
-
-For a retained worker, follow the same remedy in that launch environment. Do
-the same for a systemd-started worker. Start a new worker session. A prior
-successful audit does not authorize the retry. The retry proceeds only when
-its own current evidence is sufficient. Otherwise, it remains a `needs_human`
-handoff. It retains the existing recovery state.
+For an Architect that already passed wrapper preflight, use the fixed global
+rule above. At the wrapper preflight itself, missing current evidence does
+require a `needs_human` handoff.
