@@ -1,11 +1,11 @@
 ---
 title: How to refresh the CI validation image
 type: how-to
-summary: Refresh CI image.
+summary: Rebuild and check the root CI image.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-21
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the image.
@@ -44,9 +44,17 @@ The ten native root jobs wait for that candidate and run in it:
 Do not install tools or dependencies in these jobs. This avoids a stale digest
 or stale dependency set.
 
+The image build runs the locked Kingfisher version as its non-root user. It
+precompiles Kingfisher's unchanged built-in Vectorscan rules into a stable
+cache path and keeps that cache in the image for the root `kingfisher` job.
+The cache avoids compiling unchanged rules during validation. This optimization
+changes image preparation only. Do not change the runtime Kingfisher command,
+rules, exclusions, or failure behavior to use the cache.
+
 BuildKit uses a registry cache. Prefer a job run of 60 seconds or less. Reject
-one over 120 seconds. Do not count queue time. Do not print credentials,
-tokens, or auth files in logs.
+one over 120 seconds. These are measured pipeline thresholds, not a guaranteed
+build time. Do not count queue time. Do not print credentials, tokens, or auth
+files in logs.
 
 ## 2. Review the image evidence.
 
@@ -89,7 +97,8 @@ post-merge pin-update merge request.
 Generated Copier projects need no registry. Their portable validation job
 always runs `uv sync --locked --all-groups` on its own `pyproject.toml` and
 `uv.lock` in both Python environments. It does this before `uv run --no-sync`
-checks. This keeps dependencies current without the root image.
+checks. This keeps dependencies current without the root image or its
+Kingfisher cache.
 
 For the local equivalents of the CI checks, see [Validate template
 changes](validate-template-changes.md). For the generated-project ownership
