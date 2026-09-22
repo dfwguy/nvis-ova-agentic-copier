@@ -5,12 +5,12 @@ summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
   - path: refresh-ci-image.md
-    why: Explains the commit-specific image used for these checks.
+    why: Explains the commit-specific images used for these checks.
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the merge-request publication command.
 ---
@@ -46,16 +46,27 @@ The local `tox` command remains the supported-matrix test runner. In GitLab CI,
 the root pipeline has eight single validation jobs: `ruff-check`,
 `ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
 `readability-check`, and `shellcheck`. Six native pytest shards run for each
-supported Python. They extend the root `.base_uv` definition, whose image is
-the commit-specific candidate
-`$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. The separate
-`ci-image:candidate` BuildKit image-build job produces it, and all root
-validation jobs wait for that job. They do not bootstrap with `apt-get`,
-`uv python install`, or `uv sync`. All except `readability-check` use
-`uv run --no-sync`; `readability-check` uses `uv run --locked --all-groups`.
-The BuildKit job uses a registry-backed cache. It keeps build metadata and the
-image digest as pipeline evidence. The root has no aggregate validation job or
-aggregate JUnit suite. Inspect each check in its named GitLab job.
+supported Python. Three BuildKit jobs produce commit-specific candidates:
+
+| Build job and target | Dependency scope | Validation work |
+| --- | --- | --- |
+| `ci-image:tooling` / `tooling` | Locked `dev` group and pinned system tools | The eight single validation jobs |
+| `ci-image:pytest-py311` / `pytest-py311` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.11 | `pytest-py311` shards and `coverage-py311` |
+| `ci-image:pytest-py314` / `pytest-py314` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.14.3 | `pytest-py314` shards and `coverage-py314` |
+
+Each validation job waits for and runs in its lane's image. The tags are
+`validation-tooling`, `validation-pytest-py311`, and
+`validation-pytest-py314`, each followed by
+`:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. They do not bootstrap with `apt-get`,
+`uv python install`, or `uv sync`. Most tooling jobs use
+`uv run --no-sync`; `readability-check` uses
+`uv run --locked --all-groups`. Test and coverage jobs use the prepared
+environment in their Python-specific image.
+
+Each target has a separate registry cache. Its name has the target name and a
+`-cache` suffix. Each build keeps its own metadata and digest environment file
+as evidence. Inspect all three build jobs and every named validation job. The
+root has no aggregate validation job or aggregate JUnit suite.
 
 For each supported Python, six native pytest shards form one deterministic,
 exhaustive full-suite partition. Each validates `CI_NODE_INDEX` and
@@ -68,9 +79,10 @@ aggregation failure fails the pipeline. For a failed job, inspect the shard
 JUnit reports and the matching Cobertura report when it exists; otherwise, use
 the job log. Root coverage excludes the generated Copier payload.
 
-This is a simple CI DAG, not a state machine. Measure the longest terminal job
-only: prefer 60 seconds or less and reject more than 120 seconds. Queue time is
-not part of either limit. Improving the preferred time is out of scope here.
+This is a simple CI DAG, not a state machine. The separate images aim to reduce
+unrelated work. They do not guarantee a run time. Measure the longest terminal
+job only. Prefer 60 seconds or less and reject more than 120 seconds. Queue
+time is not part of either limit.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary

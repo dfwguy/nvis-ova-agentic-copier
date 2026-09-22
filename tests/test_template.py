@@ -111,8 +111,10 @@ def _ci_job_script(configuration: dict[str, Any], job_name: str) -> list[str]:
 
 def test_ci_exposes_each_validation_gate_as_a_parallel_job(
     project_root: Path,
+    generated_project: Path,
+    template_dir: Path,
 ) -> None:
-    """Every root gate has an honest, independently visible status."""
+    """Root gates stay visible while generated CI remains portable and exact."""
     configuration = _ci_configuration(project_root)
     visible_gates = {
         name
@@ -135,14 +137,21 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
         if job_name.startswith("coverage-"):
             environment = job_name.removeprefix("coverage-")
             assert job["needs"] == [
-                {"job": "ci-image:candidate", "artifacts": False},
+                {"job": f"ci-image:pytest-{environment}", "artifacts": False},
                 {"job": f"pytest-{environment}", "artifacts": True},
             ]
+        elif job_name.startswith("pytest-"):
+            assert job["needs"] == [{"job": f"ci-image:{job_name}", "artifacts": False}]
         else:
             assert "needs" not in job
         assert "dependencies" not in job
         assert _ci_job_script(configuration, job_name)
         assert "run-ci-checks.sh" not in str(_ci_job_script(configuration, job_name))
+
+    template_ci = (template_dir / ".gitlab-ci.yml").read_text()
+    assert (generated_project / ".gitlab-ci.yml").read_text() == template_ci
+    assert "CI_REGISTRY_IMAGE" not in template_ci
+    assert "moby/buildkit" not in template_ci
 
 
 def test_ci_runs_only_merge_request_and_default_branch_pipelines(
@@ -386,10 +395,10 @@ def test_ci_jobs_publish_independent_reports(
         }
         coverage_job = configuration[f"coverage-{environment}"]
         assert coverage_job["extends"] == ".pytest_coverage"
-        assert coverage_job["needs"][-1] == {
-            "job": f"pytest-{environment}",
-            "artifacts": True,
-        }
+        assert coverage_job["needs"] == [
+            {"job": f"ci-image:pytest-{environment}", "artifacts": False},
+            {"job": f"pytest-{environment}", "artifacts": True},
+        ]
     assert configuration[".pytest_coverage"]["artifacts"]["reports"] == {
         "coverage_report": {
             "coverage_format": "cobertura",

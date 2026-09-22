@@ -28,13 +28,6 @@ workflow:
   before_script:
     - mkdir -p /tmp/ci-image-context
     - cp Dockerfile pyproject.toml uv.lock /tmp/ci-image-context/
-
-ci-image:candidate:
-  extends: .ci_image_builder
-  tags:
-    - size/medium
-  before_script:
-    - !reference [.ci_image_builder, before_script]
     - mkdir -p "$HOME/.docker"
     - |
       auth="$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" \
@@ -50,32 +43,68 @@ ci-image:candidate:
         --local context=/tmp/ci-image-context \
         --local dockerfile=/tmp/ci-image-context \
         --secret "id=network-ca,src=$CI_SERVER_TLS_CA_FILE" \
-        --metadata-file build-metadata.json \
-        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache" \
-        --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-cache,mode=max" \
-        --output "type=image,name=$CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID,push=true"
+        --opt "target=$CI_IMAGE_TARGET" \
+        --metadata-file "build-metadata-$CI_IMAGE_TARGET.json" \
+        --import-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-$CI_IMAGE_TARGET-cache" \
+        --export-cache "type=registry,ref=$CI_REGISTRY_IMAGE/validation-$CI_IMAGE_TARGET-cache,mode=max" \
+        --output "type=image,name=$CI_REGISTRY_IMAGE/validation-$CI_IMAGE_TARGET:$CI_COMMIT_SHA-$CI_PIPELINE_ID,push=true"
     - |
-      digest="$(sed -n 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' build-metadata.json)"
-      printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
-      printf 'CI_IMAGE=%s/validation@%s\n' "$CI_REGISTRY_IMAGE" "$digest" \
-        > ci-image.env
+      digest="$(sed -n 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "build-metadata-$CI_IMAGE_TARGET.json")"
+      if ! printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+          rm -f "ci-image-$CI_IMAGE_TARGET.env"
+          exit 2
+      fi
+      printf '%s=%s/validation-%s@%s\n' \
+        "$CI_IMAGE_VARIABLE" "$CI_REGISTRY_IMAGE" "$CI_IMAGE_TARGET" "$digest" \
+        > "ci-image-$CI_IMAGE_TARGET.env"
   artifacts:
     reports:
-      dotenv: ci-image.env
+      dotenv: ci-image-$CI_IMAGE_TARGET.env
     paths:
-      - build-metadata.json
-      - ci-image.env
+      - build-metadata-$CI_IMAGE_TARGET.json
+      - ci-image-$CI_IMAGE_TARGET.env
     when: always
+
+ci-image:tooling:
+  extends: .ci_image_builder
+  tags:
+    - size/medium
+  variables:
+    CI_IMAGE_TARGET: tooling
+    CI_IMAGE_VARIABLE: CI_TOOLING_IMAGE
+  before_script:
+    - !reference [.ci_image_builder, before_script]
+
+ci-image:pytest-py311:
+  extends: .ci_image_builder
+  tags:
+    - size/medium
+  variables:
+    CI_IMAGE_TARGET: pytest-py311
+    CI_IMAGE_VARIABLE: CI_PY311_IMAGE
+  before_script:
+    - !reference [.ci_image_builder, before_script]
+
+ci-image:pytest-py314:
+  extends: .ci_image_builder
+  tags:
+    - size/medium
+  variables:
+    CI_IMAGE_TARGET: pytest-py314
+    CI_IMAGE_VARIABLE: CI_PY314_IMAGE
+  before_script:
+    - !reference [.ci_image_builder, before_script]
+
 .base_uv:
   stage: validate
   interruptible: true
   needs:
-    - job: ci-image:candidate
+    - job: ci-image:tooling
       artifacts: false
   tags:
     - size/medium
   image:
-    name: $CI_REGISTRY_IMAGE/validation:$CI_COMMIT_SHA-$CI_PIPELINE_ID
+    name: $CI_REGISTRY_IMAGE/validation-tooling:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   before_script:
     - cd "$CI_PROJECT_DIR"
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
@@ -192,34 +221,48 @@ ruff-format:
 pytest-py311:
   extends: .pytest
   parallel: 6
+  needs:
+    - job: ci-image:pytest-py311
+      artifacts: false
+  image:
+    name: $CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   variables:
     TEST_ENVIRONMENT: py311
 
 pytest-py314:
   extends: .pytest
   parallel: 6
+  needs:
+    - job: ci-image:pytest-py314
+      artifacts: false
+  image:
+    name: $CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   variables:
     TEST_ENVIRONMENT: py314
 
 coverage-py311:
   extends: .pytest_coverage
   needs:
-    - job: ci-image:candidate
+    - job: ci-image:pytest-py311
       artifacts: false
     - job: pytest-py311
       artifacts: true
   variables:
     TEST_ENVIRONMENT: py311
+  image:
+    name: $CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID
 
 coverage-py314:
   extends: .pytest_coverage
   needs:
-    - job: ci-image:candidate
+    - job: ci-image:pytest-py314
       artifacts: false
     - job: pytest-py314
       artifacts: true
   variables:
     TEST_ENVIRONMENT: py314
+  image:
+    name: $CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID
 
 yamllint:
   extends: .base_uv
