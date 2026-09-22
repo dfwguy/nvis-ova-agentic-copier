@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -310,6 +310,25 @@ a failure.
 | Architecture through Green | Architect gives the approved design concurrently to Red and the Diátaxis Writer | Green starts only after both receipts, receives test evidence and the documentation draft or no-doc rationale, becomes sole mutable owner, and reconciles docs with implemented interfaces. |
 | Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out, corrects from evidence, consolidates feedback, and returns it to Architect. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
 | Publication and assessment | Architect, finalizer, then runner; complete finalizer evidence | `observing`, exact-MR-conflict `repair`, and fresh `post-publication` assessment are durable. Publication does not end assessment. |
+
+The installed pre-commit hook checks the proposed change. The runner sends the
+work back for a fix only when standard pre-commit output identifies a failed
+hook and the issue, branch, commit, pending merge, staged Git tree, and retained
+changes still match.
+
+The runner keeps the staged files and worktree changes. It drops the old
+result, merge request draft, receipts, and final audit because the code must be
+checked again. It returns to a fresh complete workflow for correction and
+validation. A coding correction must reuse the exact retained Red checkpoint.
+A content correction does not load Red evidence; it must return fresh content
+receipts and audit evidence. Both lanes must produce a fresh merge request
+draft. An unknown lane, or missing or mismatched coding Red evidence, blocks
+the correction. The rejection route does not push or change a merge request.
+
+This route is only for a recognizable installed pre-commit rejection. Signing,
+identity, configuration, lock, file-system, object-database, and unknown commit
+failures keep their fail-closed handling. Missing, ambiguous, or changed
+publication identity remains `publication_identity_mismatch` and fails closed.
 
 Protected policy also needs all applicable receipts, a complete verdict, and
 typed, non-empty metadata. A safe disputed result starts `Draft:`. It includes
