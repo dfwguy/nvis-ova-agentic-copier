@@ -735,6 +735,7 @@ class FakeRepository:
         self.retained_refresh_result = "b" * 40
         self.retained_refresh_error: RepositoryError | None = None
         self.legacy_index_fingerprint = "d" * 64
+        self.legacy_branch = "agent/issue-12"
         self.legacy_staged_paths: tuple[str, ...] = ("src/example.py",)
         self.legacy_unstaged_paths: tuple[str, ...] = ("src/example.py",)
         self.legacy_merge_head: str | None = None
@@ -794,7 +795,7 @@ class FakeRepository:
     ) -> LegacyPublicationCandidate:
         del worktree
         return LegacyPublicationCandidate(
-            branch="agent/issue-12",
+            branch=self.legacy_branch,
             head=self.current_head,
             merge_head=self.legacy_merge_head,
             index_fingerprint=self.legacy_index_fingerprint,
@@ -1529,12 +1530,83 @@ def _legacy_dirty_hook_publication_record(
     )
 
 
+def _affected_dirty_correction_record(tmp_path: Path) -> LedgerRecord:
+    """Build the exact post-failure shape retained by affected issue #155."""
+    return _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "workflow_lane": WorkflowLane.CODING,
+            "prior_state": RunnerState.EXECUTING,
+            "prior_phase": WorkflowPhase.WORKFLOW,
+            "error_code": ErrorCode.BRANCH_OWNERSHIP_AMBIGUOUS,
+            "audit_evidence": None,
+            "condition_history": (
+                ConditionEvidence(
+                    occurred_at=NOW,
+                    retry_count=1,
+                    code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                    detail="final_envelope.protocol_version: must equal 2",
+                ),
+                ConditionEvidence(
+                    occurred_at=NOW,
+                    retry_count=3,
+                    code=ErrorCode.RETRY_EXHAUSTED.value,
+                    detail="worker protocol retries exhausted",
+                ),
+            ),
+            "summary": "retained ordinary work has authored or workflow evidence",
+            "next_action": "Review the retained branch/worktree evidence.",
+        }
+    )
+
+
 def _operational_plan_bytes(report: object) -> bytes:
     """Extract the reviewed immutable plan from one serialized preview report."""
     payload = json.loads(cast(CommandReport, report).model_dump_json())
     plan = payload["operational_plan"]
     assert plan["fingerprint"]
     return json.dumps(plan).encode()
+
+
+def _apply_legacy_dirty_hook_correction(
+    tmp_path: Path, *, lane: WorkflowLane = WorkflowLane.CODING
+) -> tuple[
+    AgentWorkConfig,
+    JsonLedger,
+    FakeGitLab,
+    FakeRepository,
+    LedgerRecord,
+    LedgerRecord,
+]:
+    """Apply the first exact reviewed legacy recovery and return its boundaries."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(
+        _legacy_dirty_hook_publication_record(tmp_path, lane=lane)
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = original.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=original.issue_iid,
+        choice="retry",
+        reason="The retained hook correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "legacy-dirty-hook-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(original.issue_iid)
+    assert resumed is not None
+    return config, ledger, gitlab, repository, original, resumed
 
 
 def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
@@ -3287,6 +3359,22 @@ def test_recovery_retry_apply_routes_exact_legacy_dirty_hook_to_correction(
     assert resumed.state is RunnerState.EXECUTING
     assert resumed.phase is WorkflowPhase.WORKFLOW
     assert resumed.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    identity = getattr(resumed, "correction_identity", None)
+    assert identity is not None, "durable correction identity was not captured"
+    assert identity.mode == "publication_commit_rejected"
+    assert identity.project_id == record.project_id
+    assert identity.issue_iid == record.issue_iid
+    assert identity.worktree == record.worktree
+    assert identity.source_branch == record.source_branch
+    assert identity.baseline_sha == record.source_sha
+    assert identity.head_sha == record.source_sha
+    assert identity.merge_head is None
+    assert identity.index_fingerprint == repository.legacy_index_fingerprint
+    assert identity.staged_paths == repository.legacy_staged_paths
+    assert identity.unstaged_paths == repository.legacy_unstaged_paths
+    assert identity.workflow_lane is WorkflowLane.CODING
+    assert isinstance(record.audit_evidence, AuditReceiptSummary)
+    assert identity.red_checkpoint == record.audit_evidence.red_checkpoint
     assert resumed.intent is None and resumed.publication_sha is None
     assert resumed.merge_request_draft is None and resumed.audit_evidence is None
     assert resumed.receipts == () and resumed.worker_exit is None
@@ -3333,7 +3421,354 @@ def test_recovery_retry_apply_routes_exact_legacy_content_hook_to_correction(
     assert resumed.state is RunnerState.EXECUTING
     assert resumed.phase is WorkflowPhase.WORKFLOW
     assert resumed.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    identity = getattr(resumed, "correction_identity", None)
+    assert identity is not None, "content correction identity was not captured"
+    assert identity.mode == "publication_commit_rejected"
+    assert identity.workflow_lane is WorkflowLane.CONTENT
+    assert identity.red_checkpoint is None
+    assert identity.index_fingerprint == repository.legacy_index_fingerprint
+    assert identity.staged_paths == repository.legacy_staged_paths
+    assert identity.unstaged_paths == repository.legacy_unstaged_paths
     assert repository.binds == repository.prepares == repository.pushes == 0
+
+
+def test_recovery_retry_bootstraps_affected_dirty_correction_without_publication_artifacts(
+    tmp_path: Path,
+) -> None:
+    """The exact post-failure #155 shape can establish its durable correction identity."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_affected_dirty_correction_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("src/agent_work/domain.py", "src/agent_work/timing.py")
+    repository.legacy_staged_paths = ("src/agent_work/domain.py",)
+    repository.legacy_unstaged_paths = ("src/agent_work/timing.py",)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact retained correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "affected-correction-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert report.applied and resumed is not None
+    assert resumed.state is RunnerState.EXECUTING
+    assert resumed.phase is WorkflowPhase.WORKFLOW
+    identity = getattr(resumed, "correction_identity", None)
+    assert identity is not None, "affected correction identity was not established"
+    assert identity.index_fingerprint == repository.legacy_index_fingerprint
+    assert identity.staged_paths == repository.legacy_staged_paths
+    assert identity.unstaged_paths == repository.legacy_unstaged_paths
+    assert set(identity.staged_paths).isdisjoint(identity.unstaged_paths)
+    assert identity.red_checkpoint is not None
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "wrong_prior",
+        "incomplete_history",
+        "publication_artifact",
+        "branch",
+        "head",
+        "merge",
+        "untracked",
+        "unmerged",
+        "rename",
+        "unknown_lane",
+        "missing_checkpoint",
+    ),
+)
+def test_recovery_retry_rejects_inexact_affected_dirty_correction_bootstrap(
+    tmp_path: Path, defect: str
+) -> None:
+    """A historical failure shape cannot bootstrap identity from ambiguous evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = _affected_dirty_correction_record(tmp_path)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("src/agent_work/domain.py", "src/agent_work/timing.py")
+    repository.legacy_staged_paths = ("src/agent_work/domain.py",)
+    repository.legacy_unstaged_paths = ("src/agent_work/timing.py",)
+    if defect == "wrong_prior":
+        record = record.model_copy(update={"prior_phase": WorkflowPhase.DISCOVERY})
+    elif defect == "incomplete_history":
+        record = record.model_copy(update={"condition_history": ()})
+    elif defect == "publication_artifact":
+        record = record.model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Stale publication", description="Must not authorize recovery"
+                )
+            }
+        )
+    elif defect == "branch":
+        repository.legacy_branch = "agent/issue-999"
+    elif defect == "head":
+        repository.current_head = "c" * 40
+    elif defect == "merge":
+        repository.legacy_merge_head = "c" * 40
+    elif defect == "untracked":
+        repository.legacy_has_untracked = True
+    elif defect == "unmerged":
+        repository.legacy_has_unmerged = True
+    elif defect == "rename":
+        repository.legacy_has_renames = True
+    elif defect == "unknown_lane":
+        record = record.model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    retained = ledger.persist(record)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    if defect == "missing_checkpoint":
+        dependencies = replace(dependencies, load_red_checkpoint=lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="correction|recovery|retry|evidence"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="The exact retained correction was reviewed.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
+
+    assert ledger.load(record.issue_iid) == retained
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
+def test_dirty_correction_refreshes_after_invalid_worker_and_reviewed_retry_reinvokes(
+    tmp_path: Path,
+) -> None:
+    """Authorized edits survive an invalid handoff and remain exactly retryable."""
+    config, ledger, gitlab, repository, original, resumed = (
+        _apply_legacy_dirty_hook_correction(tmp_path)
+    )
+    initial_identity = getattr(resumed, "correction_identity", None)
+    assert initial_identity is not None, "durable correction identity was not captured"
+    updated_staged = ("src/example.py", "tests/test_correction.py")
+    updated_unstaged = ("src/agent_work/timing.py",)
+
+    def modify_candidate() -> None:
+        repository.legacy_index_fingerprint = "e" * 64
+        repository.legacy_staged_paths = updated_staged
+        repository.legacy_unstaged_paths = updated_unstaged
+        repository.paths = (*updated_staged, *updated_unstaged)
+
+    checkpoint = cast(AuditReceiptSummary, original.audit_evidence).red_checkpoint
+    assert checkpoint is not None
+    invoker = HandoffInvoker(malformed=b"{", on_invoke=modify_candidate)
+    run_dependencies = _dependencies(config, ledger, gitlab, repository)
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=run_dependencies.load_red_checkpoint,
+    )
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    refreshed = getattr(first, "correction_identity", None)
+    assert refreshed is not None
+    assert refreshed.index_fingerprint == "e" * 64
+    assert refreshed.staged_paths == updated_staged
+    assert refreshed.unstaged_paths == updated_unstaged
+    assert refreshed.red_checkpoint == checkpoint
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=run_dependencies.load_red_checkpoint,
+    )
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert getattr(blocked, "correction_identity", None) == refreshed
+
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=blocked.issue_iid,
+        choice="retry",
+        reason="Retry the exact retained correction after the invalid handoff.",
+    )
+    preview = dispatch(request, apply=False, dependencies=run_dependencies)
+    plan_file = tmp_path / "retained-correction-retry-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    report = dispatch(
+        replace(request, plan_file=plan_file),
+        apply=True,
+        dependencies=run_dependencies,
+    )
+    retried = ledger.load(blocked.issue_iid)
+    assert report.applied and retried is not None
+    assert retried.state is RunnerState.EXECUTING
+    assert retried.phase is WorkflowPhase.WORKFLOW
+    assert getattr(retried, "correction_identity", None) == refreshed
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+    next_invoker = FakeInvoker(
+        '<agent-work-result>{"protocol_version":1}</agent-work-result>'
+    )
+    next_outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=next_invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=run_dependencies.load_red_checkpoint,
+    )
+    assert len(next_invoker.prompts) == 1
+    assert next_outcome is not None
+    assert next_outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert next_outcome.error_code is not ErrorCode.BRANCH_OWNERSHIP_AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "branch",
+        "baseline",
+        "head",
+        "index",
+        "staged",
+        "unstaged",
+        "merge",
+        "lane",
+        "checkpoint",
+        "worktree",
+    ),
+)
+def test_reviewed_dirty_correction_retry_rejects_any_identity_drift(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A later reviewed retry re-observes every durable correction identity field."""
+    config, ledger, gitlab, repository, original, resumed = (
+        _apply_legacy_dirty_hook_correction(tmp_path)
+    )
+    identity = getattr(resumed, "correction_identity", None)
+    assert identity is not None, "durable correction identity was not captured"
+    blocked = ledger.persist(
+        resumed.model_copy(
+            update={
+                "state": RunnerState.BLOCKED,
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.WORKFLOW,
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        retry_count=1,
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail="final_envelope.protocol_version: must equal 2",
+                    ),
+                ),
+            }
+        )
+    )
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    if mutation == "branch":
+        repository.legacy_branch = "agent/issue-999"
+    elif mutation == "baseline":
+        blocked = ledger.persist(blocked.model_copy(update={"source_sha": "c" * 40}))
+    elif mutation == "head":
+        repository.current_head = "c" * 40
+    elif mutation == "index":
+        repository.legacy_index_fingerprint = "e" * 64
+    elif mutation == "staged":
+        repository.legacy_staged_paths = ("src/other.py",)
+    elif mutation == "unstaged":
+        repository.legacy_unstaged_paths = ("src/other.py",)
+    elif mutation == "merge":
+        repository.legacy_merge_head = "c" * 40
+    elif mutation == "lane":
+        blocked = ledger.persist(
+            blocked.model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
+        )
+    elif mutation == "checkpoint":
+        checkpoint = cast(AuditReceiptSummary, original.audit_evidence).red_checkpoint
+        assert checkpoint is not None
+        dependencies = replace(
+            dependencies,
+            load_red_checkpoint=lambda *_args: checkpoint.model_copy(
+                update={"tree_oid": "c" * 40}
+            ),
+        )
+    else:
+        blocked = ledger.persist(
+            blocked.model_copy(update={"worktree": tmp_path / "different-worktree"})
+        )
+    retained = ledger.load(blocked.issue_iid)
+    labels_before = tuple(gitlab.labels)
+
+    with pytest.raises(RuntimeError, match="correction|recovery|evidence"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=blocked.issue_iid,
+                choice="retry",
+                reason="Retry the exact retained correction.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
+
+    assert ledger.load(blocked.issue_iid) == retained
+    assert tuple(gitlab.labels) == labels_before
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+
+def test_successful_validated_correction_clears_durable_identity(
+    tmp_path: Path,
+) -> None:
+    """Fresh complete workflow evidence supersedes the retained correction snapshot."""
+    _config_value, ledger, gitlab, repository, original, resumed = (
+        _apply_legacy_dirty_hook_correction(tmp_path)
+    )
+    assert getattr(resumed, "correction_identity", None) is not None
+    repository.paths = ("src/example.py",)
+    invoker = SingleSessionInvoker()
+    invoker.changed_paths = repository.paths
+    checkpoint = cast(AuditReceiptSummary, original.audit_evidence).red_checkpoint
+    assert checkpoint is not None
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert result is not None and result.state is RunnerState.PUBLISHING
+    assert result.audit_evidence is not None
+    assert getattr(result, "correction_identity", None) is None
 
 
 @pytest.mark.parametrize(
@@ -10566,17 +11001,20 @@ def test_publication_commit_rejection_returns_ordinary_work_to_fresh_correction(
         verdict="complete",
         detail="$tdd-finalizer: approved",
     )
+    publishing = _record(
+        tmp_path,
+        state=RunnerState.PUBLISHING,
+        phase=WorkflowPhase.READY_TO_PUBLISH,
+    )
+    checkpoint = _red_checkpoint_evidence_for_segment(publishing)
+    audit = _completed_coding_audit().model_copy(update={"red_checkpoint": checkpoint})
     initial = ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
+        publishing.model_copy(
             update={
                 "main_sha": "b" * 40,
                 "merge_request_draft": draft,
                 "receipts": (receipt,),
-                "audit_evidence": _completed_coding_audit(),
+                "audit_evidence": audit,
                 "worker_exit": WorkerExitEvidence(
                     returncode=1, diagnostic="stale validation failure"
                 ),
@@ -10607,6 +11045,21 @@ def test_publication_commit_rejection_returns_ordinary_work_to_fresh_correction(
     assert outcome.source_sha == initial.source_sha
     assert outcome.main_sha == initial.main_sha
     assert outcome.worktree == initial.worktree
+    identity = getattr(outcome, "correction_identity", None)
+    assert identity is not None, "native correction identity was not captured"
+    assert identity.mode == "publication_commit_rejected"
+    assert identity.project_id == initial.project_id
+    assert identity.issue_iid == initial.issue_iid
+    assert identity.worktree == initial.worktree
+    assert identity.source_branch == initial.source_branch
+    assert identity.baseline_sha == initial.source_sha
+    assert identity.head_sha == initial.source_sha
+    assert identity.merge_head is None
+    assert identity.index_fingerprint == repository.legacy_index_fingerprint
+    assert identity.staged_paths == repository.legacy_staged_paths
+    assert identity.unstaged_paths == repository.legacy_unstaged_paths
+    assert identity.workflow_lane is WorkflowLane.CODING
+    assert identity.red_checkpoint == checkpoint
     assert outcome.merge_request_draft is None
     assert outcome.intent is None and outcome.publication_sha is None
     assert outcome.receipts == () and outcome.audit_evidence is None
@@ -10628,18 +11081,25 @@ def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow
         origin="automatic-exact-pipeline",
     )
     draft = MergeRequestDraft(title="Repair", description="Validated repair")
+    publishing = _record(
+        tmp_path,
+        state=RunnerState.PUBLISHING,
+        phase=WorkflowPhase.READY_TO_PUBLISH,
+        repair_attempt=repair,
+    )
     initial = ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-            repair_attempt=repair,
-        ).model_copy(
+        publishing.model_copy(
             update={
                 "merge_request_iid": 88,
                 "merge_request_url": _mr().web_url,
                 "merge_request_draft": draft,
-                "audit_evidence": _completed_coding_audit(),
+                "audit_evidence": _completed_coding_audit().model_copy(
+                    update={
+                        "red_checkpoint": _red_checkpoint_evidence_for_segment(
+                            publishing
+                        )
+                    }
+                ),
             }
         )
     )
@@ -10675,16 +11135,22 @@ def test_corrected_publication_can_publish_after_local_commit_rejection(
     """Freshly corrected work can pass the same publication boundary later."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    publishing = _record(
+        tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
+    )
     ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
+        publishing.model_copy(
             update={
                 "merge_request_draft": MergeRequestDraft(
                     title="Change", description="Validated details"
-                )
+                ),
+                "audit_evidence": _completed_coding_audit().model_copy(
+                    update={
+                        "red_checkpoint": _red_checkpoint_evidence_for_segment(
+                            publishing
+                        )
+                    }
+                ),
             }
         )
     )
@@ -10814,10 +11280,10 @@ def test_publication_commit_correction_requires_its_exact_retained_red_checkpoin
     )
 
     assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
     assert correction.prompts == []
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
-    assert gitlab.labels == ["agent::blocked"]
+    assert gitlab.labels == ["agent::blocked", "agent::blocked"]
 
 
 def test_content_publication_commit_rejection_runs_fresh_content_workflow(
@@ -10952,22 +11418,9 @@ def test_unknown_lane_publication_commit_correction_fails_closed(
         timeout_seconds=10,
         now=NOW,
     )
-    assert rejected is not None and rejected.state is RunnerState.EXECUTING
-    correction = SingleSessionInvoker()
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=correction,
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
-    assert outcome.summary == "Publication correction workflow lane is unknown."
-    assert correction.prompts == []
+    assert rejected is not None and rejected.state is RunnerState.BLOCKED
+    assert rejected.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert rejected.summary == "Publication correction identity could not be captured."
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
     assert gitlab.labels == ["agent::blocked"]
 

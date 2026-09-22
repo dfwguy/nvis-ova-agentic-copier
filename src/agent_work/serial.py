@@ -55,6 +55,7 @@ from .models import (
     MergeRequestFeedbackCursor,
     PendingMergeRequestFeedback,
     PipelineEvidence,
+    PublicationCorrectionIdentity,
     RepairAttemptEvidence,
     SplitPlan,
     TransitionIntentRecord,
@@ -66,6 +67,7 @@ from .red_checkpoint import (
     RedCheckpointRequest,
 )
 from .repository import (
+    LegacyPublicationCandidate,
     PublicationCommitRejected,
     PublicationError,
     RepositoryError,
@@ -94,6 +96,99 @@ from .worker import (
 
 class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
+
+
+def build_publication_correction_identity(
+    record: LedgerRecord,
+    candidate: LegacyPublicationCandidate,
+    *,
+    checkpoint: RedCheckpointEvidence | None,
+) -> PublicationCorrectionIdentity:
+    """Build one exact dirty-candidate snapshot without changing repository state."""
+    if (
+        record.source_sha is None
+        or record.workflow_lane is WorkflowLane.UNKNOWN
+        or candidate.branch != record.source_branch
+        or candidate.head != record.source_sha
+        or candidate.has_untracked
+        or candidate.has_unmerged
+        or candidate.has_renames
+        or not candidate.staged_paths
+    ):
+        raise SegmentError("publication correction evidence is not exact")
+    if record.workflow_lane is WorkflowLane.CODING:
+        if (
+            checkpoint is None
+            or checkpoint.project_id != record.project_id
+            or checkpoint.issue_iid != record.issue_iid
+            or checkpoint.source_branch != record.source_branch
+            or checkpoint.base_sha != record.source_sha
+            or not checkpoint.test_paths
+        ):
+            raise SegmentError("publication correction Red evidence is not exact")
+    elif checkpoint is not None:
+        raise SegmentError("content correction cannot retain Red evidence")
+    return PublicationCorrectionIdentity(
+        mode="publication_commit_rejected",
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        worktree=record.worktree,
+        source_branch=record.source_branch,
+        baseline_sha=record.source_sha,
+        head_sha=candidate.head,
+        merge_head=candidate.merge_head,
+        index_fingerprint=candidate.index_fingerprint,
+        staged_paths=tuple(sorted(candidate.staged_paths)),
+        unstaged_paths=tuple(sorted(candidate.unstaged_paths)),
+        workflow_lane=record.workflow_lane,
+        red_checkpoint=checkpoint,
+    )
+
+
+def correction_identity_matches(
+    record: LedgerRecord,
+    candidate: LegacyPublicationCandidate,
+    *,
+    checkpoint: RedCheckpointEvidence | None,
+) -> bool:
+    """Return whether a fresh read-only observation equals the frozen identity."""
+    identity = record.correction_identity
+    if identity is None:
+        return False
+    try:
+        observed = build_publication_correction_identity(
+            record, candidate, checkpoint=checkpoint
+        )
+    except SegmentError:
+        return False
+    return observed == identity
+
+
+def refresh_publication_correction_identity(
+    record: LedgerRecord,
+    *,
+    repository: RepositoryPort,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> LedgerRecord | None:
+    """Replace a correction snapshot after an authorized worker attempt."""
+    if record.correction_identity is None:
+        return record
+    checkpoint = (
+        None
+        if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None
+        else load_red_checkpoint(
+            record.project_id, record.issue_iid, record.source_sha or ""
+        )
+    )
+    try:
+        identity = build_publication_correction_identity(
+            record,
+            repository.observe_legacy_publication_candidate(record.worktree),
+            checkpoint=checkpoint,
+        )
+    except (RepositoryError, SegmentError):
+        return None
+    return record.model_copy(update={"correction_identity": identity})
 
 
 AUTOMATIC_REPAIR_MAX_ATTEMPTS = 3
@@ -2450,6 +2545,22 @@ def _execute(
             )
         ):
             return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
+        if record.correction_identity is not None:
+            try:
+                exact_correction = correction_identity_matches(
+                    record,
+                    repository.observe_legacy_publication_candidate(record.worktree),
+                    checkpoint=retained_checkpoint,
+                )
+            except RepositoryError:
+                exact_correction = False
+            if not exact_correction:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Publication correction identity changed before worker invocation.",
+                )
         prompt_record = record.model_dump(mode="json")
         if retained_checkpoint is not None:
             prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
@@ -2674,6 +2785,17 @@ def _execute(
                 if handoff_request is not None
                 else invoke.invoke(record.worktree, prompt, worker_timeout)
             )
+    refreshed_correction = refresh_publication_correction_identity(
+        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    )
+    if refreshed_correction is None:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Publication correction identity changed after worker invocation.",
+        )
+    record = refreshed_correction
     if invocation.returncode != 0:
         worker_exit = (
             worker_exit_evidence(
@@ -2935,7 +3057,16 @@ def _execute(
                     stop_on_unchanged_condition=True,
                 )
             else:
-                outcome = outcome.model_copy(update={"worker_exit": None})
+                outcome = outcome.model_copy(
+                    update={
+                        "worker_exit": None,
+                        "correction_identity": (
+                            None
+                            if outcome.state is RunnerState.PUBLISHING
+                            else outcome.correction_identity
+                        ),
+                    }
+                )
     if (
         record.state is RunnerState.REPAIR
         and record.pending_feedback is not None
@@ -3478,6 +3609,25 @@ def _publish(
             if record.repair_attempt is not None
             else RunnerState.EXECUTING
         )
+        checkpoint = (
+            record.audit_evidence.red_checkpoint
+            if isinstance(record.audit_evidence, AuditReceiptSummary)
+            and record.workflow_lane is WorkflowLane.CODING
+            else None
+        )
+        try:
+            correction_identity = build_publication_correction_identity(
+                record,
+                repository.observe_legacy_publication_candidate(record.worktree),
+                checkpoint=checkpoint,
+            )
+        except (RepositoryError, SegmentError):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Publication correction identity could not be captured.",
+            )
         return ledger.persist(
             transition_record(
                 record,
@@ -3489,6 +3639,7 @@ def _publish(
                 receipts=(),
                 audit_evidence=None,
                 worker_exit=None,
+                correction_identity=correction_identity,
                 retry_at=None,
                 error_code=ErrorCode.PUBLICATION_COMMIT_REJECTED,
                 summary=error.failure.diagnostic,

@@ -17,7 +17,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from pydantic import (
@@ -684,6 +684,66 @@ class AuditReceiptSummary(BoundaryModel):
         return self
 
 
+class PublicationCorrectionIdentity(BoundaryModel):
+    """Immutable controller-authored identity for one dirty publication correction."""
+
+    mode: Literal["publication_commit_rejected"]
+    project_id: int = Field(gt=0)
+    issue_iid: int = Field(gt=0)
+    worktree: Path
+    source_branch: str = Field(min_length=1)
+    baseline_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    merge_head: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    index_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    staged_paths: tuple[str, ...] = Field(min_length=1, max_length=128)
+    unstaged_paths: tuple[str, ...] = Field(max_length=128)
+    workflow_lane: WorkflowLane
+    red_checkpoint: RedCheckpointEvidence | None = None
+
+    @field_validator("worktree")
+    @classmethod
+    def validate_worktree(cls, value: Path) -> Path:
+        """Require the captured worktree to be explicit."""
+        if not value.is_absolute():
+            raise ValueError("correction worktree must be absolute")
+        return value
+
+    @field_validator("staged_paths", "unstaged_paths")
+    @classmethod
+    def validate_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require normalized, unique repository-relative path snapshots."""
+        if tuple(sorted(value)) != value or len(set(value)) != len(value):
+            raise ValueError("correction paths must be sorted and unique")
+        if any(
+            not item
+            or "\x00" in item
+            or len(item.encode("utf-8")) > 4_096
+            or PurePosixPath(item).is_absolute()
+            or ".." in PurePosixPath(item).parts
+            or PurePosixPath(item).as_posix() != item
+            for item in value
+        ):
+            raise ValueError("correction paths must be normalized")
+        return value
+
+    @model_validator(mode="after")
+    def validate_lane_evidence(self) -> PublicationCorrectionIdentity:
+        """Bind coding corrections to Red evidence and content corrections to none."""
+        if self.workflow_lane is WorkflowLane.CODING and self.red_checkpoint is None:
+            raise ValueError("coding correction requires Red checkpoint evidence")
+        if (
+            self.workflow_lane is not WorkflowLane.CODING
+            and self.red_checkpoint is not None
+        ):
+            raise ValueError(
+                "only coding correction may retain Red checkpoint evidence"
+            )
+        if self.workflow_lane is WorkflowLane.UNKNOWN:
+            raise ValueError("correction workflow lane must be known")
+        return self
+
+
 class ConditionEvidence(BoundaryModel):
     """One bounded current or historical operational condition."""
 
@@ -758,6 +818,7 @@ class LedgerRecord(BoundaryModel):
     latest_meaningful_update_at: datetime | None = None
     completed_at: datetime | None = None
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = "unknown"
+    correction_identity: PublicationCorrectionIdentity | None = None
     condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
     phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
     summary: str = ""

@@ -80,6 +80,7 @@ from .models import (
     OperationalPlan,
     PipelineEvidence,
     PrerequisiteLabelProjectionReport,
+    PublicationCorrectionIdentity,
     RecoveryCandidateReport,
     RecoverySummary,
     TransitionIntentRecord,
@@ -114,7 +115,9 @@ from .serial import (
     AUTOMATIC_REPAIR_MAX_ATTEMPTS,
     SegmentError,
     activate_exact_pipeline_repair,
+    build_publication_correction_identity,
     collect_exact_failed_job_diagnostic,
+    correction_identity_matches,
     reconcile_closed_issues,
     record_failed_job_diagnostic_unavailable,
     resume_candidates,
@@ -631,6 +634,13 @@ def _recovery_plan(
     legacy = _legacy_dirty_publication_evidence(
         record, repository=repository, load_red_checkpoint=load_red_checkpoint
     )
+    affected = (
+        None
+        if legacy is not None
+        else _affected_dirty_correction_evidence(
+            record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        )
+    )
     try:
         choice = ResolutionChoice(request.choice)
         observation = _recovery_observation(
@@ -679,6 +689,8 @@ def _recovery_plan(
     )
     if legacy is not None:
         evidence.update(legacy)
+    if affected is not None:
+        evidence.update(affected)
     return OperationalPlan(
         command=request.command,
         action=choice.value,
@@ -700,6 +712,21 @@ def _legacy_dirty_publication_evidence(
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
 ) -> dict[str, str] | None:
     """Bind one historical dirty publication candidate or reject it fail-closed."""
+    if record is not None and record.correction_identity is not None:
+        if repository is None or record.source_sha is None:
+            raise RuntimeError("correction recovery evidence is incomplete")
+        checkpoint = (
+            None
+            if record.correction_identity.workflow_lane is WorkflowLane.CONTENT
+            or load_red_checkpoint is None
+            else load_red_checkpoint(
+                record.project_id, record.issue_iid, record.source_sha
+            )
+        )
+        candidate = repository.observe_legacy_publication_candidate(record.worktree)
+        if not correction_identity_matches(record, candidate, checkpoint=checkpoint):
+            raise RuntimeError("correction recovery evidence changed")
+        return {"correction_identity": record.correction_identity.model_dump_json()}
     if (
         record is None
         or record.intent is None
@@ -760,6 +787,9 @@ def _legacy_dirty_publication_evidence(
         eligible = False
     if not eligible:
         raise RuntimeError("legacy publication recovery evidence is ineligible")
+    identity = build_publication_correction_identity(
+        record, candidate, checkpoint=audit.red_checkpoint
+    )
     return {
         "legacy_index_fingerprint": candidate.index_fingerprint,
         "legacy_staged_paths": ",".join(candidate.staged_paths),
@@ -771,6 +801,68 @@ def _legacy_dirty_publication_evidence(
             if audit.red_checkpoint is None
             else audit.red_checkpoint.model_dump_json()
         ),
+        "correction_identity": identity.model_dump_json(),
+    }
+
+
+def _affected_dirty_correction_evidence(
+    record: LedgerRecord | None,
+    *,
+    repository: RepositoryPort | None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> dict[str, str] | None:
+    """Bind the one retained worker-protocol failure shape that predates snapshots."""
+    if record is None or repository is None or record.correction_identity is not None:
+        return None
+    if not repository.has_changes(record.worktree):
+        return None
+    if not (
+        record.state is RunnerState.BLOCKED
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.prior_state is RunnerState.EXECUTING
+        and record.prior_phase is WorkflowPhase.WORKFLOW
+        and record.work_kind is WorkKind.ORDINARY
+        and record.source_sha is not None
+        and record.source_branch == f"agent/issue-{record.issue_iid}"
+        and record.workflow_lane in {WorkflowLane.CODING, WorkflowLane.CONTENT}
+        and record.intent is None
+        and record.audit_evidence is None
+        and record.receipts == ()
+        and record.publication_sha is None
+        and record.merge_request_draft is None
+        and record.pending_feedback is None
+        and record.repair_attempt is None
+        and record.suggest_close_evidence is None
+        and record.worker_exit is None
+        and bool(record.condition_history)
+        and any(
+            item.code == ErrorCode.WORKER_PROTOCOL_INVALID.value
+            for item in record.condition_history
+        )
+        and all(
+            item.code
+            in {
+                ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                ErrorCode.RETRY_EXHAUSTED.value,
+            }
+            for item in record.condition_history
+        )
+    ):
+        raise RuntimeError("affected correction recovery evidence is ineligible")
+    candidate = repository.observe_legacy_publication_candidate(record.worktree)
+    checkpoint = (
+        None
+        if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None
+        else load_red_checkpoint(record.project_id, record.issue_iid, record.source_sha)
+    )
+    identity = build_publication_correction_identity(
+        record, candidate, checkpoint=checkpoint
+    )
+    if candidate.merge_head is not None:
+        raise RuntimeError("affected correction recovery evidence is ineligible")
+    return {
+        "correction_identity": identity.model_dump_json(),
+        "affected_correction": "true",
     }
 
 
@@ -2310,17 +2402,48 @@ def dispatch(
                     retained_publication
                     and "legacy_index_fingerprint" in reviewed.evidence
                 )
-                if legacy_dirty_publication:
-                    preparing = ledger.persist(
-                        transition_record(
-                            current_record,
-                            RunnerState.PREPARING,
-                            phase=WorkflowPhase.WORKFLOW,
+                correction_snapshot = reviewed.evidence.get("correction_identity")
+                if legacy_dirty_publication or correction_snapshot is not None:
+                    if not isinstance(correction_snapshot, str):
+                        raise RuntimeError("reviewed correction identity is invalid")
+                    try:
+                        correction_identity = (
+                            PublicationCorrectionIdentity.model_validate_json(
+                                correction_snapshot
+                            )
                         )
-                    )
+                    except ValueError as error:
+                        raise RuntimeError(
+                            "reviewed correction identity is invalid"
+                        ) from error
+                    if correction_identity.workflow_lane is WorkflowLane.CONTENT:
+                        checkpoint = None
+                    elif wired.load_red_checkpoint is None:
+                        raise RuntimeError(
+                            "correction recovery Red evidence is unavailable"
+                        )
+                    else:
+                        checkpoint = wired.load_red_checkpoint(
+                            current_record.project_id,
+                            current_record.issue_iid,
+                            current_record.source_sha or "",
+                        )
+                    if (
+                        not correction_identity_matches(
+                            current_record,
+                            repository.observe_legacy_publication_candidate(
+                                current_record.worktree
+                            ),
+                            checkpoint=checkpoint,
+                        )
+                        and current_record.correction_identity is not None
+                    ):
+                        raise RuntimeError("correction recovery evidence changed")
+                    # The reviewed snapshot may establish the narrowly retained
+                    # pre-snapshot record; subsequent retries compare it above.
                     updated = ledger.persist(
                         transition_record(
-                            preparing,
+                            current_record,
                             RunnerState.EXECUTING,
                             phase=WorkflowPhase.WORKFLOW,
                             intent=None,
@@ -2331,6 +2454,7 @@ def dispatch(
                             worker_exit=None,
                             retry_at=None,
                             retry_count=0,
+                            correction_identity=correction_identity,
                             error_code=ErrorCode.PUBLICATION_COMMIT_REJECTED,
                             summary=(
                                 "The retained publication candidate requires "
