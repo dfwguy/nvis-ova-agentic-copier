@@ -308,6 +308,27 @@ class PlannedOutcome:
     record: LedgerRecord
 
 
+def retained_ordinary_is_untouched(record: LedgerRecord) -> bool:
+    """Return whether a retained ordinary record has no progressed workflow evidence."""
+    return (
+        record.work_kind is WorkKind.ORDINARY
+        and record.source_sha is not None
+        and record.source_sha == record.main_sha
+        and not record.receipts
+        and record.audit_evidence in {None, "unknown"}
+        and record.publication_sha is None
+        and record.merge_request_iid is None
+        and record.merge_request_url is None
+        and record.merge_request_draft is None
+        and record.feedback_cursor is None
+        and record.pending_feedback is None
+        and record.repair_attempt is None
+        and record.suggest_close_evidence is None
+        and record.intent is None
+        and record.worker_exit is None
+    )
+
+
 def validate_transition(source: RunnerState, target: RunnerState) -> bool:
     """Return whether one lifecycle edge is declared."""
     return target in ALLOWED_TRANSITIONS[source]

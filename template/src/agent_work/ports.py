@@ -192,6 +192,10 @@ class RepositoryPort(Protocol):
         allow_existing_branch: bool = True,
     ) -> Path: ...
 
+    def refresh_retained_worktree(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str: ...
+
     def worktree_for_existing_branch(
         self, issue_iid: int, branch: str, expected_sha: str
     ) -> Path: ...

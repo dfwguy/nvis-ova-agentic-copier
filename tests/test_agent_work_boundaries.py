@@ -2747,6 +2747,254 @@ def test_repository_prepares_publishes_and_inventories(
     assert any("pull" in command for command in calls)
 
 
+@pytest.mark.parametrize(
+    ("recorded_head", "initial_head", "default_head", "expects_merge"),
+    [
+        ("a" * 40, "a" * 40, "b" * 40, True),
+        ("b" * 40, "b" * 40, "b" * 40, False),
+        ("a" * 40, "b" * 40, "b" * 40, False),
+        ("a" * 40, "b" * 40, "c" * 40, True),
+    ],
+)
+def test_refresh_retained_worktree_fast_forwards_or_replays_exact_default(
+    tmp_path: Path,
+    recorded_head: str,
+    initial_head: str,
+    default_head: str,
+    *,
+    expects_merge: bool,
+) -> None:
+    """Untouched retained work converges by fast-forward without reset or overwrite."""
+    config = _config(tmp_path)
+    worktree = config.state_root / "worktrees" / "12"
+    worktree.mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+    head = initial_head
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal head
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "--git-path", "MERGE_HEAD"):
+            return CommandResult(0, str(tmp_path / "missing-MERGE_HEAD"), "")
+        if arguments == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{default_head}\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{head}\n", "")
+        if arguments[:2] == ("merge-base", "--is-ancestor"):
+            ancestor, descendant = arguments[2:]
+            related = ancestor == descendant or (ancestor, descendant) in {
+                (recorded_head, initial_head),
+                (initial_head, default_head),
+                (recorded_head, default_head),
+            }
+            return CommandResult(0 if related else 1, "", "")
+        if arguments == ("merge", "--ff-only", "origin/main"):
+            head = default_head
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+
+    observed = repository.refresh_retained_worktree(
+        worktree, "agent/issue-12", recorded_head
+    )
+
+    assert observed == default_head
+    merge_calls = [
+        command for command in calls if command[3:5] == ("merge", "--ff-only")
+    ]
+    assert bool(merge_calls) is expects_merge
+    assert not any(command[3] in {"reset", "stash"} for command in calls)
+
+
+@pytest.mark.parametrize("failure", ["unrelated-recorded-head", "inexact-merge-result"])
+def test_refresh_retained_worktree_rejects_inexact_replay_or_merge_result(
+    tmp_path: Path, failure: str
+) -> None:
+    """Replay ancestry and the post-merge head must both be exact."""
+    config = _config(tmp_path)
+    worktree = config.state_root / "worktrees" / "12"
+    worktree.mkdir(parents=True)
+    recorded_head = "a" * 40
+    default_head = "b" * 40
+    head = default_head if failure == "unrelated-recorded-head" else recorded_head
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "--git-path", "MERGE_HEAD"):
+            return CommandResult(0, str(tmp_path / "missing-MERGE_HEAD"), "")
+        if arguments == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{default_head}\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{head}\n", "")
+        if arguments[:2] == ("merge-base", "--is-ancestor"):
+            return CommandResult(
+                1 if failure == "unrelated-recorded-head" else 0, "", ""
+            )
+        if arguments == ("merge", "--ff-only", "origin/main"):
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+
+    with pytest.raises(RepositoryError):
+        repository.refresh_retained_worktree(worktree, "agent/issue-12", recorded_head)
+
+    assert not any(command[3] in {"reset", "stash"} for command in calls)
+
+
+def test_refresh_retained_worktree_rejects_an_unrelated_recorded_replay_chain(
+    tmp_path: Path,
+) -> None:
+    """Current-to-default ancestry cannot substitute for the recorded baseline."""
+    config = _config(tmp_path)
+    worktree = config.state_root / "worktrees" / "12"
+    worktree.mkdir(parents=True)
+    recorded_head = "a" * 40
+    current_head = "b" * 40
+    default_head = "c" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "--git-path", "MERGE_HEAD"):
+            return CommandResult(0, str(tmp_path / "missing-MERGE_HEAD"), "")
+        if arguments == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{default_head}\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{current_head}\n", "")
+        if arguments[:2] == ("merge-base", "--is-ancestor"):
+            return CommandResult(
+                0 if arguments[2:] == (current_head, default_head) else 1, "", ""
+            )
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+
+    with pytest.raises(RepositoryError, match="recorded baseline"):
+        repository.refresh_retained_worktree(worktree, "agent/issue-12", recorded_head)
+
+    assert not any(command[3] in {"merge", "reset", "stash"} for command in calls)
+
+
+@pytest.mark.parametrize("path_state", ["wrong", "missing"])
+def test_refresh_retained_worktree_requires_the_exact_existing_directory(
+    tmp_path: Path, path_state: str
+) -> None:
+    """A wrong or absent retained worktree path stops before Git is invoked."""
+    config = _config(tmp_path)
+    exact_path = config.state_root / "worktrees" / "12"
+    worktree = exact_path if path_state == "missing" else tmp_path / "other" / "12"
+    if path_state == "wrong":
+        worktree.mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+
+    with pytest.raises(RepositoryError, match="path is not exact"):
+        repository.refresh_retained_worktree(worktree, "agent/issue-12", "a" * 40)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("branch", "status", "recorded_head", "initial_head", "default_head", "merge_head"),
+    [
+        ("other", "", "a" * 40, "a" * 40, "b" * 40, False),
+        ("agent/issue-12", " M owned.py", "a" * 40, "a" * 40, "b" * 40, False),
+        ("agent/issue-12", "", "c" * 40, "c" * 40, "b" * 40, False),
+        ("agent/issue-12", "", "a" * 40, "a" * 40, "c" * 40, False),
+        ("agent/issue-12", "", "a" * 40, "a" * 40, "b" * 40, True),
+    ],
+)
+def test_refresh_retained_worktree_rejects_non_exact_or_authored_state(
+    tmp_path: Path,
+    branch: str,
+    status: str,
+    recorded_head: str,
+    initial_head: str,
+    default_head: str,
+    *,
+    merge_head: bool,
+) -> None:
+    """Wrong, dirty, ahead, divergent, and merging worktrees fail without mutation."""
+    config = _config(tmp_path)
+    worktree = config.state_root / "worktrees" / "12"
+    worktree.mkdir(parents=True)
+    merge_head_path = tmp_path / "MERGE_HEAD"
+    if merge_head:
+        merge_head_path.write_text("d" * 40, encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, f"{branch}\n", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, status, "")
+        if arguments == ("rev-parse", "--git-path", "MERGE_HEAD"):
+            return CommandResult(0, str(merge_head_path), "")
+        if arguments == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{default_head}\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{initial_head}\n", "")
+        if arguments[:2] == ("merge-base", "--is-ancestor"):
+            ancestor, descendant = arguments[2:]
+            related = (
+                (ancestor, descendant) == (default_head, recorded_head)
+                and recorded_head == initial_head
+                and recorded_head != "a" * 40
+            )
+            return CommandResult(0 if related else 1, "", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+
+    with pytest.raises(RepositoryError):
+        repository.refresh_retained_worktree(worktree, "agent/issue-12", recorded_head)
+
+    assert not any(command[3] in {"merge", "reset", "stash"} for command in calls)
+
+
 def test_push_prepared_rejects_a_changed_head_without_push(tmp_path: Path) -> None:
     config = _config(tmp_path)
     calls: list[tuple[str, ...]] = []

@@ -530,6 +530,60 @@ class GitRepository:
             )
         return path
 
+    def refresh_retained_worktree(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str:
+        """Fast-forward one exact untouched retained worktree to current default."""
+        match = re.fullmatch(r"agent/issue-(?P<iid>[1-9][0-9]*)", branch)
+        if match is None:
+            raise RepositoryError("retained worktree branch is not an ordinary issue")
+        expected_path = self.config.state_root / "worktrees" / match["iid"]
+        if worktree.resolve() != expected_path.resolve() or not worktree.is_dir():
+            raise RepositoryError("retained worktree path is not exact")
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("retained worktree is on the wrong branch")
+        if self.has_changes(worktree):
+            raise RepositoryError("retained worktree must be clean")
+        merge_path_value = self._git(
+            "rev-parse", "--git-path", "MERGE_HEAD", cwd=worktree
+        )
+        merge_path = Path(merge_path_value)
+        if not merge_path.is_absolute():
+            merge_path = worktree / merge_path
+        if merge_path.exists():
+            raise RepositoryError("retained worktree has a pending merge")
+
+        self._git(
+            "fetch", "origin", self.config.default_branch, cwd=worktree, transient=True
+        )
+        default_ref = f"origin/{self.config.default_branch}"
+        default_sha = self._git("rev-parse", default_ref, cwd=worktree)
+        head = self.head(worktree)
+        if head == default_sha:
+            if expected_head != default_sha and not self._is_ancestor(
+                expected_head, default_sha, worktree
+            ):
+                raise RepositoryError(
+                    "retained worktree does not match its recorded baseline"
+                )
+            return default_sha
+        if head != expected_head and not self._is_ancestor(
+            expected_head, head, worktree
+        ):
+            raise RepositoryError(
+                "retained worktree does not match its recorded baseline"
+            )
+        if not self._is_ancestor(head, default_sha, worktree):
+            if self._is_ancestor(default_sha, head, worktree):
+                raise RepositoryError("retained worktree contains authored commits")
+            raise RepositoryError("retained worktree diverged from current default")
+        self._git("merge", "--ff-only", default_ref, cwd=worktree)
+        if self.head(worktree) != default_sha:
+            raise RepositoryError(
+                "retained worktree fast-forward could not be verified"
+            )
+        return default_sha
+
     def worktree_for_existing_branch(
         self, issue_iid: int, branch: str, expected_sha: str
     ) -> Path:

@@ -111,7 +111,7 @@ from .serial import (
     resume_candidates,
     run_segment,
 )
-from .state_machine import transition_record
+from .state_machine import retained_ordinary_is_untouched, transition_record
 from .status import project_status
 from .timing import is_bounded_timing_append
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
@@ -688,19 +688,12 @@ def _normalization_is_exact(
             issue.state == "opened"
             and set(issue.labels).intersection(LIFECYCLE_LABELS) == {"agent::running"}
             and record.source_branch == f"agent/issue-{record.issue_iid}"
-            and record.work_kind is WorkKind.ORDINARY
+            and retained_ordinary_is_untouched(record)
             and repository.worktree_exists(record.worktree)
             and repository.head(record.worktree) == record.source_sha
             and not repository.has_changes(record.worktree)
             and not repository.changed_paths(record.worktree)
             and not gitlab.open_merge_requests_by_branch(record.source_branch)
-            and record.merge_request_iid is None
-            and record.publication_sha is None
-            and record.merge_request_draft is None
-            and record.feedback_cursor is None
-            and record.pending_feedback is None
-            and not record.receipts
-            and record.intent is None
             and repository.verify_worktree(
                 record.worktree, record.source_branch, record.source_sha or ""
             )
@@ -2355,6 +2348,7 @@ def dispatch(
                     transition_record(
                         record,
                         RunnerState.BLOCKED,
+                        main_sha=record.source_sha,
                         error_code=ErrorCode.STATE_RECONCILIATION_FAILED,
                         summary="Interrupted pre-worker claim retained for exact recovery.",
                         next_action=f"Review and explicitly recover retained issue {target}.",

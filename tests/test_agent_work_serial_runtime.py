@@ -27,7 +27,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agent_work import domain, serial
+from agent_work import domain, runtime, serial, state_machine
 from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
@@ -713,6 +713,9 @@ class FakeRepository:
         self.publication_paths: tuple[str, ...] | None = None
         self.has_changes_calls = 0
         self.worktree_exists_calls = 0
+        self.retained_refreshes: list[tuple[str, str]] = []
+        self.retained_refresh_result = "b" * 40
+        self.retained_refresh_error: RepositoryError | None = None
 
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
@@ -738,6 +741,17 @@ class FakeRepository:
             raise self.existing_worktree_error
         self.prepared = True
         return self.config.state_root / "worktrees" / str(issue_iid)
+
+    def refresh_retained_worktree(
+        self, worktree: Path, branch: str, expected_head: str
+    ) -> str:
+        """Model an exact fail-closed refresh of untouched retained work."""
+        del worktree
+        self.retained_refreshes.append((branch, expected_head))
+        if self.retained_refresh_error is not None:
+            raise self.retained_refresh_error
+        self.current_head = self.retained_refresh_result
+        return self.retained_refresh_result
 
     def head(self, worktree: Path) -> str:
         del worktree
@@ -2290,6 +2304,7 @@ def test_canary_prioritizes_a_failed_exact_pipeline_over_a_clean_active_claim_wi
                 "issue_iid": 77,
                 "source_branch": "agent/issue-77",
                 "worktree": config.state_root / "worktrees" / "77",
+                "main_sha": "a" * 40,
             }
         )
     )
@@ -2443,6 +2458,11 @@ def test_credential_identity_rotation_between_preview_and_apply_invalidates_plan
         "feedback",
         "receipts",
         "intent",
+        "audit-evidence",
+        "worker-exit",
+        "repair-attempt",
+        "suggest-close-evidence",
+        "source-main-mismatch",
     ],
 )
 def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
@@ -2461,6 +2481,7 @@ def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
                 "issue_iid": 77,
                 "source_branch": "agent/issue-77",
                 "worktree": config.state_root / "worktrees" / "77",
+                "main_sha": "a" * 40,
             }
         )
     )
@@ -2525,7 +2546,7 @@ def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
                 }
             )
         )
-    else:
+    elif mismatch == "intent":
         record = ledger.persist(
             record.model_copy(
                 update={
@@ -2533,6 +2554,65 @@ def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
                 }
             )
         )
+    elif mismatch == "audit-evidence":
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "audit_evidence": AuditReceiptSummary(
+                        lane="coding",
+                        capacity=AuditCapacity(
+                            required=12,
+                            available=16,
+                            shortfall=0,
+                            decision="run",
+                        ),
+                        role_receipts=("$tdd-green: complete",),
+                        changed_paths=("src/example.py",),
+                        tests=("uv run pytest tests/test_example.py",),
+                        reviewers=("$tdd-judge: approved",),
+                        findings=(),
+                        corrections=(),
+                    )
+                }
+            )
+        )
+    elif mismatch == "worker-exit":
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "worker_exit": WorkerExitEvidence(
+                        returncode=1, diagnostic="retained worker failure"
+                    )
+                }
+            )
+        )
+    elif mismatch == "repair-attempt":
+        record = ledger.persist(
+            record.model_copy(
+                update={"repair_attempt": RepairAttemptEvidence(fingerprint="a" * 64)}
+            )
+        )
+    elif mismatch == "suggest-close-evidence":
+        candidate = record.model_copy(
+            update={
+                "suggest_close_evidence": SuggestCloseEvidence(
+                    reason="already-satisfied",
+                    issue_iid=77,
+                    evidence=("https://gitlab.example.com/group/project/-/issues/78",),
+                )
+            }
+        )
+        assert not runtime._normalization_is_exact(
+            candidate,
+            gitlab=gitlab,
+            repository=repository,  # type: ignore[arg-type]
+        )
+        assert ledger.load(77) == record
+        assert gitlab.labels == []
+        assert repository.prepared is False
+        return
+    else:
+        record = ledger.persist(record.model_copy(update={"main_sha": "b" * 40}))
     preview = dispatch(
         CommandRequest(command="loop.recover", issue_iid=77),
         apply=False,
@@ -2712,6 +2792,7 @@ def test_recover_normalizes_an_exact_clean_unpublished_preworker_claim_and_retai
                 "issue_iid": 77,
                 "source_branch": "agent/issue-77",
                 "worktree": config.state_root / "worktrees" / "77",
+                "main_sha": "a" * 40,
             }
         )
     )
@@ -2763,6 +2844,7 @@ def test_reviewed_exact_retry_keeps_its_pinned_owner_ahead_of_queued_retry_wait(
                 "issue_iid": 35,
                 "source_branch": "agent/issue-35",
                 "worktree": config.state_root / "worktrees" / "35",
+                "main_sha": "a" * 40,
             }
         )
     )
@@ -3174,6 +3256,7 @@ def test_recover_76_advances_only_76_after_reviewed_recover_77_normalizes_stale_
                 "issue_iid": 77,
                 "source_branch": "agent/issue-77",
                 "worktree": config.state_root / "worktrees" / "77",
+                "main_sha": "a" * 40,
             }
         )
     )
@@ -3271,6 +3354,287 @@ def test_new_eligible_issue_is_claimed_and_prepared_without_running_worker(
     assert gitlab.labels == ["agent::running"]
     persisted = ledger.load(12)
     assert persisted is not None and persisted.intent is None
+
+
+@pytest.mark.parametrize(
+    ("retained_sha", "default_sha"),
+    [("a" * 40, "b" * 40), ("b" * 40, "b" * 40)],
+)
+def test_preparing_untouched_retained_work_uses_current_default_before_execution(
+    tmp_path: Path, retained_sha: str, default_sha: str
+) -> None:
+    """A clean untouched retry executes only from the observed current default."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"source_sha": retained_sha, "main_sha": retained_sha})
+    )
+    repository = FakeRepository(config)
+    repository.current_head = retained_sha
+    repository.retained_refresh_result = default_sha
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert repository.retained_refreshes == [("agent/issue-12", retained_sha)]
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.source_sha == default_sha and outcome.main_sha == default_sha
+
+
+def test_preparing_retained_refresh_replays_after_git_advanced_before_ledger_write(
+    tmp_path: Path,
+) -> None:
+    """A replay recognizes the exact fetched default and durably records both SHAs."""
+    config = _config(tmp_path)
+    ledger = FailOnPersistLedger(config.state_root, fail_on=2)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"source_sha": "a" * 40, "main_sha": "a" * 40})
+    )
+    repository = FakeRepository(config)
+    repository.current_head = "a" * 40
+    repository.retained_refresh_result = "b" * 40
+    dependencies: dict[str, Any] = {
+        "ledger": ledger,
+        "gitlab": FakeGitLab(),
+        "repository": repository,
+        "invoke": FakeInvoker(),
+        "timeout_seconds": 10,
+        "now": NOW,
+    }
+
+    with pytest.raises(LedgerError, match="injected ledger failure"):
+        run_segment(**dependencies)  # type: ignore[arg-type]
+    retained = ledger.load(12)
+    assert retained is not None and retained.source_sha == "a" * 40
+    assert repository.current_head == "b" * 40
+
+    outcome = run_segment(**dependencies)  # type: ignore[arg-type]
+
+    assert len(repository.retained_refreshes) == 2
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.source_sha == "b" * 40 and outcome.main_sha == "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("record_updates", "current_head", "refresh_error"),
+    [
+        (
+            {"source_sha": "a" * 40, "main_sha": "a" * 40},
+            "a" * 40,
+            "retained worktree must be clean",
+        ),
+        (
+            {"source_sha": "c" * 40, "main_sha": "a" * 40},
+            "c" * 40,
+            None,
+        ),
+        (
+            {"source_sha": "a" * 40, "main_sha": "a" * 40},
+            "c" * 40,
+            "retained worktree diverged from current default",
+        ),
+    ],
+)
+def test_preparing_retained_work_with_local_authorship_fails_closed(
+    tmp_path: Path,
+    record_updates: dict[str, object],
+    current_head: str,
+    refresh_error: str | None,
+) -> None:
+    """Dirty, authored-ahead, and divergent retained work is never overwritten."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update=record_updates)
+    )
+    repository = FakeRepository(config)
+    repository.current_head = current_head
+    repository.dirty = refresh_error == "retained worktree must be clean"
+    if refresh_error is not None:
+        repository.retained_refresh_error = RepositoryError(refresh_error)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.BRANCH_OWNERSHIP_AMBIGUOUS
+    assert repository.current_head == current_head
+    if record_updates["source_sha"] != record_updates["main_sha"]:
+        assert repository.retained_refreshes == []
+
+
+@pytest.mark.parametrize(
+    "evidence_kind",
+    [
+        "receipts",
+        "publication",
+        "intent",
+        "checkpoint",
+        "merge-request-iid",
+        "merge-request-url",
+        "merge-request-draft",
+        "feedback-cursor",
+        "pending-feedback",
+        "repair-attempt",
+        "worker-exit",
+    ],
+)
+def test_preparing_retained_work_with_workflow_evidence_fails_closed(
+    tmp_path: Path, evidence_kind: str
+) -> None:
+    """A retry with prior workflow evidence is preserved for explicit recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    evidence_updates: dict[str, object]
+    if evidence_kind == "receipts":
+        evidence_updates = {
+            "receipts": (
+                WorkflowReceiptRecord(
+                    phase=WorkflowPhase.WORKFLOW,
+                    verdict="complete",
+                    detail="$architect: approved",
+                ),
+            )
+        }
+    elif evidence_kind == "publication":
+        evidence_updates = {"publication_sha": "a" * 40}
+    elif evidence_kind == "intent":
+        evidence_updates = {
+            "intent": TransitionIntentRecord(
+                operation_id="12:prepare:retained",
+                kind="prepare_worktree",
+                expected_evidence={"branch": "agent/issue-12"},
+            )
+        }
+    elif evidence_kind == "checkpoint":
+        checkpoint = importlib.import_module("agent_work.red_checkpoint")
+        red_checkpoint = checkpoint.RedCheckpointEvidence(
+            project_id=310967,
+            issue_iid=12,
+            source_branch="agent/issue-12",
+            base_sha="a" * 40,
+            tree_oid="b" * 40,
+            ref=f"refs/agent-work/red-checkpoints/12/{'a' * 40}",
+            test_paths=("tests/test_behavior.py",),
+            argv=("uv", "run", "pytest", "tests/test_behavior.py"),
+            exit_code=1,
+            expected_failure="assert expected failure",
+            output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+        )
+        evidence_updates = {
+            "audit_evidence": AuditReceiptSummary(
+                lane="coding",
+                capacity=AuditCapacity(
+                    required=12, available=16, shortfall=0, decision="run"
+                ),
+                role_receipts=("$tdd-red: accepted",),
+                changed_paths=("tests/test_behavior.py",),
+                tests=("uv run pytest tests/test_behavior.py",),
+                reviewers=("$tdd-judge: approved",),
+                findings=(),
+                corrections=(),
+                red_checkpoint=red_checkpoint,
+            )
+        }
+    elif evidence_kind == "merge-request-iid":
+        evidence_updates = {"merge_request_iid": 88}
+    elif evidence_kind == "merge-request-url":
+        evidence_updates = {
+            "merge_request_url": "https://gitlab.example.com/group/project/-/merge_requests/88"
+        }
+    elif evidence_kind == "merge-request-draft":
+        evidence_updates = {"merge_request_draft": _decision_draft()}
+    elif evidence_kind == "feedback-cursor":
+        evidence_updates = {
+            "feedback_cursor": MergeRequestFeedbackCursor(
+                last_processed_general_note_id=1,
+                feedback_source_sha="a" * 40,
+            )
+        }
+    elif evidence_kind == "pending-feedback":
+        evidence_updates = {
+            "pending_feedback": PendingMergeRequestFeedback(
+                target_cursor=MergeRequestFeedbackCursor(
+                    last_processed_general_note_id=1,
+                    feedback_source_sha="a" * 40,
+                ),
+                source_sha="a" * 40,
+                source="general",
+                note_id=1,
+            )
+        }
+    elif evidence_kind == "repair-attempt":
+        evidence_updates = {
+            "repair_attempt": RepairAttemptEvidence(fingerprint="a" * 64)
+        }
+    elif evidence_kind == "worker-exit":
+        evidence_updates = {
+            "worker_exit": WorkerExitEvidence(
+                returncode=1, diagnostic="retained worker failure"
+            )
+        }
+    else:
+        raise AssertionError(f"unknown evidence kind: {evidence_kind}")
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "source_sha": "a" * 40,
+                "main_sha": "a" * 40,
+                **evidence_updates,
+            }
+        )
+    )
+    repository = FakeRepository(config)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert repository.retained_refreshes == []
+
+
+def test_suggest_close_evidence_is_never_eligible_as_untouched_retained_work(
+    tmp_path: Path,
+) -> None:
+    """A valid close suggestion cannot enter retained ordinary preparation."""
+    record = _record(
+        tmp_path,
+        state=RunnerState.SUGGEST_CLOSE,
+        phase=WorkflowPhase.POST_PUBLICATION,
+        suggest_close_evidence=SuggestCloseEvidence(
+            reason="already-satisfied",
+            issue_iid=12,
+            evidence=("https://gitlab.example.com/group/project/-/issues/13",),
+        ),
+    ).model_copy(update={"main_sha": "a" * 40})
+
+    assert not state_machine.retained_ordinary_is_untouched(record)
 
 
 def test_execution_parses_identity_bound_result_and_advances_one_phase(
@@ -14008,6 +14372,7 @@ def test_loop_recover_preview_reconciles_owner_capacity_or_fails_closed(
             "worktree": first.worktree
             if duplicate_identity
             else tmp_path / "worktrees" / "13",
+            "main_sha": "a" * 40,
         }
     )
     first = ledger.persist(first)
@@ -14051,6 +14416,7 @@ def test_loop_recover_preview_keeps_retry_wait_queued_behind_a_stale_target(
             "issue_iid": 13,
             "source_branch": "agent/issue-13",
             "worktree": tmp_path / "worktrees" / "13",
+            "main_sha": "a" * 40,
         }
     )
     config = _config(tmp_path)

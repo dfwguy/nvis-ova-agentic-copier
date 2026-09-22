@@ -64,6 +64,7 @@ from .state_machine import (
     apply_worker_result,
     has_complete_workflow_receipt,
     plan_retry,
+    retained_ordinary_is_untouched,
     transition_record,
 )
 from .timing import append_phase_timing
@@ -2216,7 +2217,22 @@ def _prepare(
                 repository.config.default_branch,
                 allow_existing_branch=not newly_claimed,
             )
-        source_sha = repository.head(worktree)
+            if newly_claimed:
+                source_sha = repository.head(worktree)
+            else:
+                expected_head = record.source_sha
+                if expected_head is None or not retained_ordinary_is_untouched(record):
+                    raise RepositoryError(
+                        "retained ordinary work has authored or workflow evidence"
+                    )
+                source_sha = repository.refresh_retained_worktree(
+                    worktree, record.source_branch, expected_head
+                )
+        if record.work_kind in {
+            WorkKind.EXISTING_MR_REMEDIATION,
+            WorkKind.MERGE_CONFLICT_REPAIR,
+        }:
+            source_sha = repository.head(worktree)
     except (RepositoryTransientError, GitLabError) as error:
         return _record_retry(
             record,
@@ -2261,9 +2277,9 @@ def _prepare(
         "summary": "Durable worktree prepared.",
         "next_action": "Run the recorded workflow phase.",
     }
-    if newly_claimed and record.work_kind is WorkKind.ORDINARY:
+    if record.work_kind is WorkKind.ORDINARY:
         # This is the first post-refresh worktree observation; do not use a
-        # potentially stale base-checkout SHA captured during discovery.
+        # potentially stale base-checkout or retained ledger SHA.
         updates["main_sha"] = source_sha
     return ledger.persist(
         transition_record(
