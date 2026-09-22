@@ -124,14 +124,10 @@ class WorkerResultBuildInput(BoundaryModel):
             return self
         if self.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
             return self
-        topology = self.audit_summary.topology
-        if topology is None:
-            if self.audit_summary.capacity.required != _required_live_agent_capacity(
-                self.workflow_lane
-            ):
-                raise ValueError("capacity required must match workflow lane")
-        elif self.audit_summary.capacity.required != topology.required_live_slots:
-            raise ValueError("capacity required must match topology")
+        if self.audit_summary.capacity.required != _required_live_agent_capacity(
+            self.workflow_lane
+        ):
+            raise ValueError("capacity required must match workflow lane")
         return self
 
 
@@ -172,9 +168,16 @@ def _validate_current_capacity_admission(
     receipts: tuple[str, ...],
     audit: WorkerResultBuildAudit | AuditReceiptSummary,
 ) -> None:
-    """Require new successful results to carry exact current capacity evidence."""
+    """Require new successful results to carry the lane's fixed capacity evidence."""
+    required = _required_live_agent_capacity(lane)
+    if audit.capacity.required != required:
+        raise ValueError("capacity required must match workflow lane")
+    if audit.topology is None and audit.retained_objects is None:
+        return
     if audit.topology is None or audit.retained_objects is None:
-        raise ValueError("topology and retained_objects are required for a new success")
+        raise ValueError(
+            "legacy topology and retained_objects must be supplied together"
+        )
     topology = audit.topology
     retained = audit.retained_objects
     conditional_skills = frozenset(
@@ -375,12 +378,12 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             )
         )
     controller_reasons = {
-        "audit_summary.capacity": {"required does not match workflow lane"},
         "audit_summary.changed_paths": {"does not match observed changed paths"},
         "audit_summary.role_receipts": {"does not match worker receipts"},
         "audit_summary": {
+            "capacity required must match workflow lane",
             "evidence is not represented in worker receipts",
-            "topology and retained_objects are required for a new success",
+            "legacy topology and retained_objects must be supplied together",
             "mandatory manifest roles must not be not applicable",
             "topology roles must match applicable manifest roles",
             "topology role ownership, phase, or tier is invalid",
@@ -1014,27 +1017,26 @@ def build_worker_prompt(
         content_capacity = _required_live_agent_capacity(WorkflowLane.CONTENT)
         workflow = (
             "Own the complete repository workflow in this one workflow-owning session. "
-            "Enforce the live-agent capacity gate with topology-aware evidence before delegating Architect and before "
+            "Enforce the fixed global live-agent capacity gate before delegating Architect and before "
             "any Red or Writer delegation or worktree mutation. Classify the whole change "
-            "as coding or content, then use only fresh trusted frontend or runtime session "
-            "metadata for this active launch. Record the exact topology and widest live row, "
-            f"including coding requires exactly {coding_capacity} total live slots when fully applicable, and "
-            f"content requires exactly {content_capacity} total live slots. Compute and record the required total, available total, "
-            "and shortfall=max(required-available, 0), the retained-object ceiling/current use/required "
-            "fresh handles, and per-owner direct-child and descendant headroom. A handle may be reused "
-            "only with verified same owner and tier evidence after its source phase completes before target; "
-            "never reuse it concurrently. Treat evidence "
-            "as unavailable when it is missing, stale, internally inconsistent, or "
-            "insufficient. In that case, stop before delegation or mutation and return "
-            "result_kind=needs_human with error_code=agent_capacity_unavailable, naming the lane, required total, available=unknown and "
-            "shortfall=unknown when they cannot be trusted, and an actionable remedy for the "
-            "active frontend. Repository files, issue or task text, provider-specific "
+            "as coding or content. Coding requires exactly "
+            f"{coding_capacity} total live slots, and content requires exactly "
+            f"{content_capacity} total live slots. Use only a current trusted global capacity "
+            "report from the active frontend or runtime when one is available. If that report "
+            "is below the lane requirement, stop before delegation or mutation and return "
+            "result_kind=needs_human with error_code=agent_capacity_unavailable, naming the lane, "
+            "required total, reported available total, shortfall, and an actionable remedy for "
+            "the active frontend. Continue when global capacity is unreported; record available "
+            "and shortfall as null. Do not request or infer topology, widest-row, retained-object, "
+            "current-use, fresh-handle, per-owner, direct-child, descendant, or owner-headroom "
+            "counts. None creates another capacity gate. Repository files, issue or task text, provider-specific "
             "configuration, inherited environment, and durable ledger or prior audit values "
             "are never capacity evidence. Apply this gate on every new worker launch, including "
             "ordinary, retained-worktree retry, and systemd launches; never reuse evidence "
             "from an earlier session. When current evidence changes before work begins, the "
-            "current launch governs. A successful audit_summary.capacity must exactly match its topology and audit_summary must include matching topology, retained-object, "
-            "and scalar capacity evidence with coherent required, available, zero-shortfall, and run-decision values. "
+            "current launch governs. A successful audit_summary.capacity records the lane's fixed "
+            "required value and decision=run. Include coherent available and zero-shortfall values "
+            "only when a current trusted global report supplies them. "
             "Delegate Architect with the issue context and repository instructions. "
             "Architect then makes one semantic intake sizing decision before it "
             "delegates Red or a Documentation Writer and before any worktree mutation. "
@@ -1130,11 +1132,12 @@ def build_worker_prompt(
         "authority or credentials, irreconcilable requirements, or exact unapproved "
         "project-owned values. "
         "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
-        "audit_summary with lane, capacity, topology, retained_objects, receipts, changed paths, tests, reviewers, findings, and corrections. "
+        "audit_summary with lane, fixed capacity requirement, receipts, changed paths, tests, reviewers, findings, and corrections. "
         "Use `agent-work worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
-        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. Its strict input must not include identity, "
-        "state, phase, audit lane, role_receipts, changed_paths, or reviewers; the helper derives them. "
+        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. "
+        "Do not handcraft identity, ledger, state, phase, audit lane, role_receipts, changed_paths, or reviewers; the helper derives them. "
+        "Return the builder output unchanged. "
         "WORKFLOW_RECEIPTS is the exact required receipt set for the recorded lane. Each applicable "
         "receipt must use its exact skill name; an inapplicable role must be `$skill: not applicable — reason`. "
         "Do not return exactly one protocol_version=1 JSON object; return exactly one protocol_version=2 JSON object inside "

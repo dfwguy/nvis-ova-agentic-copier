@@ -510,7 +510,7 @@ def test_workflow_prompt_keeps_quality_rerun_accounting_with_controller() -> Non
             "work_kind": "existing_mr_remediation",
             "audit_evidence": {
                 "capacity": {
-                    "required": 1,
+                    "required": 12,
                     "available": 999,
                     "shortfall": 0,
                     "decision": "run",
@@ -538,16 +538,15 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     assert capacity_gate < architect
     assert "before delegating architect" in normalized
     assert "before any red or writer delegation or worktree mutation" in normalized
-    assert "trusted frontend or runtime session metadata" in normalized
+    assert "current trusted global capacity report" in normalized
     assert "coding requires exactly 12 total live slots" in normalized
     assert "content requires exactly 3 total live slots" in normalized
     assert "available total" in normalized
     assert "shortfall" in normalized
-    assert "missing, stale, internally inconsistent, or insufficient" in normalized
     assert "result_kind=needs_human" in normalized
     assert "error_code=agent_capacity_unavailable" in normalized
-    assert "available=unknown" in normalized
-    assert "shortfall=unknown" in normalized
+    assert "continue when global capacity is unreported" in normalized
+    assert "record available and shortfall as null" in normalized
     assert "active frontend" in normalized
     assert "repository files" in normalized
     assert "issue or task text" in normalized
@@ -557,13 +556,11 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     assert "never reuse" in normalized
     assert "current launch governs" in normalized
     assert "audit_summary.capacity" in normalized
-    assert "must exactly match" in normalized
+    assert "lane's fixed required value and decision=run" in normalized
 
 
-def test_workflow_prompt_requires_current_topology_and_retained_object_admission() -> (
-    None
-):
-    """Worker instructions fail closed on missing live, owner, or object evidence."""
+def test_workflow_prompt_forbids_derived_capacity_gates() -> None:
+    """Worker instructions use one fixed global gate without derived counts."""
     prompt = build_worker_prompt(
         {
             "state": "executing",
@@ -575,16 +572,10 @@ def test_workflow_prompt_requires_current_topology_and_retained_object_admission
         effective_worker_budget_seconds=1800,
     ).casefold()
 
-    assert "widest live row" in prompt
-    assert "retained-object" in prompt
-    assert "required fresh handles" in prompt
-    assert "per-owner" in prompt
-    assert "direct-child" in prompt
-    assert "descendant" in prompt
-    assert "reuse" in prompt
-    assert "same owner and tier" in prompt
-    assert "source phase completes before target" in prompt
-    assert "topology" in prompt
+    assert "do not request or infer topology" in prompt
+    assert "owner-headroom counts" in prompt
+    assert "none creates another capacity gate" in prompt
+    assert "topology-aware evidence" not in prompt
 
 
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (

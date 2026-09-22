@@ -5,7 +5,7 @@ summary: Set live-agent capacity for a workflow lane.
 audience: practitioner
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why capacity is a workflow precondition.
@@ -71,32 +71,32 @@ global report if the active frontend or runtime gives one.
 - Continue when global capacity is not reported. Missing facts are not a
   shortage.
 
-At this boundary, do not ask for or work out another capacity value. Route shape, retained-agent
-counts, current use, fresh handles, and owner space do not control interactive
-admission. A serial loop may report these facts under its current protocol.
-They are diagnostic facts, not a new gate.
+At this boundary, do not ask for or work out another capacity value. Route
+shape, topology, retained-agent counts, current use, fresh handles, and owner
+space do not control admission. Do not use them as diagnostics for a second
+gate.
 
 Use a newer trusted report in place of an older one. Repo files, issue or task
 text, settings, service setup, and saved records cannot prove live capacity.
 
-## Check the serial wrapper preflight
+## Check serial wrapper admission
 
-The serial wrapper keeps its stricter gate. This applies when you invoke it
-from a terminal, during normal serial work, on a retained-worktree retry, and
-under systemd. Before it delegates Architect, it checks current live capacity,
-route topology, retained-agent objects, and owner headroom.
+The serial wrapper uses the same fixed global requirement when it delegates
+Architect. This applies to terminal, normal serial, retained-worktree retry,
+and systemd runs. Use a current trusted global report when the active frontend
+or runtime provides one. Continue when it does not provide a report.
 
-Missing, stale, conflicting, or low evidence returns `needs_human`. The wrapper
-does not delegate Architect or change the retained worktree. Follow the remedy,
-then start a new wrapper session. A prior successful audit cannot authorize the
-new run.
+Do not request or infer topology, retained-object, or owner-headroom counts for
+the wrapper. A current report below the selected lane's fixed requirement
+returns `needs_human` before delegation or a worktree change. A prior report
+does not authorize a new run.
 
 ## Respond when capacity is too low
 
 Stop before delegation or a worktree change when a trusted current report shows
-too few slots. Name the lane, fixed limit, free total, and shortfall. Give the
-operator a fix. Do not run concurrent work in series. Also stop when you cannot
-safely resolve a real delegation or tool refusal.
+too few slots. Name the lane, fixed limit, reported total, and shortfall. Give
+the operator a fix. Do not run concurrent work in series. Also stop when you
+cannot safely resolve a real delegation or tool refusal.
 
 Known capacity example:
 
@@ -107,6 +107,5 @@ least 11 in ~/.codex/config.toml, then relaunch and confirm current runtime
 metadata for the new session.
 ```
 
-For an Architect that already passed wrapper preflight, use the fixed global
-rule above. At the wrapper preflight itself, missing current evidence does
-require a `needs_human` handoff.
+Use the same fixed global rule for every Architect launch. Missing global
+capacity evidence is not a `needs_human` handoff.

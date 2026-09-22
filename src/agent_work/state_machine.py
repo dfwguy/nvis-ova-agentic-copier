@@ -446,7 +446,7 @@ def apply_worker_result(
         )
         if (
             audit.capacity.decision != "run"
-            or audit.capacity.shortfall != 0
+            or audit.capacity.shortfall not in {None, 0}
             or audit.role_receipts != result.receipts
             or not audit_receipt_skills
             or len(set(audit_receipt_skills)) != len(audit_receipt_skills)
