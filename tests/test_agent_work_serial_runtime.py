@@ -68,6 +68,13 @@ from agent_work.models import (
     WorkerExitEvidence,
     WorkflowReceiptRecord,
 )
+from agent_work.ports import CommandResult as CommandResultProtocol
+from agent_work.red_checkpoint import (
+    RedCheckpointError,
+    RedCheckpointEvidence,
+    RedCheckpointReport,
+    RedCheckpointRequest,
+)
 from agent_work.repository import (
     CommandResult,
     PublicationError,
@@ -1536,6 +1543,789 @@ def test_workflow_runtime_reloads_checkpoint_created_during_worker_invocation(
     assert loads == [False, True]
     expected_state = RunnerState.PUBLISHING if matches else RunnerState.RETRY_WAIT
     assert result is not None and result.state is expected_state
+
+
+def _red_checkpoint_request_for_segment() -> RedCheckpointRequest:
+    test_path = "tests/test_agent_work_serial_runtime.py"
+    return RedCheckpointRequest(
+        argv=("uv", "run", "pytest", f"{test_path}::test_red"),
+        expected_failure="assert expected failure",
+        test_paths=(test_path,),
+    )
+
+
+def _red_checkpoint_evidence_for_segment(
+    record: LedgerRecord, *, tree_oid: str = "b" * 40
+) -> RedCheckpointEvidence:
+    assert record.source_sha is not None
+    request = _red_checkpoint_request_for_segment()
+    return RedCheckpointEvidence(
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        source_branch=record.source_branch,
+        base_sha=record.source_sha,
+        tree_oid=tree_oid,
+        ref=(f"refs/agent-work/red-checkpoints/{record.issue_iid}/{record.source_sha}"),
+        test_paths=request.test_paths,
+        argv=request.argv,
+        exit_code=1,
+        expected_failure=request.expected_failure,
+        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+    )
+
+
+class RedThenGreenInvoker:
+    """Return a tests-only Red handoff, then run Green after trusted capture."""
+
+    def __init__(self, repository: FakeRepository) -> None:
+        self.repository = repository
+        self.prompts: list[str] = []
+        self.green = SingleSessionInvoker()
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+        del checkout
+        self.prompts.append(prompt)
+        raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
+        record = ast.literal_eval(raw_record)
+        if len(self.prompts) == 1:
+            request = _red_checkpoint_request_for_segment()
+            payload = {
+                "protocol_version": 2,
+                "project_id": record["project_id"],
+                "issue_iid": record["issue_iid"],
+                "ledger_revision": record["revision"],
+                "expected_state": record["state"],
+                "expected_phase": record["phase"],
+                "workflow_lane": "coding",
+                "result_kind": "red_checkpoint_ready",
+                "phase_status": "complete",
+                "completed_phase": "workflow",
+                "receipts": ("$architect: approved", "$tdd-red: red confirmed"),
+                "change_summary": "Failing behavior tests are ready for capture.",
+                "next_action": "Create and verify the trusted Red checkpoint.",
+                "red_checkpoint_request": request.model_dump(mode="json"),
+            }
+            return WorkerInvocation(
+                0,
+                f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
+                "",
+            )
+        assert "red_checkpoint" in record
+        self.repository.paths = (
+            "src/example.py",
+            "tests/test_agent_work_serial_runtime.py",
+        )
+        self.green.changed_paths = self.repository.paths
+        return self.green.invoke(Path("."), prompt, timeout)
+
+
+class RedThenGreenHandoffInvoker:
+    """Return both Red and resumed Green results through trusted artifacts."""
+
+    supports_worker_result_handoff = True
+
+    def __init__(self, repository: FakeRepository) -> None:
+        self.repository = repository
+        self.legacy = RedThenGreenInvoker(repository)
+        self.requests: list[_HandoffRequest] = []
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        handoff: _HandoffRequest | None = None,
+    ) -> WorkerInvocation:
+        assert handoff is not None
+        self.requests.append(handoff)
+        invocation = self.legacy.invoke(checkout, prompt, timeout)
+        envelope = json.loads(
+            invocation.stdout.removeprefix("<agent-work-result>").removesuffix(
+                "</agent-work-result>"
+            )
+        )
+        artifact = {
+            "schema_version": 1,
+            "nonce": handoff.nonce,
+            "project_id": handoff.project_id,
+            "issue_iid": handoff.issue_iid,
+            "ledger_revision": handoff.ledger_revision,
+            "source_branch": handoff.source_branch,
+            "source_sha": handoff.source_sha,
+            "changed_paths": list(self.repository.paths),
+            "envelope": envelope,
+        }
+        return WorkerInvocation(
+            0,
+            "untrusted stdout without a result envelope",
+            "",
+            handoff=json.dumps(artifact, separators=(",", ":")).encode(),
+        )
+
+
+class RecordingLedger(JsonLedger):
+    """Record durable lane writes around the trusted checkpoint transaction."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root, clock=lambda: NOW)
+        self.events: list[str] = []
+
+    def persist(self, record: LedgerRecord) -> LedgerRecord:
+        persisted = super().persist(record)
+        self.events.append(f"persist:{persisted.workflow_lane.value}")
+        return persisted
+
+
+def test_coding_workflow_persists_lane_then_captures_red_before_green(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = RecordingLedger(config.state_root)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    ledger.events.clear()
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        assert issue_iid == record.issue_iid
+        assert request == _red_checkpoint_request_for_segment()
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None and current.workflow_lane is WorkflowLane.CODING
+        ledger.events.append("apply-red-checkpoint")
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert len(invoker.prompts) == 2
+    persist_index = ledger.events.index("persist:coding")
+    apply_index = ledger.events.index("apply-red-checkpoint")
+    assert persist_index < apply_index
+    assert retained is not None and retained.tree_oid in invoker.prompts[1]
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenHandoffInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+    checkpoint_revision: int | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal checkpoint_revision, retained
+        assert issue_iid == record.issue_iid
+        assert request == _red_checkpoint_request_for_segment()
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        checkpoint_revision = current.revision
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert len(invoker.requests) == 2
+    red_request, green_request = invoker.requests
+    assert red_request.nonce != green_request.nonce
+    assert red_request.path != green_request.path
+    assert red_request.ledger_revision == record.revision
+    assert green_request.ledger_revision == checkpoint_revision
+    assert green_request.ledger_revision > red_request.ledger_revision
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "missing",
+        "mismatched",
+        "passing",
+        "failure-marker-missing",
+        "transaction-failed",
+    ),
+)
+def test_red_checkpoint_failure_is_stable_and_never_launches_green(
+    tmp_path: Path, failure: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        del issue_iid, request
+        if failure == "passing":
+            raise RedCheckpointError("red command must fail")
+        if failure == "failure-marker-missing":
+            raise RedCheckpointError("expected failure marker was not observed")
+        if failure == "transaction-failed":
+            raise RedCheckpointError("red checkpoint write failed")
+        evidence = _red_checkpoint_evidence_for_segment(record)
+        retained = (
+            evidence.model_copy(update={"tree_oid": "c" * 40})
+            if failure == "mismatched"
+            else None
+        )
+        return evidence
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert len(invoker.prompts) == 1
+    assert repository.paths == ("tests/test_agent_work_serial_runtime.py",)
+    assert result is not None and result.state is RunnerState.BLOCKED
+    assert result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+
+
+def test_restart_reuses_exact_red_checkpoint_without_recreating_it(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = (
+        "src/example.py",
+        "tests/test_agent_work_serial_runtime.py",
+    )
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+    invoker = SingleSessionInvoker()
+    invoker.changed_paths = repository.paths
+
+    def reject_recreation(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        del issue_iid, request
+        raise AssertionError("an exact retained checkpoint must be reused")
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: checkpoint,
+        apply_red_checkpoint=reject_recreation,
+    )
+
+    assert invoker.phases == [WorkflowPhase.WORKFLOW.value]
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_production_change_before_red_checkpoint_blocks_and_preserves_worktree(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    original_paths = (
+        "src/example.py",
+        "tests/test_agent_work_serial_runtime.py",
+    )
+    repository.paths = original_paths
+    invoker = RedThenGreenInvoker(repository)
+    apply_calls = 0
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal apply_calls
+        del issue_iid, request
+        apply_calls += 1
+        raise AssertionError("production changes must block before checkpoint apply")
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert apply_calls == 0
+    assert len(invoker.prompts) == 1
+    assert repository.paths == original_paths
+    assert result is not None and result.state is RunnerState.BLOCKED
+    assert result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+
+
+def test_content_workflow_does_not_enter_the_red_checkpoint_transaction(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("docs/explanation.md",)
+    invoker = SingleSessionInvoker(lane="content")
+    invoker.changed_paths = repository.paths
+
+    def reject_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        del issue_iid, request
+        raise AssertionError("content work must not enter the Red transaction")
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=reject_red_checkpoint,
+    )
+
+    assert invoker.phases == [WorkflowPhase.WORKFLOW.value]
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_fresh_unknown_lane_content_result_bypasses_the_red_transaction(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("docs/explanation.md",)
+    invoker = SingleSessionInvoker(lane="content")
+    invoker.changed_paths = repository.paths
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
+            AssertionError("content work must not apply a Red checkpoint")
+        ),
+    )
+
+    assert invoker.phases == [WorkflowPhase.WORKFLOW.value]
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+@pytest.mark.parametrize(
+    ("result_kind", "expected_state", "expected_error"),
+    (
+        ("split_required", RunnerState.COMPLETE, None),
+        (
+            "needs_human",
+            RunnerState.BLOCKED,
+            ErrorCode.AGENT_CAPACITY_UNAVAILABLE,
+        ),
+        ("retryable", RunnerState.RETRY_WAIT, ErrorCode.GITLAB_RETRYABLE),
+    ),
+)
+def test_pre_red_control_results_keep_their_existing_controller_routes(
+    tmp_path: Path,
+    result_kind: str,
+    expected_state: RunnerState,
+    expected_error: ErrorCode | None,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    payload: dict[str, object] = {
+        "protocol_version": 2,
+        "project_id": record.project_id,
+        "issue_iid": record.issue_iid,
+        "ledger_revision": record.revision,
+        "expected_state": record.state,
+        "expected_phase": record.phase,
+        "workflow_lane": "coding",
+        "result_kind": result_kind,
+        "phase_status": "rejected",
+        "completed_phase": record.phase,
+        "receipts": (),
+        "change_summary": "The coding workflow stopped before Red.",
+        "next_action": "Follow the controller route.",
+    }
+    if result_kind == "split_required":
+        payload.update(
+            {
+                "workflow_lane": "unknown",
+                "phase_status": "complete",
+                "split_plan": {
+                    "slices": (
+                        {
+                            "ordinal": 1,
+                            "key": "first",
+                            "title": "First slice",
+                            "description": "First independent outcome.",
+                            "depends_on": (),
+                        },
+                        {
+                            "ordinal": 2,
+                            "key": "second",
+                            "title": "Second slice",
+                            "description": "Second independent outcome.",
+                            "depends_on": (),
+                        },
+                    )
+                },
+            }
+        )
+    elif result_kind == "needs_human":
+        payload.update(
+            {
+                "error_code": ErrorCode.AGENT_CAPACITY_UNAVAILABLE,
+                "redacted_summary": "Fresh capacity is unavailable.",
+                "rejection_route": WorkflowPhase.WORKFLOW,
+            }
+        )
+    else:
+        payload["error_code"] = ErrorCode.GITLAB_RETRYABLE
+
+    repository = FakeRepository(config)
+    repository.paths = ()
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(
+            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
+        ),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
+            AssertionError("control results must not apply a Red checkpoint")
+        ),
+    )
+
+    assert result is not None and result.state is expected_state
+    assert result.error_code is expected_error
+
+
+def test_red_checkpoint_does_not_launch_green_after_activation_budget_expires(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        del issue_iid, request
+        current = ledger.load_read_only(record.issue_iid)
+        assert current is not None
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    budgets = iter((10.0, 0.0))
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        remaining_seconds=lambda: next(budgets),
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert result is None
+    assert len(invoker.prompts) == 1
+    assert retained is not None
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_error"),
+    (
+        (1, ErrorCode.WORKER_EXIT),
+        (None, ErrorCode.WORKER_TIMEOUT),
+    ),
+)
+def test_first_red_worker_process_failure_uses_the_recoverable_retry_route(
+    tmp_path: Path, returncode: int | None, expected_error: ErrorCode
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(returncode=returncode),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
+            AssertionError("a failed worker process cannot apply a checkpoint")
+        ),
+    )
+
+    assert result is not None and result.state is RunnerState.RETRY_WAIT
+    assert result.error_code is expected_error
+    if returncode is not None:
+        assert result.worker_exit is not None
+
+
+def test_composition_root_wires_the_trusted_red_checkpoint_apply_boundary(
+    tmp_path: Path,
+) -> None:
+    class CompositionGitLab(FakeGitLab):
+        def lifecycle_label_drift(self) -> tuple[str, ...]:
+            """Return an empty composition-root drift projection."""
+            return ()
+
+        def ensure_lifecycle_labels(self) -> None:
+            """Model successful composition-root label setup."""
+
+    class CompositionRepository(FakeRepository):
+        class FailedCommand:
+            returncode = 1
+            stdout = "expected failure"
+            stderr = ""
+
+        def run_red_command(
+            self, worktree: Path, argv: tuple[str, ...]
+        ) -> CommandResultProtocol:
+            del worktree, argv
+            return self.FailedCommand()
+
+        def snapshot_tests(
+            self,
+            worktree: Path,
+            base_sha: str,
+            paths: tuple[str, ...],
+            ref: str,
+        ) -> str:
+            del worktree, base_sha, paths, ref
+            return "b" * 40
+
+        def checkpoint_tree(self, ref: str) -> str | None:
+            del ref
+            return None
+
+    config = _config(tmp_path)
+    gitlab = CompositionGitLab()
+    repository = CompositionRepository(config)
+    evidence = _red_checkpoint_evidence_for_segment(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    observed: list[tuple[int, bool]] = []
+
+    def create_checkpoint(
+        *,
+        issue_iid: int,
+        request: RedCheckpointRequest,
+        apply: bool,
+        dependencies: runtime.RedCheckpointDependencies,
+    ) -> RedCheckpointReport:
+        del request, dependencies
+        observed.append((issue_iid, apply))
+        return RedCheckpointReport(True, "created", evidence)
+
+    dependencies = runtime.build_runtime_dependencies(
+        debug=False,
+        composition=runtime.RuntimeCompositionDependencies(
+            config=config,
+            logger=logging.getLogger("composition-root-test"),
+            gitlab=gitlab,
+            repository=repository,
+            invoke=FakeInvoker(),
+            checkpoint_store=runtime.RedCheckpointStore(config.state_root),
+            create_checkpoint=create_checkpoint,
+        ),
+    )
+
+    assert dependencies.load_red_checkpoint is not None
+    assert dependencies.apply_red_checkpoint is not None
+    assert (
+        dependencies.apply_red_checkpoint(12, _red_checkpoint_request_for_segment())
+        == evidence
+    )
+    assert observed == [(12, True)]
+
+
+def test_loop_run_passes_the_checkpoint_apply_boundary_to_each_segment(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    checkpoint: RedCheckpointEvidence | None = None
+    apply_calls = 0
+
+    def apply_boundary(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal apply_calls, checkpoint
+        del issue_iid, request
+        apply_calls += 1
+        current = ledger.load_read_only(retained.issue_iid)
+        assert current is not None
+        checkpoint = _red_checkpoint_evidence_for_segment(current)
+        return checkpoint
+
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        invoke=invoker,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: checkpoint,
+        apply_red_checkpoint=apply_boundary,
+    )
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert apply_calls == 1
+    assert len(invoker.prompts) == 2
+
+
+def test_reviewed_recovery_passes_the_checkpoint_apply_boundary_to_its_segment(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    repository = FakeRepository(config)
+    request = CommandRequest(
+        command="loop.recover", issue_iid=retained.issue_iid, max_segments=1
+    )
+    preview = dispatch(
+        request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "run_segment"
+
+    def apply_boundary(
+        issue_iid: int, checkpoint_request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        del issue_iid, checkpoint_request
+        raise AssertionError("coding-green must not apply a Red checkpoint")
+
+    observed: list[object] = []
+    real_run_segment = runtime.run_segment
+
+    def capture_segment(**kwargs: Any) -> LedgerRecord | None:
+        observed.append(kwargs["apply_red_checkpoint"])
+        return real_run_segment(**kwargs)
+
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        invoke=BatchingInvoker(),
+        apply_red_checkpoint=apply_boundary,
+        run_segment_boundary=capture_segment,
+        read_plan=lambda _path: _operational_plan_bytes(preview),
+    )
+
+    dispatch(
+        replace(request, plan_file=tmp_path / "recover.json"),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert observed == [apply_boundary]
 
 
 def test_recovery_inventory_correlates_durable_evidence_without_claiming_or_mutating(

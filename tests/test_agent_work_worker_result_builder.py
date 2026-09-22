@@ -1985,7 +1985,9 @@ def test_worker_result_build_apply_atomically_writes_identity_bound_handoff(
     )
 
     assert exit_code == 0
-    assert stdout == []
+    assert stdout == ["worker result handoff written for issue #81"]
+    assert "<agent-work-result>" not in stdout[0]
+    assert "envelope" not in stdout[0]
     assert len(writes) == 1 and writes[0][0] == handoff_path
     artifact = json.loads(writes[0][1])
     assert artifact == {

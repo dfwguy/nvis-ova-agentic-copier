@@ -145,6 +145,21 @@ declared paths so it can inspect the same Red boundary. Ordinary `git diff
 `--debug` does not weaken redaction. Checkpoint validation failures remain
 sanitized and never include rejected evidence values or raw test output.
 
+### Coding workflow Red boundary
+
+A coarse coding workflow keeps Red tests apart from code changes. The
+controller sees and checks the handoff between two worker runs.
+
+| Condition or step | Controller contract |
+| --- | --- |
+| Fresh coding work without a retained checkpoint | The first worker segment may change only declared test paths. It returns `red_checkpoint_ready` with `change_summary`, `next_action`, the `$architect` and `$tdd-red` receipts, and one `red_checkpoint_request` with `argv`, `expected_failure`, and `test_paths`. It does not start Green or return the full workflow receipts. |
+| Durable lane selection | Before applying the trusted checkpoint transaction, the controller persists `workflow_lane: coding` in the ledger. The applied transaction therefore cannot run against an unknown or inferred lane. |
+| Trusted checkpoint transaction | The controller rejects production-path changes, validates the Red-only result, applies `red-checkpoint create`, then loads the retained evidence through the trusted checkpoint boundary. The returned and loaded evidence must match exactly. |
+| Later coding segment | Only after exact checkpoint verification does the controller start a new worker invocation. Its prompt includes the retained checkpoint identity. That invocation completes Green and the remaining coding workflow and returns the full coding receipt set. |
+| Restart with exact evidence | When the trusted loader finds the exact checkpoint for the project, issue, source branch, and recorded base, the controller reuses it. It does not recreate the checkpoint or repeat the Red-only segment. It starts the later full workflow with the same retained identity. |
+| Failed boundary | A missing or mismatched checkpoint, a passing Red command, a missing failure marker, a failed transaction, or a production change before capture blocks the item with `red_checkpoint_failed`. The controller preserves the worktree and never starts the later coding segment. Repeated observation has the same stable outcome. |
+| Content lane | Content work keeps its existing single coarse workflow invocation. It does not enter the Red checkpoint transaction. |
+
 ### `merge-request publish`
 
 `merge-request publish` creates Markdown text for review. It has the needed
@@ -427,7 +442,7 @@ accepted for consistent invocation and changes nothing.
 | Argparse usage failure | Exits `2`. |
 | Input object | One strict JSON object containing only worker intent. Unknown fields are rejected. |
 | Required worker intent | `workflow_lane`, `result_kind`, `receipts`, `change_summary`, and `next_action`. |
-| Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, and bounded `audit_summary` evidence: `capacity`, `tests`, `findings`, and `corrections`. |
+| Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, `red_checkpoint_request`, and bounded `audit_summary` evidence: `capacity`, `tests`, `findings`, and `corrections`. |
 | Controller-derived values | Protocol version; project and issue identity; ledger revision; expected state and phase; completed phase; audit lane; role receipts; changed paths; reviewer receipt list. The input must not contain `identity`, `state`, `phase`, audit `lane`, `role_receipts`, `changed_paths`, or `reviewers`. |
 
 | Result state or receipt | Contract |
@@ -437,11 +452,12 @@ accepted for consistent invocation and changes nothing.
 | `post-publication` | Gets `complete` only for `ready_to_publish`. Failed, actionable, and other non-success results remain `rejected`. |
 | Successful post-publication assessment | Supplies the needed complete `$pipeline-performance-judge` receipt and advances the verified exact-source handoff to `awaiting-human`. |
 | Malformed, contradictory, failed, or actionable assessment | Keeps existing rejection and feedback handling; it does not advance that handoff. |
+| Red-only coding handoff | `red_checkpoint_ready` is valid only for a coarse coding `workflow` without exact retained Red evidence. It has the required `change_summary` and `next_action`, complete `$architect` and `$tdd-red` receipts, and one `red_checkpoint_request`. It has no documentation or policy receipts, audit summary, merge-request draft, split plan, or error code, and it cannot advance to publication. |
 | Completed ordinary workflow lane | Use `coding` or `content` with that lane's exact `WORKFLOW_RECEIPTS` set. |
 | Coding receipts | `$architect`, `$tdd-red`, `$diataxis-writer`, `$agent-policy-writer`, `$tdd-green`, `$tdd-judge`, `$nonfunctional-review`, `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, `$license-checker`, and `$tdd-finalizer`. All 17 are needed for coding `ready_to_publish`. |
 | Content receipts | `$architect`, `$documentation-writer`, and `$documentation-finalizer`. All three are needed for completed content `ready_to_publish`. |
 | Receipt format | Every receipt starts with its exact skill name and can include full multiline nested-role evidence. A conditionally inapplicable role is exactly `$skill: not applicable — reason`. Arbitrary, omitted, duplicated, or invented receipts cannot advance the workflow. |
-| Coarse and legacy route | The 17-receipt coding set applies to new coarse `WORKFLOW` results. A legacy recorded phased route remains compatible and finishes its recorded route. |
+| Coarse and legacy route | The 17-receipt coding set applies to the completed result from a new coarse `WORKFLOW`, after the Red-only handoff when one is needed. A legacy recorded phased route remains compatible and finishes its recorded route. |
 | `ready_to_publish` | Completes a coherent ordinary workflow. It needs exact receipts, a successful audit (including capacity and tests for coding), and a merge-request draft when retained work needs new publication metadata. |
 | Draft metadata | The draft has nonempty `title` and `description`. A controversial but safe human handoff has a title beginning `Draft:`, an agreeing draft flag, and a decision review covering decisions and assumptions, alternatives, risks, reviewer checks, unresolved findings and evidence, tests, the correction-cycle ledger, and unchanged project-owned values. Existing-MR remediation is the exception: it supplies no new publication metadata. |
 
@@ -449,6 +465,7 @@ The other result kinds preserve their distinct controller transitions:
 
 | Result kind | Use and needed intent |
 | --- | --- |
+| `red_checkpoint_ready` | A tests-only coding handoff for controller capture. Supply the required `change_summary` and `next_action`, exactly the `$architect` and `$tdd-red` receipts, and the exact `red_checkpoint_request`. Do not supply documentation or policy receipts, `merge_request_draft`, `audit_summary`, `split_plan`, or `error_code`. The controller verifies and retains the handoff before any later coding segment. |
 | `retryable` | A bounded transient outcome. Include the applicable error code and redacted summary when available. The controller schedules ordinary retained-worktree recovery. |
 | `needs_human` | A blocker requiring human authority or a decision. Provide the bounded redacted summary, next action, and applicable error code. |
 | `split_required` | An oversized fresh workflow. Use `workflow_lane: unknown` and a `split_plan` of 2–25 ordered, independently mergeable slices. It needs no receipts, audit, merge-request draft, or error code. |

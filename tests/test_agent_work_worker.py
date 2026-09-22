@@ -24,6 +24,7 @@ from agent_work.worker import (
     build_worker_prompt,
     format_worker_result_diagnostic,
     parse_worker_result,
+    parse_worker_result_build_input,
 )
 
 _CONTEXT_PREFIX = "Untrusted issue context JSON:\n"
@@ -72,6 +73,98 @@ def test_parse_worker_result_accepts_one_exact_versioned_envelope() -> None:
     assert result.issue_iid == 12
     assert result.protocol_version == 2
     assert result.result_kind == "ready_to_publish"
+
+
+def _red_checkpoint_request() -> dict[str, object]:
+    return {
+        "argv": (
+            "uv",
+            "run",
+            "pytest",
+            "tests/test_agent_work_serial_runtime.py::test_red",
+            "tests/test_agent_work_worker.py::test_red",
+        ),
+        "expected_failure": "assert expected failure",
+        "test_paths": (
+            "tests/test_agent_work_serial_runtime.py",
+            "tests/test_agent_work_worker.py",
+        ),
+    }
+
+
+def _red_checkpoint_ready_envelope(**updates: object) -> dict[str, object]:
+    payload = _envelope(
+        expected_phase=WorkflowPhase.WORKFLOW.value,
+        completed_phase=WorkflowPhase.WORKFLOW.value,
+        result_kind="red_checkpoint_ready",
+        receipts=("$architect: approved", "$tdd-red: red confirmed"),
+        change_summary="Failing behavior tests are ready for trusted capture.",
+        next_action="Create and verify the trusted Red checkpoint.",
+        red_checkpoint_request=_red_checkpoint_request(),
+    )
+    payload.update(updates)
+    return payload
+
+
+def test_red_checkpoint_ready_envelope_is_exact_and_strict() -> None:
+    valid = _red_checkpoint_ready_envelope()
+
+    result = parse_worker_result(
+        f"<agent-work-result>{json.dumps(valid)}</agent-work-result>"
+    )
+
+    assert result.result_kind == "red_checkpoint_ready"
+    assert result.red_checkpoint_request is not None
+    assert result.red_checkpoint_request.test_paths == (
+        "tests/test_agent_work_serial_runtime.py",
+        "tests/test_agent_work_worker.py",
+    )
+    invalid_updates = (
+        {"red_checkpoint_request": None},
+        {"expected_phase": WorkflowPhase.CODING_GREEN.value},
+        {"completed_phase": WorkflowPhase.CODING_RED_DOCS.value},
+        {"workflow_lane": WorkflowLane.CONTENT.value},
+        {"phase_status": "rejected"},
+        {"audit_summary": {}},
+        {"merge_request_draft": {"title": "Draft", "description": "Body"}},
+        {"split_plan": {"slices": []}},
+        {"error_code": "worker_exit"},
+        {"receipts": ("$architect: approved",)},
+        {
+            "receipts": (
+                "$architect: approved",
+                "$tdd-red: red confirmed",
+                "$diataxis-writer: complete",
+            )
+        },
+        {"receipts": ("$tdd-red: red confirmed", "$architect: approved")},
+        {"receipts": ("$judge-quality: approved", "$judge-test: approved")},
+        {"receipts": ("$architect: ", "$tdd-red: ")},
+    )
+    for updates in invalid_updates:
+        with pytest.raises(WorkerProtocolError):
+            parse_worker_result(
+                "<agent-work-result>"
+                + json.dumps(_red_checkpoint_ready_envelope(**updates))
+                + "</agent-work-result>"
+            )
+
+
+def test_red_checkpoint_ready_builder_input_uses_the_checkpoint_request_model() -> None:
+    payload = {
+        "workflow_lane": WorkflowLane.CODING.value,
+        "result_kind": "red_checkpoint_ready",
+        "receipts": ("$architect: approved", "$tdd-red: red confirmed"),
+        "change_summary": "Failing behavior tests are ready for trusted capture.",
+        "next_action": "Create and verify the trusted Red checkpoint.",
+        "red_checkpoint_request": _red_checkpoint_request(),
+    }
+
+    result = parse_worker_result_build_input(json.dumps(payload))
+
+    assert result.result_kind == "red_checkpoint_ready"
+    assert result.red_checkpoint_request is not None
+    assert result.red_checkpoint_request.argv[:3] == ("uv", "run", "pytest")
 
 
 def test_parse_worker_result_exposes_a_bounded_field_specific_protocol_reason() -> None:

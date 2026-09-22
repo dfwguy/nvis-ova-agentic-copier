@@ -25,15 +25,19 @@ guidance. Do not load this file for content-only work.
 
 Use explicit stages. Each stage has a distinct role:
 
-- **Test Writer** — concurrently writes failing tests for the desired behavior.
-  Stops when tests are confirmed Red.
-- **Diátaxis Writer** — concurrently drafts required `docs/` updates or says
-  why none are needed. Exclusively mutates `docs/`.
-- **Agent Policy Writer** — when applicable, concurrently edits only approved
-  root/template agent-policy paths.
+- **Test Writer** — writes failing tests for the desired behavior. In ordinary
+  interactive work, it runs at the same time as the preparation writers. In
+  the first serial segment, only this role may change files. It stops when tests
+  are confirmed Red.
+- **Diátaxis Writer** — drafts required `docs/` updates or says why none are
+  needed. It alone may change `docs/`. Serial work starts it only after the
+  exact retained Red checkpoint passes controller checks.
+- **Agent Policy Writer** — when needed, edits only approved root/template
+  agent-policy paths. Serial work starts it only after the same checks.
 - **Architect** — accepts Red's exact evidence. It returns interactive work to
-  Main for a local Red commit, or invokes the trusted serial
-  `agent-work red-checkpoint create` boundary. It otherwise stays read-only.
+  Main for a local Red commit. In serial work, it returns a
+  `red_checkpoint_ready` handoff. The deterministic controller runs the trusted
+  `agent-work red-checkpoint create` boundary. Architect stays read-only.
 - **Implementer** — starts only after all applicable preparation receipts/N/A
   and the exact mode-specific Red checkpoint. Writes production, tests, and
   docs. Reconciles drafts against final interfaces. Never edits agent-policy
@@ -51,18 +55,33 @@ local `--no-verify` Red commit. Main keeps its SHA and paths under a named local
 ref and returns them to Architect. It must not push or publish while that
 failing commit is the branch tip.
 
-In serial work, commits are prohibited. Architect runs:
+Serial workers must not commit. The first workflow segment is Red-only. It
+returns one protocol-version-2 `red_checkpoint_ready` envelope. That envelope
+requires exactly the Architect and Red receipts, the exact
+`red_checkpoint_request`, a non-empty `change_summary`, and a non-empty
+`next_action`. Here, "only" excludes documentation or policy receipts, a
+merge-request draft, audit summary, split plan, error code, suggest-close
+evidence, and rejection route. It does not exclude `protocol_version`, the
+project, issue, and ledger identity, `expected_state`, `expected_phase`,
+`workflow_lane`, `result_kind`, `phase_status`, `completed_phase`, or the
+optional `redacted_summary`. The deterministic controller runs the command
+below. Architect and other model roles must not run it.
 
 ```bash
 uv run agent-work red-checkpoint create \
   --issue-iid IID --evidence-file PATH --apply
 ```
 
-The executable reruns the evidence and owns the serial local Git ref and state change.
-Its report binds project, issue, branch, base, tree, ref, test paths, command,
+The controller persists the coding lane before the transaction. The executable
+reruns the evidence. It owns the serial local Git ref and state change. Its
+report binds the project, issue, branch, base, tree, ref, test paths, command,
 nonzero exit, failure marker, and output digest. It cannot commit, push, or
-publish. Green requires this checkpoint and inspects the ordinary Git diff from
-it before implementation and review.
+publish. Before capture, only the approved test paths may change. A production,
+documentation, or policy change stops the transaction. Preserve those changes.
+The controller then loads and verifies the exact retained report. Only then may
+it start a resumed workflow segment. That segment may start documentation and
+policy preparation, then Green. Green requires this checkpoint. It inspects the
+ordinary Git diff from it before implementation and review.
 
 During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
 `uv run ty check`. It then runs focused behavior tests. It stages the exact
