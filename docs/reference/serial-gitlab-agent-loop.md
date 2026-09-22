@@ -852,13 +852,18 @@ The oneshot service has a bounded outer limit. `TimeoutStartSec=190min`.
 | Timeout evidence | The unit journal records `Result=timeout` and relevant sanitized wrapper diagnostics. The durable ledger and retained issue worktree stay in place. Normal retry and human diagnosis use that evidence. |
 
 A workflow-owning worker returns a versioned, redacted envelope for its
-expected ledger change.
+expected ledger change. For the handoff-aware production `AgentInvoker`, only
+the controller-owned handoff capture is a worker result. Standard output and
+model prose, including output from a successful worker process, are never
+accepted as a handoff result.
 
 | Envelope field or check | Contract |
 | --- | --- |
 | Result | `ready_to_publish`, `retryable`, `needs_human`, or `split_required`. |
 | Content | Include the coarse completed state, receipts, diagnostic, and next action. |
 | Trusted runner | Before changing state, check the ledger, configured numeric project, Git evidence, and needed workflow receipts. |
+| Trusted capture | `AgentInvoker` retains one typed capture outcome: `captured`, `pre_run_cleanup_failed`, `artifact_not_written`, `artifact_unreadable`, `artifact_too_large`, or `post_read_cleanup_failed`. The controller accepts a result only from `captured` after its identity and changed paths match the controller's expected handoff. |
+| Rejected capture | A missing artifact after a successful worker, malformed artifact, controller identity mismatch, changed-path mismatch, or applicable filesystem capture, cleanup, or size-limit failure rejects the result. The durable diagnostic is a bounded constant that identifies that stage and category. It never retains raw payloads, paths, identities, secrets, or worker output. Cleanup is attempted for every captured artifact; a cleanup failure rejects the result. |
 | Coding final audit | Name Architect, Red, Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable reviews including the initial `$license-checker`, and Finalizer. |
 | License receipt | Finalizer needs a current approving license receipt for the final in-scope diff. During correction, rerun the checker only if a maintained file in its checked scope changed. A violation cannot be waived or marked not applicable. |
 | Policy finding | Send it through Architect to the Agent-policy Writer, not Green. |
