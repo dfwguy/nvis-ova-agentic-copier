@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import secrets
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
+from typing import cast
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
@@ -68,10 +70,13 @@ from .state_machine import (
 )
 from .timing import append_phase_timing
 from .worker import (
+    WorkerInvocation,
     WorkerProtocolError,
+    WorkerResultHandoffRequest,
     build_worker_prompt,
     format_worker_result_diagnostic,
     parse_worker_result,
+    parse_worker_result_handoff,
     validate_worker_result,
     worker_exit_evidence,
 )
@@ -2372,6 +2377,19 @@ def _execute(
             prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
                 mode="json"
             )
+        handoff_request = None
+        if getattr(invoke, "supports_worker_result_handoff", False):
+            source_sha = record.source_sha or repository.head(record.worktree)
+            nonce = secrets.token_hex(16)
+            handoff_request = WorkerResultHandoffRequest(
+                path=record.worktree / f".agent-work-result-{nonce}.json",
+                nonce=nonce,
+                project_id=record.project_id,
+                issue_iid=record.issue_iid,
+                ledger_revision=record.revision,
+                source_branch=record.source_branch,
+                source_sha=source_sha,
+            )
         prompt = build_worker_prompt(
             prompt_record,
             project_id=record.project_id,
@@ -2393,6 +2411,7 @@ def _execute(
                 for note in feedback
                 if _feedback_is_qualifying(note, repository.config.factory_username)
             ),
+            worker_result_handoff=handoff_request,
         )
     except ValueError as error:
         return _block_publication_identity(
@@ -2403,7 +2422,16 @@ def _execute(
         )
     lock_factory = issue_lock or (lambda _issue_iid: nullcontext())
     with lock_factory(record.issue_iid):
-        invocation = invoke.invoke(record.worktree, prompt, worker_timeout)
+        invocation = (
+            cast(Callable[..., WorkerInvocation], invoke.invoke)(
+                record.worktree,
+                prompt,
+                worker_timeout,
+                handoff=handoff_request,
+            )
+            if handoff_request is not None
+            else invoke.invoke(record.worktree, prompt, worker_timeout)
+        )
     if invocation.returncode != 0:
         worker_exit = (
             worker_exit_evidence(
@@ -2435,11 +2463,54 @@ def _execute(
         )
     else:
         try:
-            result = parse_worker_result(
-                invocation.stdout,
-                expected_project_id=record.project_id,
-                expected_issue_iid=record.issue_iid,
-                expected_revision=record.revision,
+            final_changed_paths = (
+                tuple(sorted(set(repository.changed_paths(record.worktree))))
+                if handoff_request is not None
+                else None
+            )
+            result = (
+                parse_worker_result_handoff(
+                    invocation.handoff,
+                    request=handoff_request,
+                    changed_paths=final_changed_paths or (),
+                )
+                if handoff_request is not None
+                else parse_worker_result(
+                    invocation.stdout,
+                    expected_project_id=record.project_id,
+                    expected_issue_iid=record.issue_iid,
+                    expected_revision=record.revision,
+                )
+            )
+        except RepositoryTransientError:
+            if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
+                return _record_repair_failure(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    evidence_delta={"validation": "repository_transient"},
+                    failure_reason="repair validation encountered a repository transient",
+                )
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            )
+        except RepositoryError as error:
+            if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
+                return _record_repair_failure(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    evidence_delta={"validation": "repository_error"},
+                    failure_reason=f"repair validation failed: {error}",
+                )
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
             )
         except WorkerProtocolError as error:
             if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
@@ -2508,14 +2579,22 @@ def _execute(
                     validate_worker_result(
                         record,
                         result,
-                        changed_paths=repository.changed_paths(record.worktree),
+                        changed_paths=(
+                            final_changed_paths
+                            if final_changed_paths is not None
+                            else repository.changed_paths(record.worktree)
+                        ),
                         red_checkpoint=retained_checkpoint,
                     )
                 else:
                     validate_worker_result(
                         record,
                         result,
-                        changed_paths=repository.changed_paths(record.worktree),
+                        changed_paths=(
+                            final_changed_paths
+                            if final_changed_paths is not None
+                            else repository.changed_paths(record.worktree)
+                        ),
                         red_checkpoint=None,
                     )
                 if result.result_kind == "split_required":

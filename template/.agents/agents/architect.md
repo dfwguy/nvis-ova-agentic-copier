@@ -362,12 +362,16 @@ the parent without human approval. Do not create issues. Do not update issues.
 Do not execute a proposed slice. Do not retry the parent automatically. A suitable issue
 continues through the current workflow unchanged.
 
-For an ordinary completed workflow, use `agent-work worker-result build`. It
-derives the protocol-v2 identity and phase from the retained record. It derives duplicate audit fields from the
-retained record. Supply only nonduplicated worker intent and exact
-`WORKFLOW_RECEIPTS` or `$skill: not applicable — reason`. Add required
-merge-request draft metadata. Add bounded audit evidence. Return its one
-delimited result envelope without altering it.
+For an ordinary completed workflow, use
+`agent-work worker-result build ... --apply`. It derives the protocol-v2
+identity and phase from the retained record. It derives duplicate audit fields
+from the retained record. Supply only
+nonduplicated worker intent and exact `WORKFLOW_RECEIPTS` or `$skill: not
+applicable — reason`. Add required merge-request draft metadata. Add bounded
+audit evidence. Publish the result to the controller-owned, identity-bound
+handoff. The controller verifies and consumes that handoff; model stdout and
+prose are not result authority. A build without `--apply` is a non-mutating
+preview and does not publish a result.
 
 When a coding worker resumes, reuse only the exact retained Red checkpoint for
 that issue, source branch, base SHA, tree OID, ref, test paths, command, failure
