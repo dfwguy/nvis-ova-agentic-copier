@@ -21,7 +21,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, Protocol, cast
 
 import pytest
 from hypothesis import given
@@ -68,8 +68,8 @@ from agent_work.models import (
     WorkerExitEvidence,
     WorkflowReceiptRecord,
 )
-from agent_work.ports import CommandResult
 from agent_work.repository import (
+    CommandResult,
     PublicationError,
     RepositoryError,
     RepositoryTransientError,
@@ -991,6 +991,108 @@ class FakeInvoker:
         self.prompts.append(prompt)
         output = self.output.pop(0) if isinstance(self.output, list) else self.output
         return WorkerInvocation(self.returncode, output, "safe diagnostic")
+
+
+class _HandoffRequest(Protocol):
+    """Controller-owned identity supplied only to handoff-aware invokers."""
+
+    path: Path
+    nonce: str
+    project_id: int
+    issue_iid: int
+    ledger_revision: int
+    source_branch: str
+    source_sha: str
+
+
+class HandoffInvoker:
+    """Declare handoff support and return one controller-bound artifact."""
+
+    supports_worker_result_handoff = True
+
+    def __init__(
+        self,
+        *,
+        artifact_updates: dict[str, object] | None = None,
+        envelope_updates: dict[str, object] | None = None,
+        artifact_paths: tuple[str, ...] = ("src/example.py",),
+        stdout: str | None = None,
+        malformed: bytes | None = None,
+        missing: bool = False,
+        on_invoke: Callable[[], None] | None = None,
+    ) -> None:
+        self.artifact_updates = artifact_updates or {}
+        self.envelope_updates = envelope_updates or {}
+        self.artifact_paths = artifact_paths
+        self.stdout = stdout
+        self.malformed = malformed
+        self.missing = missing
+        self.on_invoke = on_invoke
+        self.requests: list[object] = []
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        handoff: _HandoffRequest | None = None,
+    ) -> WorkerInvocation:
+        del checkout, timeout
+        assert handoff is not None
+        assert f"--handoff-file {handoff.path}" in prompt
+        assert f"--handoff-nonce {handoff.nonce}" in prompt
+        assert "worker-result build" in prompt and "--apply" in prompt
+        self.requests.append(handoff)
+        if self.on_invoke is not None:
+            self.on_invoke()
+        envelope = {
+            "protocol_version": 2,
+            "project_id": handoff.project_id,
+            "issue_iid": handoff.issue_iid,
+            "ledger_revision": handoff.ledger_revision,
+            "expected_state": "executing",
+            "expected_phase": "coding-green",
+            "workflow_lane": "coding",
+            "result_kind": "ready_to_publish",
+            "phase_status": "complete",
+            "completed_phase": "coding-green",
+            "receipts": ["$tdd-green: complete"],
+            "change_summary": "Implementation is green.",
+            "next_action": "Run nonfunctional review.",
+            **self.envelope_updates,
+        }
+        if self.missing:
+            payload = None
+        elif self.malformed is not None:
+            payload = self.malformed
+        else:
+            artifact = {
+                "schema_version": 1,
+                "nonce": handoff.nonce,
+                "project_id": handoff.project_id,
+                "issue_iid": handoff.issue_iid,
+                "ledger_revision": handoff.ledger_revision,
+                "source_branch": handoff.source_branch,
+                "source_sha": handoff.source_sha,
+                "changed_paths": list(self.artifact_paths),
+                "envelope": envelope,
+                **self.artifact_updates,
+            }
+            payload = json.dumps(artifact, separators=(",", ":")).encode()
+        return WorkerInvocation(
+            returncode=0,
+            stdout=(
+                self.stdout
+                if self.stdout is not None
+                else f"<agent-work-result>{json.dumps(envelope)}</agent-work-result>"
+            ),
+            stderr="",
+            handoff=payload,
+        )
 
 
 class BatchingInvoker:
@@ -4500,6 +4602,234 @@ def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.retry_at is not None
     assert outcome.error_code is ErrorCode.WORKER_EXIT
+
+
+def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -> None:
+    """The production process boundary rejects replay and leaves no handoff file."""
+    worker = importlib.import_module("agent_work.worker")
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    handoff_path.write_bytes(b"stale artifact must not survive")
+    fresh = b'{"schema_version":1,"fresh":true}'
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command, kwargs
+        assert not handoff_path.exists()
+        handoff_path.write_bytes(fresh)
+        return CommandResult(0, "untrusted model prose", "")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+        },
+    )
+    assert invoker.supports_worker_result_handoff is True
+    invocation = invoker.invoke(tmp_path, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff == fresh
+    assert not handoff_path.exists()
+
+
+@pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
+def test_agent_invoker_removes_handoff_after_failed_process_boundary(
+    tmp_path: Path,
+    failure: str,
+    returncode: int | None,
+) -> None:
+    """Boundary exceptions and nonzero exits cannot retain a handoff file."""
+    worker = importlib.import_module("agent_work.worker")
+    handoff_path = tmp_path / "worker-result.json"
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command, kwargs
+        handoff_path.write_bytes(b"failed boundary artifact")
+        if failure == "exception":
+            raise RuntimeError("bounded failure")
+        return CommandResult(7, "", "bounded failure")
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+        },
+    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+
+    assert invocation.returncode == returncode
+    assert not handoff_path.exists()
+
+
+def test_serial_prefers_valid_handoff_over_duplicate_or_malformed_stdout(
+    tmp_path: Path,
+) -> None:
+    """Model prose and stdout envelopes cannot override the captured artifact."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    stdout = (
+        "prose before a malformed result "
+        "<agent-work-result>{}</agent-work-result>"
+        "<agent-work-result>{}</agent-work-result>"
+    )
+    invoker = HandoffInvoker(stdout=stdout)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert len(invoker.requests) == 1
+    assert outcome is not None and outcome.error_code is None
+    assert outcome.phase is WorkflowPhase.CODING_NONFUNCTIONAL
+    assert outcome.revision > record.revision
+
+
+def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
+    tmp_path: Path,
+) -> None:
+    """A worker may add a path before its builder records the final observation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/before.py",)
+    final_paths = ("src/after.py", "tests/test_after.py")
+    invoker = HandoffInvoker(
+        artifact_paths=final_paths,
+        on_invoke=lambda: setattr(repository, "paths", final_paths),
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.error_code is None
+    assert outcome.phase is WorkflowPhase.CODING_NONFUNCTIONAL
+    assert repository.changed_paths_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "updates", "envelope_updates", "malformed", "missing"),
+    [
+        ("missing", {}, {}, None, True),
+        ("malformed", {}, {}, b"{", False),
+        ("nonce", {"nonce": "f" * 32}, {}, None, False),
+        ("project", {"project_id": 999}, {}, None, False),
+        ("issue", {"issue_iid": 999}, {}, None, False),
+        ("revision", {"ledger_revision": 999}, {}, None, False),
+        ("branch", {"source_branch": "agent/other"}, {}, None, False),
+        ("source-sha", {"source_sha": "b" * 40}, {}, None, False),
+        ("paths", {"changed_paths": ["src/not-observed.py"]}, {}, None, False),
+        ("envelope-project", {}, {"project_id": 999}, None, False),
+        ("envelope-issue", {}, {"issue_iid": 999}, None, False),
+        ("envelope-revision", {}, {"ledger_revision": 999}, None, False),
+    ],
+)
+def test_serial_rejects_every_missing_malformed_or_stale_handoff_with_one_diagnostic(
+    tmp_path: Path,
+    case: str,
+    updates: dict[str, object],
+    envelope_updates: dict[str, object],
+    malformed: bytes | None,
+    missing: bool,
+) -> None:
+    """Every untrusted handoff defect collapses to one safe retry condition."""
+    del case
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=HandoffInvoker(
+            artifact_updates=updates,
+            envelope_updates=envelope_updates,
+            malformed=malformed,
+            missing=missing,
+        ),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.condition_history[-1].detail == (
+        "worker_result_handoff: missing, malformed, or stale"
+    )
+
+
+def test_distinct_handoff_defects_share_stable_repeat_retry_classification(
+    tmp_path: Path,
+) -> None:
+    """Changing malformed worker data cannot evade unchanged-condition blocking."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=HandoffInvoker(artifact_updates={"nonce": "f" * 32}),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    second = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=HandoffInvoker(missing=True),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert second is not None and second.state is RunnerState.BLOCKED
+    assert second.retry_count == first.retry_count == 1
+    assert second.condition_history[-1].detail == (
+        "worker_result_handoff: missing, malformed, or stale"
+    )
 
 
 def test_agent_invoker_worker_exit_redacts_prompt_credentials_and_controls(

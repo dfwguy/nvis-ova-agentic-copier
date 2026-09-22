@@ -51,6 +51,7 @@ from agent_work.state_machine import (
 from agent_work.worker import (
     WorkerProtocolError,
     WorkerResultBuildInput,
+    WorkerResultHandoffRequest,
     build_worker_prompt,
     build_worker_result,
     format_worker_result_diagnostic,
@@ -128,6 +129,37 @@ def _completed_input() -> WorkerResultBuildInput:
                 "tests": [
                     "uv run pytest tests/test_agent_work_worker_result_builder.py"
                 ],
+                "findings": [],
+                "corrections": [],
+            },
+        }
+    )
+
+
+def _completed_content_input() -> WorkerResultBuildInput:
+    """Return one complete content-lane builder input."""
+    receipts = tuple(
+        f"{skill}: approved" for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
+    )
+    return WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": "content",
+            "result_kind": "ready_to_publish",
+            "receipts": receipts,
+            "change_summary": "Updated the operator guide.",
+            "next_action": "Publish the reviewed documentation.",
+            "merge_request_draft": {
+                "title": "Update the operator guide",
+                "description": "Documentation ready for human review.",
+            },
+            "audit_summary": {
+                "capacity": {
+                    "required": 3,
+                    "available": 16,
+                    "shortfall": 0,
+                    "decision": "run",
+                },
+                "tests": [],
                 "findings": [],
                 "corrections": [],
             },
@@ -1312,6 +1344,29 @@ def test_worker_prompt_forbids_handcrafted_identity_or_ledger_fields(
     assert "topology-aware evidence" not in prompt
 
 
+def test_handoff_prompt_omits_the_legacy_stdout_return_contract(tmp_path: Path) -> None:
+    """A handoff-aware worker receives one noncontradictory completion route."""
+    prompt = build_worker_prompt(
+        _record(tmp_path).model_dump(mode="json"),
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+        worker_result_handoff=WorkerResultHandoffRequest(
+            path=tmp_path / "handoff.json",
+            nonce="0123456789abcdef" * 2,
+            project_id=310967,
+            issue_iid=81,
+            ledger_revision=7,
+            source_branch="agent/issue-81",
+            source_sha="a" * 40,
+        ),
+    )
+
+    assert "--handoff-file" in prompt and "--apply" in prompt
+    assert "Return the builder output unchanged" not in prompt
+    assert "<agent-work-result>" not in prompt
+
+
 def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(
     tmp_path: Path,
 ) -> None:
@@ -1442,7 +1497,6 @@ def test_worker_result_build_cli_writes_only_one_envelope_to_stdout(
             "81",
             "--input-file",
             str(input_path),
-            "--apply",
         ],
         load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
         changed_paths=lambda worktree: (
@@ -1508,6 +1562,13 @@ def test_worker_result_build_json_writes_one_bare_compact_object(
 def test_worker_result_build_help_and_usage_follow_argparse_contract(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    with pytest.raises(SystemExit) as parent_help_exit:
+        main(["worker-result", "--help"])
+
+    assert parent_help_exit.value.code == 0
+    parent_help = capsys.readouterr().out
+    assert "Preview or hand off a validated worker result" in parent_help
+
     with pytest.raises(SystemExit) as help_exit:
         main(["worker-result", "build", "--help"])
 
@@ -1515,6 +1576,9 @@ def test_worker_result_build_help_and_usage_follow_argparse_contract(
     help_text = capsys.readouterr().out
     assert "agent-work worker-result build" in help_text
     assert "--input-file" in help_text
+    assert "Preview one validated worker result without mutation" in help_text
+    assert "controller-owned output path; required with --apply" in help_text
+    assert "preview envelope or applied handoff receipt" in help_text
     assert "retain bounded diagnostics on failure" in help_text
 
     with pytest.raises(SystemExit) as usage_exit:
@@ -1522,6 +1586,37 @@ def test_worker_result_build_help_and_usage_follow_argparse_contract(
 
     assert usage_exit.value.code == 2
     assert "required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "partial_handoff",
+    [
+        ("--handoff-file", "/tmp/handoff.json"),
+        ("--handoff-nonce", "0123456789abcdef" * 2),
+    ],
+)
+def test_worker_result_build_apply_requires_complete_handoff_at_parse_boundary(
+    capsys: pytest.CaptureFixture[str], partial_handoff: tuple[str, str]
+) -> None:
+    """An incomplete mutating request is argparse usage failure, not runtime work."""
+    with pytest.raises(SystemExit) as usage_exit:
+        main(
+            [
+                "worker-result",
+                "build",
+                "--issue-iid",
+                "81",
+                "--input-file",
+                "/tmp/result.json",
+                *partial_handoff,
+                "--apply",
+            ]
+        )
+
+    assert usage_exit.value.code == 2
+    assert (
+        "--apply requires --handoff-file and --handoff-nonce" in capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize(
@@ -1821,3 +1916,191 @@ def test_builder_derives_no_content_reviewers(tmp_path: Path) -> None:
 
     assert result.audit_summary is not None
     assert result.audit_summary.reviewers == ()
+
+
+@pytest.mark.parametrize(
+    ("lane", "build_input", "observed_paths"),
+    [
+        (
+            "coding",
+            _completed_input(),
+            (
+                "tests/test_agent_work_worker_result_builder.py",
+                "src/agent_work/worker.py",
+            ),
+        ),
+        (
+            "content",
+            _completed_content_input(),
+            ("docs/operator-guide.md", "README.md"),
+        ),
+    ],
+)
+def test_worker_result_build_apply_atomically_writes_identity_bound_handoff(
+    tmp_path: Path,
+    lane: str,
+    build_input: WorkerResultBuildInput,
+    observed_paths: tuple[str, ...],
+) -> None:
+    """Apply writes one controller-verifiable artifact for either workflow lane."""
+    input_path = tmp_path / f"{lane}-result.json"
+    handoff_path = tmp_path / f"{lane}-handoff.json"
+    nonce = "0123456789abcdef" * 2
+    input_path.write_text(json.dumps(build_input.model_dump(mode="json")))
+    record = _record(tmp_path).model_copy(update={"workflow_lane": WorkflowLane(lane)})
+    writes: list[tuple[Path, bytes]] = []
+    stdout: list[str] = []
+
+    exit_code = main(
+        [
+            "worker-result",
+            "build",
+            "--issue-iid",
+            "81",
+            "--input-file",
+            str(input_path),
+            "--handoff-file",
+            str(handoff_path),
+            "--handoff-nonce",
+            nonce,
+            "--apply",
+        ],
+        load_record=lambda issue_iid: record if issue_iid == 81 else None,
+        changed_paths=lambda _worktree: observed_paths,
+        load_red_checkpoint=(
+            (
+                lambda project_id, issue_iid, base_sha: (
+                    _red_checkpoint_evidence()
+                    if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
+                    else None
+                )
+            )
+            if lane == "coding"
+            else None
+        ),
+        read_bytes=Path.read_bytes,
+        atomic_write=lambda path, payload: writes.append((path, payload)),
+        write_stdout=stdout.append,
+        write_stderr=lambda _message: None,
+    )
+
+    assert exit_code == 0
+    assert stdout == []
+    assert len(writes) == 1 and writes[0][0] == handoff_path
+    artifact = json.loads(writes[0][1])
+    assert artifact == {
+        "schema_version": 1,
+        "nonce": nonce,
+        "project_id": 310967,
+        "issue_iid": 81,
+        "ledger_revision": 7,
+        "source_branch": "agent/issue-81",
+        "source_sha": "a" * 40,
+        "changed_paths": sorted(observed_paths),
+        "envelope": json.loads(
+            build_worker_result(
+                record,
+                build_input,
+                changed_paths=observed_paths,
+                red_checkpoint=(
+                    _red_checkpoint_evidence() if lane == "coding" else None
+                ),
+            ).model_dump_json(exclude_none=True)
+        ),
+    }
+    project_root = Path(__file__).parents[1]
+    for relative_path in (
+        Path("src/agent_work/cli.py"),
+        Path("src/agent_work/serial.py"),
+        Path("src/agent_work/worker.py"),
+    ):
+        assert (project_root / relative_path).read_bytes() == (
+            project_root / "template" / relative_path
+        ).read_bytes()
+
+
+def test_worker_result_build_preview_never_writes_handoff(tmp_path: Path) -> None:
+    """A handoff destination remains untouched until the explicit apply boundary."""
+    input_path = tmp_path / "result.json"
+    handoff_path = tmp_path / "handoff.json"
+    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
+    writes: list[tuple[Path, bytes]] = []
+    stdout: list[str] = []
+
+    exit_code = main(
+        [
+            "worker-result",
+            "build",
+            "--issue-iid",
+            "81",
+            "--input-file",
+            str(input_path),
+            "--handoff-file",
+            str(handoff_path),
+            "--handoff-nonce",
+            "fedcba9876543210" * 2,
+        ],
+        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
+        changed_paths=lambda _worktree: (
+            "src/agent_work/worker.py",
+            "tests/test_agent_work_worker_result_builder.py",
+        ),
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: (
+            _red_checkpoint_evidence()
+        ),
+        read_bytes=Path.read_bytes,
+        atomic_write=lambda path, payload: writes.append((path, payload)),
+        write_stdout=stdout.append,
+        write_stderr=lambda _message: None,
+    )
+
+    assert exit_code == 0
+    assert writes == [] and not handoff_path.exists()
+    assert len(stdout) == 1 and stdout[0].startswith("<agent-work-result>")
+
+
+def test_worker_result_build_apply_json_emits_only_bounded_handoff_receipt(
+    tmp_path: Path,
+) -> None:
+    """Applied JSON confirms the mutation without exposing the protected envelope."""
+    input_path = tmp_path / "result.json"
+    handoff_path = tmp_path / "handoff.json"
+    input_path.write_text(
+        json.dumps(_completed_content_input().model_dump(mode="json"))
+    )
+    stdout: list[str] = []
+
+    exit_code = main(
+        [
+            "worker-result",
+            "build",
+            "--issue-iid",
+            "81",
+            "--input-file",
+            str(input_path),
+            "--handoff-file",
+            str(handoff_path),
+            "--handoff-nonce",
+            "0123456789abcdef" * 2,
+            "--apply",
+            "--json",
+        ],
+        load_record=lambda issue_iid: (
+            _record(tmp_path).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
+            if issue_iid == 81
+            else None
+        ),
+        changed_paths=lambda _worktree: ("docs/operator-guide.md",),
+        read_bytes=Path.read_bytes,
+        atomic_write=lambda _path, _payload: None,
+        write_stdout=stdout.append,
+        write_stderr=lambda _message: None,
+    )
+
+    assert exit_code == 0
+    assert json.loads(stdout[0]) == {
+        "action": "worker-result-handoff",
+        "applied": True,
+        "issue_iid": 81,
+    }
+    assert "envelope" not in stdout[0]

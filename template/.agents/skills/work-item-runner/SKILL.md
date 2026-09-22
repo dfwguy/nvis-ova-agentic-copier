@@ -33,9 +33,13 @@ Work only in the runner-provided durable per-issue worktree. Never use an
 operator's active checkout. Own the complete repository workflow in one live
 session for the coarse `workflow` phase. Edit uncommitted changes. Validate
 those changes.
-Emit exactly one versioned `<agent-work-result>` envelope. Use GitLab only for
-the configured numeric project. Do not commit. Do not push. Do not create an
-MR. Do not approve. Do not merge.
+Publish exactly one final worker result through
+`agent-work worker-result build ... --apply` to the controller-owned,
+identity-bound handoff. The controller
+verifies and consumes that handoff. Model stdout and prose are not result
+authority. A build without `--apply` is a non-mutating preview and does not
+publish a result. Use GitLab only for the configured numeric project. Do not
+commit. Do not push. Do not create an MR. Do not approve. Do not merge.
 
 The trusted `agent-work red-checkpoint create` boundary is the sole narrow
 Red-checkpoint Git mutation. Architect invokes it after accepting Red evidence. The

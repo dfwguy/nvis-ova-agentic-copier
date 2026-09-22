@@ -55,7 +55,9 @@ agent-work recovery resolve --issue-iid IID
                             [--apply] [--json]
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
-agent-work worker-result build --issue-iid IID --input-file PATH [--json] [--apply] [--debug]
+agent-work worker-result build --issue-iid IID --input-file PATH
+                               [--handoff-file PATH --handoff-nonce NONCE]
+                               [--json] [--apply] [--debug]
 agent-work red-checkpoint create --issue-iid IID --evidence-file PATH
                                  [--json] [--apply] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
@@ -88,7 +90,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `recovery resolve` | Exact `--issue-iid`, explicit `--choice`, and `--reason` | Applying also needs the exact reviewed `--plan-file`; some choices need evidence, a replacement IID, or a target label. |
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
-| `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Read-only helper; `--json` emits the envelope without delimiters. |
+| `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Without `--apply`, previews the validated envelope. Applied handoff creation also requires `--handoff-file PATH` and `--handoff-nonce NONCE`. |
 | `red-checkpoint create` | Exact `--issue-iid` and bounded `--evidence-file` | Bare invocation previews; `--apply` verifies and retains one durable Red checkpoint. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, and repeated acceptance criteria | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
@@ -400,7 +402,7 @@ accepted for consistent invocation and changes nothing.
 | Invalid manifest, unreadable credential file, access/API failure, or response-verification failure | Exits `1` with sanitized diagnostics. |
 | Invalid usage | Exits `2`. |
 
-`worker-result build` is read-only. It builds one worker result.
+`worker-result build` validates and builds one worker result.
 
 ```text
 <agent-work-result>{...}</agent-work-result>
@@ -410,13 +412,16 @@ accepted for consistent invocation and changes nothing.
 | --- | --- |
 | Input and evidence | Reads one strict structured JSON request with the retained ledger and worktree for the supplied issue. |
 | Derived fields and checks | Derives protocol-v2 identity, state, completed phase, and duplicated audit fields. Uses the trusted controller and receipt-coherence rules from a workflow transition. |
-| Successful standard output | Has exactly one compact delimited result: |
+| Preview | Without `--apply`, validates and emits the result but makes no change. It does not write a handoff artifact. |
+| Successful preview output | Has exactly one compact delimited result. |
 | Standard error | Receives human status and sanitized failures. |
-| Without `--json` | Success emits the delimited worker envelope. |
-| `--json` | Emits the same compact protocol object without delimiters for direct JSON consumers. It does not relax check. |
+| Preview without `--json` | Success emits the delimited worker envelope. |
+| `--json` | Preview emits the same compact envelope without delimiters. Applied mode emits only the bounded `action`, `applied`, and `issue_iid` receipt; it never emits the protected envelope. JSON does not relax validation. |
 | `--debug` | Adds local sanitized diagnostics without credentials, environment values, worker prose, prompts, or transcripts. |
-| `--apply` | Is accepted for CLI consistency and is a no-op. |
-| Mutation | Never changes the ledger, worktree, GitLab, or publication state. |
+| Applied handoff | After strict validation, `--apply` atomically writes one artifact to the controller-supplied `--handoff-file`. It also requires the controller-supplied `--handoff-nonce`. Applied success does not emit the envelope on standard output. |
+| Artifact identity | The artifact binds its schema version and nonce to the project, issue, ledger revision, source branch, source SHA, sorted changed paths observed when it is built, and validated envelope. |
+| Controller verification | After the worker returns, the controller observes the final changed paths and accepts only the fresh artifact whose complete identity and bound paths match. Missing, malformed, stale, or mismatched artifacts fail closed. Worker prose and standard-output envelopes cannot replace or override it. |
+| Mutation boundary | Apply writes only the transient untracked handoff artifact. It never changes tracked worktree content, the ledger, Git, GitLab, or publication state. |
 | Success | Exits `0`. |
 | Validation or runtime failure | Exits `1`. |
 | Argparse usage failure | Exits `2`. |

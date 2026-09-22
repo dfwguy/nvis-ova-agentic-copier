@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from . import registry_cleanup, template_comparison
 from .credential_rotation import (
@@ -95,6 +95,7 @@ from .validation import (
 from .worker import (
     WorkerProtocolError,
     build_worker_result,
+    build_worker_result_handoff,
     format_worker_result_diagnostic,
     parse_worker_result_build_input,
 )
@@ -199,7 +200,7 @@ class _LoadRecord(Protocol):
 class _ChangedPaths(Protocol):
     """Typed read-only worktree observation boundary."""
 
-    def __call__(self, worktree: Path) -> tuple[str, ...]: ...
+    def __call__(self, worktree: Path, /) -> tuple[str, ...]: ...
 
 
 class _MergeRequestPublicationReport(Protocol):
@@ -409,6 +410,7 @@ def _common(
     explicit_dry_run: bool = False,
     apply_help: str = "apply the operation",
     debug_help: str = "show a traceback on failure",
+    json_help: str = "emit stable JSON",
 ) -> None:
     if apply:
         if explicit_dry_run:
@@ -421,7 +423,7 @@ def _common(
             )
         else:
             parser.add_argument("--apply", action="store_true", help=apply_help)
-    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    parser.add_argument("--json", action="store_true", help=json_help)
     parser.add_argument("--debug", action="store_true", help=debug_help)
 
 
@@ -443,6 +445,13 @@ class _AgentWorkParser(argparse.ArgumentParser):
             and parsed.plan_file is None
         ):
             self.error("--apply requires --plan-file")
+        if (
+            (getattr(parsed, "resource", None), getattr(parsed, "action", None))
+            == ("worker-result", "build")
+            and parsed.apply
+            and (parsed.handoff_file is None or parsed.handoff_nonce is None)
+        ):
+            self.error("--apply requires --handoff-file and --handoff-nonce")
         return parsed
 
 
@@ -451,6 +460,15 @@ def _candidate_tree(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError(
             "candidate tree must be 40 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _handoff_nonce(value: str) -> str:
+    """Require one bounded lowercase nonce at the CLI boundary."""
+    if re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise argparse.ArgumentTypeError(
+            "handoff nonce must be 32 lowercase hexadecimal characters"
         )
     return value
 
@@ -631,18 +649,36 @@ def build_parser() -> argparse.ArgumentParser:
         apply_help="create one deduplicated upstream issue; omit for a read-only preview",
     )
     worker_result = resources.add_parser(
-        "worker-result", help="build a read-only validated worker result"
+        "worker-result",
+        help="preview or hand off a validated worker result",
+        description="Preview or hand off a validated worker result.",
     )
     worker_result_actions = worker_result.add_subparsers(dest="action", required=True)
     worker_build = worker_result_actions.add_parser(
-        "build", help="derive and validate one protocol-v2 worker result"
+        "build",
+        help="preview or hand off one protocol-v2 worker result",
+        description=(
+            "Preview one validated worker result without mutation, or use --apply "
+            "with the controller-owned handoff file and nonce to write it atomically."
+        ),
     )
     worker_build.add_argument("--issue-iid", type=_positive_integer, required=True)
     worker_build.add_argument("--input-file", type=Path, required=True)
+    worker_build.add_argument(
+        "--handoff-file",
+        type=Path,
+        help="controller-owned output path; required with --apply",
+    )
+    worker_build.add_argument(
+        "--handoff-nonce",
+        type=_handoff_nonce,
+        help="controller-owned 32-hex nonce; required with --apply",
+    )
     _common(
         worker_build,
-        apply_help="accepted for command consistency; worker-result build remains read-only",
+        apply_help="atomically write one controller-owned worker-result handoff",
         debug_help="retain bounded diagnostics on failure",
+        json_help="emit the preview envelope or applied handoff receipt as stable JSON",
     )
     red_checkpoint = resources.add_parser(
         "red-checkpoint", help="verify and retain one failing-test checkpoint"
@@ -1545,13 +1581,40 @@ def main(
             )
             write_stderr(diagnostic)
             return 1
-        rendered_result = result.model_dump_json(exclude_none=True)
-        write_stdout(
-            rendered_result
-            if parsed.json
-            else f"<agent-work-result>{rendered_result}</agent-work-result>"
-        )
-        write_stderr("worker result validated; no changes were made")
+        if parsed.apply:
+            handoff_file = cast(Path, parsed.handoff_file)
+            handoff_nonce = cast(str, parsed.handoff_nonce)
+            try:
+                payload = build_worker_result_handoff(
+                    record,
+                    result,
+                    nonce=handoff_nonce,
+                    changed_paths=observed_paths,
+                )
+                atomic_write(handoff_file, payload)
+            except (OSError, WorkerProtocolError):
+                write_stderr("worker_result_handoff: could not be written")
+                return 1
+            if parsed.json:
+                write_stdout(
+                    json.dumps(
+                        {
+                            "action": "worker-result-handoff",
+                            "applied": True,
+                            "issue_iid": record.issue_iid,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+            write_stderr("worker result handoff written")
+        else:
+            rendered_result = result.model_dump_json(exclude_none=True)
+            write_stdout(
+                rendered_result
+                if parsed.json
+                else f"<agent-work-result>{rendered_result}</agent-work-result>"
+            )
+            write_stderr("worker result validated; no changes were made")
         return 0
     if parsed.resource == "upstream-finding" and parsed.action == "preview":
         try:

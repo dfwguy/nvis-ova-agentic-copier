@@ -21,7 +21,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Literal, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -129,6 +129,41 @@ class WorkerResultBuildInput(BoundaryModel):
         ):
             raise ValueError("capacity required must match workflow lane")
         return self
+
+
+@dataclass(frozen=True)
+class WorkerResultHandoffRequest:
+    """Controller-owned identity for one worker-result handoff."""
+
+    path: Path
+    nonce: str
+    project_id: int
+    issue_iid: int
+    ledger_revision: int
+    source_branch: str
+    source_sha: str
+
+
+class WorkerResultHandoff(BoundaryModel):
+    """Strict artifact written by the validated worker-result builder."""
+
+    schema_version: Literal[1] = 1
+    nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
+    project_id: int = Field(gt=0)
+    issue_iid: int = Field(gt=0)
+    ledger_revision: int = Field(ge=0)
+    source_branch: str = Field(min_length=1, max_length=255)
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    changed_paths: tuple[str, ...] = Field(max_length=128)
+    envelope: WorkerResultEnvelope
+
+    @field_validator("changed_paths")
+    @classmethod
+    def validate_changed_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require one canonical observed-path sequence."""
+        if value != tuple(sorted(set(value))):
+            raise ValueError("changed paths must be sorted and unique")
+        return value
 
 
 def _required_live_agent_capacity(lane: WorkflowLane) -> int:
@@ -672,6 +707,82 @@ class WorkerInvocation:
     returncode: int | None
     stdout: str = ""
     stderr: str = ""
+    handoff: bytes | None = None
+
+
+def build_worker_result_handoff(
+    record: LedgerRecord,
+    result: WorkerResultEnvelope,
+    *,
+    nonce: str,
+    changed_paths: tuple[str, ...],
+) -> bytes:
+    """Serialize one result with controller-verifiable invocation identity."""
+    if record.source_sha is None:
+        raise WorkerProtocolError("worker_result_handoff.source_sha", "is required")
+    try:
+        artifact = WorkerResultHandoff(
+            nonce=nonce,
+            project_id=record.project_id,
+            issue_iid=record.issue_iid,
+            ledger_revision=record.revision,
+            source_branch=record.source_branch,
+            source_sha=record.source_sha,
+            changed_paths=tuple(sorted(set(changed_paths))),
+            envelope=result,
+        )
+    except ValidationError as error:
+        raise WorkerProtocolError(
+            "worker_result_handoff", "could not be constructed"
+        ) from error
+    return artifact.model_dump_json(exclude_none=True).encode()
+
+
+def parse_worker_result_handoff(
+    payload: bytes | None,
+    *,
+    request: WorkerResultHandoffRequest,
+    changed_paths: tuple[str, ...],
+) -> WorkerResultEnvelope:
+    """Return a result only from an exact fresh controller-bound artifact."""
+    try:
+        if payload is None:
+            raise ValueError("missing artifact")
+        artifact = WorkerResultHandoff.model_validate_json(payload)
+    except (ValidationError, ValueError):
+        raise WorkerProtocolError(
+            "worker_result_handoff", "missing, malformed, or stale"
+        ) from None
+    observed_identity = (
+        artifact.nonce,
+        artifact.project_id,
+        artifact.issue_iid,
+        artifact.ledger_revision,
+        artifact.source_branch,
+        artifact.source_sha,
+    )
+    expected_identity = (
+        request.nonce,
+        request.project_id,
+        request.issue_iid,
+        request.ledger_revision,
+        request.source_branch,
+        request.source_sha,
+    )
+    envelope_identity = (
+        artifact.envelope.project_id,
+        artifact.envelope.issue_iid,
+        artifact.envelope.ledger_revision,
+    )
+    if (
+        observed_identity != expected_identity
+        or envelope_identity != expected_identity[1:4]
+        or artifact.changed_paths != tuple(sorted(set(changed_paths)))
+    ):
+        raise WorkerProtocolError(
+            "worker_result_handoff", "missing, malformed, or stale"
+        )
+    return artifact.envelope
 
 
 def parse_worker_result(
@@ -956,6 +1067,7 @@ def build_worker_prompt(
     issue_description: str = "",
     issue_notes: tuple[GitLabIssueNote, ...] = (),
     merge_request_feedback: tuple[object, ...] = (),
+    worker_result_handoff: WorkerResultHandoffRequest | None = None,
 ) -> str:
     """Build the trusted protocol instructions for one bounded phase."""
     safe_record = dict(record)
@@ -1094,6 +1206,20 @@ def build_worker_prompt(
             "approved consolidated result. Content-only work uses Architect, one sole-mutator "
             "Documentation Writer, and Documentation Finalizer without Red or code judges. "
         )
+    result_contract = (
+        "Use `agent-work worker-result build --issue-iid "
+        f"{issue_iid} --input-file PATH --handoff-file {worker_result_handoff.path} "
+        f"--handoff-nonce {worker_result_handoff.nonce} --apply` to derive trusted fields, "
+        "validate the envelope, and atomically write the controller-owned handoff. "
+        "Do not transcribe or return that envelope through standard output. "
+        "Complete after the helper succeeds. "
+        if worker_result_handoff is not None
+        else "Use `agent-work worker-result build --issue-iid "
+        f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
+        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. "
+        "Return the builder output unchanged. Do not return exactly one protocol_version=1 JSON object; "
+        "return exactly one protocol_version=2 JSON object inside <agent-work-result>...</agent-work-result>. "
+    )
     return (
         f"Continue one bounded agent-work segment for project {project_id}, issue #{issue_iid}.\n"
         "The effective bounded worker budget for this session is "
@@ -1133,15 +1259,10 @@ def build_worker_prompt(
         "project-owned values. "
         "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
         "audit_summary with lane, fixed capacity requirement, receipts, changed paths, tests, reviewers, findings, and corrections. "
-        "Use `agent-work worker-result build --issue-iid "
-        f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
-        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. "
+        f"{result_contract}"
         "Do not handcraft identity, ledger, state, phase, audit lane, role_receipts, changed_paths, or reviewers; the helper derives them. "
-        "Return the builder output unchanged. "
         "WORKFLOW_RECEIPTS is the exact required receipt set for the recorded lane. Each applicable "
         "receipt must use its exact skill name; an inapplicable role must be `$skill: not applicable — reason`. "
-        "Do not return exactly one protocol_version=1 JSON object; return exactly one protocol_version=2 JSON object inside "
-        "<agent-work-result>...</agent-work-result>."
     )
 
 
@@ -1260,6 +1381,17 @@ class AgentInvoker:
         self._run_command = run_command
         self._environment = environment
 
+    supports_worker_result_handoff = True
+
+    @staticmethod
+    def _remove_handoff(path: Path) -> bool:
+        """Remove one handoff path and report whether replay is impossible."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
+
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""
         agent, executable = _agent_profile(self._environment)
@@ -1277,10 +1409,19 @@ class AgentInvoker:
         ):
             raise WorkerProtocolError("codex exec does not support --add-dir")
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        handoff: WorkerResultHandoffRequest | None = None,
+    ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
         agent, executable = _agent_profile(self._environment)
         command, stdin = _agent_command(agent, executable, checkout, prompt)
+        if handoff is not None and not self._remove_handoff(handoff.path):
+            return WorkerInvocation(0, stderr="worker result handoff is unavailable")
         try:
             result = self._run_command(
                 command,
@@ -1289,7 +1430,18 @@ class AgentInvoker:
                 environment=_worker_environment(self._environment),
             )
         except RuntimeError as error:
+            if handoff is not None:
+                self._remove_handoff(handoff.path)
             return WorkerInvocation(None, stderr=str(error))
+        handoff_payload = None
+        if handoff is not None:
+            try:
+                with handoff.path.open("rb") as stream:
+                    handoff_payload = stream.read(1_048_577)
+            except OSError:
+                handoff_payload = None
+            if not self._remove_handoff(handoff.path):
+                handoff_payload = None
         diagnostic = (
             worker_exit_evidence(
                 result.returncode,
@@ -1304,4 +1456,5 @@ class AgentInvoker:
             result.returncode,
             _redact(result.stdout, self._environment),
             diagnostic,
+            handoff_payload,
         )
