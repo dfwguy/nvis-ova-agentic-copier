@@ -22,7 +22,7 @@ when you need more detail.
 <!-- BEGIN GENERATED -->
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
-- [How to refresh the CI validation image](refresh-ci-image.md) — Check the CI image and registry cleanup.
+- [How to refresh the CI validation images](refresh-ci-image.md) — Build and check three root CI images and clean up old tags.
 - [How to validate template changes](validate-template-changes.md) — Check a change.
 
 ### Agent Workflow

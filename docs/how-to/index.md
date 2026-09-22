@@ -12,11 +12,9 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-This page maps work in this repo and in a project made from it, so you can find
-a guide and know where to start. Pick the guide that fits your task, goal, and
-place in the work, then use it from the first step to the last. Do each step in
-order, check the result as you go, and fix what fails before you move on. Use
-the links when you need more facts, rules, tips, or help to make a safe choice.
+Use these guides to do work in this repo or in a project made from it. Pick the
+guide for the job. Read each step, run each check, and fix what fails. Use the
+links for facts and rules as you do the work.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -27,7 +25,7 @@ the links when you need more facts, rules, tips, or help to make a safe choice.
 
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
-- [How to refresh the CI validation image](refresh-ci-image.md) — Check the CI image and registry cleanup.
+- [How to refresh the CI validation images](refresh-ci-image.md) — Build and check three root CI images and clean up old tags.
 - [How to update a generated project](update-a-generated-project.md) — Add template improvements to an existing generated project.
 - [How to validate template changes](validate-template-changes.md) — Check a change.
 

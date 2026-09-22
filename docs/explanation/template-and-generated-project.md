@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -58,13 +58,19 @@ generated repository root.
 This split makes two kinds of change clear. Template maintainers improve shared scaffolding, such as tooling, CI, workflow guidance, and defaults, in one place. Generated-project owners choose when to take those improvements through Copier's three-way update process.
 
 The root repository has its own CI boundary. Each merge-request and
-default-branch pipeline builds and pushes a project-only validation candidate.
-Eight single validation jobs and six native pytest shards for each supported
-Python use it. The tag has the commit SHA and pipeline ID. The jobs validate
-that commit's Dockerfile and locked dependencies, not a stale fixed digest.
-The image has the interpreter, system tools, and locked dependencies. Jobs do
-not install them again. BuildKit uses a registry-backed cache. Its metadata and
-output digest remain evidence.
+default-branch pipeline builds and pushes three project-only validation
+candidates. One tooling image contains the locked development tools and pinned
+system tools. Two pytest images contain pinned Git and jq, the project's locked
+default dependencies, and the test group for Python 3.11 or 3.14.3. The
+tooling checks use the first image. Each Python's pytest shards and coverage
+job use its matching image.
+
+Each target has its own commit-and-pipeline tag, registry cache, build
+metadata, and digest evidence. This keeps unrelated tools out of the pytest
+images and lets GitLab build the lanes independently. The split is meant to
+reduce the work on the longest path. It does not promise that a job will meet
+a fixed run time. Jobs still validate the current Dockerfile and locked
+dependencies, not a stale fixed digest, and do not install dependencies again.
 
 The root pytest work is a simple DAG, not a state machine. For each Python,
 six shards make one deterministic, exhaustive partition of the full suite.
@@ -74,7 +80,8 @@ six matching shards. It combines exactly those six coverage files, measures
 `src/agent_work`, enforces the 85% floor, and publishes Cobertura. Invalid
 shard metadata, a shard failure, or an aggregation failure fails the pipeline.
 Queue time stays outside the unchanged 60-second preference and 120-second
-hard per-job limits.
+hard per-job limits. The image split does not change the six-shard partition,
+coverage inputs, 85% floor, or reports.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
