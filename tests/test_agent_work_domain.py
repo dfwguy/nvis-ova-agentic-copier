@@ -98,6 +98,7 @@ def test_lifecycle_label_specs_are_stable_and_cover_every_projection() -> None:
         (RunnerState.REPAIR, RunnerState.PUBLISHING),
         (RunnerState.BLOCKED, RunnerState.PREPARING),
         (RunnerState.AWAITING_HUMAN, RunnerState.COMPLETE),
+        (RunnerState.BLOCKED, RunnerState.EXECUTING),
     ],
 )
 def test_required_transition_edges_are_explicit(
@@ -124,7 +125,6 @@ def test_repair_failed_to_repair_is_a_declared_reviewed_recovery_edge() -> None:
 @pytest.mark.parametrize(
     ("source", "target"),
     [
-        (RunnerState.BLOCKED, RunnerState.EXECUTING),
         (RunnerState.FAILED, RunnerState.PREPARING),
         (RunnerState.COMPLETE, RunnerState.EXECUTING),
     ],

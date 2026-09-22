@@ -112,6 +112,7 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
             {
                 RunnerState.AWAITING_HUMAN,
                 RunnerState.PREPARING,
+                RunnerState.EXECUTING,
                 RunnerState.PUBLISHING,
                 RunnerState.OBSERVING,
                 RunnerState.COMPLETE,
