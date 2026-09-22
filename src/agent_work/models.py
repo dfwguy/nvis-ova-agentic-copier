@@ -39,7 +39,7 @@ from .domain import (
     WorkflowPhase,
     WorkKind,
 )
-from .red_checkpoint import RedCheckpointEvidence
+from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
 
 
 class BoundaryModel(BaseModel):
@@ -827,6 +827,7 @@ class WorkerResultEnvelope(BoundaryModel):
     workflow_lane: WorkflowLane
     result_kind: Literal[
         "ready_to_publish",
+        "red_checkpoint_ready",
         "retryable",
         "needs_human",
         "split_required",
@@ -844,10 +845,35 @@ class WorkerResultEnvelope(BoundaryModel):
     next_action: str = Field(min_length=1, max_length=2_000)
     audit_summary: AuditReceiptSummary | None = None
     suggest_close_evidence: SuggestCloseEvidence | None = None
+    red_checkpoint_request: RedCheckpointRequest | None = None
 
     @model_validator(mode="after")
     def validate_split_context(self) -> WorkerResultEnvelope:
         """Keep split-required envelopes unambiguous and worker-only."""
+        if self.result_kind == "red_checkpoint_ready":
+            if (
+                self.expected_phase is not WorkflowPhase.WORKFLOW
+                or self.completed_phase is not WorkflowPhase.WORKFLOW
+                or self.workflow_lane is not WorkflowLane.CODING
+                or self.phase_status != "complete"
+                or self.red_checkpoint_request is None
+                or self.audit_summary is not None
+                or self.merge_request_draft is not None
+                or self.split_plan is not None
+                or self.error_code is not None
+                or self.suggest_close_evidence is not None
+                or self.rejection_route is not None
+                or len(self.receipts) != 2
+                or not self.receipts[0].startswith("$architect:")
+                or not self.receipts[1].startswith("$tdd-red:")
+                or not self.receipts[0].removeprefix("$architect:").strip()
+                or not self.receipts[1].removeprefix("$tdd-red:").strip()
+            ):
+                raise ValueError("red_checkpoint_ready envelope has invalid context")
+        elif self.red_checkpoint_request is not None:
+            raise ValueError(
+                "red_checkpoint_request is only valid for red_checkpoint_ready"
+            )
         if self.result_kind == "split_required":
             if (
                 self.protocol_version != 2

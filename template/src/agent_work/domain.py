@@ -130,6 +130,7 @@ class ErrorCode(StrEnum):
     WORKER_PROTOCOL_INVALID = "worker_protocol_invalid"
     WORKER_IDENTITY_MISMATCH = "worker_identity_mismatch"
     WORKER_RECEIPT_INVALID = "worker_receipt_invalid"
+    RED_CHECKPOINT_FAILED = "red_checkpoint_failed"
     AGENT_CAPACITY_UNAVAILABLE = "agent_capacity_unavailable"
     GIT_TRANSPORT_RETRYABLE = "git_transport_retryable"
     GIT_AUTHENTICATION = "git_authentication"

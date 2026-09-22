@@ -60,7 +60,11 @@ from .models import (
     TransitionIntentRecord,
 )
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
-from .red_checkpoint import RedCheckpointEvidence
+from .red_checkpoint import (
+    RedCheckpointError,
+    RedCheckpointEvidence,
+    RedCheckpointRequest,
+)
 from .repository import PublicationError, RepositoryError, RepositoryTransientError
 from .state_machine import (
     apply_worker_result,
@@ -1914,6 +1918,32 @@ def _block_feedback_path_mismatch(
     return blocked
 
 
+def _block_red_checkpoint(
+    record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort
+) -> LedgerRecord:
+    """Fail closed when trusted Red evidence cannot be established exactly."""
+    blocked = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.BLOCKED,
+            error_code=ErrorCode.RED_CHECKPOINT_FAILED,
+            summary="The trusted Red checkpoint could not be established.",
+            next_action=(
+                "Review the retained tests and checkpoint evidence before an "
+                "explicit retry."
+            ),
+        )
+    )
+    gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
+    gitlab.comment_outcome(
+        record.issue_iid,
+        error_code=str(blocked.error_code),
+        summary=blocked.summary,
+        next_action=blocked.next_action,
+    )
+    return blocked
+
+
 def _mr_evidence_is_exact(
     record: LedgerRecord,
     mr: MergeRequestEvidence,
@@ -2309,6 +2339,9 @@ def _execute(
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
+    apply_red_checkpoint: (
+        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+    ) = None,
 ) -> LedgerRecord | None:
     try:
         _verify_authenticated_user(gitlab)
@@ -2429,6 +2462,8 @@ def _execute(
             ),
             worker_result_handoff=handoff_request,
         )
+    except RedCheckpointError:
+        return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
     except ValueError as error:
         return _block_publication_identity(
             record,
@@ -2437,17 +2472,178 @@ def _execute(
             summary=f"Feedback selection cannot be rendered safely: {error}",
         )
     lock_factory = issue_lock or (lambda _issue_iid: nullcontext())
-    with lock_factory(record.issue_iid):
-        invocation = (
-            cast(Callable[..., WorkerInvocation], invoke.invoke)(
-                record.worktree,
-                prompt,
-                worker_timeout,
-                handoff=handoff_request,
+    invocation = None
+    if (
+        record.state is RunnerState.EXECUTING
+        and record.work_kind is WorkKind.ORDINARY
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.workflow_lane is not WorkflowLane.CONTENT
+        and apply_red_checkpoint is not None
+        and retained_checkpoint is None
+    ):
+        with lock_factory(record.issue_iid):
+            red_invocation = (
+                cast(Callable[..., WorkerInvocation], invoke.invoke)(
+                    record.worktree,
+                    prompt,
+                    worker_timeout,
+                    handoff=handoff_request,
+                )
+                if handoff_request is not None
+                else invoke.invoke(record.worktree, prompt, worker_timeout)
             )
-            if handoff_request is not None
-            else invoke.invoke(record.worktree, prompt, worker_timeout)
-        )
+        if red_invocation.returncode != 0:
+            worker_exit = (
+                worker_exit_evidence(
+                    red_invocation.returncode, red_invocation.stderr, prompt=prompt
+                )
+                if red_invocation.returncode is not None
+                else None
+            )
+            return _record_retry(
+                record.model_copy(update={"worker_exit": worker_exit}),
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=(
+                    ErrorCode.WORKER_TIMEOUT
+                    if red_invocation.returncode is None
+                    else ErrorCode.WORKER_EXIT
+                ),
+                retry_delay=timedelta(),
+            )
+        try:
+            red_changed_paths = (
+                tuple(sorted(set(repository.changed_paths(record.worktree))))
+                if handoff_request is not None
+                else None
+            )
+            red_result = (
+                parse_worker_result_handoff(
+                    red_invocation.handoff,
+                    request=handoff_request,
+                    changed_paths=red_changed_paths or (),
+                )
+                if handoff_request is not None
+                else parse_worker_result(
+                    red_invocation.stdout,
+                    expected_project_id=record.project_id,
+                    expected_issue_iid=record.issue_iid,
+                    expected_revision=record.revision,
+                )
+            )
+            if (
+                red_result.expected_state is not record.state
+                or red_result.expected_phase is not record.phase
+            ):
+                raise RedCheckpointError("worker result identity is not exact")
+            checkpoint_request = red_result.red_checkpoint_request
+            if (
+                red_result.workflow_lane is WorkflowLane.CONTENT
+                or red_result.result_kind
+                in {"split_required", "needs_human", "retryable"}
+            ):
+                invocation = red_invocation
+            elif (
+                red_result.result_kind != "red_checkpoint_ready"
+                or checkpoint_request is None
+                or (
+                    red_changed_paths
+                    if red_changed_paths is not None
+                    else tuple(sorted(repository.changed_paths(record.worktree)))
+                )
+                != checkpoint_request.test_paths
+            ):
+                raise RedCheckpointError("red checkpoint handoff is not exact")
+            if invocation is None:
+                if checkpoint_request is None:
+                    raise RedCheckpointError("red checkpoint request is missing")
+                record = ledger.persist(
+                    record.model_copy(update={"workflow_lane": WorkflowLane.CODING})
+                )
+                applied_checkpoint = apply_red_checkpoint(
+                    record.issue_iid, checkpoint_request
+                )
+                retained_checkpoint = (
+                    load_red_checkpoint(
+                        record.project_id, record.issue_iid, record.source_sha
+                    )
+                    if load_red_checkpoint is not None and record.source_sha is not None
+                    else None
+                )
+                if (
+                    retained_checkpoint is None
+                    or retained_checkpoint != applied_checkpoint
+                ):
+                    raise RedCheckpointError(
+                        "applied red checkpoint does not match retained evidence"
+                    )
+                if remaining_seconds is not None:
+                    remaining = remaining_seconds()
+                    if remaining <= 0:
+                        return None
+                    worker_timeout = max(1, math.ceil(remaining))
+                prompt_record = record.model_dump(mode="json")
+                prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
+                    mode="json"
+                )
+                previous_nonce = (
+                    handoff_request.nonce if handoff_request is not None else None
+                )
+                handoff_request = None
+                if getattr(invoke, "supports_worker_result_handoff", False):
+                    source_sha = record.source_sha or repository.head(record.worktree)
+                    nonce = secrets.token_hex(16)
+                    while nonce == previous_nonce:
+                        nonce = secrets.token_hex(16)
+                    handoff_request = WorkerResultHandoffRequest(
+                        path=record.worktree / f".agent-work-result-{nonce}.json",
+                        nonce=nonce,
+                        project_id=record.project_id,
+                        issue_iid=record.issue_iid,
+                        ledger_revision=record.revision,
+                        source_branch=record.source_branch,
+                        source_sha=source_sha,
+                    )
+                prompt = build_worker_prompt(
+                    prompt_record,
+                    project_id=record.project_id,
+                    issue_iid=record.issue_iid,
+                    effective_worker_budget_seconds=worker_timeout,
+                    issue_title=issue.title,
+                    issue_description=issue.description,
+                    issue_notes=issue_notes,
+                    merge_request_feedback=tuple(
+                        {
+                            "id": note.id,
+                            "source": note.source,
+                            "discussion_id": note.discussion_id,
+                            "author": note.author,
+                            "created_at": note.created_at,
+                            "body": note.body,
+                            "unseen": True,
+                        }
+                        for note in feedback
+                        if _feedback_is_qualifying(
+                            note, repository.config.factory_username
+                        )
+                    ),
+                    worker_result_handoff=handoff_request,
+                )
+        except (RedCheckpointError, RepositoryError, WorkerProtocolError, ValueError):
+            return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
+    if invocation is None:
+        with lock_factory(record.issue_iid):
+            invocation = (
+                cast(Callable[..., WorkerInvocation], invoke.invoke)(
+                    record.worktree,
+                    prompt,
+                    worker_timeout,
+                    handoff=handoff_request,
+                )
+                if handoff_request is not None
+                else invoke.invoke(record.worktree, prompt, worker_timeout)
+            )
     if invocation.returncode != 0:
         worker_exit = (
             worker_exit_evidence(
@@ -3591,6 +3787,9 @@ def run_segment(
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
+    apply_red_checkpoint: (
+        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+    ) = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     record, issue = select_record(
@@ -3848,6 +4047,7 @@ def run_segment(
             remaining_seconds=remaining_seconds,
             issue_lock=issue_lock,
             load_red_checkpoint=load_red_checkpoint,
+            apply_red_checkpoint=apply_red_checkpoint,
         )
         finished_at = boundary_clock()
         if outcome is None:

@@ -48,7 +48,7 @@ from .models import (
     WorkerResultEnvelope,
 )
 from .ports import CommandRunner
-from .red_checkpoint import RedCheckpointEvidence
+from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
 from .state_machine import WORKFLOW_RECEIPTS, WORKFLOW_REVIEWER_SKILLS
 
 
@@ -102,6 +102,7 @@ class WorkerResultBuildInput(BoundaryModel):
     workflow_lane: WorkflowLane
     result_kind: Literal[
         "ready_to_publish",
+        "red_checkpoint_ready",
         "retryable",
         "needs_human",
         "split_required",
@@ -116,6 +117,7 @@ class WorkerResultBuildInput(BoundaryModel):
     split_plan: SplitPlan | None = None
     audit_summary: WorkerResultBuildAudit | None = None
     suggest_close_evidence: SuggestCloseEvidence | None = None
+    red_checkpoint_request: RedCheckpointRequest | None = None
 
     @model_validator(mode="after")
     def validate_lane_capacity(self) -> WorkerResultBuildInput:
@@ -653,6 +655,7 @@ def build_worker_result(
             next_action=build_input.next_action,
             audit_summary=audit,
             suggest_close_evidence=build_input.suggest_close_evidence,
+            red_checkpoint_request=build_input.red_checkpoint_request,
         )
     except ValidationError as error:
         raise _validation_error(
@@ -681,7 +684,10 @@ def build_worker_result(
         # Reuse the controller's exact receipt/state coherence authority.
         from .state_machine import apply_worker_result
 
-        if record.phase is WorkflowPhase.WORKFLOW:
+        if (
+            record.phase is WorkflowPhase.WORKFLOW
+            and result.result_kind != "red_checkpoint_ready"
+        ):
             required = WORKFLOW_RECEIPTS.get(build_input.workflow_lane, ())
             if len(result.receipts) != len(required) or any(
                 not _has_exact_receipt_format(receipt, skill)
@@ -691,7 +697,7 @@ def build_worker_result(
                     "controller_invariant.receipts",
                     "must use each exact required skill once",
                 )
-        if result.result_kind != "split_required":
+        if result.result_kind not in {"split_required", "red_checkpoint_ready"}:
             apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
     except ValueError as error:
         raise WorkerProtocolError(
@@ -1109,6 +1115,22 @@ def build_worker_prompt(
                 f"tree {tree_oid}, ref {ref}, test paths {tuple(test_paths)}. "
                 "Restore or inspect that exact local checkpoint; never rebuild it from prose. "
             )
+    coding_checkpoint_workflow = (
+        "For the coding lane, the trusted Red checkpoint already exists. Do not "
+        "rerun Red or manufacture replacement evidence. Reuse its exact identity, "
+        "then delegate the applicable writers and Green with the retained Red receipt. "
+        if checkpoint_context
+        else (
+            "For the coding lane, delegate only Architect and Red in this segment. "
+            "Stop immediately after the approved failing tests exist. Do not delegate "
+            "a writer or Green and do not make a production, documentation, or policy "
+            "change. Return result_kind=red_checkpoint_ready with exactly the Architect "
+            "and Red receipts plus red_checkpoint_request containing the exact shell-free "
+            "pytest argv, expected failure marker, and sorted changed test paths. The "
+            "trusted controller creates and reloads the checkpoint before another worker "
+            "may continue. "
+        )
+    )
     workflow = ""
     if phase == "post-publication":
         workflow = (
@@ -1168,8 +1190,10 @@ def build_worker_prompt(
             "The trusted runner, not worker, files and queues the child issues: no human approval step. "
             "Do not create or update child issues, do not execute proposed slices "
             "in this worker, and do not automatically retry. "
-            "Architect remains live: it delegates Red, Diátaxis Writer, and conditional $agent-policy-writer concurrently with "
-            "its design and acceptance criteria, receives every applicable receipt or N/A, then delegates Green with that design, "
+            f"{coding_checkpoint_workflow}"
+            "After the trusted coding checkpoint is present, Architect remains live: it delegates Diátaxis Writer and conditional "
+            "$agent-policy-writer concurrently with its design and acceptance criteria, receives every applicable receipt or N/A, "
+            "then delegates Green with that design, "
             "Red receipt, failing-test diff, and shared worktree. The Policy Writer exclusively owns policy paths; "
             "Green owns production, tests, and docs and must inspect the actual worktree. Green implements code, "
             "tests, README, and documentation, stages one exact candidate, then delegates the serial "

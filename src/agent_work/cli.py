@@ -1606,7 +1606,10 @@ def main(
                         separators=(",", ":"),
                     )
                 )
-            write_stderr("worker result handoff written")
+            else:
+                write_stdout(
+                    f"worker result handoff written for issue #{record.issue_iid}"
+                )
         else:
             rendered_result = result.model_dump_json(exclude_none=True)
             write_stdout(

@@ -21,6 +21,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from .domain import (
     ACTIVE_STATES,
@@ -82,6 +83,7 @@ from .models import (
     TransitionIntentRecord,
 )
 from .ports import (
+    CommandResult,
     CommandRunner,
     GitLabPort,
     InvokerPort,
@@ -90,9 +92,13 @@ from .ports import (
     RepositoryPort,
 )
 from .red_checkpoint import (
+    RedCheckpointDependencies,
     RedCheckpointError,
     RedCheckpointEvidence,
+    RedCheckpointReport,
+    RedCheckpointRequest,
     RedCheckpointStore,
+    create_red_checkpoint,
 )
 from .repository import (
     GitRepository,
@@ -949,6 +955,70 @@ class RuntimeDependencies:
     load_red_checkpoint: (
         Callable[[int, int, str], RedCheckpointEvidence | None] | None
     ) = None
+    apply_red_checkpoint: (
+        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+    ) = None
+    run_segment_boundary: Callable[..., LedgerRecord | None] = run_segment
+
+
+class RuntimeCheckpointRepository(RepositoryPort, Protocol):
+    """Repository operations needed to compose trusted checkpoint capture."""
+
+    def head(self, worktree: Path) -> str: ...
+
+    def checkpoint_tree(self, ref: str) -> str | None: ...
+
+    def run_red_command(
+        self, worktree: Path, argv: tuple[str, ...]
+    ) -> CommandResult: ...
+
+    def snapshot_tests(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...], ref: str
+    ) -> str: ...
+
+
+class RuntimeGitLabPort(GitLabPort, Protocol):
+    """GitLab operations needed only while composing runtime dependencies."""
+
+    def lifecycle_label_drift(self) -> tuple[str, ...]: ...
+
+    def ensure_lifecycle_labels(self) -> None: ...
+
+
+class RuntimeCheckpointStore(Protocol):
+    """Durable checkpoint-sidecar operations needed by composition."""
+
+    def read(
+        self, project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None: ...
+
+    def write(self, evidence: RedCheckpointEvidence) -> None: ...
+
+
+class RuntimeCheckpointCreator(Protocol):
+    """Trusted checkpoint transaction callable used by the composition root."""
+
+    def __call__(
+        self,
+        *,
+        issue_iid: int,
+        request: RedCheckpointRequest,
+        apply: bool,
+        dependencies: RedCheckpointDependencies,
+    ) -> RedCheckpointReport: ...
+
+
+@dataclass(frozen=True)
+class RuntimeCompositionDependencies:
+    """Explicit constructors and boundaries for composition-root testing."""
+
+    config: AgentWorkConfig
+    logger: logging.Logger
+    gitlab: RuntimeGitLabPort
+    repository: RuntimeCheckpointRepository
+    invoke: InvokerPort
+    checkpoint_store: RuntimeCheckpointStore
+    create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
 
 
 @dataclass(frozen=True)
@@ -1281,12 +1351,37 @@ def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logg
     return logger
 
 
-def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
+def build_runtime_dependencies(
+    *,
+    debug: bool,
+    composition: RuntimeCompositionDependencies | None = None,
+) -> RuntimeDependencies:
     """Wire real process and filesystem boundaries at the composition root."""
-    config = discover_config(
-        current_directory=Path.cwd(), environment=os.environ, run_command=run_subprocess
-    )
-    logger = _build_local_logger(config, debug=debug)
+    if composition is None:
+        config = discover_config(
+            current_directory=Path.cwd(),
+            environment=os.environ,
+            run_command=run_subprocess,
+        )
+        logger = _build_local_logger(config, debug=debug)
+        gitlab: RuntimeGitLabPort = GitLabGateway(config, run_subprocess)
+        repository: RuntimeCheckpointRepository = GitRepository(
+            config,
+            run_subprocess,
+            service_environment=os.environ,
+            diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
+        )
+        invoke: InvokerPort = AgentInvoker(run_subprocess, environment=os.environ)
+        checkpoint_store: RuntimeCheckpointStore = RedCheckpointStore(config.state_root)
+        create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
+    else:
+        config = composition.config
+        logger = composition.logger
+        gitlab = composition.gitlab
+        repository = composition.repository
+        invoke = composition.invoke
+        checkpoint_store = composition.checkpoint_store
+        create_checkpoint = composition.create_checkpoint
 
     def process_alive(pid: int) -> bool | None:
         """Return liveness when this platform can verify the marker PID."""
@@ -1311,14 +1406,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         )
 
     now = lambda: datetime.now(UTC)
-    gitlab = GitLabGateway(config, run_subprocess)
-    repository = GitRepository(
-        config,
-        run_subprocess,
-        service_environment=os.environ,
-        diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
-    )
-    checkpoint_store = RedCheckpointStore(config.state_root)
+    ledger = JsonLedger(config.state_root, clock=now)
 
     def load_red_checkpoint(
         project_id: int, issue_iid: int, base_sha: str
@@ -1330,12 +1418,39 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
             raise RedCheckpointError("red checkpoint ref does not match retained tree")
         return evidence
 
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        def snapshot_tests(base_sha: str, paths: tuple[str, ...], ref: str) -> str:
+            record = ledger.load_read_only(issue_iid)
+            if record is None:
+                raise RedCheckpointError("red checkpoint record is unavailable")
+            return repository.snapshot_tests(record.worktree, base_sha, paths, ref)
+
+        report = create_checkpoint(
+            issue_iid=issue_iid,
+            request=request,
+            apply=True,
+            dependencies=RedCheckpointDependencies(
+                load_record=ledger.load_read_only,
+                current_head=repository.head,
+                changed_paths=repository.changed_paths,
+                run_red_command=repository.run_red_command,
+                snapshot_tests=snapshot_tests,
+                read_evidence=load_red_checkpoint,
+                write_evidence=checkpoint_store.write,
+            ),
+        )
+        if report.evidence is None:
+            raise RedCheckpointError("red checkpoint evidence was not created")
+        return report.evidence
+
     return RuntimeDependencies(
         config=config,
-        ledger=JsonLedger(config.state_root, clock=now),
+        ledger=ledger,
         gitlab=gitlab,
         repository=repository,
-        invoke=AgentInvoker(run_subprocess, environment=os.environ),
+        invoke=invoke,
         lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
         issue_lock=lambda issue_iid: XdgIssueLock(config.state_root, issue_iid),
         clock=now,
@@ -1348,6 +1463,7 @@ def build_runtime_dependencies(*, debug: bool) -> RuntimeDependencies:
         lifecycle_label_drift=gitlab.lifecycle_label_drift,
         ensure_lifecycle_labels=gitlab.ensure_lifecycle_labels,
         load_red_checkpoint=load_red_checkpoint,
+        apply_red_checkpoint=apply_red_checkpoint,
     )
 
 
@@ -2416,7 +2532,7 @@ def dispatch(
                     )
                     if remaining <= 0:
                         break
-                    result = run_segment(
+                    result = wired.run_segment_boundary(
                         ledger=ledger,
                         gitlab=gitlab,
                         repository=repository,
@@ -2428,6 +2544,7 @@ def dispatch(
                         allow_pinned_conflict=True,
                         issue_lock=wired.issue_lock,
                         load_red_checkpoint=wired.load_red_checkpoint,
+                        apply_red_checkpoint=wired.apply_red_checkpoint,
                         remaining_seconds=lambda: (
                             request.max_activation_seconds
                             - (wired.monotonic() - started)
@@ -2978,7 +3095,7 @@ def dispatch(
                 stop_reason = "time_limit"
                 break
             segment_start_state = prior_state
-            record = run_segment(
+            record = wired.run_segment_boundary(
                 ledger=ledger,
                 gitlab=gitlab,
                 repository=repository,
@@ -2989,6 +3106,7 @@ def dispatch(
                 issue_iid=issue_iid,
                 issue_lock=wired.issue_lock,
                 load_red_checkpoint=wired.load_red_checkpoint,
+                apply_red_checkpoint=wired.apply_red_checkpoint,
                 remaining_seconds=remaining_activation_seconds,
             )
             if record is None:
