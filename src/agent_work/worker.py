@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import UnionType
-from typing import Literal, Union, cast, get_args, get_origin
+from typing import BinaryIO, Literal, Protocol, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -133,11 +133,21 @@ class WorkerResultBuildInput(BoundaryModel):
         return self
 
 
+class HandoffPath(Protocol):
+    """Minimum filesystem boundary for one transient handoff artifact."""
+
+    def unlink(self, *, missing_ok: bool) -> None:
+        """Remove the artifact when it exists."""
+
+    def open(self, mode: str) -> BinaryIO:
+        """Open the artifact for binary capture."""
+
+
 @dataclass(frozen=True)
 class WorkerResultHandoffRequest:
     """Controller-owned identity for one worker-result handoff."""
 
-    path: Path
+    path: Path | HandoffPath
     nonce: str
     project_id: int
     issue_iid: int
@@ -437,6 +447,16 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
         },
         "split_required": {"is required", "is limited to fresh ordinary intake"},
         "identity": {"does not match the segment"},
+        "worker_result_handoff": {
+            "not written/missing after successful invocation",
+            "malformed artifact",
+            "identity mismatch",
+            "changed-path mismatch",
+            "pre-run stale cleanup failed",
+            "artifact unreadable",
+            "artifact exceeds 1 MiB",
+            "post-read cleanup failed",
+        },
     }
     return origin == "controller_invariant" and reason in controller_reasons.get(
         path, set()
@@ -707,6 +727,23 @@ def build_worker_result(
 
 
 @dataclass(frozen=True)
+class HandoffCapture:
+    """Controller-owned outcome of one transient handoff capture."""
+
+    status: Literal[
+        "captured",
+        "pre_run_cleanup_failed",
+        "artifact_not_written",
+        "artifact_unreadable",
+        "artifact_too_large",
+        "post_read_cleanup_failed",
+    ]
+
+
+_CAPTURED_HANDOFF = HandoffCapture("captured")
+
+
+@dataclass(frozen=True)
 class WorkerInvocation:
     """Redacted result of one bounded worker process."""
 
@@ -714,6 +751,7 @@ class WorkerInvocation:
     stdout: str = ""
     stderr: str = ""
     handoff: bytes | None = None
+    handoff_capture: HandoffCapture = _CAPTURED_HANDOFF
 
 
 def build_worker_result_handoff(
@@ -749,15 +787,30 @@ def parse_worker_result_handoff(
     *,
     request: WorkerResultHandoffRequest,
     changed_paths: tuple[str, ...],
+    capture: HandoffCapture = _CAPTURED_HANDOFF,
 ) -> WorkerResultEnvelope:
     """Return a result only from an exact fresh controller-bound artifact."""
+    capture_reasons = {
+        "pre_run_cleanup_failed": "pre-run stale cleanup failed",
+        "artifact_not_written": "not written/missing after successful invocation",
+        "artifact_unreadable": "artifact unreadable",
+        "artifact_too_large": "artifact exceeds 1 MiB",
+        "post_read_cleanup_failed": "post-read cleanup failed",
+    }
+    if capture.status != "captured":
+        raise WorkerProtocolError(
+            "worker_result_handoff", capture_reasons[capture.status]
+        )
+    if payload is None:
+        raise WorkerProtocolError(
+            "worker_result_handoff",
+            "not written/missing after successful invocation",
+        )
     try:
-        if payload is None:
-            raise ValueError("missing artifact")
         artifact = WorkerResultHandoff.model_validate_json(payload)
     except (ValidationError, ValueError):
         raise WorkerProtocolError(
-            "worker_result_handoff", "missing, malformed, or stale"
+            "worker_result_handoff", "malformed artifact"
         ) from None
     observed_identity = (
         artifact.nonce,
@@ -783,11 +836,10 @@ def parse_worker_result_handoff(
     if (
         observed_identity != expected_identity
         or envelope_identity != expected_identity[1:4]
-        or artifact.changed_paths != tuple(sorted(set(changed_paths)))
     ):
-        raise WorkerProtocolError(
-            "worker_result_handoff", "missing, malformed, or stale"
-        )
+        raise WorkerProtocolError("worker_result_handoff", "identity mismatch")
+    if artifact.changed_paths != tuple(sorted(set(changed_paths))):
+        raise WorkerProtocolError("worker_result_handoff", "changed-path mismatch")
     return artifact.envelope
 
 
@@ -1408,7 +1460,7 @@ class AgentInvoker:
     supports_worker_result_handoff = True
 
     @staticmethod
-    def _remove_handoff(path: Path) -> bool:
+    def _remove_handoff(path: Path | HandoffPath) -> bool:
         """Remove one handoff path and report whether replay is impossible."""
         try:
             path.unlink(missing_ok=True)
@@ -1445,7 +1497,10 @@ class AgentInvoker:
         agent, executable = _agent_profile(self._environment)
         command, stdin = _agent_command(agent, executable, checkout, prompt)
         if handoff is not None and not self._remove_handoff(handoff.path):
-            return WorkerInvocation(0, stderr="worker result handoff is unavailable")
+            return WorkerInvocation(
+                0,
+                handoff_capture=HandoffCapture("pre_run_cleanup_failed"),
+            )
         try:
             result = self._run_command(
                 command,
@@ -1458,14 +1513,27 @@ class AgentInvoker:
                 self._remove_handoff(handoff.path)
             return WorkerInvocation(None, stderr=str(error))
         handoff_payload = None
-        if handoff is not None:
+        handoff_capture = HandoffCapture("captured")
+        if handoff is not None and result.returncode == 0:
             try:
                 with handoff.path.open("rb") as stream:
                     handoff_payload = stream.read(1_048_577)
+            except FileNotFoundError:
+                handoff_capture = HandoffCapture("artifact_not_written")
             except OSError:
+                handoff_capture = HandoffCapture("artifact_unreadable")
+            else:
+                if len(handoff_payload) > 1_048_576:
+                    handoff_payload = None
+                    handoff_capture = HandoffCapture("artifact_too_large")
+            if (
+                not self._remove_handoff(handoff.path)
+                and handoff_capture.status == "captured"
+            ):
                 handoff_payload = None
-            if not self._remove_handoff(handoff.path):
-                handoff_payload = None
+                handoff_capture = HandoffCapture("post_read_cleanup_failed")
+        elif handoff is not None:
+            self._remove_handoff(handoff.path)
         diagnostic = (
             worker_exit_evidence(
                 result.returncode,
@@ -1481,4 +1549,5 @@ class AgentInvoker:
             _redact(result.stdout, self._environment),
             diagnostic,
             handoff_payload,
+            handoff_capture,
         )

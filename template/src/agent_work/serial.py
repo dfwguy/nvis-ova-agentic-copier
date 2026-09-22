@@ -2552,6 +2552,7 @@ def _execute(
                     red_invocation.handoff,
                     request=handoff_request,
                     changed_paths=red_changed_paths or (),
+                    capture=red_invocation.handoff_capture,
                 )
                 if handoff_request is not None
                 else parse_worker_result(
@@ -2714,6 +2715,7 @@ def _execute(
                     invocation.handoff,
                     request=handoff_request,
                     changed_paths=final_changed_paths or (),
+                    capture=invocation.handoff_capture,
                 )
                 if handoff_request is not None
                 else parse_worker_result(

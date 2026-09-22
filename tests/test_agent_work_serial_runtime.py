@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
+import io
 import json
 import logging
 from collections.abc import Callable
@@ -101,6 +102,7 @@ from agent_work.serial import (
 from agent_work.state_machine import WORKFLOW_RECEIPTS
 from agent_work.worker import (
     AgentInvoker,
+    HandoffCapture,
     WorkerInvocation,
     WorkerProtocolError,
     build_worker_prompt,
@@ -1058,6 +1060,14 @@ class HandoffInvoker:
         stdout: str | None = None,
         malformed: bytes | None = None,
         missing: bool = False,
+        capture_status: Literal[
+            "captured",
+            "pre_run_cleanup_failed",
+            "artifact_not_written",
+            "artifact_unreadable",
+            "artifact_too_large",
+            "post_read_cleanup_failed",
+        ] = "captured",
         on_invoke: Callable[[], None] | None = None,
     ) -> None:
         self.artifact_updates = artifact_updates or {}
@@ -1066,6 +1076,7 @@ class HandoffInvoker:
         self.stdout = stdout
         self.malformed = malformed
         self.missing = missing
+        self.capture_status = capture_status
         self.on_invoke = on_invoke
         self.requests: list[object] = []
 
@@ -1131,6 +1142,7 @@ class HandoffInvoker:
             ),
             stderr="",
             handoff=payload,
+            handoff_capture=HandoffCapture(self.capture_status),
         )
 
 
@@ -1742,9 +1754,12 @@ class RedThenGreenHandoffInvoker:
 
     supports_worker_result_handoff = True
 
-    def __init__(self, repository: FakeRepository) -> None:
+    def __init__(
+        self, repository: FakeRepository, *, red_capture_status: str = "captured"
+    ) -> None:
         self.repository = repository
         self.legacy = RedThenGreenInvoker(repository)
+        self.red_capture_status = red_capture_status
         self.requests: list[_HandoffRequest] = []
 
     def preflight(self) -> None:
@@ -1782,6 +1797,7 @@ class RedThenGreenHandoffInvoker:
             "untrusted stdout without a result envelope",
             "",
             handoff=json.dumps(artifact, separators=(",", ":")).encode(),
+            handoff_capture=HandoffCapture(cast(Any, self.red_capture_status)),
         )
 
 
@@ -1888,6 +1904,33 @@ def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
     assert green_request.ledger_revision == checkpoint_revision
     assert green_request.ledger_revision > red_request.ledger_revision
     assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_red_capture_failure_blocks_before_checkpoint_application(
+    tmp_path: Path,
+) -> None:
+    """A non-captured Red artifact cannot reach checkpoint application."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenHandoffInvoker(
+        repository, red_capture_status="artifact_too_large"
+    )
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        apply_red_checkpoint=lambda *_args: pytest.fail("must not apply checkpoint"),
+    )
+    assert result is not None and result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert len(invoker.requests) == 1
 
 
 @pytest.mark.parametrize(
@@ -5833,7 +5876,42 @@ def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -
     invocation = invoker.invoke(tmp_path, "trusted prompt", 10, handoff=request)
 
     assert invocation.handoff == fresh
+    assert invocation.handoff_capture.status == "captured"
     assert not handoff_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("capture_status", "expected_diagnostic"),
+    (
+        ("pre_run_cleanup_failed", "pre-run stale cleanup failed"),
+        ("artifact_not_written", "not written/missing after successful invocation"),
+        ("artifact_unreadable", "artifact unreadable"),
+        ("artifact_too_large", "artifact exceeds 1 MiB"),
+        ("post_read_cleanup_failed", "post-read cleanup failed"),
+    ),
+)
+def test_serial_rejects_typed_capture_failures_with_safe_diagnostics(
+    tmp_path: Path, capture_status: str, expected_diagnostic: str
+) -> None:
+    """Controller retry evidence keeps the capture stage without worker data."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=HandoffInvoker(capture_status=cast(Any, capture_status)),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert outcome is not None
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.condition_history[-1].detail == (
+        f"worker_result_handoff: {expected_diagnostic}"
+    )
 
 
 @pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
@@ -5872,6 +5950,96 @@ def test_agent_invoker_removes_handoff_after_failed_process_boundary(
 
     assert invocation.returncode == returncode
     assert not handoff_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_status"),
+    (
+        ("pre_run_cleanup", "pre_run_cleanup_failed"),
+        ("unreadable", "artifact_unreadable"),
+        ("oversize", "artifact_too_large"),
+    ),
+)
+def test_agent_invoker_records_a_typed_safe_capture_status_for_filesystem_failures(
+    tmp_path: Path, stage: str, expected_status: str
+) -> None:
+    """Filesystem capture failures never become worker prose or raw path diagnostics."""
+    worker = importlib.import_module("agent_work.worker")
+    handoff_path = tmp_path / "worker-result.json"
+    if stage == "pre_run_cleanup":
+        handoff_path.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        del command, kwargs
+        if stage == "unreadable":
+            handoff_path.mkdir()
+        elif stage == "oversize":
+            handoff_path.write_bytes(b"x" * 1_048_577)
+        return CommandResult(0, "untrusted prose", "untrusted diagnostic")
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+        },
+    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff_capture.status == expected_status
+    assert invocation.handoff is None
+
+
+def test_agent_invoker_records_post_read_cleanup_failure_as_a_typed_capture_status(
+    tmp_path: Path,
+) -> None:
+    """Cleanup failure invalidates an otherwise readable artifact without leaking it."""
+    worker = importlib.import_module("agent_work.worker")
+
+    class FailingCleanupPath:
+        """Minimal injected filesystem boundary with a failing second cleanup."""
+
+        def __init__(self) -> None:
+            self.unlink_calls = 0
+
+        def unlink(self, *, missing_ok: bool) -> None:
+            assert missing_ok is True
+            self.unlink_calls += 1
+            if self.unlink_calls == 2:
+                raise OSError("raw filesystem failure")
+
+        def open(self, mode: str) -> io.BytesIO:
+            assert mode == "rb"
+            return io.BytesIO(b'{"schema_version":1}')
+
+    path = FailingCleanupPath()
+    request = worker.WorkerResultHandoffRequest(
+        path=path,  # type: ignore[arg-type]
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    invocation = AgentInvoker(
+        lambda *_args, **_kwargs: CommandResult(0, "untrusted prose", ""),
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+        },
+    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff_capture.status == "post_read_cleanup_failed"
+    assert invocation.handoff is None
 
 
 def test_serial_prefers_valid_handoff_over_duplicate_or_malformed_stdout(
@@ -5937,31 +6105,116 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
 
 
 @pytest.mark.parametrize(
-    ("case", "updates", "envelope_updates", "malformed", "missing"),
+    (
+        "case",
+        "updates",
+        "envelope_updates",
+        "malformed",
+        "missing",
+        "expected_diagnostic",
+    ),
     [
-        ("missing", {}, {}, None, True),
-        ("malformed", {}, {}, b"{", False),
-        ("nonce", {"nonce": "f" * 32}, {}, None, False),
-        ("project", {"project_id": 999}, {}, None, False),
-        ("issue", {"issue_iid": 999}, {}, None, False),
-        ("revision", {"ledger_revision": 999}, {}, None, False),
-        ("branch", {"source_branch": "agent/other"}, {}, None, False),
-        ("source-sha", {"source_sha": "b" * 40}, {}, None, False),
-        ("paths", {"changed_paths": ["src/not-observed.py"]}, {}, None, False),
-        ("envelope-project", {}, {"project_id": 999}, None, False),
-        ("envelope-issue", {}, {"issue_iid": 999}, None, False),
-        ("envelope-revision", {}, {"ledger_revision": 999}, None, False),
+        (
+            "missing",
+            {},
+            {},
+            None,
+            True,
+            "worker_result_handoff: not written/missing after successful invocation",
+        ),
+        ("malformed", {}, {}, b"{", False, "worker_result_handoff: malformed artifact"),
+        (
+            "nonce",
+            {"nonce": "f" * 32},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "project",
+            {"project_id": 999},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "issue",
+            {"issue_iid": 999},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "revision",
+            {"ledger_revision": 999},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "branch",
+            {"source_branch": "agent/other"},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "source-sha",
+            {"source_sha": "b" * 40},
+            {},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "paths",
+            {"changed_paths": ["src/not-observed.py"]},
+            {},
+            None,
+            False,
+            "worker_result_handoff: changed-path mismatch",
+        ),
+        (
+            "envelope-project",
+            {},
+            {"project_id": 999},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "envelope-issue",
+            {},
+            {"issue_iid": 999},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
+        (
+            "envelope-revision",
+            {},
+            {"ledger_revision": 999},
+            None,
+            False,
+            "worker_result_handoff: identity mismatch",
+        ),
     ],
 )
-def test_serial_rejects_every_missing_malformed_or_stale_handoff_with_one_diagnostic(
+def test_serial_rejects_invalid_handoffs_with_specific_safe_diagnostics(
     tmp_path: Path,
     case: str,
     updates: dict[str, object],
     envelope_updates: dict[str, object],
     malformed: bytes | None,
     missing: bool,
+    expected_diagnostic: str,
 ) -> None:
-    """Every untrusted handoff defect collapses to one safe retry condition."""
+    """Each rejected handoff has one bounded controller-owned diagnostic."""
     del case
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -5985,15 +6238,13 @@ def test_serial_rejects_every_missing_malformed_or_stale_handoff_with_one_diagno
 
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert outcome.condition_history[-1].detail == (
-        "worker_result_handoff: missing, malformed, or stale"
-    )
+    assert outcome.condition_history[-1].detail == expected_diagnostic
 
 
-def test_distinct_handoff_defects_share_stable_repeat_retry_classification(
+def test_identity_handoff_defects_share_stable_repeat_retry_classification(
     tmp_path: Path,
 ) -> None:
-    """Changing malformed worker data cannot evade unchanged-condition blocking."""
+    """Different identity fields retain one controller-owned retry condition."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
@@ -6014,7 +6265,7 @@ def test_distinct_handoff_defects_share_stable_repeat_retry_classification(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
-        invoke=HandoffInvoker(missing=True),  # type: ignore[arg-type]
+        invoke=HandoffInvoker(artifact_updates={"project_id": 999}),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6023,7 +6274,7 @@ def test_distinct_handoff_defects_share_stable_repeat_retry_classification(
     assert second is not None and second.state is RunnerState.BLOCKED
     assert second.retry_count == first.retry_count == 1
     assert second.condition_history[-1].detail == (
-        "worker_result_handoff: missing, malformed, or stale"
+        "worker_result_handoff: identity mismatch"
     )
 
 
