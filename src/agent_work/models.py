@@ -475,13 +475,19 @@ class AuditCapacity(BoundaryModel):
     """Bounded, coherent live-session capacity decision."""
 
     required: int = Field(ge=1)
-    available: int = Field(ge=0)
-    shortfall: int = Field(ge=0)
+    available: int | None = Field(default=None, ge=0)
+    shortfall: int | None = Field(default=None, ge=0)
     decision: Literal["run"]
 
     @model_validator(mode="after")
     def validate_capacity(self) -> AuditCapacity:
         """Require arithmetic and decision to agree with the evidence."""
+        if self.available is None or self.shortfall is None:
+            if self.available is not None or self.shortfall is not None:
+                raise ValueError(
+                    "capacity available and shortfall must both be reported or unreported"
+                )
+            return self
         if self.shortfall != max(0, self.required - self.available):
             raise ValueError("capacity shortfall must match required and available")
         if self.available < self.required:

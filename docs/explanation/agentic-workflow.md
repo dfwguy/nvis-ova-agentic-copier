@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -51,12 +51,10 @@ from the active frontend or runtime. If it reports at least the lane limit, admi
 the lane. If it reports less, stop. Continue when global capacity is not
 reported. Missing capacity facts do not prove a shortage.
 
-For this check, do not make another limit from route shape or retained-agent
-counts.
-Do not use current use, fresh handles, or parent and child space. A serial loop
-may report these facts for diagnosis. They do not control interactive Architect
-admission. A real delegation or tool refusal still stops work when no safe fix
-exists.
+For this check, do not make another limit from route shape, topology, or
+retained-agent counts. Do not use current use, fresh handles, or parent and
+child space. These facts do not control admission or create a second capacity
+gate. A real delegation or tool refusal still stops work when no safe fix exists.
 
 Routing and capacity are separate. Main owns Architect. Architect owns
 the preparation writers, Green, and Finalizer. Green owns Judge and applicable
@@ -68,15 +66,16 @@ that plan, Architect and Green start fresh for each issue.
 
 A retained worktree or ledger preserves work, not a prior capacity report. For
 interactive Architect admission, a current reported shortage causes a
-`needs_human` handoff. It names the lane, fixed limit, free total, shortfall,
+`needs_human` handoff. It names the lane, fixed limit, reported total, shortfall,
 and remedy. An absent global report is not a shortage at this boundary.
 
-The serial wrapper has a stricter preflight before it starts Architect. This
-applies when a person invokes it, during normal serial work, on a retained-tree
-retry, and under systemd. The wrapper checks live slots and route shape. It also
-checks retained agents and owner space. Missing, stale, conflicting, or low
-evidence returns `needs_human` before Architect starts. Repo files, task or
-issue text, settings, and saved records cannot prove capacity.
+The serial wrapper applies the same fixed global requirement before it starts
+Architect. This applies when a person invokes it, during normal serial work, on
+a retained-tree retry, and under systemd. A current trusted report below the
+lane requirement returns `needs_human`. The wrapper continues when global
+capacity is unreported; it does not request or infer topology, retained-object,
+or owner-headroom counts. Repo files, task or issue text, settings, and saved
+records cannot prove capacity.
 See [Configure agent capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` sets authority and safety. It sets classification and conditional

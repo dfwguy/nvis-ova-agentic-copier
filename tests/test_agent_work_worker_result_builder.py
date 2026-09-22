@@ -37,6 +37,7 @@ from agent_work.models import (
     MergeRequestDraft,
     MergeRequestFeedbackCursor,
     PendingMergeRequestFeedback,
+    WorkerResultEnvelope,
 )
 from agent_work.repository import CommandResult
 from agent_work.runtime import build_worker_result_dependencies
@@ -53,6 +54,7 @@ from agent_work.worker import (
     build_worker_prompt,
     build_worker_result,
     format_worker_result_diagnostic,
+    is_safe_worker_result_diagnostic,
     parse_worker_result_build_input,
     validate_worker_result,
 )
@@ -255,10 +257,10 @@ def _topology_audit() -> dict[str, Any]:
     }
 
 
-def test_builder_requires_complete_current_topology_and_retained_object_evidence(
+def test_builder_preserves_legacy_topology_and_retained_object_evidence(
     tmp_path: Path,
 ) -> None:
-    """A new successful workflow records validated topology, not scalar capacity."""
+    """A successful workflow may retain coherent legacy admission details."""
     payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
     audit = payload["audit_summary"]
     assert isinstance(audit, dict)
@@ -278,10 +280,10 @@ def test_builder_requires_complete_current_topology_and_retained_object_evidence
     assert summary["retained_objects"] == _topology_audit()["retained_objects"]
 
 
-def test_builder_rejects_new_success_with_legacy_scalar_only_capacity_audit(
+def test_builder_accepts_new_success_with_fixed_scalar_capacity_audit(
     tmp_path: Path,
 ) -> None:
-    """Recovery-compatible scalar history cannot authorize a fresh workflow result."""
+    """The fixed lane requirement is sufficient without legacy topology details."""
     completed = _completed_coding_input_with_policy_writer()
     assert completed.audit_summary is not None
     legacy = completed.model_copy(
@@ -291,13 +293,148 @@ def test_builder_rejects_new_success_with_legacy_scalar_only_capacity_audit(
             )
         }
     )
-    with pytest.raises(WorkerProtocolError, match=r"topology|retained"):
+    result = build_worker_result(
+        _record(tmp_path),
+        legacy,
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
+
+    assert result.audit_summary is not None
+    assert result.audit_summary.capacity.required == 12
+    assert result.audit_summary.topology is None
+    assert result.audit_summary.retained_objects is None
+
+
+@pytest.mark.parametrize("missing_field", ("topology", "retained_objects"))
+def test_builder_rejects_one_sided_legacy_capacity_evidence(
+    tmp_path: Path, missing_field: str
+) -> None:
+    """Legacy topology and retained-object evidence remains an exact pair."""
+    completed = _completed_coding_input_with_policy_writer()
+    assert completed.audit_summary is not None
+    one_sided = completed.model_copy(
+        update={
+            "audit_summary": completed.audit_summary.model_copy(
+                update={missing_field: None}
+            )
+        }
+    )
+
+    with pytest.raises(
+        WorkerProtocolError,
+        match="legacy topology and retained_objects must be supplied together",
+    ):
         build_worker_result(
             _record(tmp_path),
-            legacy,
-            changed_paths=(),
-            red_checkpoint=None,
+            one_sided,
+            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+            red_checkpoint=_red_checkpoint_evidence(),
         )
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "controller_invariant.audit_summary: capacity required must match workflow lane",
+        "controller_invariant.audit_summary: legacy topology and retained_objects must be supplied together",
+    ),
+)
+def test_current_capacity_controller_diagnostics_are_safely_recognized(
+    diagnostic: str,
+) -> None:
+    """Current bounded capacity diagnostics are safe without allowing suffixes."""
+    assert is_safe_worker_result_diagnostic(diagnostic)
+    assert not is_safe_worker_result_diagnostic(f"{diagnostic} unsafe detail")
+
+
+@pytest.mark.parametrize(
+    ("lane", "required"),
+    ((WorkflowLane.CODING, 12), (WorkflowLane.CONTENT, 3)),
+)
+def test_builder_accepts_fixed_lane_capacity_when_global_availability_is_unreported(
+    tmp_path: Path, lane: WorkflowLane, required: int
+) -> None:
+    """A new successful worker needs its fixed lane requirement, not invented counts."""
+    receipts = tuple(
+        f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
+        for skill in WORKFLOW_RECEIPTS[lane]
+    )
+    build_input = WorkerResultBuildInput.model_validate(
+        {
+            "workflow_lane": lane.value,
+            "result_kind": "ready_to_publish",
+            "receipts": receipts,
+            "change_summary": "Completed the bounded workflow.",
+            "next_action": "Publish the reviewed change.",
+            "merge_request_draft": {
+                "title": "Complete the bounded workflow",
+                "description": "Evidence for human review.",
+            },
+            "audit_summary": {
+                "capacity": {
+                    "required": required,
+                    "available": None,
+                    "shortfall": None,
+                    "decision": "run",
+                },
+                "tests": [
+                    "uv run pytest tests/test_agent_work_worker_result_builder.py"
+                ],
+                "findings": [],
+                "corrections": [],
+            },
+        }
+    )
+    record = _record(tmp_path).model_copy(update={"workflow_lane": lane})
+
+    result = build_worker_result(
+        record,
+        build_input,
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence()
+        if lane is WorkflowLane.CODING
+        else None,
+    )
+
+    assert result.audit_summary is not None
+    assert result.audit_summary.capacity.required == required
+    assert result.audit_summary.capacity.available is None
+    assert result.audit_summary.capacity.shortfall is None
+    assert result.audit_summary.topology is None
+    assert result.audit_summary.retained_objects is None
+    transitioned = apply_worker_result(
+        record, result, now=datetime(2026, 9, 22, tzinfo=UTC)
+    ).record
+    assert transitioned.state is RunnerState.PUBLISHING
+
+
+def test_controller_reads_a_legacy_scalar_success_envelope_without_topology(
+    tmp_path: Path,
+) -> None:
+    """Older durable scalar envelopes remain readable after admission simplification."""
+    result = build_worker_result(
+        _record(tmp_path),
+        _completed_input(),
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
+    assert result.audit_summary is not None
+    legacy = result.model_copy(
+        update={
+            "audit_summary": result.audit_summary.model_copy(
+                update={"topology": None, "retained_objects": None}
+            )
+        }
+    )
+    restored = WorkerResultEnvelope.model_validate_json(legacy.model_dump_json())
+
+    validate_worker_result(
+        _record(tmp_path),
+        restored,
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -969,13 +1106,12 @@ def test_controller_rejects_current_capacity_that_disagrees_with_lane(
         )
 
     assert format_worker_result_diagnostic(captured.value) == (
-        "controller_invariant.audit_summary: "
-        "scalar capacity must match topology live-slot evidence"
+        "controller_invariant.audit_summary: capacity required must match workflow lane"
     )
 
 
-def test_controller_rejects_scalar_only_direct_workflow_result(tmp_path: Path) -> None:
-    """A direct envelope cannot use recovery-compatible scalar evidence to publish."""
+def test_controller_accepts_scalar_only_direct_workflow_result(tmp_path: Path) -> None:
+    """A direct envelope may publish with the fixed scalar lane requirement."""
     record = _record(tmp_path)
     result = build_worker_result(
         record,
@@ -992,13 +1128,12 @@ def test_controller_rejects_scalar_only_direct_workflow_result(tmp_path: Path) -
         }
     )
 
-    with pytest.raises(WorkerProtocolError, match="topology"):
-        validate_worker_result(
-            record,
-            scalar_only,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
+    validate_worker_result(
+        record,
+        scalar_only,
+        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
+        red_checkpoint=_red_checkpoint_evidence(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1159,6 +1294,22 @@ def test_worker_prompt_requires_the_builder_and_v2_contract(tmp_path: Path) -> N
     assert "agent-work worker-result build" in prompt
     assert "protocol_version=2" in prompt
     assert "WORKFLOW_RECEIPTS" in prompt
+
+
+def test_worker_prompt_forbids_handcrafted_identity_or_ledger_fields(
+    tmp_path: Path,
+) -> None:
+    """Workers return the builder's unchanged output instead of protocol fields."""
+    prompt = build_worker_prompt(
+        _record(tmp_path).model_dump(mode="json"),
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+    )
+
+    assert "Do not handcraft identity, ledger, state, phase" in prompt
+    assert "Return the builder output unchanged" in prompt
+    assert "topology-aware evidence" not in prompt
 
 
 def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(

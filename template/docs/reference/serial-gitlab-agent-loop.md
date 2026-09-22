@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -844,70 +844,31 @@ expected ledger change.
 
 ### Live-agent capacity launch contract
 
-This section describes the serial worker's existing protocol and diagnostic
-fields. Its topology, retained-object, owner-headroom, and current-capacity
-values remain part of that runtime contract. Every serial wrapper invocation
-uses this strict preflight. This includes a terminal invocation, normal serial
-work, a retained-worktree retry, and the systemd controller. Missing, stale,
-conflicting, or low evidence returns `needs_human` before Architect starts.
+Every Architect launch has one fixed global requirement: `12` live slots for
+coding and `3` for content. This includes terminal, normal serial,
+retained-worktree retry, and systemd launches. Check before delegation, fanout,
+or a worktree change.
 
-These fields do not define the admission check run by an Architect that has
-already been delegated. That check uses the fixed global requirement for its
-lane and only a trusted report's available-capacity fact. This remains true
-after the wrapper passes preflight. Architect does not derive another gate from
-the serial diagnostic fields.
+Use a current trusted global report from the active frontend or runtime when it
+is available. Admit the lane when the report meets its fixed requirement. Stop
+with `needs_human` only when a current report shows fewer slots. Continue when
+global capacity is unreported.
 
-Check capacity at the start of each new workflow-owning worker. Check it before
-nested delegation or retained-worktree changes. Use live data from this run.
-Do not use stored data. Admit the run only when the data is sound and the
-planned roles fit. Otherwise, return `needs_human` and retain the worktree for
-human review.
-
-Start with the active session. Map each live role before it starts. Count the
-slots, objects, and owner space. Compare that count with the plan. Stop for
-human help when the plan will not fit. Save the proof with the result.
-
-| Capacity evidence | Contract |
+| Capacity evidence or action | Contract |
 | --- | --- |
-| Valid source | Trusted frontend or runtime session metadata for that launch. |
-| Invalid source | Repository data, issue and task text, user or provider setup, service environment values, and retained ledger or audit values are not capacity evidence. |
-| Admission record | Record the exact applicable manifest topology and its widest concurrent row. |
-| Coding topology | Main owns Architect. Architect owns the preparation writers, Green, and Finalizer. Green owns Judge and each applicable specialist reviewer. Judge owns Non-functional Reviewer. |
-| Conditional role | Reduce the topology only when its condition is demonstrably false. |
+| Valid source | A current global report from the active frontend or runtime. |
+| Invalid source | Repository data, issue and task text, user or provider setup, service environment values, and retained ledger or audit values do not prove live capacity. |
+| Requirement | `12` total live slots for coding; `3` for content. The selected lane sets the requirement. |
+| Missing report | Continue. Missing global capacity is not a shortage. |
+| Reported shortage | Return `needs_human` before delegation, fanout, or a worktree change. State the lane, fixed requirement, reported total, shortfall, and an actionable frontend remedy. |
+| Prohibited inference | Do not request or calculate topology, widest-row, retained-object, current-use, fresh-handle, per-owner, direct-child, descendant, or owner-headroom counts. None creates another capacity gate. |
+| New launch | A prior report does not authorize a new launch. Use a newer current report when one is available. |
 
-The check reports one coherent set of values:
-
-| Value | Contract |
-| --- | --- |
-| Lane | `coding` or `content`, according to the whole proposed change |
-| Topology and widest row | The applicable ownership tree and the exact row that sets the requirement |
-| Required total | `12` for fully applicable coding; `3` for content |
-| Available total | Current total live slots from trusted launch metadata, or `unknown` |
-| Shortfall | `max(required - available, 0)`, or `unknown` when availability is not trustworthy |
-| Retained-object admission | Global object ceiling, current use, and fresh-object headroom for the planned topology |
-| Owner admission | Direct-child and descendant headroom for every planned owner |
-| Handle plan | A fresh handle for each role, or a verified same-owner, same-tier, non-overlapping reuse plan that preserves skill, parentage, concurrency, and receipt |
-| Decision | Run only when current evidence is internally consistent and available is at least needed |
-
-| Capacity and admission | Contract |
-| --- | --- |
-| Preparation row | With the conditional Agent-policy Writer, the widest preparation row has five live slots: Main, Architect, Red, Diátaxis Writer, and Agent-policy Writer. |
-| Required coding total | The nine-reviewer specialist-review row is wider. Fully applicable coding still needs 12. |
-| Fresh handles | Architect and Green are fresh for each issue unless the verified handle plan shows safe reuse. |
-| Fresh evidence | Evidence must describe the active worker session. Earlier-call evidence is stale, even for the same issue, retained worktree, controller process, service, or frontend setup. |
-| Conflicting evidence | Conflicting current observations are inconsistent. Available total and shortfall become `unknown`. |
-| Replacement evidence | A changed, consistent observation for the active launch replaces the earlier one. Never average values or recover them from durable state. |
-| Failed admission | Missing, stale, inconsistent, or insufficient live-slot, object, or owner evidence returns `needs_human` before nested delegation, fanout, or worker mutation. |
-| Handoff | Name the lane, topology and widest row, needed total, available total or `unknown`, shortfall or `unknown`, and an actionable remedy for the active frontend. |
-| Runner response | Keep the retained worktree and recovery evidence. Do not serialize a parallel phase, weaken a gate, change a model tier, or infer authority from the capacity failure. |
-
-Interactive launches, retained-worktree retries, and systemd-started workers
-use the same contract. Each new session checks runtime metadata again. A past
-successful audit cannot authorize it.
-
-| Successful capacity audit | Retained evidence |
-| --- | --- |
-| Worker result | Keep the checked lane, topology, widest row, live-slot and object evidence, owner headroom, any reuse plan, and run decision as one coherent capacity audit. |
+The worker-result builder preserves its trust boundary. It derives identity,
+ledger revision, state, phase, and duplicated audit fields from the controller. Worker
+input supplies only nonduplicated intent and evidence; it must not supply those
+controller-derived fields. Legacy ledger records remain readable through their
+recorded route.
 See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
 
