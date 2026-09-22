@@ -85,6 +85,7 @@ from agent_work.red_checkpoint import (
 )
 from agent_work.repository import (
     CommandResult,
+    LegacyPublicationCandidate,
     PublicationError,
     RepositoryError,
     RepositoryTransientError,
@@ -731,6 +732,13 @@ class FakeRepository:
         self.retained_refreshes: list[tuple[str, str]] = []
         self.retained_refresh_result = "b" * 40
         self.retained_refresh_error: RepositoryError | None = None
+        self.legacy_index_fingerprint = "d" * 64
+        self.legacy_staged_paths: tuple[str, ...] = ("src/example.py",)
+        self.legacy_unstaged_paths: tuple[str, ...] = ("src/example.py",)
+        self.legacy_merge_head: str | None = None
+        self.legacy_has_untracked = False
+        self.legacy_has_unmerged = False
+        self.legacy_has_renames = False
 
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
@@ -778,6 +786,22 @@ class FakeRepository:
         if self.changed_paths_error is not None:
             raise self.changed_paths_error
         return self.paths
+
+    def observe_legacy_publication_candidate(
+        self, worktree: Path
+    ) -> LegacyPublicationCandidate:
+        del worktree
+        return LegacyPublicationCandidate(
+            branch="agent/issue-12",
+            head=self.current_head,
+            merge_head=self.legacy_merge_head,
+            index_fingerprint=self.legacy_index_fingerprint,
+            staged_paths=self.legacy_staged_paths,
+            unstaged_paths=self.legacy_unstaged_paths,
+            has_untracked=self.legacy_has_untracked,
+            has_unmerged=self.legacy_has_unmerged,
+            has_renames=self.legacy_has_renames,
+        )
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str
@@ -1425,6 +1449,71 @@ def _completed_coding_audit() -> AuditReceiptSummary:
         reviewers=("$tdd-judge: approved",),
         findings=(),
         corrections=(),
+    )
+
+
+def _legacy_dirty_hook_publication_record(
+    tmp_path: Path, *, lane: WorkflowLane = WorkflowLane.CODING
+) -> LedgerRecord:
+    """Build the exact retained dirty publication evidence from the old hook path."""
+    base = _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.READY_TO_PUBLISH
+    )
+    assert base.source_sha is not None
+    test_path = "tests/test_agent_work_serial_runtime.py"
+    checkpoint = (
+        RedCheckpointEvidence(
+            project_id=base.project_id,
+            issue_iid=base.issue_iid,
+            source_branch=base.source_branch,
+            base_sha=base.source_sha,
+            tree_oid="b" * 40,
+            ref=f"refs/agent-work/red-checkpoints/{base.issue_iid}/{base.source_sha}",
+            test_paths=(test_path,),
+            argv=("uv", "run", "pytest", f"{test_path}::test_red"),
+            exit_code=1,
+            expected_failure="assert expected failure",
+            output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+        )
+        if lane is WorkflowLane.CODING
+        else None
+    )
+    audit = AuditReceiptSummary(
+        lane="coding" if lane is WorkflowLane.CODING else "content",
+        capacity=AuditCapacity(
+            required=12 if lane is WorkflowLane.CODING else 3,
+            available=16,
+            shortfall=0,
+            decision="run",
+        ),
+        role_receipts=tuple(
+            f"{skill}: approved" for skill in state_machine.WORKFLOW_RECEIPTS[lane]
+        ),
+        changed_paths=("src/example.py",),
+        tests=("uv run pytest tests/test_example.py",) if checkpoint else (),
+        reviewers=("$tdd-judge: approved",) if checkpoint else (),
+        findings=(),
+        corrections=(),
+        red_checkpoint=checkpoint,
+    )
+    return base.model_copy(
+        update={
+            "main_sha": "b" * 40,
+            "workflow_lane": lane,
+            "error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+            "merge_request_draft": MergeRequestDraft(
+                title="Complete issue 12", description="Validated details"
+            ),
+            "intent": TransitionIntentRecord(
+                operation_id="publish:12",
+                kind="publish_merge_request",
+                expected_evidence={
+                    "branch": base.source_branch,
+                    "baseline_sha": base.source_sha,
+                },
+            ),
+            "audit_evidence": audit,
+        }
     )
 
 
@@ -3086,6 +3175,296 @@ def test_recovery_retry_preserves_a_retained_publication_intent(
     assert resumed.intent.kind == "publish_merge_request"
     assert resumed.intent.expected_evidence["publication_sha"] == repository.bound_sha
     assert gitlab.labels == ["agent::running"] and record.publication_sha is None
+
+
+def test_recovery_retry_preview_binds_exact_legacy_dirty_hook_evidence(
+    tmp_path: Path,
+) -> None:
+    """A reviewed retry exposes every immutable dirty-hook identity before apply."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    preview = dispatch(
+        CommandRequest(
+            command="recovery.resolve",
+            issue_iid=record.issue_iid,
+            choice="retry",
+            reason="The retained hook correction was reviewed.",
+        ),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert preview.operational_plan is not None
+    evidence = preview.operational_plan.evidence
+    assert evidence["legacy_index_fingerprint"]
+    assert evidence["legacy_staged_paths"] == "src/example.py"
+    assert evidence["legacy_unstaged_paths"] == "src/example.py"
+    assert isinstance(record.audit_evidence, AuditReceiptSummary)
+    assert record.audit_evidence.red_checkpoint is not None
+    assert (
+        evidence["legacy_red_checkpoint"]
+        == record.audit_evidence.red_checkpoint.model_dump_json()
+    )
+
+
+def test_recovery_retry_apply_routes_exact_legacy_dirty_hook_to_correction(
+    tmp_path: Path,
+) -> None:
+    """The exact old dirty hook record resumes correction without a commit or push."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The retained hook correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "legacy-dirty-hook-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert report.applied and resumed is not None
+    assert resumed.state is RunnerState.EXECUTING
+    assert resumed.phase is WorkflowPhase.WORKFLOW
+    assert resumed.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    assert resumed.intent is None and resumed.publication_sha is None
+    assert resumed.merge_request_draft is None and resumed.audit_evidence is None
+    assert resumed.receipts == () and resumed.worker_exit is None
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == ["agent::running"]
+
+
+def test_recovery_retry_apply_routes_exact_legacy_content_hook_to_correction(
+    tmp_path: Path,
+) -> None:
+    """Content recovery accepts exact dirty evidence without loading a Red checkpoint."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _legacy_dirty_hook_publication_record(tmp_path, lane=WorkflowLane.CONTENT)
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    dependencies = replace(
+        dependencies,
+        load_red_checkpoint=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("content recovery must not load a Red checkpoint")
+        ),
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The retained hook correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "legacy-dirty-content-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert resumed is not None
+    assert resumed.state is RunnerState.EXECUTING
+    assert resumed.phase is WorkflowPhase.WORKFLOW
+    assert resumed.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    assert repository.binds == repository.prepares == repository.pushes == 0
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "wrong_state",
+        "wrong_error",
+        "missing_audit",
+        "missing_draft",
+        "no_unstaged",
+        "staged_outside_audit",
+        "unstaged_outside_audit",
+        "untracked",
+        "unmerged",
+        "merge_head",
+        "rename",
+        "unknown_lane",
+        "missing_checkpoint",
+        "mismatched_checkpoint",
+    ),
+)
+def test_recovery_retry_preview_rejects_ineligible_legacy_dirty_hook_evidence(
+    tmp_path: Path, defect: str
+) -> None:
+    """Only the exact legacy dirty hook record is eligible for correction recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = _legacy_dirty_hook_publication_record(tmp_path)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    if defect == "wrong_state":
+        record = record.model_copy(update={"state": RunnerState.EXECUTING})
+    elif defect == "wrong_error":
+        record = record.model_copy(update={"error_code": ErrorCode.GIT_POLICY})
+    elif defect == "missing_audit":
+        record = record.model_copy(update={"audit_evidence": None})
+    elif defect == "missing_draft":
+        record = record.model_copy(update={"merge_request_draft": None})
+    elif defect == "no_unstaged":
+        repository.legacy_unstaged_paths = ()
+    elif defect == "staged_outside_audit":
+        repository.legacy_staged_paths = ("src/outside.py",)
+    elif defect == "unstaged_outside_audit":
+        repository.legacy_unstaged_paths = ("src/outside.py",)
+    elif defect == "untracked":
+        repository.legacy_has_untracked = True
+    elif defect == "unmerged":
+        repository.legacy_has_unmerged = True
+    elif defect == "merge_head":
+        repository.legacy_merge_head = "c" * 40
+    elif defect == "rename":
+        repository.legacy_has_renames = True
+    elif defect == "unknown_lane":
+        record = record.model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    elif defect == "missing_checkpoint":
+        assert isinstance(record.audit_evidence, AuditReceiptSummary)
+        record = record.model_copy(
+            update={
+                "audit_evidence": record.audit_evidence.model_copy(
+                    update={"red_checkpoint": None}
+                )
+            }
+        )
+    else:
+        assert isinstance(record.audit_evidence, AuditReceiptSummary)
+        assert record.audit_evidence.red_checkpoint is not None
+        record = record.model_copy(
+            update={
+                "audit_evidence": record.audit_evidence.model_copy(
+                    update={
+                        "red_checkpoint": record.audit_evidence.red_checkpoint.model_copy(
+                            update={"tree_oid": "c" * 40}
+                        )
+                    }
+                )
+            }
+        )
+    retained = ledger.persist(record)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    with pytest.raises(RuntimeError, match="legacy|recovery|retry"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="The retained hook correction was reviewed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert ledger.load(record.issue_iid) == retained
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("head", "paths", "checkpoint", "intent", "unknown_lane"),
+)
+def test_recovery_retry_apply_rejects_legacy_dirty_hook_evidence_drift_before_effects(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Any legacy dirty evidence drift invalidates its preview before mutation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The retained hook correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "legacy-dirty-hook-drift-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    if mutation == "head":
+        repository.current_head = "c" * 40
+    elif mutation == "paths":
+        repository.paths = ("src/other.py",)
+    elif mutation == "checkpoint":
+        assert isinstance(record.audit_evidence, AuditReceiptSummary)
+        assert record.audit_evidence.red_checkpoint is not None
+        ledger.persist(
+            record.model_copy(
+                update={
+                    "audit_evidence": record.audit_evidence.model_copy(
+                        update={
+                            "red_checkpoint": record.audit_evidence.red_checkpoint.model_copy(
+                                update={"tree_oid": "c" * 40}
+                            )
+                        }
+                    )
+                }
+            )
+        )
+    elif mutation == "intent":
+        assert record.intent is not None
+        ledger.persist(
+            record.model_copy(
+                update={
+                    "intent": record.intent.model_copy(
+                        update={
+                            "expected_evidence": {
+                                "branch": record.source_branch,
+                                "baseline_sha": "c" * 40,
+                            }
+                        }
+                    )
+                }
+            )
+        )
+    else:
+        ledger.persist(
+            record.model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+        )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(record.issue_iid) == retained
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
 
 
 @pytest.mark.parametrize("username", [None, "unexpected-bot"])
