@@ -33,6 +33,7 @@ from .domain import (
     PrerequisiteLabelProjection,
     RepairAttemptEvidence,
     RunnerState,
+    WorkflowLane,
     WorkflowPhase,
     WorkKind,
     label_for_state,
@@ -65,6 +66,7 @@ from .ledger import (
 from .migration import build_migration_plan
 from .models import (
     AgentWorkConfig,
+    AuditReceiptSummary,
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
@@ -102,6 +104,7 @@ from .red_checkpoint import (
 )
 from .repository import (
     GitRepository,
+    LegacyPublicationCandidate,
     RepositoryError,
     RepositoryTransientError,
     discover_config,
@@ -117,7 +120,11 @@ from .serial import (
     resume_candidates,
     run_segment,
 )
-from .state_machine import retained_ordinary_is_untouched, transition_record
+from .state_machine import (
+    has_complete_workflow_receipt,
+    retained_ordinary_is_untouched,
+    transition_record,
+)
 from .status import project_status
 from .timing import is_bounded_timing_append
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
@@ -616,9 +623,14 @@ def _recovery_plan(
     owner_status: str = "unknown",
     issue: GitLabIssue | None = None,
     merge_requests: tuple[MergeRequestEvidence, ...] | None = None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> tuple[OperationalPlan, RecoveryObservation]:
     if request.issue_iid is None or request.choice is None or request.reason is None:
         raise RuntimeError("recovery resolution request is incomplete")
+    legacy = _legacy_dirty_publication_evidence(
+        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    )
     try:
         choice = ResolutionChoice(request.choice)
         observation = _recovery_observation(
@@ -665,6 +677,8 @@ def _recovery_plan(
             "resolution_digest": resolution.digest,
         }
     )
+    if legacy is not None:
+        evidence.update(legacy)
     return OperationalPlan(
         command=request.command,
         action=choice.value,
@@ -677,6 +691,87 @@ def _recovery_plan(
         target_iid=request.issue_iid,
         evidence=evidence,
     ), observation
+
+
+def _legacy_dirty_publication_evidence(
+    record: LedgerRecord | None,
+    *,
+    repository: RepositoryPort | None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> dict[str, str] | None:
+    """Bind one historical dirty publication candidate or reject it fail-closed."""
+    if (
+        record is None
+        or record.intent is None
+        or record.intent.kind != "publish_merge_request"
+    ):
+        return None
+    if repository is None or not repository.has_changes(record.worktree):
+        return None
+    if (
+        record.error_code is not ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+        or record.state is not RunnerState.BLOCKED
+        or record.phase is not WorkflowPhase.READY_TO_PUBLISH
+    ):
+        raise RuntimeError("legacy publication recovery evidence is ineligible")
+    if record.source_sha is None or not isinstance(
+        record.audit_evidence, AuditReceiptSummary
+    ):
+        raise RuntimeError("legacy publication recovery evidence is incomplete")
+    audit = record.audit_evidence
+    candidate: LegacyPublicationCandidate = (
+        repository.observe_legacy_publication_candidate(record.worktree)
+    )
+    expected = record.intent.expected_evidence
+    eligible = (
+        record.work_kind is WorkKind.ORDINARY
+        and record.publication_sha is None
+        and record.pending_feedback is None
+        and record.merge_request_draft is not None
+        and expected.get("branch") == record.source_branch
+        and expected.get("baseline_sha") == record.source_sha
+        and candidate.branch == record.source_branch
+        and candidate.head == record.source_sha
+        and candidate.merge_head is None
+        and bool(candidate.staged_paths)
+        and bool(candidate.unstaged_paths)
+        and not candidate.has_untracked
+        and not candidate.has_unmerged
+        and not candidate.has_renames
+        and set(candidate.staged_paths) == set(audit.changed_paths)
+        and set(candidate.unstaged_paths).issubset(set(candidate.staged_paths))
+        and set(candidate.unstaged_paths).issubset(set(audit.changed_paths))
+        and audit.lane == record.workflow_lane.value
+        and has_complete_workflow_receipt(record)
+    )
+    if record.workflow_lane is WorkflowLane.CODING:
+        checkpoint = audit.red_checkpoint
+        loaded = (
+            None
+            if load_red_checkpoint is None
+            else load_red_checkpoint(
+                record.project_id, record.issue_iid, record.source_sha
+            )
+        )
+        eligible = eligible and checkpoint is not None and loaded == checkpoint
+    elif record.workflow_lane is WorkflowLane.CONTENT:
+        eligible = eligible and audit.red_checkpoint is None
+    else:
+        eligible = False
+    if not eligible:
+        raise RuntimeError("legacy publication recovery evidence is ineligible")
+    return {
+        "legacy_index_fingerprint": candidate.index_fingerprint,
+        "legacy_staged_paths": ",".join(candidate.staged_paths),
+        "legacy_unstaged_paths": ",".join(candidate.unstaged_paths),
+        "legacy_branch": candidate.branch,
+        "legacy_head": candidate.head,
+        "legacy_red_checkpoint": (
+            ""
+            if audit.red_checkpoint is None
+            else audit.red_checkpoint.model_dump_json()
+        ),
+    }
 
 
 def _normalization_is_exact(
@@ -2099,18 +2194,26 @@ def dispatch(
             )
             plan = reviewed
         else:
-            plan, observation = _recovery_plan(
-                request,
-                project=project,
-                username=username,
-                record=record,
-                gitlab=gitlab,
-                repository=repository,
-                controller_status=snapshot_controller,
-                owner_status=_issue_owner_status(wired, request.issue_iid or 0),
-                issue=snapshot_issue,
-                merge_requests=snapshot_mrs,
-            )
+            try:
+                plan, observation = _recovery_plan(
+                    request,
+                    project=project,
+                    username=username,
+                    record=record,
+                    gitlab=gitlab,
+                    repository=repository,
+                    controller_status=snapshot_controller,
+                    owner_status=_issue_owner_status(wired, request.issue_iid or 0),
+                    issue=snapshot_issue,
+                    merge_requests=snapshot_mrs,
+                    load_red_checkpoint=wired.load_red_checkpoint,
+                )
+            except RuntimeError as error:
+                if apply and reviewed is not None:
+                    raise RuntimeError(
+                        "recovery evidence changed; create a new preview"
+                    ) from error
+                raise
         if not apply:
             return _report(
                 request,
@@ -2156,18 +2259,24 @@ def dispatch(
                 )
                 current_plan = reviewed
             else:
-                current_plan, current_observation = _recovery_plan(
-                    request,
-                    project=project,
-                    username=username,
-                    record=current_record,
-                    gitlab=gitlab,
-                    repository=repository,
-                    controller_status=current_controller,
-                    owner_status=_issue_owner_status(wired, request.issue_iid or 0),
-                    issue=current_issue,
-                    merge_requests=current_mrs,
-                )
+                try:
+                    current_plan, current_observation = _recovery_plan(
+                        request,
+                        project=project,
+                        username=username,
+                        record=current_record,
+                        gitlab=gitlab,
+                        repository=repository,
+                        controller_status=current_controller,
+                        owner_status=_issue_owner_status(wired, request.issue_iid or 0),
+                        issue=current_issue,
+                        merge_requests=current_mrs,
+                        load_red_checkpoint=wired.load_red_checkpoint,
+                    )
+                except RuntimeError as error:
+                    raise RuntimeError(
+                        "recovery evidence changed; create a new preview"
+                    ) from error
             if not replaying and current_plan != reviewed:
                 raise RuntimeError("recovery evidence changed; create a new preview")
             if not replaying:
@@ -2197,7 +2306,45 @@ def dispatch(
                     current_record.intent is not None
                     and current_record.intent.kind == "publish_merge_request"
                 )
-                if retained_publication:
+                legacy_dirty_publication = (
+                    retained_publication
+                    and "legacy_index_fingerprint" in reviewed.evidence
+                )
+                if legacy_dirty_publication:
+                    preparing = ledger.persist(
+                        transition_record(
+                            current_record,
+                            RunnerState.PREPARING,
+                            phase=WorkflowPhase.WORKFLOW,
+                        )
+                    )
+                    updated = ledger.persist(
+                        transition_record(
+                            preparing,
+                            RunnerState.EXECUTING,
+                            phase=WorkflowPhase.WORKFLOW,
+                            intent=None,
+                            publication_sha=None,
+                            merge_request_draft=None,
+                            receipts=(),
+                            audit_evidence=None,
+                            worker_exit=None,
+                            retry_at=None,
+                            retry_count=0,
+                            error_code=ErrorCode.PUBLICATION_COMMIT_REJECTED,
+                            summary=(
+                                "The retained publication candidate requires "
+                                "complete correction and validation."
+                            ),
+                            next_action=(
+                                "Correct the retained change, then rerun the complete "
+                                "workflow and validation before publication."
+                            ),
+                        )
+                    )
+                    gitlab.transition_labels(current_record.issue_iid, "agent::running")
+                    continue_recovery = False
+                elif retained_publication:
                     updated = _resume_blocked_retry(
                         current_record,
                         wired=wired,

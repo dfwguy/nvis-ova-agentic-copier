@@ -30,6 +30,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
+    from .repository import LegacyPublicationCandidate
     from .worker import WorkerInvocation
 
 
@@ -203,6 +204,10 @@ class RepositoryPort(Protocol):
     def head(self, worktree: Path) -> str: ...
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]: ...
+
+    def observe_legacy_publication_candidate(
+        self, worktree: Path
+    ) -> LegacyPublicationCandidate: ...
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

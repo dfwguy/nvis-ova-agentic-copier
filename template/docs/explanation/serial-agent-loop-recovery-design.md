@@ -325,6 +325,24 @@ receipts and audit evidence. Both lanes must produce a fresh merge request
 draft. An unknown lane, or missing or mismatched coding Red evidence, blocks
 the correction. The rejection route does not push or change a merge request.
 
+Current detection needs clear failed-hook output. It does not reinterpret other
+publication failures. A reviewed retry has one narrow route for an old dirty
+candidate blocked as `publication_identity_mismatch`.
+
+Preview and apply read the same trusted record, audit, lane, intent, and
+baseline. They check the branch, `HEAD`, a read-only staged-index fingerprint, staged paths, and
+unstaged paths. Unstaged paths must be non-empty and stay within the staged,
+audited paths. Drift fails before a ledger, Git, label, or remote change.
+Unknown lanes, generic Git failures, and unclear, untracked, unmerged, or
+changed evidence stay blocked.
+
+On success, apply keeps the index, worktree, history, and retry evidence. It
+removes stale publication results and enters the correction workflow used for
+`publication_commit_rejected`. Coding loads the exact Red checkpoint. Content
+returns fresh content evidence without Red. The route does not commit, push,
+or change a merge request. Normal lifecycle projection may change blocked to
+running.
+
 This route is only for a recognizable installed pre-commit rejection. Signing,
 identity, configuration, lock, file-system, object-database, and unknown commit
 failures keep their fail-closed handling. Missing, ambiguous, or changed

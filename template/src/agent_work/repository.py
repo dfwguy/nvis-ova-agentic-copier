@@ -19,6 +19,7 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -79,6 +80,21 @@ class PublicationCommitFailure:
     """Safe evidence from one rejected local publication commit."""
 
     diagnostic: str
+
+
+@dataclass(frozen=True)
+class LegacyPublicationCandidate:
+    """Read-only Git identity retained by the legacy publication recovery."""
+
+    branch: str
+    head: str
+    merge_head: str | None
+    index_fingerprint: str
+    staged_paths: tuple[str, ...]
+    unstaged_paths: tuple[str, ...]
+    has_untracked: bool
+    has_unmerged: bool
+    has_renames: bool
 
 
 def _publication_commit_diagnostic(failures: tuple[HookFailure, ...]) -> str:
@@ -678,6 +694,39 @@ class GitRepository:
                 paths.append(entries[index])
                 index += 1
         return tuple(paths)
+
+    def observe_legacy_publication_candidate(
+        self, worktree: Path
+    ) -> LegacyPublicationCandidate:
+        """Read the complete dirty candidate identity without changing Git state."""
+        status = self._git("status", "--porcelain=v1", "-z", cwd=worktree)
+        entries = status.split("\0")
+        flags = [entry[:2] for entry in entries if entry]
+        return LegacyPublicationCandidate(
+            branch=self._git("branch", "--show-current", cwd=worktree),
+            head=self.head(worktree),
+            merge_head=self._merge_head(worktree),
+            index_fingerprint=sha256(
+                self._git("diff", "--cached", "--raw", "-z", cwd=worktree).encode()
+            ).hexdigest(),
+            staged_paths=tuple(
+                path
+                for path in self._git(
+                    "diff", "--cached", "--name-only", "-z", cwd=worktree
+                ).split("\0")
+                if path
+            ),
+            unstaged_paths=tuple(
+                path
+                for path in self._git("diff", "--name-only", "-z", cwd=worktree).split(
+                    "\0"
+                )
+                if path
+            ),
+            has_untracked=any(flag == "??" for flag in flags),
+            has_unmerged=any("U" in flag for flag in flags),
+            has_renames=any("R" in flag for flag in flags),
+        )
 
     def run_red_command(
         self, worktree: Path, argv: tuple[str, ...]

@@ -3055,6 +3055,55 @@ def test_bind_retained_commit_returns_only_the_exact_legacy_commit(
     assert not any(call[3:4] == ("push",) for call in calls)
 
 
+@pytest.mark.parametrize("merge_head", (None, "c" * 40))
+def test_observe_legacy_publication_candidate_reads_exact_dirty_identity(
+    tmp_path: Path, merge_head: str | None
+) -> None:
+    """The legacy hook inspector reads NUL-safe Git evidence without mutating Git."""
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{'a' * 40}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(0 if merge_head else 1, f"{merge_head or ''}\n", "")
+        if arguments == ("diff", "--cached", "--raw", "-z"):
+            return CommandResult(0, "raw-index-evidence\0", "")
+        if arguments == ("diff", "--cached", "--name-only", "-z"):
+            return CommandResult(0, "src/a file.py\0src/z.py\0", "")
+        if arguments == ("diff", "--name-only", "-z"):
+            return CommandResult(0, "src/a file.py\0", "")
+        if arguments == ("status", "--porcelain=v1", "-z"):
+            return CommandResult(0, "MM src/a file.py\0", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    candidate = GitRepository(config, fake).observe_legacy_publication_candidate(
+        tmp_path / "worktree"
+    )
+
+    assert candidate.branch == "agent/issue-12"
+    assert candidate.head == "a" * 40
+    assert (
+        candidate.index_fingerprint
+        == hashlib.sha256(b"raw-index-evidence\0").hexdigest()
+    )
+    assert candidate.staged_paths == ("src/a file.py", "src/z.py")
+    assert candidate.unstaged_paths == ("src/a file.py",)
+    assert candidate.merge_head == merge_head
+    assert not candidate.has_untracked
+    assert not candidate.has_unmerged
+    assert not candidate.has_renames
+    assert not any(
+        command[3] in {"add", "commit", "merge", "push", "reset", "stash", "write-tree"}
+        for command in calls
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "branch", "parents", "count", "subject"),
     (
