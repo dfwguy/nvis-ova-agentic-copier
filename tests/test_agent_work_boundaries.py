@@ -24,6 +24,7 @@ import pytest
 from pydantic import ValidationError
 from pytest_subprocess import FakeProcess
 
+from agent_work import repository as repository_module
 from agent_work.cli import main
 from agent_work.domain import (
     DEFAULT_MAX_ACTIVATION_SECONDS,
@@ -3722,6 +3723,203 @@ def test_prepare_commit_does_not_bypass_the_installed_git_hook(tmp_path: Path) -
     commit_calls = [call[3:] for call in calls if call[3] == "commit"]
     assert commit_calls == [("commit", "-m", "Resolve issue #12")]
     assert all("--no-verify" not in call for call in commit_calls)
+
+
+@pytest.mark.parametrize("merge_head", [None, "c" * 40])
+def test_prepare_commit_classifies_an_exact_retained_hook_rejection_for_correction(
+    tmp_path: Path, merge_head: str | None
+) -> None:
+    """A rejected commit is correctable only while every local identity stays exact."""
+    candidate = "a" * 40
+    candidate_tree = "d" * 40
+    raw_diagnostic = (
+        "readability-check.................................Failed\n"
+        "- hook id: readability-check\n"
+        "- exit code: 1\n"
+        "docs/example.md: grade 10.6\n"
+        "token=super-secret\x00"
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{candidate}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(0 if merge_head else 1, f"{merge_head or ''}\n", "")
+        if arguments == ("ls-files", "--unmerged"):
+            return CommandResult(0, "", "")
+        if arguments in {
+            ("status", "--porcelain"),
+            ("status", "--porcelain=v1", "-z"),
+        }:
+            return CommandResult(0, "M  changed.py\n", "")
+        if arguments == ("write-tree",):
+            return CommandResult(0, f"{candidate_tree}\n", "")
+        if arguments[:2] == ("commit", "-m"):
+            return CommandResult(1, "", raw_diagnostic)
+        return CommandResult(0, "", "")
+
+    rejected_type = repository_module.PublicationCommitRejected
+    with pytest.raises(rejected_type) as failure:
+        GitRepository(_config(tmp_path), fake).prepare_commit(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            12,
+            expected_head=candidate,
+        )
+
+    evidence = failure.value.failure
+    assert evidence.diagnostic.startswith("Installed pre-commit rejected the commit")
+    assert "readability-check" in evidence.diagnostic
+    assert "docs/example.md: grade 10.6" in evidence.diagnostic
+    assert "super-secret" not in evidence.diagnostic
+    assert "\n" not in evidence.diagnostic and "\x00" not in evidence.diagnostic
+    assert len(evidence.diagnostic.encode()) <= 2_048
+    assert [call[3:] for call in calls if call[3] == "commit"] == [
+        ("commit", "-m", "Resolve issue #12")
+    ]
+
+
+@pytest.mark.parametrize("drift", ["branch", "head", "merge", "tree"])
+def test_prepare_commit_keeps_post_rejection_identity_drift_fail_closed(
+    tmp_path: Path, drift: str
+) -> None:
+    """A failed commit with changed local evidence remains an identity mismatch."""
+    candidate = "a" * 40
+    tree = "d" * 40
+    observations = {"branch": 0, "head": 0, "merge": 0, "tree": 0}
+
+    def observed(key: str, exact: str, changed: str) -> str:
+        observations[key] += 1
+        return changed if drift == key and observations[key] > 1 else exact
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(
+                0, observed("branch", "agent/issue-12\n", "other\n"), ""
+            )
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(
+                0, observed("head", f"{candidate}\n", f"{'b' * 40}\n"), ""
+            )
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            value = observed("merge", "", f"{'c' * 40}\n")
+            return CommandResult(0 if value else 1, value, "")
+        if arguments == ("ls-files", "--unmerged"):
+            return CommandResult(0, "", "")
+        if arguments in {
+            ("status", "--porcelain"),
+            ("status", "--porcelain=v1", "-z"),
+        }:
+            return CommandResult(0, "M  changed.py\n", "")
+        if arguments == ("write-tree",):
+            return CommandResult(0, observed("tree", f"{tree}\n", f"{'e' * 40}\n"), "")
+        if arguments[:2] == ("commit", "-m"):
+            return CommandResult(
+                1,
+                "readability-check........Failed\n- hook id: readability-check\n",
+                "",
+            )
+        return CommandResult(0, "", "")
+
+    rejected_type = repository_module.PublicationCommitRejected
+    with pytest.raises(RepositoryError) as failure:
+        GitRepository(_config(tmp_path), fake).prepare_commit(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            12,
+            expected_head=candidate,
+        )
+
+    assert not isinstance(failure.value, rejected_type)
+
+
+def test_prepare_commit_allows_unstaged_hook_repairs_when_staged_tree_stays_exact(
+    tmp_path: Path,
+) -> None:
+    """A hook may repair working files without changing the staged candidate tree."""
+    candidate = "a" * 40
+    statuses = iter(("M  changed.py\n", "MM changed.py\n"))
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{candidate}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, next(statuses), "")
+        if arguments == ("write-tree",):
+            return CommandResult(0, f"{'d' * 40}\n", "")
+        if arguments[:2] == ("commit", "-m"):
+            return CommandResult(
+                1,
+                "ruff........................................Failed\n"
+                "- hook id: ruff\n"
+                "src/example.py:1:1: E501 too long\n",
+                "",
+            )
+        return CommandResult(0, "", "")
+
+    with pytest.raises(repository_module.PublicationCommitRejected):
+        GitRepository(_config(tmp_path), fake).prepare_commit(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            12,
+            expected_head=candidate,
+        )
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "error: gpg failed to sign the data",
+        "Author identity unknown",
+        "fatal: bad config line 1",
+        "fatal: Unable to create '.git/index.lock': File exists.",
+        "fatal: cannot open .git/COMMIT_EDITMSG: Permission denied",
+        "fatal: loose object is corrupt",
+        "unknown commit failure",
+    ),
+)
+def test_prepare_commit_keeps_unrecognized_commit_failures_fail_closed(
+    tmp_path: Path, diagnostic: str
+) -> None:
+    """Non-hook commit failures never enter the correction route."""
+    candidate = "a" * 40
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{candidate}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "M  changed.py\n", "")
+        if arguments == ("write-tree",):
+            return CommandResult(0, f"{'d' * 40}\n", "")
+        if arguments[:2] == ("commit", "-m"):
+            return CommandResult(1, "", diagnostic)
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError) as failure:
+        GitRepository(_config(tmp_path), fake).prepare_commit(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            12,
+            expected_head=candidate,
+        )
+
+    assert not isinstance(failure.value, repository_module.PublicationCommitRejected)
 
 
 @pytest.mark.parametrize(

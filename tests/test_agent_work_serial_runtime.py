@@ -27,7 +27,15 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agent_work import domain, runtime, serial, state_machine
+from agent_work import (
+    domain,
+    runtime,
+    serial,
+    state_machine,
+)
+from agent_work import (
+    repository as repository_module,
+)
 from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
@@ -1232,12 +1240,16 @@ class SingleSessionInvoker:
         self.needs_human = needs_human
         self.changed_paths: tuple[str, ...] = ()
         self.phases: list[str] = []
+        self.checkouts: list[Path] = []
+        self.prompts: list[str] = []
 
     def preflight(self) -> None:
         pass
 
     def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
-        del checkout, timeout
+        del timeout
+        self.checkouts.append(checkout)
+        self.prompts.append(prompt)
         raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
         record = ast.literal_eval(raw_record)
         phase = str(record["phase"])
@@ -1399,6 +1411,20 @@ def _pending_feedback_publication_record(tmp_path: Path) -> LedgerRecord:
             ),
             "audit_evidence": audit,
         }
+    )
+
+
+def _completed_coding_audit() -> AuditReceiptSummary:
+    """Build stale completed-workflow evidence for publication reroute tests."""
+    return AuditReceiptSummary(
+        lane="coding",
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
+        role_receipts=("$tdd-finalizer: approved",),
+        changed_paths=("src/example.py",),
+        tests=("uv run pytest tests/test_example.py",),
+        reviewers=("$tdd-judge: approved",),
+        findings=(),
+        corrections=(),
     )
 
 
@@ -9886,6 +9912,434 @@ def test_publication_transport_failure_schedules_a_recoverable_retry(
     assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
     assert outcome.error_code is ErrorCode.GITLAB_RETRYABLE
     assert outcome.intent is not None
+
+
+def _publication_commit_rejection() -> RepositoryError:
+    failure_type = repository_module.PublicationCommitFailure
+    rejected_type = repository_module.PublicationCommitRejected
+    return rejected_type(
+        failure_type(
+            diagnostic="Installed pre-commit rejected the commit: readability-check.",
+        )
+    )
+
+
+def test_publication_commit_rejection_returns_ordinary_work_to_fresh_correction(
+    tmp_path: Path,
+) -> None:
+    """A local validation rejection preserves work without projecting a remote block."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    draft = MergeRequestDraft(title="Change", description="Validated details")
+    receipt = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="$tdd-finalizer: approved",
+    )
+    initial = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "main_sha": "b" * 40,
+                "merge_request_draft": draft,
+                "receipts": (receipt,),
+                "audit_evidence": _completed_coding_audit(),
+                "worker_exit": WorkerExitEvidence(
+                    returncode=1, diagnostic="stale validation failure"
+                ),
+                "retry_at": NOW + timedelta(minutes=20),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.EXECUTING
+    assert outcome.phase is WorkflowPhase.WORKFLOW
+    assert outcome.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    assert outcome.summary == (
+        "Installed pre-commit rejected the commit: readability-check."
+    )
+    assert outcome.source_branch == initial.source_branch
+    assert outcome.source_sha == initial.source_sha
+    assert outcome.main_sha == initial.main_sha
+    assert outcome.worktree == initial.worktree
+    assert outcome.merge_request_draft is None
+    assert outcome.intent is None and outcome.publication_sha is None
+    assert outcome.receipts == () and outcome.audit_evidence is None
+    assert outcome.worker_exit is None and outcome.retry_at is None
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert gitlab.labels == [] and gitlab.comments == []
+    assert gitlab.outcome_comments == []
+
+
+def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow(
+    tmp_path: Path,
+) -> None:
+    """A rejected repair commit retains its exact repair and MR identities."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repair = RepairAttemptEvidence(
+        fingerprint="a" * 64,
+        snapshot={"merge_request_iid": 88, "source_sha": "a" * 40},
+        origin="automatic-exact-pipeline",
+    )
+    draft = MergeRequestDraft(title="Repair", description="Validated repair")
+    initial = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+            repair_attempt=repair,
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr().web_url,
+                "merge_request_draft": draft,
+                "audit_evidence": _completed_coding_audit(),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.REPAIR
+    assert outcome.phase is WorkflowPhase.WORKFLOW
+    assert outcome.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+    assert outcome.repair_attempt == repair
+    assert outcome.merge_request_iid == initial.merge_request_iid
+    assert outcome.merge_request_url == initial.merge_request_url
+    assert outcome.merge_request_draft is None
+    assert outcome.intent is None and outcome.publication_sha is None
+    assert outcome.receipts == () and outcome.audit_evidence is None
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert gitlab.labels == [] and gitlab.outcome_comments == []
+
+
+def test_corrected_publication_can_publish_after_local_commit_rejection(
+    tmp_path: Path,
+) -> None:
+    """Freshly corrected work can pass the same publication boundary later."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Validated details"
+                )
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    rejected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert rejected is not None and rejected.state is RunnerState.EXECUTING
+    assert rejected.merge_request_draft is None
+
+    correction = SingleSessionInvoker()
+    repository.prepare_error = None
+    checkpoint = _red_checkpoint_evidence_for_segment(rejected)
+    ready = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=correction,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
+            checkpoint
+            if (
+                project_id,
+                issue_iid,
+                base_sha,
+            )
+            == (checkpoint.project_id, checkpoint.issue_iid, checkpoint.base_sha)
+            else None
+        ),
+    )
+
+    assert ready is not None and ready.state is RunnerState.PUBLISHING
+    assert ready.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert ready.error_code is None
+    assert ready.receipts and isinstance(ready.audit_evidence, AuditReceiptSummary)
+    assert correction.checkouts == [rejected.worktree]
+    assert correction.phases == [WorkflowPhase.WORKFLOW.value]
+    assert len(correction.prompts) == 1
+    correction_prompt = correction.prompts[0]
+    assert ErrorCode.PUBLICATION_COMMIT_REJECTED.value in correction_prompt
+    assert rejected.summary in correction_prompt
+    assert rejected.next_action in correction_prompt
+    assert rejected.summary == (
+        "Installed pre-commit rejected the commit: readability-check."
+    )
+    assert 0 < len(rejected.summary.encode()) <= 2_048
+    assert 0 < len(rejected.next_action.encode()) <= 2_000
+    assert "\n" not in rejected.summary and "\x00" not in rejected.summary
+    assert ready.worktree == rejected.worktree
+    assert ready.merge_request_draft is not None
+    assert ready.merge_request_draft.title == "Complete issue 12"
+    assert isinstance(ready.audit_evidence, AuditReceiptSummary)
+    assert ready.audit_evidence.red_checkpoint == checkpoint
+    assert checkpoint.ref in correction_prompt
+    assert checkpoint.tree_oid in correction_prompt
+
+    published = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert published is not None and published.state is RunnerState.OBSERVING
+    assert repository.pushes == 1 and gitlab.created_merge_requests == 1
+
+
+@pytest.mark.parametrize("checkpoint_state", ["missing", "mismatched"])
+def test_publication_commit_correction_requires_its_exact_retained_red_checkpoint(
+    tmp_path: Path, checkpoint_state: str
+) -> None:
+    """Correction stops before worker invocation when retained Red proof is not exact."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Validated details"
+                )
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    rejected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert rejected is not None
+    retained = _red_checkpoint_evidence_for_segment(rejected)
+    loaded = (
+        None
+        if checkpoint_state == "missing"
+        else retained.model_copy(update={"base_sha": "b" * 40})
+    )
+    correction = SingleSessionInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=correction,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: loaded,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert correction.prompts == []
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert gitlab.labels == ["agent::blocked"]
+
+
+def test_content_publication_commit_rejection_runs_fresh_content_workflow(
+    tmp_path: Path,
+) -> None:
+    """Content correction needs fresh content evidence, never a Red checkpoint."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    stale_receipt = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="$documentation-finalizer: approved",
+    )
+    stale_audit = AuditReceiptSummary(
+        lane="content",
+        capacity=AuditCapacity(required=3, available=16, shortfall=0, decision="run"),
+        role_receipts=("$documentation-finalizer: approved",),
+        changed_paths=("docs/example.md",),
+        tests=(),
+        reviewers=("$diataxis-judge: approved",),
+        findings=(),
+        corrections=(),
+    )
+    initial = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": WorkflowLane.CONTENT,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Old content draft", description="Stale content evidence"
+                ),
+                "receipts": (stale_receipt,),
+                "audit_evidence": stale_audit,
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+
+    rejected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert rejected is not None and rejected.state is RunnerState.EXECUTING
+    assert rejected.phase is WorkflowPhase.WORKFLOW
+    assert rejected.workflow_lane is WorkflowLane.CONTENT
+    assert rejected.source_branch == initial.source_branch
+    assert rejected.source_sha == initial.source_sha
+    assert rejected.worktree == initial.worktree
+    assert rejected.intent is None and rejected.publication_sha is None
+    assert rejected.merge_request_draft is None
+    assert rejected.receipts == () and rejected.audit_evidence is None
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert gitlab.labels == [] and gitlab.outcome_comments == []
+
+    def fail_checkpoint_load(
+        _project_id: int, _issue_iid: int, _base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        raise AssertionError("content correction must not load a Red checkpoint")
+
+    correction = SingleSessionInvoker(lane="content")
+    repository.prepare_error = None
+    ready = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=correction,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=fail_checkpoint_load,
+    )
+
+    assert ready is not None and ready.state is RunnerState.PUBLISHING
+    assert ready.workflow_lane is WorkflowLane.CONTENT
+    assert ready.error_code is None
+    assert ready.receipts and isinstance(ready.audit_evidence, AuditReceiptSummary)
+    assert ready.audit_evidence.lane == "content"
+    assert ready.merge_request_draft is not None
+    assert ready.merge_request_draft.title == "Complete issue 12"
+    assert correction.phases == [WorkflowPhase.WORKFLOW.value]
+
+    published = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert published is not None and published.state is RunnerState.OBSERVING
+    assert repository.pushes == 1 and gitlab.created_merge_requests == 1
+
+
+def test_unknown_lane_publication_commit_correction_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """An unknown workflow lane never enters an untyped correction workflow."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": WorkflowLane.UNKNOWN,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Validated details"
+                ),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.prepare_error = _publication_commit_rejection()
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    rejected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert rejected is not None and rejected.state is RunnerState.EXECUTING
+    correction = SingleSessionInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=correction,
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert outcome.summary == "Publication correction workflow lane is unknown."
+    assert correction.prompts == []
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert gitlab.labels == ["agent::blocked"]
 
 
 @pytest.mark.parametrize(

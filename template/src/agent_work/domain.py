@@ -139,6 +139,7 @@ class ErrorCode(StrEnum):
     GIT_PUBLICATION_CONFIGURATION = "git_publication_configuration"
     GITLAB_RETRYABLE = "gitlab_retryable"
     RETRY_EXHAUSTED = "retry_exhausted"
+    PUBLICATION_COMMIT_REJECTED = "publication_commit_rejected"
     PUBLICATION_IDENTITY_MISMATCH = "publication_identity_mismatch"
     PIPELINE_PENDING = "pipeline_pending"
     PIPELINE_REJECTED = "pipeline_rejected"

@@ -429,6 +429,13 @@ def _canonical_hook_failures(
     return tuple(packed)
 
 
+def parse_installed_precommit_failures(
+    stdout: str, stderr: str
+) -> tuple[HookFailure, ...]:
+    """Return source-proven failures from standard installed pre-commit output."""
+    return _canonical_hook_failures(stdout, stderr, ())
+
+
 def _report(
     candidate_tree: str,
     *,

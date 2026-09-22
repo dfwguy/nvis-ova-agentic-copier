@@ -24,11 +24,12 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
-from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS, ErrorCode
+from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS, ErrorCode, sanitize_diagnostic
 from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
+from .validation import HookFailure, parse_installed_precommit_failures
 
 
 class RepositoryError(RuntimeError):
@@ -71,6 +72,30 @@ class PublicationError(RepositoryError):
         self.failure = failure
         self.code = failure.code
         super().__init__(failure.summary)
+
+
+@dataclass(frozen=True)
+class PublicationCommitFailure:
+    """Safe evidence from one rejected local publication commit."""
+
+    diagnostic: str
+
+
+def _publication_commit_diagnostic(failures: tuple[HookFailure, ...]) -> str:
+    """Render bounded allowlisted evidence from installed pre-commit output."""
+    details = "; ".join(
+        f"{failure.hook_id}: {', '.join(failure.diagnostic_lines)}"
+        for failure in failures
+    )
+    return sanitize_diagnostic(f"Installed pre-commit rejected the commit: {details}")
+
+
+class PublicationCommitRejected(RepositoryError):
+    """The exact retained candidate was rejected by its local commit hook."""
+
+    def __init__(self, failure: PublicationCommitFailure) -> None:
+        self.failure = failure
+        super().__init__(failure.diagnostic)
 
 
 def classify_publication_failure(stderr: str) -> PublicationFailure:
@@ -866,20 +891,61 @@ class GitRepository:
         validated_paths: tuple[str, ...] | None = None,
     ) -> str:
         """Create exactly one runner commit and return its unpushed SHA."""
-        if self._git("branch", "--show-current", cwd=worktree) != branch:
+        current_branch = self._git("branch", "--show-current", cwd=worktree)
+        if current_branch != branch:
             raise RepositoryError("publication worktree is on the wrong branch")
         current_head = self.head(worktree)
         merge_head = self._merge_head(worktree)
         resolved_merge = merge_head and not self._git(
             "ls-files", "--unmerged", cwd=worktree
         )
-        ordinary_candidate = not merge_head and self.has_changes(worktree)
-        if current_head == expected_head and (resolved_merge or ordinary_candidate):
+        if current_head == expected_head and (resolved_merge or not merge_head):
             if validated_paths is None:
                 self._git("add", "--all", cwd=worktree)
             else:
                 self._git("add", "--all", "--", *validated_paths, cwd=worktree)
-            self._git("commit", "-m", f"Resolve issue #{issue_iid}", cwd=worktree)
+            retained_changes = self._git("status", "--porcelain", cwd=worktree)
+            candidate_tree = self._git("write-tree", cwd=worktree)
+            if not resolved_merge and not retained_changes:
+                raise RepositoryError("worker made no changes to publish")
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "commit",
+                    "-m",
+                    f"Resolve issue #{issue_iid}",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                failures = parse_installed_precommit_failures(
+                    result.stdout, result.stderr
+                )
+                retained_identity = (
+                    self._git("branch", "--show-current", cwd=worktree),
+                    self.head(worktree),
+                    self._merge_head(worktree),
+                    self._git("write-tree", cwd=worktree),
+                )
+                if retained_identity != (
+                    current_branch,
+                    current_head,
+                    merge_head,
+                    candidate_tree,
+                ) or not self._git("status", "--porcelain", cwd=worktree):
+                    raise RepositoryError(
+                        "publication identity changed while the commit hook failed"
+                    )
+                if not failures:
+                    raise RepositoryError("Git operation failed")
+                raise PublicationCommitRejected(
+                    PublicationCommitFailure(
+                        diagnostic=_publication_commit_diagnostic(failures),
+                    )
+                )
         else:
             message = (
                 "worker-created commits cannot be published"

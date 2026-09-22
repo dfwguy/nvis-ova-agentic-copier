@@ -65,7 +65,12 @@ from .red_checkpoint import (
     RedCheckpointEvidence,
     RedCheckpointRequest,
 )
-from .repository import PublicationError, RepositoryError, RepositoryTransientError
+from .repository import (
+    PublicationCommitRejected,
+    PublicationError,
+    RepositoryError,
+    RepositoryTransientError,
+)
 from .state_machine import (
     apply_worker_result,
     has_complete_workflow_receipt,
@@ -2414,13 +2419,37 @@ def _execute(
             return None
         worker_timeout = max(1, math.ceil(remaining))
     try:
+        if (
+            record.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+            and record.workflow_lane is WorkflowLane.UNKNOWN
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Publication correction workflow lane is unknown.",
+            )
         retained_checkpoint = (
             load_red_checkpoint(record.project_id, record.issue_iid, record.source_sha)
             if load_red_checkpoint is not None
             and record.phase is WorkflowPhase.WORKFLOW
+            and record.workflow_lane is not WorkflowLane.CONTENT
             and record.source_sha is not None
             else None
         )
+        if (
+            record.error_code is ErrorCode.PUBLICATION_COMMIT_REJECTED
+            and record.workflow_lane is WorkflowLane.CODING
+            and (
+                retained_checkpoint is None
+                or retained_checkpoint.project_id != record.project_id
+                or retained_checkpoint.issue_iid != record.issue_iid
+                or retained_checkpoint.source_branch != record.source_branch
+                or retained_checkpoint.base_sha != record.source_sha
+                or not retained_checkpoint.test_paths
+            )
+        ):
+            return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
         prompt_record = record.model_dump(mode="json")
         if retained_checkpoint is not None:
             prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
@@ -2784,7 +2813,11 @@ def _execute(
                     retry_delay=timedelta(),
                 )
             try:
-                if load_red_checkpoint is not None and record.source_sha is not None:
+                if (
+                    load_red_checkpoint is not None
+                    and result.workflow_lane is WorkflowLane.CODING
+                    and record.source_sha is not None
+                ):
                     retained_checkpoint = load_red_checkpoint(
                         record.project_id, record.issue_iid, record.source_sha
                     )
@@ -3436,6 +3469,32 @@ def _publish(
                     )
         identity_exact = _mr_publication_identity_is_exact(
             record, mr, repository=repository, source_sha=sha
+        )
+    except PublicationCommitRejected as error:
+        correction_state = (
+            RunnerState.REPAIR
+            if record.repair_attempt is not None
+            else RunnerState.EXECUTING
+        )
+        return ledger.persist(
+            transition_record(
+                record,
+                correction_state,
+                phase=WorkflowPhase.WORKFLOW,
+                intent=None,
+                publication_sha=None,
+                merge_request_draft=None,
+                receipts=(),
+                audit_evidence=None,
+                worker_exit=None,
+                retry_at=None,
+                error_code=ErrorCode.PUBLICATION_COMMIT_REJECTED,
+                summary=error.failure.diagnostic,
+                next_action=(
+                    "Correct the retained change, then rerun the complete workflow "
+                    "and validation before publication."
+                ),
+            )
         )
     except PublicationError as error:
         blocked = ledger.persist(
