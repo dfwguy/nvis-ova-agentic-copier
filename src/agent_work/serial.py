@@ -2601,6 +2601,7 @@ def _execute(
                 if _feedback_is_qualifying(note, repository.config.factory_username)
             ),
             worker_result_handoff=handoff_request,
+            worker_result_builder=record.worktree / "bin/agent-work-from-checkout",
         )
     except RedCheckpointError:
         return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
@@ -2770,6 +2771,9 @@ def _execute(
                         )
                     ),
                     worker_result_handoff=handoff_request,
+                    worker_result_builder=(
+                        record.worktree / "bin/agent-work-from-checkout"
+                    ),
                 )
         except (RedCheckpointError, RepositoryError, WorkerProtocolError, ValueError):
             return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)

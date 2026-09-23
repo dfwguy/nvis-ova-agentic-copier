@@ -1126,6 +1126,7 @@ def build_worker_prompt(
     issue_notes: tuple[GitLabIssueNote, ...] = (),
     merge_request_feedback: tuple[object, ...] = (),
     worker_result_handoff: WorkerResultHandoffRequest | None = None,
+    worker_result_builder: Path | None = None,
 ) -> str:
     """Build the trusted protocol instructions for one bounded phase."""
     safe_record = dict(record)
@@ -1282,8 +1283,10 @@ def build_worker_prompt(
             "approved consolidated result. Content-only work uses Architect, one sole-mutator "
             "Documentation Writer, and Documentation Finalizer without Red or code judges. "
         )
+    if worker_result_handoff is not None and worker_result_builder is None:
+        raise ValueError("worker result builder is required for a handoff")
     result_contract = (
-        "Use `agent-work worker-result build --issue-iid "
+        f"Use `{worker_result_builder} worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH --handoff-file {worker_result_handoff.path} "
         f"--handoff-nonce {worker_result_handoff.nonce} --apply` to derive trusted fields, "
         "validate the envelope, and atomically write the controller-owned handoff. "

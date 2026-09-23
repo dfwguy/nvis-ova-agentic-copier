@@ -1978,6 +1978,55 @@ def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
+def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
+    tmp_path: Path,
+) -> None:
+    """Both serial prompt call sites bind worker-result build to the worktree."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenHandoffInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        assert issue_iid == record.issue_iid
+        assert request == _red_checkpoint_request_for_segment()
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    builder = record.worktree / "bin/agent-work-from-checkout"
+    assert builder.is_absolute()
+    assert len(invoker.legacy.prompts) == len(invoker.requests) == 2
+    for prompt, request in zip(invoker.legacy.prompts, invoker.requests, strict=True):
+        assert (
+            f"Use `{builder} worker-result build --issue-iid {record.issue_iid} "
+            f"--input-file PATH --handoff-file {request.path} "
+            f"--handoff-nonce {request.nonce} --apply`" in prompt
+        )
+        assert "Use `agent-work worker-result build" not in prompt
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
 def test_red_capture_failure_blocks_before_checkpoint_application(
     tmp_path: Path,
 ) -> None:

@@ -1360,11 +1360,70 @@ def test_handoff_prompt_omits_the_legacy_stdout_return_contract(tmp_path: Path) 
             source_branch="agent/issue-81",
             source_sha="a" * 40,
         ),
+        worker_result_builder=(
+            tmp_path / "active-checkout" / "bin/agent-work-from-checkout"
+        ).resolve(),
     )
 
     assert "--handoff-file" in prompt and "--apply" in prompt
     assert "Return the builder output unchanged" not in prompt
     assert "<agent-work-result>" not in prompt
+
+
+def test_handoff_prompt_uses_the_explicit_checkout_owned_result_builder(
+    tmp_path: Path,
+) -> None:
+    """A handoff-aware prompt cannot resolve its result builder from PATH."""
+    builder = (tmp_path / "active-checkout" / "bin/agent-work-from-checkout").resolve()
+    handoff = WorkerResultHandoffRequest(
+        path=tmp_path / "handoff.json",
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=81,
+        ledger_revision=7,
+        source_branch="agent/issue-81",
+        source_sha="a" * 40,
+    )
+
+    prompt = build_worker_prompt(
+        _record(tmp_path).model_dump(mode="json"),
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+        worker_result_handoff=handoff,
+        worker_result_builder=builder,
+    )
+
+    assert (
+        f"Use `{builder} worker-result build --issue-iid 81 --input-file PATH "
+        f"--handoff-file {handoff.path} --handoff-nonce {handoff.nonce} --apply`"
+        in prompt
+    )
+    assert "Use `agent-work worker-result build" not in prompt
+
+
+def test_handoff_prompt_requires_an_explicit_result_builder(tmp_path: Path) -> None:
+    """A handoff prompt cannot render an absent checkout-owned builder."""
+    handoff = WorkerResultHandoffRequest(
+        path=tmp_path / "handoff.json",
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=81,
+        ledger_revision=7,
+        source_branch="agent/issue-81",
+        source_sha="a" * 40,
+    )
+
+    with pytest.raises(
+        ValueError, match="worker result builder is required for a handoff"
+    ):
+        build_worker_prompt(
+            _record(tmp_path).model_dump(mode="json"),
+            project_id=310967,
+            issue_iid=81,
+            effective_worker_budget_seconds=600,
+            worker_result_handoff=handoff,
+        )
 
 
 def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(
