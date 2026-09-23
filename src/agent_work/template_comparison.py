@@ -80,6 +80,7 @@ class TemplateComparison:
     current_commit: str
     candidate_commit: str
     paths: tuple[str, ...]
+    source: str = ""
 
 
 @contextmanager
@@ -394,4 +395,4 @@ def compare_template_revisions(
         subprocess.SubprocessError,
     ):
         raise TemplateComparisonError(stage="temporary-repository") from None
-    return TemplateComparison(current, candidate, paths)
+    return TemplateComparison(current, candidate, paths, metadata.source_path)

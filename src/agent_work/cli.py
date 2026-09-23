@@ -27,7 +27,7 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from . import registry_cleanup, template_comparison
+from . import registry_cleanup, template_comparison, template_update
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -47,7 +47,7 @@ from .gitlab import (
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
 from .ledger import JsonLedger, LockBusy, state_home
-from .models import CommandReport, LedgerRecord, MergeRequestEvidence
+from .models import AgentWorkConfig, CommandReport, LedgerRecord, MergeRequestEvidence
 from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointDependencies,
@@ -94,6 +94,7 @@ from .validation import (
     run_judge_validation,
 )
 from .worker import (
+    AgentInvoker,
     WorkerProtocolError,
     build_worker_result,
     build_worker_result_handoff,
@@ -648,6 +649,18 @@ def build_parser() -> argparse.ArgumentParser:
         apply=False,
         debug_help="show a safe failure stage on failure",
     )
+    template_update_parser = template_actions.add_parser(
+        "update",
+        help="plan or apply one isolated recoverable Copier template update",
+        description="Dry-run is the default. --apply creates only a retained isolated worktree.",
+    )
+    template_update_parser.add_argument("--candidate-revision", required=True)
+    template_update_parser.add_argument("--project-root", type=Path, default=Path("."))
+    _common(
+        template_update_parser,
+        apply_help="apply one isolated Copier update after recording durable state",
+        debug_help="show a traceback on failure",
+    )
     finding = resources.add_parser(
         "upstream-finding", help="preview or file an upstream finding"
     )
@@ -987,6 +1000,35 @@ def _render_template_preview(result: TemplateComparison, *, as_json: bool) -> st
     return "\n".join((header, *(f"path={path}" for path in result.paths)))
 
 
+def _render_template_update(
+    report: template_update.TemplateUpdateReport, *, as_json: bool
+) -> str:
+    """Render the stable non-secret template-update result."""
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "command": "template.update",
+        "outcome": report.outcome,
+        "state": getattr(report.state, "value", report.state),
+        "current_commit": report.current_commit,
+        "candidate_commit": report.candidate_commit,
+        "changed_paths": list(report.changed_paths),
+        "next_action": report.next_action,
+    }
+    if report.branch is not None:
+        payload["branch"] = report.branch
+    if report.worktree is not None:
+        payload["worktree"] = str(report.worktree)
+    if report.conflict_paths:
+        payload["conflict_paths"] = list(report.conflict_paths)
+    if report.recovery_stage is not None:
+        payload["recovery_stage"] = report.recovery_stage
+    if report.completion is not None:
+        payload["completion"] = report.completion.model_dump(mode="json")
+    if as_json:
+        return json.dumps(payload, separators=(",", ":"))
+    return " ".join(f"{key}={value}" for key, value in payload.items())
+
+
 def _render_rotation(report: CredentialRotationReport, *, as_json: bool) -> str:
     """Render only the stable, non-secret credential-rotation result."""
     if as_json:
@@ -1104,6 +1146,7 @@ def main(
     apply_upstream: _ApplyUpstream | None = None,
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
+    discover_agent_work_config: Callable[..., AgentWorkConfig] = discover_config,
     sleeper: Callable[[float], None] = time.sleep,
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
@@ -1126,6 +1169,11 @@ def main(
     template_private_repository: Callable[
         [], AbstractContextManager[Path]
     ] = template_comparison.private_repository,
+    run_template_update: Callable[
+        ..., object
+    ] = template_update.execute_template_update,
+    template_update_dependencies: template_update.TemplateUpdateDependencies
+    | None = None,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
     read_validation_artifact: Callable[[Path], bytes | None] = (
@@ -1137,6 +1185,54 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "template" and parsed.action == "update":
+        try:
+            if (
+                template_update_dependencies is None
+                and run_template_update is template_update.execute_template_update
+            ):
+                config = discover_agent_work_config(
+                    current_directory=parsed.project_root,
+                    environment=environment,
+                    run_command=run_command,
+                )
+                project = template_update.TemplateUpdateProject(
+                    project_id=config.project_id,
+                    checkout=config.checkout,
+                    default_branch=config.default_branch,
+                    state_root=config.state_root,
+                )
+                dependencies = template_update.default_dependencies(
+                    project=project,
+                    agent_invoker=AgentInvoker(run_command, environment=environment),
+                )
+            else:
+                dependencies = cast(
+                    template_update.TemplateUpdateDependencies,
+                    template_update_dependencies,
+                )
+            report = cast(
+                template_update.TemplateUpdateReport,
+                run_template_update(
+                    parsed.candidate_revision,
+                    parsed.project_root,
+                    apply=parsed.apply,
+                    compare=compare_template_revisions,
+                    dependencies=dependencies,
+                ),
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            template_comparison.TemplateComparisonError,
+        ) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        write_stdout(_render_template_update(report, as_json=parsed.json))
+        return 0 if report.outcome in {"planned", "ready"} else 1
     if parsed.resource == "issue" and parsed.action == "publish":
         try:
             publisher = publish_issue or _configured_issue_publisher(

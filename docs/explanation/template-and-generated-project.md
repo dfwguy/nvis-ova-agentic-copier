@@ -9,8 +9,6 @@ last_reviewed: 2026-09-22
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
-  - path: ../how-to/update-a-generated-project.md
-    why: Shows how to bring template improvements into a generated project.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
