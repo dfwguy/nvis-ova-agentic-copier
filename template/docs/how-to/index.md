@@ -12,10 +12,9 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Use these guides when you know the job and need a clear path. They help you
-plan, run, check, and fix work in a generated project or this template. Pick
-the guide that fits the task, then read its steps in order. Use the linked facts
-when you need more detail.
+Use these guides to do work in this repo or in a project made from it. Pick the
+guide for the job. Read each step, run each check, and fix what fails. Use the
+links for facts and rules as you do the work.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -23,6 +22,7 @@ when you need more detail.
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
 - [How to refresh the CI validation images](refresh-ci-image.md) — Build and check three root CI images and clean up old tags.
+- [How to update a generated project](update-a-generated-project.md) — Update a Copier project with a reviewed template revision.
 - [How to validate template changes](validate-template-changes.md) — Check a change.
 
 ### Agent Workflow

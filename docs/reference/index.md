@@ -22,6 +22,7 @@ Use it to look up a fact.
 ### Template
 - [Template contract](template-contract.md) — Look up template inputs, output, setup, and updates.
 - [Template revision preview](template-revision-preview.md) — Compare the recorded template revision with a candidate revision.
+- [Template update](template-update.md) — Look up the guarded template update command and its recovery states.
 - [License compliance](license-compliance.md) — Look up license rules, checked files, and allowed exemptions.
 
 ### Writing

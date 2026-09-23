@@ -9,6 +9,8 @@ last_reviewed: 2026-09-19
 related:
   - path: ../how-to/preview-template-revision.md
     why: Shows how to compare a generated project's recorded template revision.
+  - path: template-update.md
+    why: Defines the guarded command that can apply a reviewed revision.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

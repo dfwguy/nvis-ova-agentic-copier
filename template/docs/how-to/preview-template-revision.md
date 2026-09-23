@@ -9,6 +9,8 @@ last_reviewed: 2026-09-19
 related:
   - path: ../reference/template-revision-preview.md
     why: Defines the preview command, output, and exit status.
+  - path: update-a-generated-project.md
+    why: Applies a reviewed candidate revision through the guarded update command.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

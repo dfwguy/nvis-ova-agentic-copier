@@ -9,8 +9,6 @@ last_reviewed: 2026-08-27
 related:
   - path: ../explanation/template-and-generated-project.md
     why: Explains why template and project changes have different owners.
-  - path: update-a-generated-project.md
-    why: Shows how to apply template updates while preserving local choices.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

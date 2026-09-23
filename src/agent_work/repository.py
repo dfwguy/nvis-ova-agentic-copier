@@ -376,6 +376,23 @@ def discover_config(
         raise RepositoryError("agent-work configuration is invalid") from error
 
 
+def parse_porcelain_paths(status: str) -> tuple[str, ...]:
+    """Parse porcelain-v1 NUL records without corrupting rename destinations."""
+    entries = status.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if len(entry) <= 3:
+            continue
+        paths.append(entry[3:])
+        if ({"R", "C"} & set(entry[:2])) and index < len(entries):
+            paths.append(entries[index])
+            index += 1
+    return tuple(paths)
+
+
 class GitRepository:
     """Own durable worktrees and publication Git operations."""
 
@@ -679,21 +696,7 @@ class GitRepository:
         )
         if result.returncode != 0:
             raise RepositoryError("could not inspect changed paths")
-        entries = result.stdout.split("\0")
-        paths: list[str] = []
-        index = 0
-        while index < len(entries):
-            entry = entries[index]
-            index += 1
-            if not entry:
-                continue
-            if len(entry) <= 3:
-                continue
-            paths.append(entry[3:])
-            if entry[:2] in {"R ", " R", "C ", " C"} and index < len(entries):
-                paths.append(entries[index])
-                index += 1
-        return tuple(paths)
+        return parse_porcelain_paths(result.stdout)
 
     def observe_legacy_publication_candidate(
         self, worktree: Path
