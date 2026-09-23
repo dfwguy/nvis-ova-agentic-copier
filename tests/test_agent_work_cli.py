@@ -277,6 +277,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
             exit_code=None,
             diagnostic=None,
             hook_failures=(),
+            junit_artifacts=(),
         )
 
     output: list[str] = []
@@ -298,6 +299,7 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
         "exit_code": None,
         "diagnostic": None,
         "hook_failures": [],
+        "junit_artifacts": [],
     }
 
 
@@ -317,6 +319,7 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
             exit_code=None,
             diagnostic=None,
             hook_failures=(),
+            junit_artifacts=(),
         )
 
     output: list[str] = []
@@ -340,6 +343,7 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
     assert calls == [("a" * 40, 3)]
     assert json.loads(output[0])["terminal"] is False
     assert json.loads(output[0])["exit_code"] is None
+    assert json.loads(output[0])["junit_artifacts"] == []
 
 
 def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> None:
@@ -358,16 +362,66 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
             exit_code=0,
             diagnostic=None,
             hook_failures=(),
+            junit_artifacts=(
+                SimpleNamespace(
+                    environment="py311",
+                    path=Path("/snapshots") / candidate_tree / "test-results-py311.xml",
+                    sha256="a" * 64,
+                    test_count=3,
+                ),
+                SimpleNamespace(
+                    environment="py314",
+                    path=Path("/snapshots") / candidate_tree / "test-results-py314.xml",
+                    sha256="b" * 64,
+                    test_count=5,
+                ),
+            ),
         )
 
+    output: list[str] = []
     assert (
         main(
             ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
             validation_run=validation_run,
+            write_stdout=output.append,
         )
         == 0
     )
     assert calls == [("a" * 40, True)]
+    assert "junit_artifacts=" in output[0]
+    assert f"/snapshots/{'a' * 40}/test-results-py311.xml" in output[0]
+    assert "py311" in output[0]
+
+    json_output: list[str] = []
+    assert (
+        main(
+            [
+                "validation",
+                "run",
+                "--candidate-tree",
+                "a" * 40,
+                "--apply",
+                "--json",
+            ],
+            validation_run=validation_run,
+            write_stdout=json_output.append,
+        )
+        == 0
+    )
+    assert json.loads(json_output[0])["junit_artifacts"] == [
+        {
+            "environment": "py311",
+            "path": f"/snapshots/{'a' * 40}/test-results-py311.xml",
+            "sha256": "a" * 64,
+            "test_count": 3,
+        },
+        {
+            "environment": "py314",
+            "path": f"/snapshots/{'a' * 40}/test-results-py314.xml",
+            "sha256": "b" * 64,
+            "test_count": 5,
+        },
+    ]
 
 
 @pytest.mark.parametrize("action", ("run", "status"))
@@ -401,6 +455,7 @@ def test_validation_cli_projects_terminal_failure_diagnostic(
                     diagnostic_lines=("src/agent_work/example.py:7:3: F401",),
                 ),
             ),
+            junit_artifacts=(),
         )
 
     output: list[str] = []
@@ -427,6 +482,7 @@ def test_validation_cli_projects_terminal_failure_diagnostic(
                 "diagnostic_lines": ["src/agent_work/example.py:7:3: F401"],
             }
         ]
+        assert json.loads(output[0])["junit_artifacts"] == []
     else:
         assert f"diagnostic={diagnostic}" in output[0]
         assert "failed_hook=ruff" in output[0]
@@ -447,6 +503,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             exit_code=None,
             diagnostic=None,
             hook_failures=(),
+            junit_artifacts=(),
         )
 
     def validation_status(
@@ -462,6 +519,7 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             exit_code=0,
             diagnostic=None,
             hook_failures=(),
+            junit_artifacts=(),
         )
 
     assert (
