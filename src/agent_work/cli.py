@@ -87,6 +87,7 @@ from .upstream_gitlab import (
     UpstreamGitLabReader,
 )
 from .validation import (
+    FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
     JudgeValidationError,
     observe_judge_validation,
@@ -132,19 +133,37 @@ class _HookFailure(Protocol):
     diagnostic_lines: Sequence[str]
 
 
+class _JUnitArtifact(Protocol):
+    """Immutable JUnit evidence consumed by CLI rendering."""
+
+    environment: str
+    path: Path
+    sha256: str
+    test_count: int
+
+
 class _ValidationReport(Protocol):
     """Bounded validation report consumed by CLI rendering."""
 
     candidate_tree: str
     applied: bool
     action: Literal["preview", "ran", "existing", "status"]
-    state: Literal["preview", "running", "terminal-success", "terminal-failure"]
+    state: Literal[
+        "preview",
+        "running",
+        "terminal-success",
+        "terminal-failure",
+        "terminal-artifact-failure",
+    ]
     terminal: bool
     exit_code: int | None
     diagnostic: str | None
 
     @property
     def hook_failures(self) -> Sequence[_HookFailure]: ...
+
+    @property
+    def junit_artifacts(self) -> Sequence[_JUnitArtifact]: ...
 
 
 class _ValidationRunAction(Protocol):
@@ -784,6 +803,11 @@ def _read_validation_artifact(path: Path) -> bytes:
         return handle.read(1_048_577)
 
 
+def _remove_validation_artifact(path: Path) -> None:
+    """Remove one mutable hook-produced JUnit artifact when it exists."""
+    path.unlink(missing_ok=True)
+
+
 def _sanitize_human_value(value: object) -> str:
     """Render one bounded value on a single human-readable line."""
     return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
@@ -1323,6 +1347,7 @@ def main(
                         fcntl.flock(handle, fcntl.LOCK_EX)
                         yield
 
+                snapshot_store = FilesystemJUnitSnapshotStore(root=state_root)
                 validation_dependencies = JudgeValidationDependencies(
                     current_staged_tree=lambda: git_read(("git", "write-tree")),
                     read_record=read_record,
@@ -1332,6 +1357,10 @@ def main(
                     monotonic_clock=time.monotonic,
                     sleeper=time.sleep,
                     read_artifact=read_validation_artifact,
+                    remove_junit_artifact=_remove_validation_artifact,
+                    capture_junit_artifacts=lambda tree, artifacts: (
+                        snapshot_store.capture(candidate_tree=tree, artifacts=artifacts)
+                    ),
                 )
                 if parsed.action == "run":
                     validation_run = partial(
@@ -1371,6 +1400,15 @@ def main(
                 }
                 for failure in report.hook_failures
             ],
+            "junit_artifacts": [
+                {
+                    "environment": artifact.environment,
+                    "path": str(artifact.path),
+                    "sha256": artifact.sha256,
+                    "test_count": artifact.test_count,
+                }
+                for artifact in report.junit_artifacts
+            ],
         }
         write_stdout(
             json.dumps(payload, separators=(",", ":"))
@@ -1395,7 +1433,7 @@ def main(
         )
         if parsed.action == "run" and not getattr(parsed, "apply", False):
             return 0
-        return 0 if report.terminal and report.exit_code == 0 else 1
+        return 0 if report.state == "terminal-success" else 1
     if parsed.resource == "template" and parsed.action == "preview":
         try:
             runner = template_run_command

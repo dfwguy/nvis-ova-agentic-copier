@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_work import validation
 from agent_work.ledger import state_home
 from agent_work.repository import CommandResult
 from agent_work.validation import (
@@ -74,6 +76,14 @@ def _dependencies(
         calls.append(command)
         return CommandResult(returncode, "unbounded stdout must not persist", "stderr")
 
+    def capture(
+        candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        return tuple(
+            Path("/snapshots") / candidate_tree / f"test-results-{environment}.xml"
+            for environment, _contents, _count in artifacts
+        )
+
     return (
         JudgeValidationDependencies(
             current_staged_tree=lambda: current_tree,
@@ -83,6 +93,10 @@ def _dependencies(
             run_command=run,
             monotonic_clock=monotonic_clock,
             sleeper=sleeper,
+            read_artifact=lambda _path: (
+                b"<testsuite tests='1' failures='0' errors='0'/>"
+            ),
+            capture_junit_artifacts=capture,
         ),
         calls,
     )
@@ -110,6 +124,14 @@ def _diagnostic_dependencies(
             raise value
         return value
 
+    def capture(
+        candidate_tree: str, captured: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        return tuple(
+            Path("/snapshots") / candidate_tree / f"test-results-{environment}.xml"
+            for environment, _contents, _count in captured
+        )
+
     dependencies = JudgeValidationDependencies(
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
@@ -119,6 +141,7 @@ def _diagnostic_dependencies(
         monotonic_clock=lambda: 0.0,
         sleeper=lambda _seconds: None,
         read_artifact=read_artifact,
+        capture_junit_artifacts=capture,
     )
     return dependencies, calls, artifact_reads
 
@@ -548,6 +571,7 @@ def test_apply_runs_one_fixed_hook_and_persists_its_terminal_code(
     assert report.returncode == returncode
     expected_record: dict[str, object] = {
         "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
         "state": expected_state,
         "returncode": returncode,
     }
@@ -556,6 +580,18 @@ def test_apply_runs_one_fixed_hook_and_persists_its_terminal_code(
             f"git hook run pre-commit failed with exit code {returncode}; "
             "no failing JUnit summary available"
         )
+    else:
+        expected_record["junit_artifacts"] = [
+            {
+                "environment": environment,
+                "path": f"/snapshots/{_CANDIDATE}/test-results-{environment}.xml",
+                "sha256": hashlib.sha256(
+                    b"<testsuite tests='1' failures='0' errors='0'/>"
+                ).hexdigest(),
+                "test_count": 1,
+            }
+            for environment in ("py311", "py314")
+        ]
     assert state.records[_CANDIDATE] == expected_record
 
 
@@ -638,8 +674,572 @@ def test_legacy_terminal_failure_without_diagnostic_remains_readable() -> None:
     assert report.state == "terminal-failure"
     assert report.diagnostic is None
     assert report.hook_failures == ()
+    assert report.junit_artifacts == ()
     assert calls == []
     assert state.writes == []
+
+
+def test_successful_apply_captures_exact_supported_junit_bytes_and_status_reuses_evidence(
+    tmp_path: Path,
+) -> None:
+    """A completed candidate retains immutable evidence without rereading checkout XML."""
+    state = ValidationStateFake()
+    artifact_bytes = {
+        Path(
+            "test-results-py311.xml"
+        ): b"<testsuites><testsuite tests='3' failures='0' errors='0'/></testsuites>",
+        Path(
+            "test-results-py314.xml"
+        ): b"<testsuite tests='5' failures='0' errors='0'/>",
+    }
+    artifact_reads: list[Path] = []
+    captures: list[tuple[str, tuple[tuple[str, bytes, int], ...]]] = []
+
+    def read_artifact(path: Path) -> bytes:
+        artifact_reads.append(path)
+        return artifact_bytes[path]
+
+    def capture_junit_artifacts(
+        candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        captures.append((candidate_tree, artifacts))
+        return tuple(
+            tmp_path / candidate_tree / f"test-results-{environment}.xml"
+            for environment, _contents, _test_count in artifacts
+        )
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=lambda command, **_kwargs: CommandResult(0, "", ""),
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=read_artifact,
+        capture_junit_artifacts=capture_junit_artifacts,
+    )
+
+    applied = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert artifact_reads == [
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+    ]
+    assert captures == [
+        (
+            _CANDIDATE,
+            (
+                ("py311", artifact_bytes[Path("test-results-py311.xml")], 3),
+                ("py314", artifact_bytes[Path("test-results-py314.xml")], 5),
+            ),
+        )
+    ]
+    assert tuple(
+        (item.environment, item.path, item.sha256, item.test_count)
+        for item in applied.junit_artifacts
+    ) == (
+        (
+            "py311",
+            tmp_path / _CANDIDATE / "test-results-py311.xml",
+            hashlib.sha256(artifact_bytes[Path("test-results-py311.xml")]).hexdigest(),
+            3,
+        ),
+        (
+            "py314",
+            tmp_path / _CANDIDATE / "test-results-py314.xml",
+            hashlib.sha256(artifact_bytes[Path("test-results-py314.xml")]).hexdigest(),
+            5,
+        ),
+    )
+
+    status_dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=lambda command, **_kwargs: pytest.fail("status must not run hook"),
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: pytest.fail("status must not read mutable XML"),
+        capture_junit_artifacts=lambda *_args: pytest.fail("status must not capture"),
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=status_dependencies
+    )
+
+    assert status.junit_artifacts == applied.junit_artifacts
+
+
+@pytest.mark.parametrize(
+    "junit_artifacts",
+    (
+        [
+            {
+                "environment": "py311",
+                "path": f"/snapshots/{_CANDIDATE}/py311.xml",
+                "sha256": "a" * 64,
+                "test_count": 1,
+            }
+        ],
+        [
+            {
+                "environment": "py311",
+                "path": f"/snapshots/{_CANDIDATE}/py311.xml",
+                "sha256": "a" * 64,
+                "test_count": 1,
+            },
+            {
+                "environment": "py311",
+                "path": f"/snapshots/{_CANDIDATE}/py314.xml",
+                "sha256": "b" * 64,
+                "test_count": 1,
+            },
+        ],
+        [
+            {
+                "environment": "py312",
+                "path": f"/snapshots/{_CANDIDATE}/py312.xml",
+                "sha256": "a" * 64,
+                "test_count": 1,
+            },
+            {
+                "environment": "py314",
+                "path": f"/snapshots/{_CANDIDATE}/py314.xml",
+                "sha256": "b" * 64,
+                "test_count": 1,
+            },
+        ],
+        [
+            {
+                "environment": "py311",
+                "path": "relative/py311.xml",
+                "sha256": "a" * 64,
+                "test_count": 1,
+            },
+            {
+                "environment": "py314",
+                "path": f"/snapshots/{_CANDIDATE}/py314.xml",
+                "sha256": "b" * 64,
+                "test_count": 1,
+            },
+        ],
+        [
+            {
+                "environment": "py311",
+                "path": f"/snapshots/{_OTHER_CANDIDATE}/py311.xml",
+                "sha256": "A" * 64,
+                "test_count": -1,
+            },
+            {
+                "environment": "py314",
+                "path": f"/snapshots/{_CANDIDATE}/py314.xml",
+                "sha256": "b" * 64,
+                "test_count": 1,
+            },
+        ],
+    ),
+    ids=("partial", "duplicate", "wrong-environment", "relative-path", "unsafe"),
+)
+def test_observation_rejects_partial_duplicate_or_unsafe_junit_evidence(
+    junit_artifacts: list[dict[str, object]],
+) -> None:
+    state = ValidationStateFake(
+        records={
+            _CANDIDATE: {
+                "candidate_tree": _CANDIDATE,
+                "state": "terminal-success",
+                "returncode": 0,
+                "junit_artifacts": junit_artifacts,
+            }
+        }
+    )
+    dependencies, calls = _dependencies(state)
+
+    with pytest.raises(JudgeValidationError, match="validation record is malformed"):
+        observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
+
+    assert calls == []
+    assert state.writes == []
+
+
+@pytest.mark.parametrize(
+    "record",
+    (
+        {"candidate_tree": _CANDIDATE, "state": "terminal-success", "returncode": 0},
+        {
+            "candidate_tree": _CANDIDATE,
+            "schema_version": 2,
+            "state": "terminal-success",
+            "returncode": 0,
+        },
+        {
+            "candidate_tree": _CANDIDATE,
+            "schema_version": 2,
+            "state": "terminal-success",
+            "returncode": 0,
+            "junit_artifacts": [],
+        },
+    ),
+    ids=("legacy-omitted", "current-missing", "current-empty"),
+)
+def test_success_evidence_version_discriminates_legacy_from_current(
+    record: dict[str, object],
+) -> None:
+    state = ValidationStateFake(records={_CANDIDATE: record})
+    dependencies, _calls = _dependencies(state)
+
+    if "schema_version" not in record:
+        report = observe_judge_validation(
+            candidate_tree=_CANDIDATE, dependencies=dependencies
+        )
+        assert report.junit_artifacts == ()
+    else:
+        with pytest.raises(
+            JudgeValidationError, match="validation record is malformed"
+        ):
+            observe_judge_validation(
+                candidate_tree=_CANDIDATE, dependencies=dependencies
+            )
+
+
+def test_hook_failure_keeps_existing_diagnostics_without_junit_capture() -> None:
+    state = ValidationStateFake()
+    captures: list[object] = []
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=lambda command, **_kwargs: CommandResult(7, "", ""),
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: b"<testsuite tests='1' failures='1' errors='0'/>",
+        capture_junit_artifacts=lambda *_args: captures.append(_args),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.diagnostic == (
+        "git hook run pre-commit failed with exit code 7; "
+        "JUnit py311 failures=1 errors=0; py314 failures=1 errors=0"
+    )
+    assert report.junit_artifacts == ()
+    assert "junit_artifacts" not in state.records[_CANDIDATE]
+    assert captures == []
+
+
+def test_artifact_capture_failure_is_terminal_without_rerunning_the_hook() -> None:
+    """A successful hook cannot be reported as a usable validation without snapshots."""
+    state = ValidationStateFake()
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: b"<testsuite tests='1' failures='0' errors='0'/>",
+        capture_junit_artifacts=lambda *_args: (_ for _ in ()).throw(OSError("secret")),
+    )
+
+    first = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    observed = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert (
+        first.state == repeated.state == observed.state == "terminal-artifact-failure"
+    )
+    assert first.returncode == repeated.returncode == observed.returncode == 0
+    assert (
+        first.junit_artifacts
+        == repeated.junit_artifacts
+        == observed.junit_artifacts
+        == ()
+    )
+    assert "secret" not in str(state.records[_CANDIDATE])
+
+
+def test_apply_removes_stale_junit_sources_before_hook_and_in_finally_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Only XML produced by this one hook invocation can become durable evidence."""
+    state = ValidationStateFake()
+    events: list[str] = []
+
+    def remove_junit_artifact(path: Path) -> None:
+        events.append(f"remove:{path}")
+
+    def read_artifact(path: Path) -> bytes:
+        events.append(f"read:{path}")
+        return b"<testsuite tests='1' failures='0' errors='0'/>"
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        events.append(f"hook:{' '.join(command)}")
+        return CommandResult(0, "", "")
+
+    def capture_junit_artifacts(
+        _candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        events.append("capture")
+        return tuple(
+            tmp_path / _CANDIDATE / f"test-results-{environment}.xml"
+            for environment, *_rest in artifacts
+        )
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=read_artifact,
+        remove_junit_artifact=remove_junit_artifact,
+        capture_junit_artifacts=capture_junit_artifacts,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    fixed_paths = (Path("test-results-py311.xml"), Path("test-results-py314.xml"))
+    assert report.state == "terminal-success"
+    assert events == [
+        *(f"remove:{path}" for path in fixed_paths),
+        "hook:git hook run pre-commit",
+        *(f"read:{path}" for path in fixed_paths),
+        *(f"remove:{path}" for path in fixed_paths),
+        "capture",
+    ]
+
+
+def test_post_hook_junit_cleanup_failure_is_terminal_and_never_retries_hook(
+    tmp_path: Path,
+) -> None:
+    """Cleanup errors fail closed after the one completed hook rather than rerunning it."""
+    state = ValidationStateFake()
+    calls: list[tuple[str, ...]] = []
+    removals = 0
+    captures: list[object] = []
+
+    def remove_junit_artifact(_path: Path) -> None:
+        nonlocal removals
+        removals += 1
+        if removals == 4:
+            raise OSError("private cleanup path")
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: b"<testsuite tests='1' failures='0' errors='0'/>",
+        remove_junit_artifact=remove_junit_artifact,
+        capture_junit_artifacts=lambda *_args: captures.append(_args),
+    )
+
+    first = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert first.state == repeated.state == "terminal-artifact-failure"
+    assert first.junit_artifacts == repeated.junit_artifacts == ()
+    assert captures == []
+    assert "private cleanup path" not in str(state.records[_CANDIDATE])
+
+
+def test_pre_hook_junit_cleanup_failure_is_terminal_without_a_hook_return_code() -> (
+    None
+):
+    """A stale source that cannot be removed cannot authenticate a new candidate."""
+    state = ValidationStateFake()
+    calls: list[tuple[str, ...]] = []
+    captures: list[object] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: pytest.fail("pre-hook failure must not read XML"),
+        remove_junit_artifact=lambda _path: (_ for _ in ()).throw(
+            OSError("private stale source")
+        ),
+        capture_junit_artifacts=lambda *_args: captures.append(_args),
+    )
+
+    first = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    observed = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == []
+    assert captures == []
+    assert (
+        first.state == repeated.state == observed.state == "terminal-artifact-failure"
+    )
+    assert first.returncode == repeated.returncode == observed.returncode is None
+    assert (
+        first.junit_artifacts
+        == repeated.junit_artifacts
+        == observed.junit_artifacts
+        == ()
+    )
+    assert "private stale source" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    (
+        None,
+        b"<testsuite tests='1' failures='0' errors='0'>",
+        b"x" * 1_048_577,
+    ),
+    ids=("missing", "malformed", "oversized"),
+)
+def test_unusable_success_junit_xml_is_terminal_without_capture_or_hook_retry(
+    artifact: bytes | None,
+) -> None:
+    """A zero hook exit is not success when its required produced XML is unusable."""
+    state = ValidationStateFake()
+    calls: list[tuple[str, ...]] = []
+    removals: list[Path] = []
+    captures: list[object] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        return CommandResult(0, "", "")
+
+    dependencies = JudgeValidationDependencies(
+        current_staged_tree=lambda: _CANDIDATE,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        read_artifact=lambda _path: artifact,
+        remove_junit_artifact=removals.append,
+        capture_junit_artifacts=lambda *_args: captures.append(_args),
+    )
+
+    first = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert captures == []
+    assert removals == [
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+    ]
+    assert first.state == repeated.state == "terminal-artifact-failure"
+    assert first.returncode == repeated.returncode == 0
+    assert first.junit_artifacts == repeated.junit_artifacts == ()
+
+
+def test_filesystem_junit_snapshot_store_publishes_readonly_candidate_evidence(
+    tmp_path: Path,
+) -> None:
+    """The public store atomically retains the exact payloads under their candidate."""
+    state_root = tmp_path / "agent-work-validation" / "repository"
+    store = validation.FilesystemJUnitSnapshotStore(root=state_root)
+    artifacts = (
+        ("py311", b"<testsuite tests='3' failures='0' errors='0'/>", 3),
+        ("py314", b"<testsuite tests='5' failures='0' errors='0'/>", 5),
+    )
+
+    paths = store.capture(candidate_tree=_CANDIDATE, artifacts=artifacts)
+
+    assert paths == (
+        state_root / _CANDIDATE / "test-results-py311.xml",
+        state_root / _CANDIDATE / "test-results-py314.xml",
+    )
+    assert tuple(path.read_bytes() for path in paths) == tuple(
+        contents for _environment, contents, _count in artifacts
+    )
+    assert all(path.is_absolute() for path in paths)
+    assert all(path.stat().st_mode & 0o777 == 0o444 for path in paths)
+    assert (state_root / _CANDIDATE).stat().st_mode & 0o777 == 0o555
+
+
+def test_filesystem_junit_snapshot_store_removes_partial_temporary_state(
+    tmp_path: Path,
+) -> None:
+    """A failed atomic publication leaves no candidate or temporary evidence behind."""
+    state_root = tmp_path / "agent-work-validation" / "repository"
+    writes = 0
+
+    def write_bytes(path: Path, contents: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("injected write failure")
+        path.write_bytes(contents)
+
+    store = validation.FilesystemJUnitSnapshotStore(
+        root=state_root, write_bytes=write_bytes
+    )
+
+    with pytest.raises((JudgeValidationError, OSError)):
+        store.capture(
+            candidate_tree=_CANDIDATE,
+            artifacts=(
+                ("py311", b"first", 1),
+                ("py314", b"second", 1),
+            ),
+        )
+
+    assert not (state_root / _CANDIDATE).exists()
+    assert not state_root.exists() or not tuple(state_root.iterdir())
 
 
 def test_preview_success_and_running_reports_never_expose_diagnostics() -> None:
@@ -677,7 +1277,7 @@ def test_preview_success_and_running_reports_never_expose_diagnostics() -> None:
     assert success.diagnostic is None
     assert running.diagnostic is None
     assert preview.hook_failures == success.hook_failures == running.hook_failures == ()
-    assert success_artifact_reads == []
+    assert success_artifact_reads == [Path("test-results-py311.xml")]
 
 
 def test_recovery_never_starts_a_second_hook_for_existing_running_candidate() -> None:
@@ -725,6 +1325,7 @@ def test_interrupted_hook_preserves_running_record_for_nonduplicating_recovery()
     assert calls == [("git", "hook", "run", "pre-commit")]
     assert state.records[_CANDIDATE] == {
         "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
         "state": "running",
     }
     assert recovered.state == "running"

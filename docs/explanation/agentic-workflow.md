@@ -118,13 +118,14 @@ During implementation, Green runs the fast formatter and lint. It runs type chec
 focused behavior tests. It stages one exact candidate. It records its tree OID.
 During serial validation, TDD Judge uses an applied durable session. The session uses
 that tree as its key. It records running state. It runs exactly one
-`git hook run pre-commit`. It records the terminal exit code. Only terminal
-success lets Judge inspect the unchanged tree. It then inspects each
-supported-version JUnit artifact. It records each SHA-256 digest and test count.
-Failure blocks the workflow. A frontend can lose the handle. It can also yield
-it. In either case, Judge watches the existing tree session to terminal state. It
-does not start another hook. These checks come before Non-functional Reviewer.
-They also come before nine concurrent specialist reviews. The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
+`git hook run pre-commit`. During that one hook execution, the validation session
+captures the immutable supported-version JUnit snapshots, digests, and test
+counts with its terminal evidence. Only terminal success lets Judge inspect the
+unchanged tree. Failure blocks the workflow. A frontend can lose the handle. It
+can also yield it. In either case, Judge and Non-functional Reviewer can
+authenticate the persisted evidence after handle loss without rerunning the
+hook. These checks come before Non-functional Reviewer. They also come before
+nine concurrent specialist reviews. The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
 defines run and read-only status commands.
 
 During finalization, Finalizer may use `--no-verify`. It may do so only after matching

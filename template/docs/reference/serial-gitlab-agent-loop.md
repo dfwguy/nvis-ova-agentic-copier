@@ -243,6 +243,17 @@ code. A terminal-failure record can also have the existing bounded, canonical
 `diagnostic` and additive structured `hook_failures` from that one invocation.
 The command returns only when the hook has a terminal result.
 
+On terminal success, the hook saves fixed `py311` and `py314` JUnit snapshots.
+It saves them under the candidate tree in the state root. Each result gives its
+environment, absolute path, SHA-256 digest, and `test_count`. Status reads this
+saved evidence. It never reads checkout XML or runs the hook again.
+
+Capture clears source artifacts before and after the hook. It fails closed if
+cleanup fails or the full set is missing, bad, or cannot be saved. The session
+then has terminal artifact-capture failure with CLI status `1`. It shows no
+files and keeps the hook exit code. Preview, running, terminal-failure, and
+legacy sessions also show no files. Existing sessions are not backfilled.
+
 When fixed supported-version JUnit artifacts are usable, the diagnostic has
 only their total numeric failure and error counts. Else, it uses a fixed generic
 diagnostic. That names `git hook run pre-commit` and its nonzero exit code.
@@ -265,30 +276,31 @@ Inspect an unchanged tree and JUnit evidence only after terminal zero. A
 terminal nonzero blocks that check. An existing record for the same candidate
 tree is trusted. Another applied run returns it without rerunning the hook or
 rewriting the record. This rule also covers legacy records without `diagnostic`
-or structured hook failures. The command does not backfill either field.
+or structured hook failures, or without retained success artifacts. The command
+does not backfill any of those fields.
 Legacy records without structured hook failures expose an empty collection.
 
 `validation status --candidate-tree TREE` is read-only. It never starts a hook.
-It reports `running`, `terminal-success`, or `terminal-failure`. With
-`--wait-seconds`, it polls a running session only for that bounded interval.
-It stops at a terminal session. Use it after a yielded or lost command handle.
-Keep querying the same `TREE`; do not start another check. It accepts `--apply`
-for command consistency but remains read-only. Human output includes the
-optional diagnostic. A terminal failure with evidence also includes failed IDs
-and canonical lines. JSON exposes `diagnostic` as its canonical string or
-`null`, plus bounded `hook_failures` objects with `hook_id` and
-`diagnostic_lines`. Fields, flags, and exit codes do not change. Preview,
-running, terminal-success, and legacy terminal-failure results have no hook
-entries. Status reads legacy records that omit either field. An absent
-`diagnostic` is `null`: no diagnostic is available.
+It reports `running`, `terminal-success`, `terminal-failure`, or the distinct
+terminal artifact-capture failure. With `--wait-seconds`, it polls a running
+session only for that bounded interval. It stops at a terminal session. Use it
+after a yielded or lost command handle. Keep querying the same `TREE`; do not
+start another check. It accepts `--apply` for command consistency but remains
+read-only. Human output includes the optional diagnostic. A terminal failure
+with evidence also includes failed IDs and canonical lines. JSON exposes
+`diagnostic` as its canonical string or `null`, plus bounded `hook_failures`
+objects with `hook_id` and `diagnostic_lines`. Fields, flags, and exit codes do
+not otherwise change. Preview, running, terminal-success, and legacy
+terminal-failure results have no hook entries. Status reads legacy records that
+omit either field. An absent `diagnostic` is `null`: no diagnostic is available.
 
 Exit code `0` means a preview or terminal success. An applied running session
-exits `1`. A terminal failure, missing or malformed session, or operational
-failure also exits `1`. Invalid usage exits `2`. JSON reports the candidate
-tree, applied state, action, state, terminal state, final exit code, and
-optional diagnostic. Repeated apply or status requests for the same candidate
-tree never rerun the combined hook or an individual hook. They never rewrite
-the record.
+exits `1`. A terminal failure, terminal artifact-capture failure, missing or
+malformed session, or operational failure also exits `1`. Invalid usage exits
+`2`. JSON reports the candidate tree, applied state, action, state, terminal
+state, final exit code, and optional diagnostic. Repeated apply or status
+requests for the same candidate tree never rerun the combined hook or an
+individual hook. They never rewrite the record.
 
 ### `credential rotate`
 

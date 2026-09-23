@@ -11,13 +11,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
+import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -117,19 +120,51 @@ class JudgeValidationError(RuntimeError):
     """A validation candidate or its durable record is invalid."""
 
 
+@dataclass(frozen=True)
+class JUnitArtifact:
+    """Immutable, candidate-bound evidence retained after a successful hook."""
+
+    environment: Literal["py311", "py314"]
+    path: Path
+    sha256: str
+    test_count: int
+
+
+class _PersistedJUnitArtifact(BaseModel):
+    """Strict persisted counterpart to :class:`JUnitArtifact`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    environment: Literal["py311", "py314"]
+    path: str = Field(strict=True)
+    sha256: str = Field(strict=True, pattern=r"^[0-9a-f]{64}$")
+    test_count: int = Field(strict=True, ge=0, le=_MAX_COUNTER)
+
+
 class _Record(BaseModel):
     """Bounded persisted state for a single staged tree."""
 
     model_config = ConfigDict(extra="forbid")
     candidate_tree: str = Field(pattern=r"^[0-9a-f]{40}$")
-    state: Literal["running", "terminal-success", "terminal-failure"]
+    schema_version: Literal[2] | None = None
+    state: Literal[
+        "running", "terminal-success", "terminal-failure", "terminal-artifact-failure"
+    ]
     returncode: int | None = Field(default=None, strict=True)
     diagnostic: str | None = None
     hook_failures: tuple[_PersistedHookFailure, ...] = ()
+    junit_artifacts: tuple[_PersistedJUnitArtifact, ...] = ()
 
     def model_post_init(self, _context: object) -> None:
-        terminal = self.state in {"terminal-success", "terminal-failure"}
-        if terminal != (self.returncode is not None):
+        terminal = self.state in {
+            "terminal-success",
+            "terminal-failure",
+            "terminal-artifact-failure",
+        }
+        if self.state == "terminal-artifact-failure":
+            code_is_valid = self.returncode is None or self.returncode == 0
+        else:
+            code_is_valid = terminal == (self.returncode is not None)
+        if not code_is_valid:
             raise ValueError("invalid validation lifecycle")
         if self.state == "terminal-success" and self.returncode != 0:
             raise ValueError("success requires zero exit")
@@ -168,6 +203,20 @@ class _Record(BaseModel):
             > _MAX_HOOK_FAILURE_BYTES
         ):
             raise ValueError("invalid hook failure evidence")
+        legacy = (
+            self.schema_version is None
+            and "junit_artifacts" not in self.model_fields_set
+        )
+        if self.schema_version is None and not legacy:
+            raise ValueError("invalid validation record version")
+        if (
+            self.schema_version == 2
+            and self.state == "terminal-success"
+            and not _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
+        ):
+            raise ValueError("invalid JUnit artifact evidence")
+        if self.state != "terminal-success" and self.junit_artifacts:
+            raise ValueError("invalid JUnit artifact evidence")
 
 
 @dataclass(frozen=True)
@@ -177,11 +226,18 @@ class JudgeValidationReport:
     candidate_tree: str
     applied: bool
     action: Literal["preview", "ran", "existing", "status"]
-    state: Literal["preview", "running", "terminal-success", "terminal-failure"]
+    state: Literal[
+        "preview",
+        "running",
+        "terminal-success",
+        "terminal-failure",
+        "terminal-artifact-failure",
+    ]
     terminal: bool
     returncode: int | None
     diagnostic: str | None
     hook_failures: tuple[HookFailure, ...] = ()
+    junit_artifacts: tuple[JUnitArtifact, ...] = ()
 
     @property
     def exit_code(self) -> int | None:
@@ -201,10 +257,80 @@ class JudgeValidationDependencies:
     monotonic_clock: Callable[[], float]
     sleeper: Callable[[float], None]
     read_artifact: Callable[[Path], bytes | None] = lambda _path: None
+    remove_junit_artifact: Callable[[Path], None] = lambda _path: None
+    capture_junit_artifacts: Callable[
+        [str, tuple[tuple[str, bytes, int], ...]], tuple[Path, ...] | None
+    ] = lambda _tree, _artifacts: None
 
 
 def _valid_tree(value: str) -> bool:
     return bool(_TREE.fullmatch(value))
+
+
+def _valid_junit_artifacts(
+    candidate_tree: str, artifacts: tuple[_PersistedJUnitArtifact, ...]
+) -> bool:
+    """Validate the complete ordered candidate-bound JUnit evidence set."""
+    if len(artifacts) != len(_JUNIT_ARTIFACTS):
+        return False
+    for artifact, (environment, basename) in zip(artifacts, _JUNIT_ARTIFACTS):
+        path = Path(artifact.path)
+        if (
+            artifact.environment != environment
+            or not path.is_absolute()
+            or path.parent.name != candidate_tree
+            or path.name != basename.name
+        ):
+            return False
+    return True
+
+
+def _write_snapshot_bytes(path: Path, contents: bytes) -> None:
+    """Write one snapshot payload through the filesystem boundary."""
+    path.write_bytes(contents)
+
+
+@dataclass(frozen=True)
+class FilesystemJUnitSnapshotStore:
+    """Atomically publish read-only JUnit snapshots beneath one state root."""
+
+    root: Path
+    write_bytes: Callable[[Path, bytes], None] = _write_snapshot_bytes
+
+    def __post_init__(self) -> None:
+        """Resolve the state root once so persisted evidence paths are absolute."""
+        object.__setattr__(self, "root", self.root.resolve())
+
+    def capture(
+        self, *, candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        """Publish one complete candidate snapshot without overwriting prior evidence."""
+        if not _valid_tree(candidate_tree) or len(artifacts) != len(_JUNIT_ARTIFACTS):
+            raise JudgeValidationError("invalid JUnit artifact snapshot")
+        self.root.mkdir(parents=True, exist_ok=True)
+        destination = self.root / candidate_tree
+        if destination.exists():
+            raise JudgeValidationError("JUnit artifact snapshot already exists")
+        temporary = Path(tempfile.mkdtemp(prefix=".junit-", dir=self.root))
+        try:
+            paths: list[Path] = []
+            for (environment, basename), (actual_environment, contents, count) in zip(
+                _JUNIT_ARTIFACTS, artifacts
+            ):
+                if actual_environment != environment or not isinstance(contents, bytes):
+                    raise JudgeValidationError("invalid JUnit artifact snapshot")
+                if count < 0 or count > _MAX_COUNTER:
+                    raise JudgeValidationError("invalid JUnit artifact snapshot")
+                path = temporary / basename
+                self.write_bytes(path, contents)
+                path.chmod(0o444)
+                paths.append(destination / basename)
+            temporary.chmod(0o555)
+            temporary.replace(destination)
+            return tuple(paths)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
 
 
 def _record(candidate_tree: str, value: object | None) -> _Record | None:
@@ -269,6 +395,33 @@ def _junit_failure_counts(artifact: bytes | None) -> tuple[int, int] | None:
     if counts is None or sum(counts) == 0:
         return None
     return counts
+
+
+def _junit_test_count(artifact: bytes | None) -> int | None:
+    """Return a bounded test count from one well-formed successful JUnit artifact."""
+    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+        return None
+    try:
+        root = ElementTree.fromstring(artifact)
+    except ElementTree.ParseError:
+        return None
+    root_name = root.tag.rsplit("}", 1)[-1]
+    if root_name == "testsuite":
+        return _bounded_counter(root.get("tests"))
+    if root_name != "testsuites":
+        return None
+    direct_count = _bounded_counter(root.get("tests"))
+    if direct_count is not None:
+        return direct_count
+    child_counts = tuple(
+        _bounded_counter(child.get("tests"))
+        for child in root
+        if child.tag.rsplit("}", 1)[-1] == "testsuite"
+    )
+    if not child_counts or any(count is None for count in child_counts):
+        return None
+    total = sum(count for count in child_counts if count is not None)
+    return total if total <= _MAX_COUNTER else None
 
 
 def _junit_summaries(read_artifact: Callable[[Path], bytes | None]) -> tuple[str, ...]:
@@ -443,7 +596,11 @@ def _report(
     action: Literal["ran", "existing", "status"],
     record: _Record,
 ) -> JudgeValidationReport:
-    terminal = record.state in {"terminal-success", "terminal-failure"}
+    terminal = record.state in {
+        "terminal-success",
+        "terminal-failure",
+        "terminal-artifact-failure",
+    }
     return JudgeValidationReport(
         candidate_tree,
         applied,
@@ -458,7 +615,39 @@ def _report(
         )
         if record.state == "terminal-failure"
         else (),
+        tuple(
+            JUnitArtifact(
+                item.environment,
+                Path(item.path),
+                item.sha256,
+                item.test_count,
+            )
+            for item in record.junit_artifacts
+        )
+        if record.state == "terminal-success"
+        else (),
     )
+
+
+def _artifact_failure_record(candidate_tree: str, returncode: int | None) -> _Record:
+    """Create a redacted terminal state for unusable or unpublishable evidence."""
+    return _Record(
+        candidate_tree=candidate_tree,
+        schema_version=2,
+        state="terminal-artifact-failure",
+        returncode=returncode,
+    )
+
+
+def _write_terminal(
+    candidate_tree: str, record: _Record, dependencies: JudgeValidationDependencies
+) -> JudgeValidationReport:
+    """Persist a terminal record and project its bounded public report."""
+    dependencies.atomic_write_record(
+        candidate_tree,
+        record.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
+    )
+    return _report(candidate_tree, applied=True, action="ran", record=record)
 
 
 def run_judge_validation(
@@ -479,46 +668,112 @@ def run_judge_validation(
             return _report(
                 candidate_tree, applied=True, action="existing", record=record
             )
-        running = _Record(candidate_tree=candidate_tree, state="running")
+        running = _Record(
+            candidate_tree=candidate_tree, schema_version=2, state="running"
+        )
         dependencies.atomic_write_record(
             candidate_tree,
             running.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
         )
+        try:
+            for _environment, path in _JUNIT_ARTIFACTS:
+                dependencies.remove_junit_artifact(path)
+        except OSError:
+            return _write_terminal(
+                candidate_tree,
+                _artifact_failure_record(candidate_tree, None),
+                dependencies,
+            )
         result = dependencies.run_command(("git", "hook", "run", "pre-commit"))
-        state: Literal["terminal-success", "terminal-failure"] = (
-            "terminal-success" if result.returncode == 0 else "terminal-failure"
-        )
-        summaries = (
-            _junit_summaries(dependencies.read_artifact)
-            if state == "terminal-failure"
-            else ()
-        )
-        hook_failures = (
-            _canonical_hook_failures(result.stdout, result.stderr, summaries)
-            if state == "terminal-failure"
-            else ()
-        )
-        terminal = _Record(
-            candidate_tree=candidate_tree,
-            state=state,
-            returncode=result.returncode,
-            diagnostic=(
-                _failure_diagnostic(result.returncode, summaries)
-                if state == "terminal-failure"
-                else None
-            ),
-            hook_failures=tuple(
-                _PersistedHookFailure(
-                    hook_id=item.hook_id, diagnostic_lines=item.diagnostic_lines
+        if result.returncode != 0:
+            try:
+                summaries = _junit_summaries(dependencies.read_artifact)
+                hook_failures = _canonical_hook_failures(
+                    result.stdout, result.stderr, summaries
                 )
-                for item in hook_failures
-            ),
-        )
-        dependencies.atomic_write_record(
+                for _environment, path in _JUNIT_ARTIFACTS:
+                    dependencies.remove_junit_artifact(path)
+            except OSError:
+                return _write_terminal(
+                    candidate_tree,
+                    _artifact_failure_record(candidate_tree, result.returncode),
+                    dependencies,
+                )
+            return _write_terminal(
+                candidate_tree,
+                _Record(
+                    candidate_tree=candidate_tree,
+                    schema_version=2,
+                    state="terminal-failure",
+                    returncode=result.returncode,
+                    diagnostic=_failure_diagnostic(result.returncode, summaries),
+                    hook_failures=tuple(
+                        _PersistedHookFailure(
+                            hook_id=item.hook_id, diagnostic_lines=item.diagnostic_lines
+                        )
+                        for item in hook_failures
+                    ),
+                ),
+                dependencies,
+            )
+
+        captured: list[tuple[str, bytes, int]] = []
+        artifact_error = False
+        try:
+            for environment, path in _JUNIT_ARTIFACTS:
+                artifact = dependencies.read_artifact(path)
+                test_count = _junit_test_count(artifact)
+                if artifact is None or test_count is None:
+                    artifact_error = True
+                    break
+                captured.append((environment, artifact, test_count))
+        except OSError:
+            artifact_error = True
+        try:
+            for _environment, path in _JUNIT_ARTIFACTS:
+                dependencies.remove_junit_artifact(path)
+        except OSError:
+            artifact_error = True
+        if artifact_error:
+            return _write_terminal(
+                candidate_tree,
+                _artifact_failure_record(candidate_tree, result.returncode),
+                dependencies,
+            )
+        try:
+            paths = dependencies.capture_junit_artifacts(
+                candidate_tree, tuple(captured)
+            )
+            if paths is None:
+                raise JudgeValidationError("invalid JUnit artifact snapshot")
+            persisted = tuple(
+                _PersistedJUnitArtifact(
+                    environment=cast(Literal["py311", "py314"], environment),
+                    path=str(path),
+                    sha256=hashlib.sha256(artifact).hexdigest(),
+                    test_count=test_count,
+                )
+                for (environment, artifact, test_count), path in zip(captured, paths)
+            )
+            if not _valid_junit_artifacts(candidate_tree, persisted):
+                raise JudgeValidationError("invalid JUnit artifact snapshot")
+        except (JudgeValidationError, OSError):
+            return _write_terminal(
+                candidate_tree,
+                _artifact_failure_record(candidate_tree, result.returncode),
+                dependencies,
+            )
+        return _write_terminal(
             candidate_tree,
-            terminal.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
+            _Record(
+                candidate_tree=candidate_tree,
+                schema_version=2,
+                state="terminal-success",
+                returncode=0,
+                junit_artifacts=persisted,
+            ),
+            dependencies,
         )
-        return _report(candidate_tree, applied=True, action="ran", record=terminal)
 
 
 def observe_judge_validation(
