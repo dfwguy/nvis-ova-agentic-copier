@@ -35,6 +35,7 @@ from .domain import (
     legacy_prerequisite_label_iid,
     parse_split_marker,
     prerequisite_label_iid,
+    sanitize_diagnostic,
 )
 from .models import (
     AgentWorkConfig,
@@ -110,6 +111,8 @@ _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
 _MAX_CLOSING_PROJECTION_READS = 4
 _CLOSING_PROJECTION_RETRY_DELAY_SECONDS = 1.0
+_OUTCOME_NOTE_MARKER = re.compile(r"<!-- agent-work-outcome:v2 key=[0-9a-f]{64} -->")
+_OUTCOME_NOTE_NAMESPACE = "<!-- agent-work-outcome:v2"
 
 
 def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -1740,6 +1743,120 @@ class GitLabGateway:
             f"projects/{self._config.project_id}/issues/{iid}/notes",
             method="POST",
             fields=(f"body={body}",),
+        )
+
+    def upsert_outcome_note(
+        self,
+        iid: int,
+        *,
+        outcome_key: str,
+        outcome: str,
+        explanation: str,
+        evidence: str,
+        retained_work: str,
+        next_action: str,
+        human_decision: str,
+    ) -> None:
+        """Create or update one factory-authored structured issue outcome note."""
+        if (
+            isinstance(self._config.project_id, bool)
+            or not isinstance(self._config.project_id, int)
+            or self._config.project_id <= 0
+            or isinstance(iid, bool)
+            or not isinstance(iid, int)
+            or iid <= 0
+            or not isinstance(outcome_key, str)
+            or not outcome_key
+            or len(outcome_key.encode()) > 512
+        ):
+            raise GitLabError("outcome note identity is invalid")
+        values = (
+            outcome,
+            explanation,
+            evidence,
+            retained_work,
+            next_action,
+            human_decision,
+        )
+        if not all(isinstance(value, str) for value in values):
+            raise GitLabError("outcome note content is invalid")
+        identity = json.dumps(
+            {
+                "issue": iid,
+                "outcome": outcome_key,
+                "project": self._config.project_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        marker = (
+            "<!-- agent-work-outcome:v2 key="
+            + hashlib.sha256(identity.encode()).hexdigest()
+            + " -->"
+        )
+        safe_values = tuple(
+            sanitize_diagnostic(
+                re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value), limit=512
+            )
+            or "Not recorded."
+            for value in values
+        )
+        body = "\n\n".join(
+            (
+                marker,
+                f"## Outcome\n{safe_values[0]}",
+                f"## What happened\n{safe_values[1]}",
+                f"## Evidence\n{safe_values[2]}",
+                f"## Retained work\n{safe_values[3]}",
+                f"## Next action\n{safe_values[4]}",
+                f"## Human decision\n{safe_values[5]}",
+            )
+        )
+        endpoint = f"projects/{self._config.project_id}/issues/{iid}/notes"
+        target_note_id: int | None = None
+        for page in range(1, _MAX_NOTE_PAGES + 1):
+            notes = self._items(
+                self._call(endpoint, fields=("per_page=100", f"page={page}")),
+                "issue note list",
+            )
+            for note in notes:
+                author = note.get("author")
+                if (
+                    not isinstance(author, dict)
+                    or cast("dict[str, object]", author).get("username")
+                    != self._config.factory_username
+                ):
+                    continue
+                note_body = note.get("body")
+                if (
+                    not isinstance(note_body, str)
+                    or _OUTCOME_NOTE_NAMESPACE not in note_body
+                ):
+                    continue
+                markers = _OUTCOME_NOTE_MARKER.findall(note_body)
+                if note_body.count(_OUTCOME_NOTE_NAMESPACE) != 1 or len(markers) != 1:
+                    raise GitLabError("outcome note marker is malformed")
+                if markers[0] != marker:
+                    continue
+                note_id = note.get("id")
+                if (
+                    isinstance(note_id, bool)
+                    or not isinstance(note_id, int)
+                    or note_id <= 0
+                ):
+                    raise GitLabError("outcome note target ID is invalid")
+                if target_note_id is not None:
+                    raise GitLabError("outcome note target is duplicate")
+                target_note_id = note_id
+            if len(notes) < 100:
+                break
+        else:
+            raise GitLabError("GitLab returned too many issue note pages")
+        if target_note_id is None:
+            self._call(endpoint, method="POST", fields=(f"body={body}",))
+            return
+        self._call(
+            f"{endpoint}/{target_note_id}", method="PUT", fields=(f"body={body}",)
         )
 
     def split_child_inventory(self) -> tuple[GitLabIssue, ...]:

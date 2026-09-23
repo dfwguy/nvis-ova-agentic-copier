@@ -420,6 +420,30 @@ class FakeGitLab:
         self.comments.append(summary)
         self.outcome_comments.append((error_code, summary, next_action))
 
+    def upsert_outcome_note(
+        self,
+        iid: int,
+        *,
+        outcome_key: str,
+        outcome: str,
+        explanation: str,
+        evidence: str,
+        retained_work: str,
+        next_action: str,
+        human_decision: str,
+    ) -> None:
+        del (
+            iid,
+            outcome_key,
+            outcome,
+            explanation,
+            evidence,
+            retained_work,
+            next_action,
+            human_decision,
+        )
+        raise AssertionError("outcome-note transport is not used by serial tests")
+
     def fetch_merge_request(self, iid: int) -> MergeRequestEvidence:
         self.fetched_merge_requests.append(iid)
         if self.fetch_merge_request_error is not None:
