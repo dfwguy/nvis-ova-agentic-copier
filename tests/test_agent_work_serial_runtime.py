@@ -1595,6 +1595,43 @@ def _affected_dirty_correction_record(tmp_path: Path) -> LedgerRecord:
     )
 
 
+def _precheckpoint_test_only_red_record(tmp_path: Path) -> LedgerRecord:
+    """Build the one preserved test-only Red candidate that predates a checkpoint."""
+    return _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "error_code": ErrorCode.RED_CHECKPOINT_FAILED,
+            "prior_state": None,
+            "prior_phase": None,
+            "condition_history": (),
+            "intent": None,
+            "audit_evidence": None,
+            "receipts": (),
+            "publication_sha": None,
+            "merge_request_draft": None,
+            "pending_feedback": None,
+            "repair_attempt": None,
+            "suggest_close_evidence": None,
+            "worker_exit": None,
+        }
+    )
+
+
+def _precheckpoint_test_only_repository(
+    config: AgentWorkConfig, record: LedgerRecord
+) -> FakeRepository:
+    """Build the clean-index, tracked-test-only observation for preserved Red work."""
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    repository.legacy_staged_paths = ()
+    repository.legacy_unstaged_paths = repository.paths
+    return repository
+
+
 def _operational_plan_bytes(report: object) -> bytes:
     """Extract the reviewed immutable plan from one serialized preview report."""
     payload = json.loads(cast(CommandReport, report).model_dump_json())
@@ -4183,6 +4220,185 @@ def test_recovery_retry_apply_rejects_legacy_dirty_hook_evidence_drift_before_ef
         )
 
     assert ledger.load(record.issue_iid) == retained
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
+def test_precheckpoint_test_only_red_recovery_is_inventory_safe_and_resumes_without_a_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The one preserved Red-only shape resumes preparation without inventing history."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_precheckpoint_test_only_red_record(tmp_path))
+    repository = _precheckpoint_test_only_repository(config, record)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact preserved test-only Red candidate was reviewed.",
+    )
+
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+    assert inventory.recovery_candidates[0].classification == "safely_retryable"
+
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    evidence = preview.operational_plan.evidence
+    assert evidence["precheckpoint_test_only_red"] is True
+    assert evidence["precheckpoint_project_id"] == record.project_id
+    assert evidence["precheckpoint_issue_iid"] == record.issue_iid
+    assert evidence["precheckpoint_source_branch"] == record.source_branch
+    assert evidence["precheckpoint_base_sha"] == record.source_sha
+    assert evidence["precheckpoint_head_sha"] == record.source_sha
+    assert evidence["precheckpoint_worktree"] == str(record.worktree)
+    assert evidence["precheckpoint_index_fingerprint"] == "d" * 64
+    assert evidence["precheckpoint_test_paths"] == json.dumps(repository.paths)
+    assert "correction_identity" not in evidence
+    assert "red_checkpoint" not in evidence
+
+    plan_file = tmp_path / "precheckpoint-test-only-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    report = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert report.applied and resumed is not None
+    assert resumed.state is RunnerState.PREPARING
+    assert resumed.phase is WorkflowPhase.WORKFLOW
+    assert resumed.workflow_lane is WorkflowLane.UNKNOWN
+    assert resumed.correction_identity is None
+    assert resumed.audit_evidence is None and resumed.receipts == ()
+    assert resumed.intent is None and resumed.publication_sha is None
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == ["agent::running"]
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "branch",
+        "head",
+        "staged",
+        "production_path",
+        "untracked",
+        "unmerged",
+        "rename",
+        "merge_head",
+        "publication_artifact",
+        "progress_artifact",
+        "dependency_open",
+        "worktree",
+    ),
+)
+def test_precheckpoint_test_only_red_inventory_never_advertises_ineligible_variants_as_safe(
+    tmp_path: Path, defect: str
+) -> None:
+    """Only the exact test-only Red candidate is eligible for automatic retry review."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = _precheckpoint_test_only_red_record(tmp_path)
+    repository = _precheckpoint_test_only_repository(config, record)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    if defect == "branch":
+        repository.legacy_branch = "agent/issue-999"
+    elif defect == "head":
+        repository.current_head = "c" * 40
+    elif defect == "staged":
+        repository.legacy_staged_paths = repository.paths
+    elif defect == "production_path":
+        repository.paths = ("src/agent_work/runtime.py",)
+        repository.legacy_unstaged_paths = repository.paths
+    elif defect == "untracked":
+        repository.legacy_has_untracked = True
+    elif defect == "unmerged":
+        repository.legacy_has_unmerged = True
+    elif defect == "rename":
+        repository.legacy_has_renames = True
+    elif defect == "merge_head":
+        repository.legacy_merge_head = "c" * 40
+    elif defect == "publication_artifact":
+        record = record.model_copy(update={"merge_request_draft": _decision_draft()})
+    elif defect == "progress_artifact":
+        record = record.model_copy(
+            update={
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        retry_count=1,
+                        code=ErrorCode.RED_CHECKPOINT_FAILED.value,
+                        detail="checkpoint creation failed",
+                    ),
+                )
+            }
+        )
+    elif defect == "dependency_open":
+        gitlab.split_children["target"] = _issue(
+            description=render_split_marker(310967, 1, "target", (23,))
+        )
+        gitlab.issues[23] = _issue(iid=23, state="opened")
+    else:
+        record = record.model_copy(update={"worktree": tmp_path / "other-worktree"})
+    retained = ledger.persist(record)
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert report.recovery_candidates[0].classification != "safely_retryable"
+    assert (
+        report.recovery_candidates[0].corroboration["precheckpoint_test_only_red"]
+        == "false"
+    )
+    assert ledger.load(record.issue_iid) == retained
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
+@pytest.mark.parametrize("drift", ("index", "staged", "unstaged", "untracked"))
+def test_precheckpoint_test_only_red_apply_rejects_candidate_drift_before_effects(
+    tmp_path: Path, drift: str
+) -> None:
+    """Previewed pre-checkpoint Red evidence is re-observed before state can change."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_precheckpoint_test_only_red_record(tmp_path))
+    repository = _precheckpoint_test_only_repository(config, record)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact preserved test-only Red candidate was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "precheckpoint-test-only-drift-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    if drift == "index":
+        repository.legacy_index_fingerprint = "e" * 64
+    elif drift == "staged":
+        repository.legacy_staged_paths = repository.paths
+    elif drift == "unstaged":
+        repository.legacy_unstaged_paths = ("tests/other_test.py",)
+    else:
+        repository.legacy_has_untracked = True
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(record.issue_iid) == record
     assert repository.binds == repository.prepares == repository.pushes == 0
     assert gitlab.created_merge_requests == 0 and gitlab.labels == []
 
