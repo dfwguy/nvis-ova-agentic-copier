@@ -1719,7 +1719,7 @@ def test_worker_result_build_failure_is_bounded_and_emits_no_envelope(
     assert len(stderr[0].encode("utf-8")) <= 2048
 
 
-def test_worker_result_build_runtime_failure_is_sanitized_even_in_debug_mode(
+def test_worker_result_build_unexpected_internal_failure_is_a_fixed_safe_category(
     tmp_path: Path,
 ) -> None:
     """Default-safe diagnostics never expose a runtime boundary's detail."""
@@ -1753,7 +1753,42 @@ def test_worker_result_build_runtime_failure_is_sanitized_even_in_debug_mode(
     )
 
     assert exit_code == 1
-    assert stderr == ["worker_result: could not be read or validated"]
+    assert stderr == ["worker_result_validation: unexpected internal failure"]
+
+
+@pytest.mark.parametrize(
+    "error", (FileNotFoundError("raw missing path"), OSError("raw read failure"))
+)
+def test_worker_result_build_input_read_failures_are_a_fixed_safe_category(
+    tmp_path: Path, error: OSError
+) -> None:
+    """Missing and unreadable transient inputs have one non-leaking capture cause."""
+    stderr: list[str] = []
+
+    def fail_read(_path: Path) -> bytes:
+        raise error
+
+    exit_code = main(
+        [
+            "worker-result",
+            "build",
+            "--issue-iid",
+            "81",
+            "--input-file",
+            str(tmp_path / "input.json"),
+        ],
+        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
+        changed_paths=lambda _worktree: (),
+        read_bytes=fail_read,
+        write_stdout=lambda _message: pytest.fail(
+            "input failure must not emit an envelope"
+        ),
+        write_stderr=stderr.append,
+    )
+
+    assert exit_code == 1
+    assert stderr == ["worker_result_capture: input artifact missing or unreadable"]
+    assert all("raw" not in diagnostic for diagnostic in stderr)
 
 
 def test_builder_runtime_uses_read_only_ledger_loading(

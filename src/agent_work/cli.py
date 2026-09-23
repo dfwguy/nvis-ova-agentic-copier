@@ -46,7 +46,7 @@ from .gitlab import (
 )
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
-from .ledger import JsonLedger, LockBusy, state_home
+from .ledger import JsonLedger, LedgerCorrupt, LockBusy, state_home
 from .models import AgentWorkConfig, CommandReport, LedgerRecord, MergeRequestEvidence
 from .ports import CommandRunner
 from .red_checkpoint import (
@@ -1670,6 +1670,11 @@ def main(
         return 2
     if parsed.resource == "worker-result" and parsed.action == "build":
         try:
+            input_bytes = read_bytes(parsed.input_file)
+        except OSError:
+            write_stderr("worker_result_capture: input artifact missing or unreadable")
+            return 1
+        try:
             if load_record is None or changed_paths is None:
                 from .runtime import build_worker_result_dependencies
 
@@ -1689,7 +1694,7 @@ def main(
             record = record_loader(parsed.issue_iid)
             if record is None:
                 raise WorkerProtocolError("issue_iid", "has no retained ledger record")
-            build_input = parse_worker_result_build_input(read_bytes(parsed.input_file))
+            build_input = parse_worker_result_build_input(input_bytes)
             observed_paths = observe_paths(record.worktree)
             if checkpoint_loader is None:
                 result = build_worker_result(
@@ -1707,13 +1712,14 @@ def main(
                         record.project_id, record.issue_iid, record.source_sha or ""
                     ),
                 )
-        except (OSError, RuntimeError, ValueError) as error:
-            diagnostic = (
-                format_worker_result_diagnostic(error)
-                if isinstance(error, WorkerProtocolError)
-                else "worker_result: could not be read or validated"
-            )
-            write_stderr(diagnostic)
+        except WorkerProtocolError as error:
+            write_stderr(format_worker_result_diagnostic(error))
+            return 1
+        except LedgerCorrupt:
+            write_stderr("worker_result: could not be read or validated")
+            return 1
+        except (OSError, RuntimeError, ValueError):
+            write_stderr("worker_result_validation: unexpected internal failure")
             return 1
         if parsed.apply:
             handoff_file = cast(Path, parsed.handoff_file)
