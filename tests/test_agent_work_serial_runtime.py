@@ -1068,8 +1068,11 @@ class HandoffInvoker:
             "artifact_not_written",
             "artifact_unreadable",
             "artifact_too_large",
+            "builder_rejected",
+            "builder_budget_exhausted",
             "post_read_cleanup_failed",
         ] = "captured",
+        capture_diagnostic: str | None = None,
         on_invoke: Callable[[], None] | None = None,
     ) -> None:
         self.artifact_updates = artifact_updates or {}
@@ -1079,6 +1082,7 @@ class HandoffInvoker:
         self.malformed = malformed
         self.missing = missing
         self.capture_status = capture_status
+        self.capture_diagnostic = capture_diagnostic
         self.on_invoke = on_invoke
         self.requests: list[object] = []
 
@@ -1135,6 +1139,11 @@ class HandoffInvoker:
                 **self.artifact_updates,
             }
             payload = json.dumps(artifact, separators=(",", ":")).encode()
+        capture = (
+            HandoffCapture(self.capture_status, self.capture_diagnostic)
+            if self.capture_diagnostic is not None
+            else HandoffCapture(self.capture_status)
+        )
         return WorkerInvocation(
             returncode=0,
             stdout=(
@@ -1144,7 +1153,7 @@ class HandoffInvoker:
             ),
             stderr="",
             handoff=payload,
-            handoff_capture=HandoffCapture(self.capture_status),
+            handoff_capture=capture,
         )
 
 
@@ -6505,6 +6514,106 @@ def test_agent_invoker_builder_rejection_cleans_transient_input_and_handoff(
     assert str(handoff_path) not in invocation.stderr
 
 
+def test_agent_invoker_preserves_only_canonical_builder_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A trusted canonical diagnostic crosses the builder boundary exactly."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+    diagnostic = "builder_input.merge_request_draft: invalid type/shape/value"
+    raw_builder_output = f"raw builder output from {handoff_path}"
+    input_path: Path | None = None
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal input_path
+        if command[0] != str(builder):
+            input_path = Path(command[command.index("--output-last-message") + 1])
+            input_path.write_bytes(b'{"workflow_lane":"coding"}')
+            return CommandResult(0, "untrusted worker prose", "")
+        return CommandResult(2, raw_builder_output, diagnostic)
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff is None
+    assert invocation.handoff_capture.status == "builder_rejected"
+    assert invocation.handoff_capture.diagnostic == diagnostic
+    assert raw_builder_output not in invocation.stdout
+    assert raw_builder_output not in invocation.stderr
+    assert str(handoff_path) not in invocation.stderr
+    assert input_path is not None and str(input_path) not in invocation.stderr
+    assert not handoff_path.exists()
+    assert input_path is not None and not input_path.exists()
+
+
+@pytest.mark.parametrize(
+    "builder_stderr",
+    (
+        "builder_input.not_a_field: invalid type/shape/value",
+        "builder_input.merge_request_draft: invalid type/shape/value\nsecond line",
+        "builder_input.merge_request_draft: invalid type/shape/value /private/input.json",
+        "/private/input.json",
+        "builder_input.merge_request_draft: unexpected builder failure",
+    ),
+)
+def test_agent_invoker_collapses_unsafe_builder_diagnostic(
+    tmp_path: Path, builder_stderr: str
+) -> None:
+    """Unrecognized builder stderr cannot cross the trusted boundary."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+    raw_builder_output = f"raw builder output from {handoff_path}"
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[0] != str(builder):
+            captured_path = Path(command[command.index("--output-last-message") + 1])
+            captured_path.write_bytes(b'{"workflow_lane":"coding"}')
+            return CommandResult(0, "untrusted worker prose", "")
+        return CommandResult(2, raw_builder_output, builder_stderr)
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff_capture.status == "builder_rejected"
+    assert invocation.handoff_capture.diagnostic is None
+    assert raw_builder_output not in invocation.stdout
+    assert raw_builder_output not in invocation.stderr
+    assert builder_stderr not in invocation.stderr
+    assert str(handoff_path) not in invocation.stderr
+
+
 def test_agent_invoker_rejects_an_exhausted_builder_budget_without_invocation(
     tmp_path: Path,
 ) -> None:
@@ -6543,7 +6652,8 @@ def test_agent_invoker_rejects_an_exhausted_builder_budget_without_invocation(
 
     assert len(calls) == 1
     assert invocation.handoff is None
-    assert invocation.handoff_capture.status == "builder_rejected"
+    assert invocation.handoff_capture.status == "builder_budget_exhausted"
+    assert invocation.handoff_capture.diagnostic is None
     assert not handoff_path.exists()
 
 
@@ -6617,7 +6727,11 @@ def test_agent_invoker_fails_closed_when_builder_rejection_cleanup_fails(
 
     def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         if command[0] == str(builder):
-            return CommandResult(2, "raw builder output", "raw builder error")
+            return CommandResult(
+                2,
+                "raw builder output",
+                "builder_input.merge_request_draft: invalid type/shape/value",
+            )
         captured_path = Path(command[command.index("--output-last-message") + 1])
         captured_path.write_bytes(b'{"workflow_lane":"coding"}')
         return CommandResult(0, "untrusted prose", "")
@@ -6630,6 +6744,7 @@ def test_agent_invoker_fails_closed_when_builder_rejection_cleanup_fails(
 
     assert invocation.handoff is None
     assert invocation.handoff_capture.status == "post_read_cleanup_failed"
+    assert invocation.handoff_capture.diagnostic is None
     assert "raw builder" not in invocation.stderr
 
 
@@ -6641,6 +6756,7 @@ def test_agent_invoker_fails_closed_when_builder_rejection_cleanup_fails(
         ("artifact_unreadable", "artifact unreadable"),
         ("artifact_too_large", "artifact exceeds 1 MiB"),
         ("builder_rejected", "trusted builder rejected captured result"),
+        ("builder_budget_exhausted", "trusted builder budget exhausted"),
         ("post_read_cleanup_failed", "post-read cleanup failed"),
     ),
 )
@@ -6666,6 +6782,34 @@ def test_serial_rejects_typed_capture_failures_with_safe_diagnostics(
     assert outcome.condition_history[-1].detail == (
         f"worker_result_handoff: {expected_diagnostic}"
     )
+
+
+def test_serial_preserves_canonical_builder_diagnostic_in_condition(
+    tmp_path: Path,
+) -> None:
+    """Protocol retry evidence includes only the canonical builder diagnostic."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    diagnostic = "builder_input.merge_request_draft: invalid type/shape/value"
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),  # type: ignore[arg-type]
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+        invoke=HandoffInvoker(
+            capture_status="builder_rejected", capture_diagnostic=diagnostic
+        ),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.condition_history[-1].detail == diagnostic
+    assert "worker-result.json" not in outcome.condition_history[-1].detail
 
 
 @pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
@@ -7771,8 +7915,15 @@ def test_recovery_inventory_does_not_fall_back_past_latest_unsafe_detail(
     assert "retry --issue-iid" not in candidate.next_action
 
 
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "final_envelope.protocol_version: must equal 2",
+        "worker_result_handoff: trusted builder budget exhausted",
+    ),
+)
 def test_recovery_inventory_retains_safe_worker_cause_after_retry_exhaustion(
-    tmp_path: Path,
+    tmp_path: Path, detail: str
 ) -> None:
     """Retry exhaustion retains the latest safe underlying worker condition."""
     config = _config(tmp_path)
@@ -7786,7 +7937,7 @@ def test_recovery_inventory_retains_safe_worker_cause_after_retry_exhaustion(
                 "condition_history": (
                     ConditionEvidence(
                         code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
-                        detail="final_envelope.protocol_version: must equal 2",
+                        detail=detail,
                     ),
                     ConditionEvidence(
                         code=ErrorCode.RETRY_EXHAUSTED.value,
@@ -7806,7 +7957,7 @@ def test_recovery_inventory_retains_safe_worker_cause_after_retry_exhaustion(
     )
 
     candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == "final_envelope.protocol_version: must equal 2"
+    assert candidate.blocked_cause == detail
     assert "retry --issue-iid" in candidate.next_action
 
 
