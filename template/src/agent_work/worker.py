@@ -392,6 +392,11 @@ def _safe_validation_path(model: type[BaseModel], location: tuple[object, ...]) 
 
 def is_safe_worker_result_diagnostic(value: str) -> bool:
     """Recognize only diagnostics the worker's canonical translator can emit."""
+    if value in {
+        "worker_result: could not be read or validated",
+        "worker_result_handoff: could not be written",
+    }:
+        return True
     field, separator, reason = value.partition(": ")
     if (
         separator != ": "

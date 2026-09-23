@@ -147,6 +147,17 @@ class ErrorCode(StrEnum):
     STATE_RECONCILIATION_FAILED = "state_reconciliation_failed"
 
 
+class RedCheckpointFailureStage(StrEnum):
+    """Controller-authored diagnostic for a trusted Red boundary failure."""
+
+    RETAINED_PRECHECK = "red_checkpoint: retained checkpoint precheck mismatch"
+    CONTEXT_PREPARATION = "red_checkpoint: checkpoint context preparation failed"
+    POST_WORKER_VERIFICATION = (
+        "red_checkpoint: post-worker result or checkpoint application/reload "
+        "verification failed"
+    )
+
+
 ACTIVE_STATES = frozenset(
     {
         RunnerState.PREPARING,

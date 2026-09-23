@@ -381,6 +381,23 @@ def test_current_capacity_controller_diagnostics_are_safely_recognized(
 
 
 @pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "worker_result: could not be read or validated",
+        "worker_result_handoff: could not be written",
+    ),
+)
+def test_fixed_builder_boundary_diagnostics_are_safely_recognized_exactly(
+    diagnostic: str,
+) -> None:
+    """Only the CLI's fixed boundary diagnostics may cross into the controller."""
+    assert is_safe_worker_result_diagnostic(diagnostic)
+    assert not is_safe_worker_result_diagnostic(f"{diagnostic} unsafe detail")
+    assert not is_safe_worker_result_diagnostic(f"{diagnostic}\n/private/input.json")
+    assert not is_safe_worker_result_diagnostic(diagnostic.replace(": ", "."))
+
+
+@pytest.mark.parametrize(
     ("lane", "required"),
     ((WorkflowLane.CODING, 12), (WorkflowLane.CONTENT, 3)),
 )
