@@ -75,6 +75,8 @@ class RecoveryObservation:
     owner_status: str = "missing"
     blocked_cause: str | None = None
     merge_request_url: str | None = None
+    error_code: str | None = None
+    precheckpoint_test_only_red: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,11 @@ def _classification(observation: RecoveryObservation) -> RecoveryClassification:
     if "agent::failed" in observation.labels:
         return RecoveryClassification.CLOSURE_CANDIDATE
     if observation.record_state is RunnerState.AWAITING_HUMAN:
+        return RecoveryClassification.NEEDS_HUMAN_DECISION
+    if (
+        observation.error_code == "red_checkpoint_failed"
+        and not observation.precheckpoint_test_only_red
+    ):
         return RecoveryClassification.NEEDS_HUMAN_DECISION
     dependency_states = {state for _, state in observation.split_dependencies}
     if "opened" in dependency_states:

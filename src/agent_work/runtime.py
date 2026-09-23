@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from .domain import (
@@ -455,6 +455,7 @@ def _recovery_observation(
     controller_status: str | None = None,
     owner_status: str = "unknown",
     split_dependencies: tuple[tuple[int, str], ...] = (),
+    state_root: Path | None = None,
 ) -> RecoveryObservation:
     """Build bounded recovery evidence without reading untrusted issue prose."""
     observed_issue = gitlab.fetch_issue(issue_iid) if issue is None else issue
@@ -560,6 +561,12 @@ def _recovery_observation(
             )
         ):
             blocked_cause = latest.detail
+    precheckpoint = _precheckpoint_test_only_red_evidence(
+        record,
+        repository=repository,
+        state_root=state_root,
+        split_dependencies=split_dependencies,
+    )
     return RecoveryObservation(
         issue_iid=issue_iid,
         issue_state=observed_issue.state,
@@ -592,7 +599,100 @@ def _recovery_observation(
         owner_status=owner_status,
         merge_request_url=None if record is None else record.merge_request_url,
         blocked_cause=blocked_cause,
+        error_code=None
+        if record is None or record.error_code is None
+        else record.error_code.value,
+        precheckpoint_test_only_red=precheckpoint is not None,
     )
+
+
+def _precheckpoint_test_only_red_family(record: LedgerRecord | None) -> bool:
+    """Recognize the bounded historical Red-checkpoint failure family."""
+    return (
+        record is not None
+        and record.state is RunnerState.BLOCKED
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    )
+
+
+def _precheckpoint_test_only_red_evidence(
+    record: LedgerRecord | None,
+    *,
+    repository: RepositoryPort | None,
+    state_root: Path | None,
+    split_dependencies: tuple[tuple[int, str], ...],
+) -> dict[str, str | int | bool] | None:
+    """Bind the sole historical test-only Red retry shape without changing state."""
+    if (
+        not _precheckpoint_test_only_red_family(record)
+        or repository is None
+        or state_root is None
+    ):
+        return None
+    assert record is not None
+    try:
+        candidate = repository.observe_legacy_publication_candidate(record.worktree)
+    except RepositoryError:
+        return None
+    paths = candidate.unstaged_paths
+    normalized_paths = tuple(PurePosixPath(path).as_posix() for path in paths)
+    expected_worktree = state_root / "worktrees" / str(record.issue_iid)
+    eligible = (
+        record.work_kind is WorkKind.ORDINARY
+        and record.workflow_lane is WorkflowLane.UNKNOWN
+        and record.prior_state is None
+        and record.prior_phase is None
+        and record.retry_count == 0
+        and record.retry_at is None
+        and record.automatic_repair_count == 0
+        and record.automatic_repair_at is None
+        and record.condition_history == ()
+        and record.phase_timings == ()
+        and record.source_sha is not None
+        and (record.main_sha is None or record.main_sha == record.source_sha)
+        and record.source_branch == f"agent/issue-{record.issue_iid}"
+        and record.worktree.resolve() == expected_worktree.resolve()
+        and record.intent is None
+        and record.audit_evidence is None
+        and record.receipts == ()
+        and record.publication_sha is None
+        and record.merge_request_iid is None
+        and record.merge_request_url is None
+        and record.merge_request_draft is None
+        and record.feedback_cursor is None
+        and record.pending_feedback is None
+        and record.repair_attempt is None
+        and record.suggest_close_evidence is None
+        and record.worker_exit is None
+        and record.correction_identity is None
+        and record.completed_at is None
+        and candidate.branch == record.source_branch
+        and candidate.head == record.source_sha
+        and candidate.merge_head is None
+        and candidate.staged_paths == ()
+        and bool(paths)
+        and paths == normalized_paths
+        and paths == tuple(sorted(set(paths)))
+        and all(path.startswith("tests/") and path.endswith(".py") for path in paths)
+        and not candidate.has_untracked
+        and not candidate.has_unmerged
+        and not candidate.has_renames
+        and not any(state == "opened" for _, state in split_dependencies)
+    )
+    if not eligible:
+        return None
+    return {
+        "precheckpoint_test_only_red": True,
+        "precheckpoint_project_id": record.project_id,
+        "precheckpoint_issue_iid": record.issue_iid,
+        "precheckpoint_source_branch": record.source_branch,
+        "precheckpoint_base_sha": record.source_sha,
+        "precheckpoint_head_sha": candidate.head,
+        "precheckpoint_worktree": str(record.worktree),
+        "precheckpoint_index_fingerprint": candidate.index_fingerprint,
+        "precheckpoint_test_paths": json.dumps(paths),
+    }
 
 
 def _is_safe_worker_protocol_diagnostic(value: str) -> bool:
@@ -635,6 +735,7 @@ def _recovery_split_dependencies(
 def _recovery_plan(
     request: CommandRequest,
     *,
+    config: AgentWorkConfig,
     project: GitLabProject,
     username: str,
     record: LedgerRecord | None,
@@ -649,12 +750,25 @@ def _recovery_plan(
 ) -> tuple[OperationalPlan, RecoveryObservation]:
     if request.issue_iid is None or request.choice is None or request.reason is None:
         raise RuntimeError("recovery resolution request is incomplete")
-    legacy = _legacy_dirty_publication_evidence(
-        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    split_dependencies = _recovery_split_dependencies(
+        request.issue_iid, project=project, gitlab=gitlab
+    )
+    precheckpoint = _precheckpoint_test_only_red_evidence(
+        record,
+        repository=repository,
+        state_root=config.state_root,
+        split_dependencies=split_dependencies,
+    )
+    legacy = (
+        None
+        if _precheckpoint_test_only_red_family(record)
+        else _legacy_dirty_publication_evidence(
+            record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        )
     )
     affected = (
         None
-        if legacy is not None
+        if legacy is not None or _precheckpoint_test_only_red_family(record)
         else _affected_dirty_correction_evidence(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
@@ -671,9 +785,8 @@ def _recovery_plan(
             owner_status=owner_status,
             issue=issue,
             merge_requests=merge_requests,
-            split_dependencies=_recovery_split_dependencies(
-                request.issue_iid, project=project, gitlab=gitlab
-            ),
+            split_dependencies=split_dependencies,
+            state_root=config.state_root,
         )
         resolution = build_resolution_plan(
             ResolutionRequest(
@@ -709,6 +822,12 @@ def _recovery_plan(
         evidence.update(legacy)
     if affected is not None:
         evidence.update(affected)
+    if _precheckpoint_test_only_red_family(record) and precheckpoint is None:
+        raise RuntimeError(
+            "pre-checkpoint test-only Red recovery evidence is ineligible"
+        )
+    if precheckpoint is not None:
+        evidence.update(precheckpoint)
     return OperationalPlan(
         command=request.command,
         action=choice.value,
@@ -1832,6 +1951,11 @@ def _recovery_candidate_report(
         "blocked_cause": observation.blocked_cause,
         "stale": observation.stale,
         "ambiguous": observation.ambiguous,
+        "precheckpoint_test_only_red": (
+            observation.precheckpoint_test_only_red
+            if observation.error_code == ErrorCode.RED_CHECKPOINT_FAILED.value
+            else None
+        ),
     }
     open_dependencies = tuple(
         str(iid) for iid, state in observation.split_dependencies if state == "opened"
@@ -1870,7 +1994,10 @@ def _recovery_candidate_report(
             observation.blocked_cause
             if (
                 observation.blocked_cause is not None
-                and candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
+                and (
+                    candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
+                    or observation.error_code == ErrorCode.RED_CHECKPOINT_FAILED.value
+                )
             )
             else "pipeline evidence disagrees"
             if observation.pipeline_status == "failed"
@@ -2147,6 +2274,7 @@ def dispatch(
                             (dependency_iid, observed_issues[dependency_iid].state)
                             for dependency_iid in child_dependencies.get(iid, ())
                         ),
+                        state_root=config.state_root,
                     )
                     for iid in sorted(candidate_iids)
                 )
@@ -2305,12 +2433,14 @@ def dispatch(
                 split_dependencies=_recovery_split_dependencies(
                     request.issue_iid or 0, project=project, gitlab=gitlab
                 ),
+                state_root=config.state_root,
             )
             plan = reviewed
         else:
             try:
                 plan, observation = _recovery_plan(
                     request,
+                    config=config,
                     project=project,
                     username=username,
                     record=record,
@@ -2370,12 +2500,14 @@ def dispatch(
                     split_dependencies=_recovery_split_dependencies(
                         request.issue_iid or 0, project=project, gitlab=gitlab
                     ),
+                    state_root=config.state_root,
                 )
                 current_plan = reviewed
             else:
                 try:
                     current_plan, current_observation = _recovery_plan(
                         request,
+                        config=config,
                         project=project,
                         username=username,
                         record=current_record,
@@ -2423,6 +2555,9 @@ def dispatch(
                 legacy_dirty_publication = (
                     retained_publication
                     and "legacy_index_fingerprint" in reviewed.evidence
+                )
+                precheckpoint_test_only_red = (
+                    reviewed.evidence.get("precheckpoint_test_only_red") is True
                 )
                 correction_snapshot = reviewed.evidence.get("correction_identity")
                 if legacy_dirty_publication or correction_snapshot is not None:
@@ -2489,6 +2624,15 @@ def dispatch(
                         )
                     )
                     gitlab.transition_labels(current_record.issue_iid, "agent::running")
+                    continue_recovery = False
+                elif precheckpoint_test_only_red:
+                    updated = _resume_blocked_retry(
+                        current_record,
+                        wired=wired,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        conflict_checked=True,
+                    )
                     continue_recovery = False
                 elif retained_publication:
                     updated = _resume_blocked_retry(
