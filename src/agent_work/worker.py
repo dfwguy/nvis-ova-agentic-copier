@@ -394,7 +394,9 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
     """Recognize only diagnostics the worker's canonical translator can emit."""
     if value in {
         "worker_result: could not be read or validated",
+        "worker_result_capture: input artifact missing or unreadable",
         "worker_result_handoff: could not be written",
+        "worker_result_validation: unexpected internal failure",
     }:
         return True
     field, separator, reason = value.partition(": ")

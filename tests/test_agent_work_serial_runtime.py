@@ -6701,7 +6701,9 @@ def test_agent_invoker_builder_rejection_cleans_transient_input_and_handoff(
     "diagnostic",
     (
         "builder_input.merge_request_draft: invalid type/shape/value",
-        "worker_result: could not be read or validated",
+        "controller_invariant.receipts: required receipts are not coherent",
+        "worker_result_capture: input artifact missing or unreadable",
+        "worker_result_validation: unexpected internal failure",
         "worker_result_handoff: could not be written",
     ),
 )
@@ -7011,8 +7013,8 @@ def test_serial_preserves_canonical_builder_diagnostic_in_condition(
 @pytest.mark.parametrize(
     "diagnostic",
     (
-        "worker_result: could not be read or validated",
-        "worker_result_handoff: could not be written",
+        "worker_result_capture: input artifact missing or unreadable",
+        "worker_result_validation: unexpected internal failure",
     ),
 )
 def test_recovery_inventory_surfaces_fixed_builder_diagnostic_after_repeat(
@@ -7057,6 +7059,8 @@ def test_recovery_inventory_surfaces_fixed_builder_diagnostic_after_repeat(
     assert blocked is not None and blocked.state is RunnerState.BLOCKED
     assert blocked.condition_history[-1].detail == diagnostic
     assert report.recovery_candidates[0].blocked_cause == diagnostic
+    assert diagnostic in gitlab.outcome_comments[0][1]
+    assert "raw-worker-prose-secret" not in gitlab.outcome_comments[0][1]
 
 
 @pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
