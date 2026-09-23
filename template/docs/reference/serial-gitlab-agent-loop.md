@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-23
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -429,7 +429,8 @@ accepted for consistent invocation and changes nothing.
 | Invalid manifest, unreadable credential file, access/API failure, or response-verification failure | Exits `1` with sanitized diagnostics. |
 | Invalid usage | Exits `2`. |
 
-`worker-result build` validates and builds one worker result.
+`worker-result build` validates a captured `WorkerResultBuildInput` object and
+builds one worker result.
 
 ```text
 <agent-work-result>{...}</agent-work-result>
@@ -437,7 +438,7 @@ accepted for consistent invocation and changes nothing.
 
 | Worker-result action, field, or outcome | Contract |
 | --- | --- |
-| Input and evidence | Reads one strict structured JSON request with the retained ledger and worktree for the supplied issue. |
+| Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object, captured from a supported worker's final message, with the retained ledger and worktree for the supplied issue. The object is untrusted builder input. |
 | Derived fields and checks | Derives protocol-v2 identity, state, completed phase, and duplicated audit fields. Uses the trusted controller and receipt-coherence rules from a workflow transition. |
 | Preview | Without `--apply`, validates and emits the result but makes no change. It does not write a handoff artifact. |
 | Successful preview output | Has exactly one compact delimited result. |
@@ -445,14 +446,16 @@ accepted for consistent invocation and changes nothing.
 | Preview without `--json` | Success emits the delimited worker envelope. |
 | `--json` | Preview emits the same compact envelope without delimiters. Applied mode emits only the bounded `action`, `applied`, and `issue_iid` receipt; it never emits the protected envelope. JSON does not relax validation. |
 | `--debug` | Adds local sanitized diagnostics without credentials, environment values, worker prose, prompts, or transcripts. |
-| Applied handoff | After strict validation, `--apply` atomically writes one artifact to the controller-supplied `--handoff-file`. It also requires the controller-supplied `--handoff-nonce`. Applied success does not emit the envelope on standard output. |
+| Applied handoff | Trusted `AgentInvoker` invokes its controller-owned helper with `--apply`, controller-supplied issue, input, handoff, and nonce values. It rejects a helper inside the worker checkout. After strict validation, it atomically writes one artifact to the controller-supplied `--handoff-file`. A worker does not invoke this helper. Applied success does not emit the envelope on standard output. |
+| Temporary transport | The controller creates the temporary input and handoff files below its state root, outside the retained worker checkout. It attempts to clear both before launch and after every capture outcome. Any cleanup failure rejects the capture. |
+| Builder time bound | The controller gives the builder only the worker time still remaining. The builder cannot extend the worker budget. |
 | Artifact identity | The artifact binds its schema version and nonce to the project, issue, ledger revision, source branch, source SHA, sorted changed paths observed when it is built, and validated envelope. |
-| Controller verification | After the worker returns, the controller observes the final changed paths and accepts only the fresh artifact whose complete identity and bound paths match. Missing, malformed, stale, or mismatched artifacts fail closed. Worker prose and standard-output envelopes cannot replace or override it. |
+| Controller verification | After the worker returns, the controller observes the final changed paths and accepts only the fresh artifact whose complete identity and bound paths match. Missing, malformed, stale, or mismatched artifacts fail closed. The captured input, worker prose, and standard-output envelopes cannot replace or override it. |
 | Mutation boundary | Apply writes only the transient untracked handoff artifact. It never changes tracked worktree content, the ledger, Git, GitLab, or publication state. |
 | Success | Exits `0`. |
 | Validation or runtime failure | Exits `1`. |
 | Argparse usage failure | Exits `2`. |
-| Input object | One strict JSON object containing only worker intent. Unknown fields are rejected. |
+| Input object | One strict `WorkerResultBuildInput` JSON object containing only worker intent. The worker returns it as its final message. Unknown fields are rejected. |
 | Required worker intent | `workflow_lane`, `result_kind`, `receipts`, `change_summary`, and `next_action`. |
 | Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, `red_checkpoint_request`, and bounded `audit_summary` evidence: `capacity`, `tests`, `findings`, and `corrections`. |
 | Controller-derived values | Protocol version; project and issue identity; ledger revision; expected state and phase; completed phase; audit lane; role receipts; changed paths; reviewer receipt list. The input must not contain `identity`, `state`, `phase`, audit `lane`, `role_receipts`, `changed_paths`, or `reviewers`. |
@@ -489,7 +492,7 @@ The other result kinds preserve their distinct controller transitions:
 | Retention ban | Failures never retain request values, worker prose, prompts, chain-of-thought, credentials, environment values, or unbounded exception output. |
 | Issues #40 and #78 | Protocol failures remain retryable, so retained worktrees stay in place for ordinary recovery. |
 | Issue #80 | This does not claim an underlying cause for its retry exhaustion. |
-| Envelope handling | Return the helper's delimited standard output unchanged to the controller. Put explanatory status outside that envelope. |
+| Envelope handling | Return only strict `WorkerResultBuildInput` JSON as the final message. `AgentInvoker` supplies it to the controller-owned builder. Neither helper output nor other prose is directly authoritative. |
 
 ### Worker validation diagnostics
 
@@ -863,19 +866,24 @@ The oneshot service has a bounded outer limit. `TimeoutStartSec=190min`.
 | Timeout action | At the outer limit, systemd sends TERM to the full service control group. It gives TERM 30 seconds before KILL, then kills survivors. |
 | Timeout evidence | The unit journal records `Result=timeout` and relevant sanitized wrapper diagnostics. The durable ledger and retained issue worktree stay in place. Normal retry and human diagnosis use that evidence. |
 
-A workflow-owning worker returns a versioned, redacted envelope for its
-expected ledger change. For the handoff-aware production `AgentInvoker`, only
-the controller-owned handoff capture is a worker result. Standard output and
-model prose, including output from a successful worker process, are never
-accepted as a handoff result.
+A workflow-owning worker returns one strict `WorkerResultBuildInput` JSON
+object as its final message. For the handoff-aware production `AgentInvoker`,
+that message is untrusted builder input, not a handoff result. `AgentInvoker`
+captures Codex's final message through `--output-last-message` and the
+supported final-text output from Claude or Pi. It then invokes the
+controller-owned `worker-result build` helper with controller-owned issue,
+input, handoff, and nonce values and `--apply`. Only the resulting
+controller-owned artifact can be accepted as a handoff result. Other standard
+output and model prose, including output from a successful worker process,
+are never accepted as a handoff result.
 
 | Envelope field or check | Contract |
 | --- | --- |
 | Result | `red_checkpoint_ready` for the coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, or `split_required` for a workflow-owning result. |
 | Content | Include the coarse completed state, receipts, diagnostic, and next action. |
 | Trusted runner | Before changing state, check the ledger, configured numeric project, Git evidence, and needed workflow receipts. |
-| Trusted capture | `AgentInvoker` retains one typed capture outcome: `captured`, `pre_run_cleanup_failed`, `artifact_not_written`, `artifact_unreadable`, `artifact_too_large`, or `post_read_cleanup_failed`. The controller accepts a result only from `captured` after its identity and changed paths match the controller's expected handoff. |
-| Rejected capture | A missing artifact after a successful worker, malformed artifact, controller identity mismatch, changed-path mismatch, or applicable filesystem capture, cleanup, or size-limit failure rejects the result. The durable diagnostic is a bounded constant that identifies that stage and category. It never retains raw payloads, paths, identities, secrets, or worker output. Cleanup is attempted for every captured artifact; a cleanup failure rejects the result. |
+| Trusted capture | `AgentInvoker` captures the supported worker's final message, supplies it to the builder, and retains one typed capture outcome: `captured`, `pre_run_cleanup_failed`, `artifact_not_written`, `artifact_unreadable`, `artifact_too_large`, `builder_rejected`, or `post_read_cleanup_failed`. The controller accepts a result only from `captured` after its identity and changed paths match the controller's expected handoff. |
+| Rejected capture | A missing, malformed, or rejected captured final message; a missing artifact after a successful worker; a malformed artifact; controller identity mismatch; changed-path mismatch; or applicable filesystem capture, cleanup, or size-limit failure rejects the result. The durable diagnostic is a bounded constant that identifies that stage and category. It never retains raw payloads, paths, identities, secrets, or worker output. Cleanup is attempted for every captured artifact; a cleanup failure rejects the result. |
 | Coding final audit | Name Architect, Red, Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable reviews including the initial `$license-checker`, and Finalizer. |
 | License receipt | Finalizer needs a current approving license receipt for the final in-scope diff. During correction, rerun the checker only if a maintained file in its checked scope changed. A violation cannot be waived or marked not applicable. |
 | Policy finding | Send it through Architect to the Agent-policy Writer, not Green. |
@@ -904,10 +912,10 @@ global capacity is unreported.
 | New launch | A prior report does not authorize a new launch. Use a newer current report when one is available. |
 
 The worker-result builder preserves its trust boundary. It derives identity,
-ledger revision, state, phase, and duplicated audit fields from the controller. Worker
-input supplies only nonduplicated intent and evidence; it must not supply those
-controller-derived fields. Legacy ledger records remain readable through their
-recorded route.
+ledger revision, state, phase, and duplicated audit fields from the controller.
+The captured final-message input supplies only nonduplicated intent and
+evidence; it must not supply those controller-derived fields. Legacy ledger
+records remain readable through their recorded route.
 See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
 

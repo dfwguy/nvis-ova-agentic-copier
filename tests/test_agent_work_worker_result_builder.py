@@ -1345,7 +1345,7 @@ def test_worker_prompt_forbids_handcrafted_identity_or_ledger_fields(
 
 
 def test_handoff_prompt_omits_the_legacy_stdout_return_contract(tmp_path: Path) -> None:
-    """A handoff-aware worker receives one noncontradictory completion route."""
+    """A handoff-aware worker returns only strict builder input to its controller."""
     prompt = build_worker_prompt(
         _record(tmp_path).model_dump(mode="json"),
         project_id=310967,
@@ -1365,41 +1365,15 @@ def test_handoff_prompt_omits_the_legacy_stdout_return_contract(tmp_path: Path) 
         ).resolve(),
     )
 
-    assert "--handoff-file" in prompt and "--apply" in prompt
-    assert "Return the builder output unchanged" not in prompt
-    assert "<agent-work-result>" not in prompt
-
-
-def test_handoff_prompt_uses_the_explicit_checkout_owned_result_builder(
-    tmp_path: Path,
-) -> None:
-    """A handoff-aware prompt cannot resolve its result builder from PATH."""
-    builder = (tmp_path / "active-checkout" / "bin/agent-work-from-checkout").resolve()
-    handoff = WorkerResultHandoffRequest(
-        path=tmp_path / "handoff.json",
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=81,
-        ledger_revision=7,
-        source_branch="agent/issue-81",
-        source_sha="a" * 40,
-    )
-
-    prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
-        project_id=310967,
-        issue_iid=81,
-        effective_worker_budget_seconds=600,
-        worker_result_handoff=handoff,
-        worker_result_builder=builder,
-    )
-
     assert (
-        f"Use `{builder} worker-result build --issue-iid 81 --input-file PATH "
-        f"--handoff-file {handoff.path} --handoff-nonce {handoff.nonce} --apply`"
+        "exactly one strict WorkerResultBuildInput JSON object as your final response"
         in prompt
     )
-    assert "Use `agent-work worker-result build" not in prompt
+    assert "trusted controller invokes the checkout-owned builder" in prompt
+    assert "worker-result build" not in prompt
+    assert "--handoff-file" not in prompt and "--apply" not in prompt
+    assert "Return the builder output unchanged" not in prompt
+    assert "<agent-work-result>" not in prompt
 
 
 def test_handoff_prompt_requires_an_explicit_result_builder(tmp_path: Path) -> None:

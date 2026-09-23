@@ -2571,7 +2571,7 @@ def _execute(
             source_sha = record.source_sha or repository.head(record.worktree)
             nonce = secrets.token_hex(16)
             handoff_request = WorkerResultHandoffRequest(
-                path=record.worktree / f".agent-work-result-{nonce}.json",
+                path=ledger.state_root / f".agent-work-result-{nonce}.json",
                 nonce=nonce,
                 project_id=record.project_id,
                 issue_iid=record.issue_iid,
@@ -2601,7 +2601,9 @@ def _execute(
                 if _feedback_is_qualifying(note, repository.config.factory_username)
             ),
             worker_result_handoff=handoff_request,
-            worker_result_builder=record.worktree / "bin/agent-work-from-checkout",
+            worker_result_builder=(
+                repository.config.checkout / "bin" / "agent-work-from-checkout"
+            ),
         )
     except RedCheckpointError:
         return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
@@ -2739,7 +2741,7 @@ def _execute(
                     while nonce == previous_nonce:
                         nonce = secrets.token_hex(16)
                     handoff_request = WorkerResultHandoffRequest(
-                        path=record.worktree / f".agent-work-result-{nonce}.json",
+                        path=ledger.state_root / f".agent-work-result-{nonce}.json",
                         nonce=nonce,
                         project_id=record.project_id,
                         issue_iid=record.issue_iid,
@@ -2772,7 +2774,7 @@ def _execute(
                     ),
                     worker_result_handoff=handoff_request,
                     worker_result_builder=(
-                        record.worktree / "bin/agent-work-from-checkout"
+                        repository.config.checkout / "bin" / "agent-work-from-checkout"
                     ),
                 )
         except (RedCheckpointError, RepositoryError, WorkerProtocolError, ValueError):

@@ -3254,7 +3254,9 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         calls.append((command, kwargs))
         if command[-1] == "--help":
             return SimpleNamespace(
-                returncode=0, stdout="usage: codex exec --add-dir DIR", stderr=""
+                returncode=0,
+                stdout=("usage: codex exec --add-dir DIR --output-last-message FILE"),
+                stderr="",
             )
         diagnostic = " ".join((retained, *filtered))
         return SimpleNamespace(returncode=1, stdout=diagnostic, stderr=diagnostic)
@@ -3334,6 +3336,7 @@ def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
     [
         (1, "usage: codex exec"),
         (0, "usage: codex exec\n  --sandbox workspace-write"),
+        (0, "usage: codex exec --add-dir DIR"),
     ],
 )
 def test_codex_preflight_rejects_an_unsupported_exec(
@@ -3378,7 +3381,9 @@ def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
     def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
         calls.append((command, kwargs))
         return SimpleNamespace(
-            returncode=0, stdout="usage: codex exec --add-dir DIR", stderr=""
+            returncode=(0),
+            stdout=("usage: codex exec --add-dir DIR --output-last-message PATH"),
+            stderr="",
         )
 
     invoker = AgentInvoker(

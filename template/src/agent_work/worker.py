@@ -12,12 +12,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from types import UnionType
 from typing import BinaryIO, Literal, Protocol, Union, cast, get_args, get_origin
 
@@ -141,6 +143,13 @@ class HandoffPath(Protocol):
 
     def open(self, mode: str) -> BinaryIO:
         """Open the artifact for binary capture."""
+
+
+class TransientPathFactory(Protocol):
+    """Create the controller-owned path used to capture one final response."""
+
+    def __call__(self, checkout: Path, handoff: WorkerResultHandoffRequest) -> Path:
+        """Return an untracked, nonce-scoped input path."""
 
 
 @dataclass(frozen=True)
@@ -455,6 +464,7 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             "pre-run stale cleanup failed",
             "artifact unreadable",
             "artifact exceeds 1 MiB",
+            "trusted builder rejected captured result",
             "post-read cleanup failed",
         },
     }
@@ -736,6 +746,7 @@ class HandoffCapture:
         "artifact_not_written",
         "artifact_unreadable",
         "artifact_too_large",
+        "builder_rejected",
         "post_read_cleanup_failed",
     ]
 
@@ -795,6 +806,7 @@ def parse_worker_result_handoff(
         "artifact_not_written": "not written/missing after successful invocation",
         "artifact_unreadable": "artifact unreadable",
         "artifact_too_large": "artifact exceeds 1 MiB",
+        "builder_rejected": "trusted builder rejected captured result",
         "post_read_cleanup_failed": "post-read cleanup failed",
     }
     if capture.status != "captured":
@@ -1286,12 +1298,10 @@ def build_worker_prompt(
     if worker_result_handoff is not None and worker_result_builder is None:
         raise ValueError("worker result builder is required for a handoff")
     result_contract = (
-        f"Use `{worker_result_builder} worker-result build --issue-iid "
-        f"{issue_iid} --input-file PATH --handoff-file {worker_result_handoff.path} "
-        f"--handoff-nonce {worker_result_handoff.nonce} --apply` to derive trusted fields, "
-        "validate the envelope, and atomically write the controller-owned handoff. "
-        "Do not transcribe or return that envelope through standard output. "
-        "Complete after the helper succeeds. "
+        "Return exactly one strict WorkerResultBuildInput JSON object as your final response. "
+        "The trusted controller invokes the checkout-owned builder, derives controller fields, "
+        "and reads only its produced artifact. Do not invoke the helper, return its output, "
+        "handcraft envelope or controller fields, or emit explanatory prose. "
         if worker_result_handoff is not None
         else "Use `agent-work worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
@@ -1346,7 +1356,12 @@ def build_worker_prompt(
 
 
 def _agent_command(
-    agent: str, executable: str, checkout: Path, prompt: str
+    agent: str,
+    executable: str,
+    checkout: Path,
+    prompt: str,
+    *,
+    output_last_message: Path | None = None,
 ) -> tuple[tuple[str, ...], str | None]:
     _validate_agent(agent)
     if agent == "codex":
@@ -1364,6 +1379,11 @@ def _agent_command(
                 str(checkout / ".agents"),
                 "--add-dir",
                 str(checkout / "template" / ".agents"),
+                *(
+                    ("--output-last-message", str(output_last_message))
+                    if output_last_message is not None
+                    else ()
+                ),
                 "--ephemeral",
                 "--color",
                 "never",
@@ -1456,11 +1476,28 @@ class AgentInvoker:
         run_command: CommandRunner,
         *,
         environment: Mapping[str, str],
+        transient_path_factory: TransientPathFactory | None = None,
+        trusted_builder: Path | None = None,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
+        self._transient_path_factory = (
+            transient_path_factory or self._default_transient_path
+        )
+        self._trusted_builder = trusted_builder
+        self._clock = clock
 
     supports_worker_result_handoff = True
+
+    @staticmethod
+    def _default_transient_path(
+        checkout: Path, handoff: WorkerResultHandoffRequest
+    ) -> Path:
+        """Return a nonce-scoped capture path outside the retained checkout."""
+        if isinstance(handoff.path, Path):
+            return handoff.path.with_name(f".agent-work-input-{handoff.nonce}.json")
+        return checkout.parent / f".agent-work-input-{handoff.nonce}.json"
 
     @staticmethod
     def _remove_handoff(path: Path | HandoffPath) -> bool:
@@ -1470,6 +1507,26 @@ class AgentInvoker:
         except OSError:
             return False
         return True
+
+    @classmethod
+    def _clear_transport_paths(
+        cls, input_path: Path, handoff_path: Path | HandoffPath
+    ) -> bool:
+        """Attempt both transport cleanups and report whether both succeeded."""
+        input_removed = cls._remove_handoff(input_path)
+        handoff_removed = cls._remove_handoff(handoff_path)
+        return input_removed and handoff_removed
+
+    def _has_trusted_builder(self, checkout: Path) -> bool:
+        """Require a controller-owned builder outside the worker checkout."""
+        if self._trusted_builder is None:
+            return False
+        try:
+            return not self._trusted_builder.resolve().is_relative_to(
+                checkout.resolve()
+            )
+        except OSError:
+            return False
 
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""
@@ -1485,8 +1542,11 @@ class AgentInvoker:
         if (
             result.returncode != 0
             or re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout) is None
+            or re.search(r"(?<!\S)--output-last-message(?:\s|$)", result.stdout) is None
         ):
-            raise WorkerProtocolError("codex exec does not support --add-dir")
+            raise WorkerProtocolError(
+                "codex exec does not support --add-dir and --output-last-message"
+            )
 
     def invoke(
         self,
@@ -1498,12 +1558,31 @@ class AgentInvoker:
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
         agent, executable = _agent_profile(self._environment)
-        command, stdin = _agent_command(agent, executable, checkout, prompt)
-        if handoff is not None and not self._remove_handoff(handoff.path):
-            return WorkerInvocation(
-                0,
-                handoff_capture=HandoffCapture("pre_run_cleanup_failed"),
-            )
+        input_path = (
+            self._transient_path_factory(checkout, handoff)
+            if handoff is not None
+            else None
+        )
+        command, stdin = _agent_command(
+            agent,
+            executable,
+            checkout,
+            prompt,
+            output_last_message=input_path if agent == "codex" else None,
+        )
+        if handoff is not None:
+            assert input_path is not None
+            if not self._clear_transport_paths(input_path, handoff.path):
+                return WorkerInvocation(
+                    0,
+                    handoff_capture=HandoffCapture("pre_run_cleanup_failed"),
+                )
+            if not self._has_trusted_builder(checkout):
+                return WorkerInvocation(
+                    0,
+                    handoff_capture=HandoffCapture("builder_rejected"),
+                )
+        started_at = self._clock()
         try:
             result = self._run_command(
                 command,
@@ -1513,30 +1592,72 @@ class AgentInvoker:
             )
         except RuntimeError as error:
             if handoff is not None:
-                self._remove_handoff(handoff.path)
+                assert input_path is not None
+                cleanup_succeeded = self._clear_transport_paths(
+                    input_path, handoff.path
+                )
+                return WorkerInvocation(
+                    None,
+                    stderr=str(error),
+                    handoff_capture=HandoffCapture(
+                        "captured" if cleanup_succeeded else "post_read_cleanup_failed"
+                    ),
+                )
             return WorkerInvocation(None, stderr=str(error))
         handoff_payload = None
         handoff_capture = HandoffCapture("captured")
         if handoff is not None and result.returncode == 0:
+            assert input_path is not None
             try:
-                with handoff.path.open("rb") as stream:
-                    handoff_payload = stream.read(1_048_577)
+                if agent != "codex":
+                    input_path.write_bytes(result.stdout.encode())
+                assert self._trusted_builder is not None
+                builder = self._trusted_builder
+                builder_timeout = math.floor(timeout - (self._clock() - started_at))
+                if builder_timeout <= 0:
+                    handoff_capture = HandoffCapture("builder_rejected")
+                else:
+                    builder_result = self._run_command(
+                        (
+                            str(builder),
+                            "worker-result",
+                            "build",
+                            "--issue-iid",
+                            str(handoff.issue_iid),
+                            "--input-file",
+                            str(input_path),
+                            "--handoff-file",
+                            str(handoff.path),
+                            "--handoff-nonce",
+                            handoff.nonce,
+                            "--apply",
+                        ),
+                        stdin=None,
+                        timeout_seconds=builder_timeout,
+                        environment=_worker_environment(self._environment),
+                    )
+                    if builder_result.returncode != 0:
+                        handoff_capture = HandoffCapture("builder_rejected")
+                    elif not self._remove_handoff(input_path):
+                        handoff_capture = HandoffCapture("post_read_cleanup_failed")
+                    else:
+                        with handoff.path.open("rb") as stream:
+                            handoff_payload = stream.read(1_048_577)
             except FileNotFoundError:
                 handoff_capture = HandoffCapture("artifact_not_written")
             except OSError:
                 handoff_capture = HandoffCapture("artifact_unreadable")
             else:
-                if len(handoff_payload) > 1_048_576:
+                if handoff_payload is not None and len(handoff_payload) > 1_048_576:
                     handoff_payload = None
                     handoff_capture = HandoffCapture("artifact_too_large")
-            if (
-                not self._remove_handoff(handoff.path)
-                and handoff_capture.status == "captured"
-            ):
+            if not self._clear_transport_paths(input_path, handoff.path):
                 handoff_payload = None
                 handoff_capture = HandoffCapture("post_read_cleanup_failed")
         elif handoff is not None:
-            self._remove_handoff(handoff.path)
+            assert input_path is not None
+            if not self._clear_transport_paths(input_path, handoff.path):
+                handoff_capture = HandoffCapture("post_read_cleanup_failed")
         diagnostic = (
             worker_exit_evidence(
                 result.returncode,
