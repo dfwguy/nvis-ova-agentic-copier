@@ -31,6 +31,7 @@ from .domain import (
     CommandRequest,
     ErrorCode,
     PrerequisiteLabelProjection,
+    RedCheckpointFailureStage,
     RepairAttemptEvidence,
     RunnerState,
     WorkflowLane,
@@ -531,6 +532,7 @@ def _recovery_observation(
         in {
             ErrorCode.WORKER_PROTOCOL_INVALID,
             ErrorCode.WORKER_RECEIPT_INVALID,
+            ErrorCode.RED_CHECKPOINT_FAILED,
             ErrorCode.RETRY_EXHAUSTED,
         }
     ):
@@ -541,14 +543,21 @@ def _recovery_observation(
             and len(record.condition_history) >= 2
         ):
             latest = record.condition_history[-2]
-        if (
-            latest is not None
-            and latest.code
-            in {
-                ErrorCode.WORKER_PROTOCOL_INVALID.value,
-                ErrorCode.WORKER_RECEIPT_INVALID.value,
-            }
-            and _is_safe_worker_protocol_diagnostic(latest.detail)
+        if latest is not None and (
+            (
+                record.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+                and latest.code == ErrorCode.RED_CHECKPOINT_FAILED.value
+                and _is_safe_red_checkpoint_diagnostic(latest.detail)
+            )
+            or (
+                record.error_code is not ErrorCode.RED_CHECKPOINT_FAILED
+                and latest.code
+                in {
+                    ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                    ErrorCode.WORKER_RECEIPT_INVALID.value,
+                }
+                and _is_safe_worker_protocol_diagnostic(latest.detail)
+            )
         ):
             blocked_cause = latest.detail
     return RecoveryObservation(
@@ -589,6 +598,15 @@ def _recovery_observation(
 def _is_safe_worker_protocol_diagnostic(value: str) -> bool:
     """Keep the recovery boundary aligned with worker diagnostic generation."""
     return is_safe_worker_result_diagnostic(value)
+
+
+def _is_safe_red_checkpoint_diagnostic(value: str) -> bool:
+    """Recognize only fixed diagnostics authored by the Red controller boundary."""
+    try:
+        RedCheckpointFailureStage(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _recovery_split_dependencies(

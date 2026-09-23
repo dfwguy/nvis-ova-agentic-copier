@@ -35,6 +35,7 @@ from .domain import (
     FailedJobDiagnosticEvidence,
     JobTraceEvidence,
     PipelineJobEvidence,
+    RedCheckpointFailureStage,
     RunnerState,
     WorkflowLane,
     WorkflowPhase,
@@ -2019,19 +2020,36 @@ def _block_feedback_path_mismatch(
 
 
 def _block_red_checkpoint(
-    record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    now: datetime,
+    stage: RedCheckpointFailureStage,
 ) -> LedgerRecord:
     """Fail closed when trusted Red evidence cannot be established exactly."""
+    detail = stage.value
+    condition = ConditionEvidence(
+        occurred_at=now,
+        retry_count=record.retry_count,
+        code=ErrorCode.RED_CHECKPOINT_FAILED.value,
+        detail=detail,
+    )
     blocked = ledger.persist(
         transition_record(
             record,
             RunnerState.BLOCKED,
             error_code=ErrorCode.RED_CHECKPOINT_FAILED,
-            summary="The trusted Red checkpoint could not be established.",
+            summary=(
+                "The trusted Red checkpoint could not be established. "
+                f"{ErrorCode.RED_CHECKPOINT_FAILED.value}: {detail}"
+            ),
             next_action=(
                 "Review the retained tests and checkpoint evidence before an "
                 "explicit retry."
             ),
+        ).model_copy(
+            update={"condition_history": (*record.condition_history, condition)[-64:]}
         )
     )
     gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
@@ -2544,7 +2562,13 @@ def _execute(
                 or not retained_checkpoint.test_paths
             )
         ):
-            return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
+            return _block_red_checkpoint(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                stage=RedCheckpointFailureStage.RETAINED_PRECHECK,
+            )
         if record.correction_identity is not None:
             try:
                 exact_correction = correction_identity_matches(
@@ -2606,7 +2630,13 @@ def _execute(
             ),
         )
     except RedCheckpointError:
-        return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
+        return _block_red_checkpoint(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            stage=RedCheckpointFailureStage.CONTEXT_PREPARATION,
+        )
     except ValueError as error:
         return _block_publication_identity(
             record,
@@ -2778,7 +2808,13 @@ def _execute(
                     ),
                 )
         except (RedCheckpointError, RepositoryError, WorkerProtocolError, ValueError):
-            return _block_red_checkpoint(record, ledger=ledger, gitlab=gitlab)
+            return _block_red_checkpoint(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                stage=RedCheckpointFailureStage.POST_WORKER_VERIFICATION,
+            )
     if invocation is None:
         with lock_factory(record.issue_iid):
             invocation = (

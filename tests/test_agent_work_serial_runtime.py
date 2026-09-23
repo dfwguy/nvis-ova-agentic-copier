@@ -2061,7 +2061,166 @@ def test_red_capture_failure_blocks_before_checkpoint_application(
         apply_red_checkpoint=lambda *_args: pytest.fail("must not apply checkpoint"),
     )
     assert result is not None and result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert result.condition_history[-1].detail == (
+        "red_checkpoint: post-worker result or checkpoint application/reload "
+        "verification failed"
+    )
     assert len(invoker.requests) == 1
+
+
+def _assert_safe_red_checkpoint_stage(
+    outcome: LedgerRecord | None,
+    config: AgentWorkConfig,
+    ledger: JsonLedger,
+    gitlab: FakeGitLab,
+    repository: FakeRepository,
+    expected_detail: str,
+    unsafe_detail: str,
+) -> None:
+    """Assert one controller-authored Red failure survives every durable projection."""
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert expected_detail in outcome.summary
+    assert outcome.condition_history
+    assert outcome.condition_history[-1].code == ErrorCode.RED_CHECKPOINT_FAILED.value
+    assert outcome.condition_history[-1].detail == expected_detail
+    assert len(gitlab.outcome_comments) == 1
+    comment = "\n".join(gitlab.outcome_comments[0])
+    assert expected_detail in comment
+    assert unsafe_detail not in outcome.model_dump_json()
+    assert unsafe_detail not in comment
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert report.recovery_candidates[0].blocked_cause == expected_detail
+
+
+def test_retained_red_checkpoint_precheck_preserves_fixed_stage_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A missing correction checkpoint identifies the pre-worker precheck stage."""
+    unsafe_detail = "/private/retained-checkpoint.json"
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"error_code": ErrorCode.PUBLICATION_COMMIT_REJECTED})
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    invoker = FakeInvoker()
+    retained = _red_checkpoint_evidence_for_segment(record).model_copy(
+        update={"base_sha": "b" * 40, "expected_failure": unsafe_detail}
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: retained,
+    )
+
+    _assert_safe_red_checkpoint_stage(
+        outcome,
+        config,
+        ledger,
+        gitlab,
+        repository,
+        "red_checkpoint: retained checkpoint precheck mismatch",
+        unsafe_detail,
+    )
+    assert not invoker.prompts
+
+
+def test_red_checkpoint_context_failure_preserves_fixed_stage_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """Checkpoint loading failure identifies context preparation without its detail."""
+    unsafe_detail = "/private/checkpoint-context.json"
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    invoker = FakeInvoker()
+
+    def fail_checkpoint_context(*_args: object) -> RedCheckpointEvidence | None:
+        raise RedCheckpointError(unsafe_detail)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=fail_checkpoint_context,
+    )
+
+    _assert_safe_red_checkpoint_stage(
+        outcome,
+        config,
+        ledger,
+        gitlab,
+        repository,
+        "red_checkpoint: checkpoint context preparation failed",
+        unsafe_detail,
+    )
+    assert not invoker.prompts
+
+
+def test_post_worker_red_checkpoint_failure_preserves_fixed_stage_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """Issue #38's failed apply/reload stage remains distinguishable and sanitized."""
+    unsafe_detail = "/private/issue-38-red-ref"
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    gitlab = FakeGitLab()
+    invoker = RedThenGreenInvoker(repository)
+
+    def fail_checkpoint_apply(
+        _issue_iid: int, _request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        raise RedCheckpointError(unsafe_detail)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=fail_checkpoint_apply,
+    )
+
+    _assert_safe_red_checkpoint_stage(
+        outcome,
+        config,
+        ledger,
+        gitlab,
+        repository,
+        (
+            "red_checkpoint: post-worker result or checkpoint application/reload "
+            "verification failed"
+        ),
+        unsafe_detail,
+    )
+    assert len(invoker.prompts) == 1
 
 
 @pytest.mark.parametrize(
@@ -6514,8 +6673,16 @@ def test_agent_invoker_builder_rejection_cleans_transient_input_and_handoff(
     assert str(handoff_path) not in invocation.stderr
 
 
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "builder_input.merge_request_draft: invalid type/shape/value",
+        "worker_result: could not be read or validated",
+        "worker_result_handoff: could not be written",
+    ),
+)
 def test_agent_invoker_preserves_only_canonical_builder_diagnostic(
-    tmp_path: Path,
+    tmp_path: Path, diagnostic: str
 ) -> None:
     """A trusted canonical diagnostic crosses the builder boundary exactly."""
     worker = importlib.import_module("agent_work.worker")
@@ -6533,7 +6700,6 @@ def test_agent_invoker_preserves_only_canonical_builder_diagnostic(
         source_sha="a" * 40,
     )
     builder = tmp_path / "controller" / "agent-work-from-checkout"
-    diagnostic = "builder_input.merge_request_draft: invalid type/shape/value"
     raw_builder_output = f"raw builder output from {handoff_path}"
     input_path: Path | None = None
 
@@ -6784,8 +6950,16 @@ def test_serial_rejects_typed_capture_failures_with_safe_diagnostics(
     )
 
 
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "builder_input.merge_request_draft: invalid type/shape/value",
+        "worker_result: could not be read or validated",
+        "worker_result_handoff: could not be written",
+    ),
+)
 def test_serial_preserves_canonical_builder_diagnostic_in_condition(
-    tmp_path: Path,
+    tmp_path: Path, diagnostic: str
 ) -> None:
     """Protocol retry evidence includes only the canonical builder diagnostic."""
     config = _config(tmp_path)
@@ -6793,8 +6967,6 @@ def test_serial_preserves_canonical_builder_diagnostic_in_condition(
     ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
-    diagnostic = "builder_input.merge_request_draft: invalid type/shape/value"
-
     outcome = run_segment(
         ledger=ledger,
         gitlab=FakeGitLab(),  # type: ignore[arg-type]
@@ -6810,6 +6982,57 @@ def test_serial_preserves_canonical_builder_diagnostic_in_condition(
     assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
     assert outcome.condition_history[-1].detail == diagnostic
     assert "worker-result.json" not in outcome.condition_history[-1].detail
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "worker_result: could not be read or validated",
+        "worker_result_handoff: could not be written",
+    ),
+)
+def test_recovery_inventory_surfaces_fixed_builder_diagnostic_after_repeat(
+    tmp_path: Path, diagnostic: str
+) -> None:
+    """A repeated fixed builder failure stays distinct through recovery inventory."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=HandoffInvoker(
+            capture_status="builder_rejected", capture_diagnostic=diagnostic
+        ),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=HandoffInvoker(
+            capture_status="builder_rejected", capture_diagnostic=diagnostic
+        ),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.condition_history[-1].detail == diagnostic
+    assert report.recovery_candidates[0].blocked_cause == diagnostic
 
 
 @pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
@@ -7792,6 +8015,60 @@ def test_recovery_inventory_hides_noncanonical_retained_protocol_detail(
     assert candidate.blocked_cause is None
     assert "retry --issue-iid" not in candidate.next_action
     assert "attacker_secret" not in candidate.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("error_code", "condition_code", "detail"),
+    (
+        (
+            ErrorCode.RED_CHECKPOINT_FAILED,
+            ErrorCode.RED_CHECKPOINT_FAILED.value,
+            "red_checkpoint: retained checkpoint precheck mismatch unsafe suffix",
+        ),
+        (
+            ErrorCode.RED_CHECKPOINT_FAILED,
+            ErrorCode.WORKER_PROTOCOL_INVALID.value,
+            "red_checkpoint: retained checkpoint precheck mismatch",
+        ),
+        (
+            ErrorCode.WORKER_PROTOCOL_INVALID,
+            ErrorCode.RED_CHECKPOINT_FAILED.value,
+            "red_checkpoint: retained checkpoint precheck mismatch",
+        ),
+    ),
+)
+def test_recovery_inventory_hides_forged_red_checkpoint_detail(
+    tmp_path: Path,
+    error_code: ErrorCode,
+    condition_code: str,
+    detail: str,
+) -> None:
+    """Recovery requires exact controller-authored Red failure evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": error_code,
+                "condition_history": (
+                    ConditionEvidence(code=condition_code, detail=detail),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause is None
+    assert "retry --issue-iid" not in candidate.next_action
 
 
 @pytest.mark.parametrize(
