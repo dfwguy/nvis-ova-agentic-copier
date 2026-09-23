@@ -465,11 +465,13 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             "artifact unreadable",
             "artifact exceeds 1 MiB",
             "trusted builder rejected captured result",
+            "trusted builder budget exhausted",
             "post-read cleanup failed",
         },
     }
-    return origin == "controller_invariant" and reason in controller_reasons.get(
-        path, set()
+    lookup_path = origin if origin == "worker_result_handoff" and not dot else path
+    return origin in {"controller_invariant", "worker_result_handoff"} and reason in (
+        controller_reasons.get(lookup_path, set())
     )
 
 
@@ -747,8 +749,10 @@ class HandoffCapture:
         "artifact_unreadable",
         "artifact_too_large",
         "builder_rejected",
+        "builder_budget_exhausted",
         "post_read_cleanup_failed",
     ]
+    diagnostic: str | None = None
 
 
 _CAPTURED_HANDOFF = HandoffCapture("captured")
@@ -807,9 +811,17 @@ def parse_worker_result_handoff(
         "artifact_unreadable": "artifact unreadable",
         "artifact_too_large": "artifact exceeds 1 MiB",
         "builder_rejected": "trusted builder rejected captured result",
+        "builder_budget_exhausted": "trusted builder budget exhausted",
         "post_read_cleanup_failed": "post-read cleanup failed",
     }
     if capture.status != "captured":
+        if (
+            capture.status == "builder_rejected"
+            and capture.diagnostic is not None
+            and is_safe_worker_result_diagnostic(capture.diagnostic)
+        ):
+            field, reason = capture.diagnostic.split(": ", maxsplit=1)
+            raise WorkerProtocolError(field, reason)
         raise WorkerProtocolError(
             "worker_result_handoff", capture_reasons[capture.status]
         )
@@ -1615,7 +1627,7 @@ class AgentInvoker:
                 builder = self._trusted_builder
                 builder_timeout = math.floor(timeout - (self._clock() - started_at))
                 if builder_timeout <= 0:
-                    handoff_capture = HandoffCapture("builder_rejected")
+                    handoff_capture = HandoffCapture("builder_budget_exhausted")
                 else:
                     builder_result = self._run_command(
                         (
@@ -1637,7 +1649,13 @@ class AgentInvoker:
                         environment=_worker_environment(self._environment),
                     )
                     if builder_result.returncode != 0:
-                        handoff_capture = HandoffCapture("builder_rejected")
+                        candidate = builder_result.stderr.strip()
+                        handoff_capture = HandoffCapture(
+                            "builder_rejected",
+                            candidate
+                            if is_safe_worker_result_diagnostic(candidate)
+                            else None,
+                        )
                     elif not self._remove_handoff(input_path):
                         handoff_capture = HandoffCapture("post_read_cleanup_failed")
                     else:
