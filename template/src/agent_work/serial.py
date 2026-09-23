@@ -2706,6 +2706,18 @@ def _execute(
                     expected_revision=record.revision,
                 )
             )
+        except WorkerProtocolError as error:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+                retry_delay=timedelta(),
+                detail=format_worker_result_diagnostic(error),
+                stop_on_unchanged_condition=True,
+            )
+        try:
             if (
                 red_result.expected_state is not record.state
                 or red_result.expected_phase is not record.phase
@@ -2732,25 +2744,48 @@ def _execute(
             if invocation is None:
                 if checkpoint_request is None:
                     raise RedCheckpointError("red checkpoint request is missing")
-                record = ledger.persist(
-                    record.model_copy(update={"workflow_lane": WorkflowLane.CODING})
-                )
-                applied_checkpoint = apply_red_checkpoint(
-                    record.issue_iid, checkpoint_request
-                )
-                retained_checkpoint = (
-                    load_red_checkpoint(
-                        record.project_id, record.issue_iid, record.source_sha
+                try:
+                    record = ledger.persist(
+                        record.model_copy(update={"workflow_lane": WorkflowLane.CODING})
                     )
-                    if load_red_checkpoint is not None and record.source_sha is not None
-                    else None
-                )
+                    applied_checkpoint = apply_red_checkpoint(
+                        record.issue_iid, checkpoint_request
+                    )
+                except (RedCheckpointError, RepositoryError, ValueError):
+                    return _block_red_checkpoint(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        stage=RedCheckpointFailureStage.EXECUTION_PERSISTENCE,
+                    )
+                try:
+                    retained_checkpoint = (
+                        load_red_checkpoint(
+                            record.project_id, record.issue_iid, record.source_sha
+                        )
+                        if load_red_checkpoint is not None
+                        and record.source_sha is not None
+                        else None
+                    )
+                except RedCheckpointError:
+                    return _block_red_checkpoint(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        stage=RedCheckpointFailureStage.RETAINED_RELOAD_MISMATCH,
+                    )
                 if (
                     retained_checkpoint is None
                     or retained_checkpoint != applied_checkpoint
                 ):
-                    raise RedCheckpointError(
-                        "applied red checkpoint does not match retained evidence"
+                    return _block_red_checkpoint(
+                        record,
+                        ledger=ledger,
+                        gitlab=gitlab,
+                        now=now,
+                        stage=RedCheckpointFailureStage.RETAINED_RELOAD_MISMATCH,
                     )
                 if remaining_seconds is not None:
                     remaining = remaining_seconds()
@@ -2807,13 +2842,13 @@ def _execute(
                         repository.config.checkout / "bin" / "agent-work-from-checkout"
                     ),
                 )
-        except (RedCheckpointError, RepositoryError, WorkerProtocolError, ValueError):
+        except (RedCheckpointError, RepositoryError, ValueError):
             return _block_red_checkpoint(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
                 now=now,
-                stage=RedCheckpointFailureStage.POST_WORKER_VERIFICATION,
+                stage=RedCheckpointFailureStage.RESULT_REQUEST_PATH,
             )
     if invocation is None:
         with lock_factory(record.issue_iid):
