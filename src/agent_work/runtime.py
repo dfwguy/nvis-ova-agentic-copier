@@ -1558,7 +1558,11 @@ def build_runtime_dependencies(
             service_environment=os.environ,
             diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
         )
-        invoke: InvokerPort = AgentInvoker(run_subprocess, environment=os.environ)
+        invoke: InvokerPort = AgentInvoker(
+            run_subprocess,
+            environment=os.environ,
+            trusted_builder=config.checkout / "bin" / "agent-work-from-checkout",
+        )
         checkpoint_store: RuntimeCheckpointStore = RedCheckpointStore(config.state_root)
         create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
     else:

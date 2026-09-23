@@ -105,6 +105,7 @@ from agent_work.worker import (
     HandoffCapture,
     WorkerInvocation,
     WorkerProtocolError,
+    WorkerResultHandoffRequest,
     build_worker_prompt,
 )
 
@@ -1094,9 +1095,9 @@ class HandoffInvoker:
     ) -> WorkerInvocation:
         del checkout, timeout
         assert handoff is not None
-        assert f"--handoff-file {handoff.path}" in prompt
-        assert f"--handoff-nonce {handoff.nonce}" in prompt
-        assert "worker-result build" in prompt and "--apply" in prompt
+        assert "exactly one strict WorkerResultBuildInput JSON object" in prompt
+        assert "trusted controller invokes the checkout-owned builder" in prompt
+        assert "worker-result build" not in prompt and "--apply" not in prompt
         self.requests.append(handoff)
         if self.on_invoke is not None:
             self.on_invoke()
@@ -1972,6 +1973,10 @@ def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
     red_request, green_request = invoker.requests
     assert red_request.nonce != green_request.nonce
     assert red_request.path != green_request.path
+    assert not red_request.path.is_relative_to(record.worktree)
+    assert not green_request.path.is_relative_to(record.worktree)
+    assert red_request.path.is_relative_to(config.state_root)
+    assert green_request.path.is_relative_to(config.state_root)
     assert red_request.ledger_revision == record.revision
     assert green_request.ledger_revision == checkpoint_revision
     assert green_request.ledger_revision > red_request.ledger_revision
@@ -2014,16 +2019,12 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
         apply_red_checkpoint=apply_red_checkpoint,
     )
 
-    builder = record.worktree / "bin/agent-work-from-checkout"
-    assert builder.is_absolute()
     assert len(invoker.legacy.prompts) == len(invoker.requests) == 2
     for prompt, request in zip(invoker.legacy.prompts, invoker.requests, strict=True):
-        assert (
-            f"Use `{builder} worker-result build --issue-iid {record.issue_iid} "
-            f"--input-file PATH --handoff-file {request.path} "
-            f"--handoff-nonce {request.nonce} --apply`" in prompt
-        )
-        assert "Use `agent-work worker-result build" not in prompt
+        del request
+        assert "exactly one strict WorkerResultBuildInput JSON object" in prompt
+        assert "trusted controller invokes the checkout-owned builder" in prompt
+        assert "worker-result build" not in prompt and "--apply" not in prompt
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
@@ -6332,6 +6333,9 @@ def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -
     handoff_path = tmp_path / "controller" / "worker-result.json"
     handoff_path.parent.mkdir()
     handoff_path.write_bytes(b"stale artifact must not survive")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
     fresh = b'{"schema_version":1,"fresh":true}'
     request = worker.WorkerResultHandoffRequest(
         path=handoff_path,
@@ -6344,10 +6348,12 @@ def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -
     )
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del command, kwargs
-        assert not handoff_path.exists()
+        del kwargs
+        if command[0] != str(builder):
+            assert not handoff_path.exists()
+            return CommandResult(0, "untrusted model prose", "")
         handoff_path.write_bytes(fresh)
-        return CommandResult(0, "untrusted model prose", "")
+        return CommandResult(0, "", "")
 
     invoker = AgentInvoker(
         run_command,
@@ -6355,13 +6361,276 @@ def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -
             "AGENT_WORK_AGENT": "codex",
             "AGENT_WORK_AGENT_PATH": "/codex",
         },
+        trusted_builder=builder,
     )
     assert invoker.supports_worker_result_handoff is True
-    invocation = invoker.invoke(tmp_path, "trusted prompt", 10, handoff=request)
+    invocation = invoker.invoke(checkout, "trusted prompt", 10, handoff=request)
 
     assert invocation.handoff == fresh
     assert invocation.handoff_capture.status == "captured"
     assert not handoff_path.exists()
+
+
+@pytest.mark.parametrize("agent", ("codex", "claude", "pi"))
+@pytest.mark.parametrize(
+    ("budget", "clock_values", "expected_builder_timeout"),
+    ((10, (0.0, 2.1), 7), (20, (3.0, 7.2), 15)),
+)
+def test_agent_invoker_builds_handoff_from_controller_captured_final_input(
+    tmp_path: Path,
+    agent: str,
+    budget: int,
+    clock_values: tuple[float, float],
+    expected_builder_timeout: int,
+) -> None:
+    """Every supported agent routes final text through the trusted builder."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    calls: list[tuple[str, ...]] = []
+    builder_timeouts: list[int] = []
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+    trap_builder = checkout / "bin" / "agent-work-from-checkout"
+    final_input = (
+        b'{"workflow_lane":"coding","result_kind":"needs_human",'
+        b'"change_summary":"Need human input.","next_action":"Await review."}'
+    )
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append(command)
+        assert command[0] != str(trap_builder)
+        if command[0] != str(builder):
+            if agent == "codex":
+                assert "--output-last-message" in command
+                captured_path = Path(
+                    command[command.index("--output-last-message") + 1]
+                )
+                assert not captured_path.is_relative_to(checkout)
+                captured_path.write_bytes(final_input)
+                return CommandResult(0, "untrusted model prose", "")
+            assert "--output-last-message" not in command
+            return CommandResult(0, final_input.decode(), "")
+        input_path = Path(command[command.index("--input-file") + 1])
+        builder_timeouts.append(cast(int, kwargs["timeout_seconds"]))
+        assert input_path.read_bytes() == final_input
+        assert command == (
+            str(builder),
+            "worker-result",
+            "build",
+            "--issue-iid",
+            "12",
+            "--input-file",
+            str(input_path),
+            "--handoff-file",
+            str(handoff_path),
+            "--handoff-nonce",
+            request.nonce,
+            "--apply",
+        )
+        handoff_path.write_bytes(b'{"schema_version":1}')
+        return CommandResult(0, "", "")
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": agent, "AGENT_WORK_AGENT_PATH": f"/{agent}"},
+        trusted_builder=builder,
+        clock=iter(clock_values).__next__,
+    ).invoke(checkout, "trusted prompt", budget, handoff=request)
+
+    assert len(calls) == 2
+    assert invocation.handoff == b'{"schema_version":1}'
+    assert invocation.stdout == (
+        "untrusted model prose" if agent == "codex" else final_input.decode()
+    )
+    assert builder_timeouts == [expected_builder_timeout]
+    assert not handoff_path.exists()
+
+
+def test_agent_invoker_builder_rejection_cleans_transient_input_and_handoff(
+    tmp_path: Path,
+) -> None:
+    """A rejected trusted build leaks neither artifacts nor raw diagnostics."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+    final_input = b'{"workflow_lane":"coding"}'
+    raw_builder_output = "raw builder payload /controller/input.json"
+    raw_builder_error = "raw builder stderr /controller/input.json"
+    captured_path: Path | None = None
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal captured_path
+        if command[0] != str(builder):
+            captured_path = Path(command[command.index("--output-last-message") + 1])
+            captured_path.write_bytes(final_input)
+            return CommandResult(0, "untrusted model prose", "")
+        handoff_path.write_bytes(b"partial artifact")
+        return CommandResult(2, raw_builder_output, raw_builder_error)
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert captured_path is not None and not captured_path.exists()
+    assert not handoff_path.exists()
+    assert invocation.handoff is None
+    assert invocation.handoff_capture.status == "builder_rejected"
+    assert raw_builder_output not in invocation.stderr
+    assert raw_builder_error not in invocation.stderr
+    assert str(handoff_path) not in invocation.stderr
+
+
+def test_agent_invoker_rejects_an_exhausted_builder_budget_without_invocation(
+    tmp_path: Path,
+) -> None:
+    """The builder cannot run after the worker consumes its whole budget."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    handoff_path.parent.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+    calls: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        if command[0] == str(builder):
+            pytest.fail("builder must not run after its budget is exhausted")
+        captured_path = Path(command[command.index("--output-last-message") + 1])
+        captured_path.write_bytes(b'{"workflow_lane":"coding"}')
+        return CommandResult(0, "untrusted prose", "")
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        trusted_builder=builder,
+        clock=iter((0.0, 10.0)).__next__,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert len(calls) == 1
+    assert invocation.handoff is None
+    assert invocation.handoff_capture.status == "builder_rejected"
+    assert not handoff_path.exists()
+
+
+def test_agent_invoker_fails_closed_when_input_pre_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    """A stale final-input path blocks launch even when handoff cleanup succeeds."""
+    worker = importlib.import_module("agent_work.worker")
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    stale_input = tmp_path / "controller" / "stale-input"
+    stale_input.mkdir(parents=True)
+    handoff_path = tmp_path / "controller" / "worker-result.json"
+    request = worker.WorkerResultHandoffRequest(
+        path=handoff_path,
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+
+    def transient_path_factory(
+        checkout: Path, handoff: WorkerResultHandoffRequest
+    ) -> Path:
+        del checkout, handoff
+        return stale_input
+
+    invocation = AgentInvoker(
+        lambda *_args, **_kwargs: pytest.fail("worker must not launch"),
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        transient_path_factory=transient_path_factory,
+        trusted_builder=tmp_path / "controller" / "agent-work-from-checkout",
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff_capture.status == "pre_run_cleanup_failed"
+
+
+def test_agent_invoker_fails_closed_when_builder_rejection_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    """A rejected builder cannot retain transport data after cleanup trouble."""
+    worker = importlib.import_module("agent_work.worker")
+
+    class FailingPostCleanupPath:
+        def __init__(self) -> None:
+            self.unlink_calls = 0
+
+        def unlink(self, *, missing_ok: bool) -> None:
+            assert missing_ok is True
+            self.unlink_calls += 1
+            if self.unlink_calls == 2:
+                raise OSError("raw cleanup failure")
+
+        def open(self, mode: str) -> io.BytesIO:
+            pytest.fail(f"artifact must not be read after rejected builder: {mode}")
+
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    request = worker.WorkerResultHandoffRequest(
+        path=FailingPostCleanupPath(),  # type: ignore[arg-type]
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        source_branch="agent/issue-12",
+        source_sha="a" * 40,
+    )
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[0] == str(builder):
+            return CommandResult(2, "raw builder output", "raw builder error")
+        captured_path = Path(command[command.index("--output-last-message") + 1])
+        captured_path.write_bytes(b'{"workflow_lane":"coding"}')
+        return CommandResult(0, "untrusted prose", "")
+
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
+
+    assert invocation.handoff is None
+    assert invocation.handoff_capture.status == "post_read_cleanup_failed"
+    assert "raw builder" not in invocation.stderr
 
 
 @pytest.mark.parametrize(
@@ -6371,6 +6640,7 @@ def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -
         ("artifact_not_written", "not written/missing after successful invocation"),
         ("artifact_unreadable", "artifact unreadable"),
         ("artifact_too_large", "artifact exceeds 1 MiB"),
+        ("builder_rejected", "trusted builder rejected captured result"),
         ("post_read_cleanup_failed", "post-read cleanup failed"),
     ),
 )
@@ -6407,6 +6677,9 @@ def test_agent_invoker_removes_handoff_after_failed_process_boundary(
     """Boundary exceptions and nonzero exits cannot retain a handoff file."""
     worker = importlib.import_module("agent_work.worker")
     handoff_path = tmp_path / "worker-result.json"
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
     request = worker.WorkerResultHandoffRequest(
         path=handoff_path,
         nonce="0123456789abcdef" * 2,
@@ -6430,7 +6703,8 @@ def test_agent_invoker_removes_handoff_after_failed_process_boundary(
             "AGENT_WORK_AGENT": "codex",
             "AGENT_WORK_AGENT_PATH": "/codex",
         },
-    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
 
     assert invocation.returncode == returncode
     assert not handoff_path.exists()
@@ -6440,7 +6714,7 @@ def test_agent_invoker_removes_handoff_after_failed_process_boundary(
     ("stage", "expected_status"),
     (
         ("pre_run_cleanup", "pre_run_cleanup_failed"),
-        ("unreadable", "artifact_unreadable"),
+        ("unreadable", "post_read_cleanup_failed"),
         ("oversize", "artifact_too_large"),
     ),
 )
@@ -6450,6 +6724,9 @@ def test_agent_invoker_records_a_typed_safe_capture_status_for_filesystem_failur
     """Filesystem capture failures never become worker prose or raw path diagnostics."""
     worker = importlib.import_module("agent_work.worker")
     handoff_path = tmp_path / "worker-result.json"
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
+    builder = tmp_path / "controller" / "agent-work-from-checkout"
     if stage == "pre_run_cleanup":
         handoff_path.mkdir()
     request = worker.WorkerResultHandoffRequest(
@@ -6463,7 +6740,9 @@ def test_agent_invoker_records_a_typed_safe_capture_status_for_filesystem_failur
     )
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del command, kwargs
+        del kwargs
+        if command[0] == str(builder):
+            return CommandResult(0, "", "")
         if stage == "unreadable":
             handoff_path.mkdir()
         elif stage == "oversize":
@@ -6476,7 +6755,8 @@ def test_agent_invoker_records_a_typed_safe_capture_status_for_filesystem_failur
             "AGENT_WORK_AGENT": "codex",
             "AGENT_WORK_AGENT_PATH": "/codex",
         },
-    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+        trusted_builder=builder,
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
 
     assert invocation.handoff_capture.status == expected_status
     assert invocation.handoff is None
@@ -6505,6 +6785,8 @@ def test_agent_invoker_records_post_read_cleanup_failure_as_a_typed_capture_stat
             return io.BytesIO(b'{"schema_version":1}')
 
     path = FailingCleanupPath()
+    checkout = tmp_path / "retained-checkout"
+    checkout.mkdir()
     request = worker.WorkerResultHandoffRequest(
         path=path,  # type: ignore[arg-type]
         nonce="0123456789abcdef" * 2,
@@ -6520,7 +6802,8 @@ def test_agent_invoker_records_post_read_cleanup_failure_as_a_typed_capture_stat
             "AGENT_WORK_AGENT": "codex",
             "AGENT_WORK_AGENT_PATH": "/codex",
         },
-    ).invoke(tmp_path, "trusted prompt", 10, handoff=request)
+        trusted_builder=tmp_path / "controller" / "agent-work-from-checkout",
+    ).invoke(checkout, "trusted prompt", 10, handoff=request)
 
     assert invocation.handoff_capture.status == "post_read_cleanup_failed"
     assert invocation.handoff is None
