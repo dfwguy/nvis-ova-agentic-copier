@@ -109,6 +109,19 @@ class GitLabPort(Protocol):
         self, iid: int, *, error_code: str, summary: str, next_action: str
     ) -> None: ...
 
+    def upsert_outcome_note(
+        self,
+        iid: int,
+        *,
+        outcome_key: str,
+        outcome: str,
+        explanation: str,
+        evidence: str,
+        retained_work: str,
+        next_action: str,
+        human_decision: str,
+    ) -> None: ...
+
     def fetch_merge_request(self, iid: int) -> MergeRequestEvidence: ...
 
     def find_merge_request_by_branch(
