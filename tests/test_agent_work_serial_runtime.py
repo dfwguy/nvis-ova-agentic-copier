@@ -1847,8 +1847,14 @@ def _red_checkpoint_evidence_for_segment(
 class RedThenGreenInvoker:
     """Return a tests-only Red handoff, then run Green after trusted capture."""
 
-    def __init__(self, repository: FakeRepository) -> None:
+    def __init__(
+        self,
+        repository: FakeRepository,
+        *,
+        red_checkpoint_request_updates: dict[str, object] | None = None,
+    ) -> None:
         self.repository = repository
+        self.red_checkpoint_request_updates = red_checkpoint_request_updates or {}
         self.prompts: list[str] = []
         self.green = SingleSessionInvoker()
 
@@ -1862,6 +1868,8 @@ class RedThenGreenInvoker:
         record = ast.literal_eval(raw_record)
         if len(self.prompts) == 1:
             request = _red_checkpoint_request_for_segment()
+            request_payload = request.model_dump(mode="json")
+            request_payload.update(self.red_checkpoint_request_updates)
             payload = {
                 "protocol_version": 2,
                 "project_id": record["project_id"],
@@ -1876,7 +1884,7 @@ class RedThenGreenInvoker:
                 "receipts": ("$architect: approved", "$tdd-red: red confirmed"),
                 "change_summary": "Failing behavior tests are ready for capture.",
                 "next_action": "Create and verify the trusted Red checkpoint.",
-                "red_checkpoint_request": request.model_dump(mode="json"),
+                "red_checkpoint_request": request_payload,
             }
             return WorkerInvocation(
                 0,
@@ -2098,35 +2106,99 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
-def test_red_capture_failure_blocks_before_checkpoint_application(
+@pytest.mark.parametrize(
+    ("missing", "malformed", "expected_detail"),
+    (
+        (
+            True,
+            None,
+            "worker_result_handoff: not written/missing after successful invocation",
+        ),
+        (
+            False,
+            b'{"unsafe":"/private/red-handoff.json"}',
+            "worker_result_handoff: malformed artifact",
+        ),
+    ),
+)
+def test_red_handoff_protocol_failure_retries_without_checkpoint_application(
     tmp_path: Path,
+    missing: bool,
+    malformed: bytes | None,
+    expected_detail: str,
 ) -> None:
-    """A non-captured Red artifact cannot reach checkpoint application."""
+    """A clean successful Red worker keeps its canonical handoff diagnostic."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
+    record = ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
     )
     repository = FakeRepository(config)
-    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
-    invoker = RedThenGreenHandoffInvoker(
-        repository, red_capture_status="artifact_too_large"
-    )
-    result = run_segment(
+    repository.paths = ()
+    invoker = HandoffInvoker(missing=missing, malformed=malformed, artifact_paths=())
+    gitlab = FakeGitLab()
+    apply_calls = 0
+
+    def reject_checkpoint_apply(
+        _issue_iid: int, _request: RedCheckpointRequest
+    ) -> RedCheckpointEvidence:
+        nonlocal apply_calls
+        apply_calls += 1
+        raise AssertionError("a handoff protocol failure cannot apply a checkpoint")
+
+    first = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),
+        gitlab=gitlab,
         repository=repository,
         invoke=invoker,
         timeout_seconds=10,
         now=NOW,
-        apply_red_checkpoint=lambda *_args: pytest.fail("must not apply checkpoint"),
+        apply_red_checkpoint=reject_checkpoint_apply,
     )
-    assert result is not None and result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
-    assert result.condition_history[-1].detail == (
-        "red_checkpoint: post-worker result or checkpoint application/reload "
-        "verification failed"
-    )
+
+    assert record.source_sha == repository.current_head
+    assert repository.paths == ()
+    assert apply_calls == 0
     assert len(invoker.requests) == 1
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert first.condition_history[-1].detail == expected_detail
+    assert gitlab.outcome_comments == []
+    assert "unsafe" not in first.model_dump_json()
+    first_inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert first_inventory.recovery_candidates[0].blocked_cause is None
+    assert "private/red-handoff.json" not in first_inventory.model_dump_json()
+
+    second = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        apply_red_checkpoint=reject_checkpoint_apply,
+    )
+
+    assert apply_calls == 0
+    assert len(invoker.requests) == 2
+    assert second is not None and second.state is RunnerState.BLOCKED
+    assert second.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert second.condition_history[-1].detail == expected_detail
+    assert "unsafe" not in second.model_dump_json()
+    assert len(gitlab.outcome_comments) == 1
+    assert expected_detail in "\n".join(gitlab.outcome_comments[0])
+    assert "private/red-handoff.json" not in "\n".join(gitlab.outcome_comments[0])
+    second_inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert second_inventory.recovery_candidates[0].blocked_cause == expected_detail
+    assert "private/red-handoff.json" not in second_inventory.model_dump_json()
 
 
 def _assert_safe_red_checkpoint_stage(
@@ -2156,6 +2228,7 @@ def _assert_safe_red_checkpoint_stage(
         dependencies=_dependencies(config, ledger, gitlab, repository),
     )
     assert report.recovery_candidates[0].blocked_cause == expected_detail
+    assert unsafe_detail not in report.model_dump_json()
 
 
 def test_retained_red_checkpoint_precheck_preserves_fixed_stage_diagnostic(
@@ -2238,10 +2311,51 @@ def test_red_checkpoint_context_failure_preserves_fixed_stage_diagnostic(
     assert not invoker.prompts
 
 
-def test_post_worker_red_checkpoint_failure_preserves_fixed_stage_diagnostic(
+def test_red_checkpoint_request_path_failure_preserves_fixed_stage_diagnostic(
     tmp_path: Path,
 ) -> None:
-    """Issue #38's failed apply/reload stage remains distinguishable and sanitized."""
+    """A result path mismatch has its own fixed, sanitized Red failure stage."""
+    unsafe_path = "tests/private/red-request.py"
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    gitlab = FakeGitLab()
+    invoker = RedThenGreenInvoker(
+        repository,
+        red_checkpoint_request_updates={"test_paths": [unsafe_path]},
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=lambda *_args: pytest.fail("must not apply checkpoint"),
+    )
+
+    _assert_safe_red_checkpoint_stage(
+        outcome,
+        config,
+        ledger,
+        gitlab,
+        repository,
+        "red_checkpoint: red result request or path verification failed",
+        unsafe_path,
+    )
+    assert len(invoker.prompts) == 1
+
+
+def test_red_checkpoint_execution_failure_preserves_fixed_stage_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """Checkpoint execution/persistence has its own fixed sanitized stage."""
     unsafe_detail = "/private/issue-38-red-ref"
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -2275,10 +2389,48 @@ def test_post_worker_red_checkpoint_failure_preserves_fixed_stage_diagnostic(
         ledger,
         gitlab,
         repository,
-        (
-            "red_checkpoint: post-worker result or checkpoint application/reload "
-            "verification failed"
-        ),
+        "red_checkpoint: checkpoint execution or persistence failed",
+        unsafe_detail,
+    )
+    assert len(invoker.prompts) == 1
+
+
+def test_red_checkpoint_retained_reload_mismatch_preserves_fixed_stage_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A post-apply retained-evidence mismatch has its own sanitized stage."""
+    unsafe_detail = "/private/retained-red-checkpoint.json"
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    gitlab = FakeGitLab()
+    invoker = RedThenGreenInvoker(repository)
+    applied = _red_checkpoint_evidence_for_segment(record).model_copy(
+        update={"expected_failure": unsafe_detail}
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=lambda *_args: applied,
+    )
+
+    _assert_safe_red_checkpoint_stage(
+        outcome,
+        config,
+        ledger,
+        gitlab,
+        repository,
+        "red_checkpoint: retained evidence reload mismatch",
         unsafe_detail,
     )
     assert len(invoker.prompts) == 1

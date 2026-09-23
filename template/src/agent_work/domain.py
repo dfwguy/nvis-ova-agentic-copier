@@ -152,10 +152,11 @@ class RedCheckpointFailureStage(StrEnum):
 
     RETAINED_PRECHECK = "red_checkpoint: retained checkpoint precheck mismatch"
     CONTEXT_PREPARATION = "red_checkpoint: checkpoint context preparation failed"
-    POST_WORKER_VERIFICATION = (
-        "red_checkpoint: post-worker result or checkpoint application/reload "
-        "verification failed"
+    RESULT_REQUEST_PATH = (
+        "red_checkpoint: red result request or path verification failed"
     )
+    EXECUTION_PERSISTENCE = "red_checkpoint: checkpoint execution or persistence failed"
+    RETAINED_RELOAD_MISMATCH = "red_checkpoint: retained evidence reload mismatch"
 
 
 ACTIVE_STATES = frozenset(
