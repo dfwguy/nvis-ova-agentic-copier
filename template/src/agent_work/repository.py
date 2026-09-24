@@ -216,21 +216,7 @@ def _git_environment_controls(
     environment["GIT_ASKPASS"] = "/bin/false"
     environment["SSH_ASKPASS"] = "/bin/false"
     environment["AGENT_WORK_GIT_CREDENTIAL_HELPER"] = str(credential_helper)
-    environment.update(
-        {
-            "GIT_TERMINAL_PROMPT": "0",
-            "GCM_INTERACTIVE": "never",
-            "GIT_CONFIG_COUNT": "4",
-            "GIT_CONFIG_KEY_0": "credential.helper",
-            "GIT_CONFIG_VALUE_0": "",
-            "GIT_CONFIG_KEY_1": "credential.helper",
-            "GIT_CONFIG_VALUE_1": '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
-            "GIT_CONFIG_KEY_2": "credential.useHttpPath",
-            "GIT_CONFIG_VALUE_2": "true",
-            "GIT_CONFIG_KEY_3": "core.askPass",
-            "GIT_CONFIG_VALUE_3": "/bin/false",
-        }
-    )
+    environment.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"})
     return environment
 
 
