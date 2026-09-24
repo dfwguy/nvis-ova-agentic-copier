@@ -101,7 +101,7 @@ become controller state.
 | Lane | What runs, and when |
 | --- | --- |
 | Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging through the private candidate socket. Green coordinates review and routes documentation findings to the writer before returning final validation to Architect. |
-| Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
+| Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Architect records `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`; no staged-tree review is claimed. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
 The Red-first coding session ends after the trusted checkpoint. A fresh session
 then handles policy preparation, concurrent Green and documentation work,
@@ -117,7 +117,8 @@ checks the JUnit summary and the same staged tree. Green waits for both
 receipts before it starts the parallel specialist review. This review includes
 the Diátaxis, Quality, Test, and CI/CD Judges, the read-only README Reviewer,
 and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy
-Judges join when their topics apply. Each specialist sees the same staged
+Judges join when their topics apply. The Consistency Judge is N/A in this
+serial workflow. Each active specialist sees the same staged
 tree, diff, and Judge evidence. Green waits for every receipt and routes
 findings to their file owners. The Architect then gets the full result and
 asks the Finalizer to act. Final validation uses current license evidence.

@@ -98,6 +98,12 @@ not add untested functionality.
    It must be complete. It covers the exact staged tree. Green cannot
    self-certify it. Give Test Judge the accepted mode-specific Red checkpoint
    and ordinary Git diff from that checkpoint to this Green candidate.
+   In interactive work, if `$consistency-judge` applies, give it the design,
+   base commit, changed
+   paths, Judge's staged tree OID, and base-to-tree diff. In reconciliation, add
+   source, target, and joined-tree proof. Else carry Architect's exact
+   `$consistency-judge: not applicable — <reason>`. In serial work, carry
+   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an
@@ -119,9 +125,11 @@ not add untested functionality.
    owned domain/evidence changed. Rerun license review only when maintained in-scope
    files changed after its approval. Each candidate change needs a new tree
    through the applicable staging boundary and a fresh validation Judge
-   receipt. Get it before dependent review.
-   Get it before a Finalizer check. If behavior changes, rerun focused behavior
-   tests. Do the same if tests change. Require the full installed hook from the
+   receipt. Get it before dependent review and a Finalizer check.
+   In interactive work, rerun Consistency Judge for a new tree when it applies.
+   Its receipt must
+   name that tree. If behavior or tests change, rerun focused behavior
+   tests. Require the full installed hook from the
    validation session. Each coding candidate needs it. Before changing a
    test, reconfirm that it fails against pre-fix behavior.
    Architect must authorize a focused Quality Judge rerun. Green must supply:

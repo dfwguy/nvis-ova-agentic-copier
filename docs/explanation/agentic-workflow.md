@@ -112,6 +112,12 @@ tests. At the same time, the Diátaxis Writer updates `docs/` and `README.md`.
 Agent-policy Writer handles portable policy when it applies. Green never edits
 docs, README, or agent-policy paths.
 
+Some changed facts have copies in the repo. In interactive work, Consistency
+Judge checks those copies against their source on the staged tree. Architect
+also runs it there when unsure. In serial work, Architect records
+`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+No staged-tree review is claimed there. An interactive skip needs a reason.
+
 Red keeps a verified failing-test boundary. In an interactive workflow, Main
 creates one approved checkpoint commit and local ref after Red proves the
 expected failures. The Finalizer later replaces the branch tip with one passing
@@ -264,6 +270,7 @@ flowchart TD
         cli["$cli-syntax-judge (conditional)"]
         filesystem["$filesystem-structure-judge (conditional)"]
         policy["$agent-policy-judge (conditional)"]
+        consistency["$consistency-judge (interactive, conditional)"]
         license["$license-checker"]
     end
     judge --> nonfunctional
@@ -275,6 +282,7 @@ flowchart TD
     nonfunctional --> cli
     nonfunctional --> filesystem
     nonfunctional --> policy
+    nonfunctional --> consistency
     nonfunctional --> license
     nonfunctional --> reviews["All initially applicable reviews returned"]
     diataxis --> reviews
@@ -285,6 +293,7 @@ flowchart TD
     cli --> reviews
     filesystem --> reviews
     policy --> reviews
+    consistency --> reviews
     license --> reviews
     reviews --> reviewoutcome{"Concrete, resolvable specialist-review findings with material progress?"}
     reviewoutcome -- "code or test finding" --> focusedgreen["Focused $tdd-green correction"]
@@ -322,7 +331,11 @@ flowchart TD
     docfastone --> docsynthesis
     docfasttwo --> docsynthesis
     docsynthesis --> docwriter["$documentation-writer"]
-    docwriter --> docfinalizer["$documentation-finalizer"]
+    docwriter --> docconsistency["$consistency-judge (interactive, conditional)"]
+    docconsistency --> docfinalizer["$documentation-finalizer"]
+    docwriter -- "exact not-applicable record" --> docfinalizer
+    docconsistency -- "finding" --> doccorrection["Live Architect routes correction"]
+    doccorrection --> docwriter
     docfinalizer --> docprogress{"Resolvable finding and material progress?"}
     docprogress -- "yes: evidence-led repair" --> docwriter
     docprogress -- "no findings" --> docdecision{"Architect accepts finalizer approval?"}
@@ -410,8 +423,10 @@ Green never edits docs, README, or agent-policy paths.
 
 In the documentation and agent-policy lane,
 Architect delegates one Documentation Writer. That writer alone may edit.
-Architect then delegates one
-consolidated Documentation Finalizer. Repair cycles need material progress. A
+In interactive work, the writer stages the candidate and Architect runs the
+Consistency Judge when copied facts change. In serial work, the worker does
+not stage and records the exact boundary-unavailable N/A. Architect then
+delegates one consolidated Documentation Finalizer. Repair cycles need material progress. A
 repeated finding returns to Architect for human direction. Unchanged evidence
 also returns to Architect. Scope expansion does too. Neither lane has a fixed
 repair count.
@@ -591,6 +606,7 @@ visible and preserves the human approval and merge boundary.
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
 | Agent Policy Judge | Reviews agent routing, portable skills, mirrors, and authority boundaries | Edit instructions, code, tests, or README.md |
+| Consistency Judge | In interactive work, checks changed repeated facts against authoritative definitions on an exact staged tree | Edit, stage, approve, merge, or infer exceptions without evidence |
 | Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
