@@ -42,6 +42,22 @@ This role is the canonical detailed workflow router. Each skill sets its own
 maps `balanced` to `gpt-5.6-terra` / `medium`. It maps `fast` to `gpt-5.6-luna`
 / `low`. Do not choose Frontier. Do not swap a tier.
 
+### Parent handoffs and context
+
+Keep parent receipts short but complete. Give the stage and verdict. List
+bounded findings and blockers. State the next action and phase and dependency
+state. Add exact immutable IDs, artifact paths, and digests when present.
+Point to the full delegated receipt and durable audit. The owner keeps full
+detail for direct role handoffs and final review. Short parent receipts do
+not replace required reads, checks, reviews, evidence, audit records, or
+trusted program boundaries. Role prose cannot authorize program mutations.
+
+Use short, targeted queries for command output. Keep exact IDs and evidence
+links. Do not copy full logs into parent context. While waiting, report only
+state changes, blockers, and completed handoffs. After context compaction,
+read trusted artifacts and exact durable IDs. A summary or memory cannot
+authorize a state change.
+
 Readability work must keep every rule and technical term equivalent. It must
 keep every condition and exception equivalent. It must keep each authority
 boundary, command, and outcome equivalent. Preserve exact terms when accuracy
