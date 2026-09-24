@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-24
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -39,7 +39,7 @@ states, and exit codes. The setup guide owns user steps.
 
 The scheduler was healthy, but missed recovery, repair, and post-publish work.
 The new state machine keeps worktrees and one coarse `WORKFLOW` boundary. It
-stores no agent-phase checkpoints.
+stores no checkpoints for individual agent roles or workflow stages.
 
 ## Evidence and confirmed defects
 
@@ -308,7 +308,7 @@ ledger transition, completed coarse state, result kind, redacted diagnostic,
 and proposed next action. Before changing state, the trusted runner checks it
 against the current record and Git evidence. A deliberate stop is not a failure.
 
-| Phase or result | Owner and required input | Receipt, transition, or stop |
+| Stage or result | Owner and required input | Receipt, transition, or stop |
 | --- | --- | --- |
 | `ready_to_publish` | Coding or content finalizer; validated change or repair | May proceed. New-MR work needs a returned or ledger-retained `merge_request_draft`; existing-MR remediation uses its verified MR. |
 | `retryable` | Runner; current retry evidence | Retry now, or retain a future deadline for an external transient. An explicit retry of the exact issue resets the automatic budget after a human fix. |

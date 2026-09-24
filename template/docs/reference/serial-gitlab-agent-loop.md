@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-24
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -637,7 +637,7 @@ Use this note to review the shown work.
 | --- | --- |
 | Newly selected issue | Attempts its entire applicable repository workflow in the same activation. |
 | Durable record | Resumes at its coarse `WORKFLOW` boundary and durable worktree. |
-| First rollout | Has no sidecar checkpoint for each role or phase. |
+| First rollout | Has no sidecar checkpoint for each role or workflow stage. |
 | Legacy phase-ledger value | Finishes its recorded route. |
 | New work | Uses `WORKFLOW`. |
 | Approved design | Architect gives it to Red and the Diátaxis Writer concurrently. The conditional Agent-policy Writer joins when portable agent policy is in scope. |
@@ -781,7 +781,7 @@ ledger state and coarse phase.
 
 | Output or evidence | Contract |
 | --- | --- |
-| Human item line | States whether work runs, what changed, the current failure or condition, and the next action. It includes issue, projected and raw state, phase, identity facts, and available worker-exit evidence. When phase timing evidence exists, it includes one concise `timing=` token with the entry count, summed execution seconds, summed wait seconds, and the latest phase, outcome, and elapsed seconds. |
+| Human item line | States whether work runs, what changed, the current failure or condition, and the next action. It includes issue, projected and raw state, phase, identity facts, and available worker-exit evidence. When phase timing evidence exists, it includes one concise `timing=` token with the entry count, summed execution seconds, summed wait seconds, and the latest phase or role, outcome, and elapsed seconds. |
 | JSON detail | Includes the full bounded `phase_timings` list, controller evidence, timestamps, conditions, and corroboration. Historical role and audit prose remains non-authoritative context. |
 | JSON form | It is compact, versioned `CommandReport` version 2. Status records have the human view's identity, projection, current-versus-history, bounded audit, and observation data. |
 | List bounds | A report gives total matching records and truncation metadata. Only an unfiltered list is capped at 100 records. |
@@ -890,7 +890,7 @@ starts.
 
 | Intake result | Rule |
 | --- | --- |
-| Suitable issue | It has one delivery outcome that can be reviewed and merged on its own. It can finish each applicable workflow phase within the effective bounded worker budget. |
+| Suitable issue | It has one delivery outcome that can be reviewed and merged on its own. It can finish each applicable workflow stage within the effective bounded worker budget. |
 | Sizing decision | It uses behavior, dependency and order, and workflow breadth. Numeric limits, such as line count, do not decide suitability. |
 | Suitable work | It uses the existing coding or content workflow. |
 | Split-required work | The issue is oversized or has more than one separately deliverable capability. |

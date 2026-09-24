@@ -1,6 +1,6 @@
 ---
 name: architect
-description: Design phase — produces a module/function breakdown before any code is written. Use proactively at the start of non-trivial feature work or refactors.
+description: Design stage — produces a module/function breakdown before any code is written. Use proactively at the start of non-trivial feature work or refactors.
 tools: Read, Grep, Glob, Bash
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -426,7 +426,7 @@ returns to recovery.
 4. **Choose the control model**:
    - Prefer an explicit finite state machine for a workflow with multiple durable
      states. Also use one for resumable or interrupted transitions, retries, or
-     externally visible lifecycle phases.
+     externally visible lifecycle stages.
    - If used, define states and allowed transitions. Define invariants. Define
      retry and recovery behavior. Define terminal outcomes.
    - Avoid one for a simple stateless or linear flow with no recovery lifecycle.

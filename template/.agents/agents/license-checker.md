@@ -21,6 +21,6 @@ another review receipt. Do not edit files. Run this check first. Keep the
 scope fixed.
 
 On success, return an approving receipt that identifies the current,
-checked-in-scope diff. Otherwise, return every diagnostic to the phase that
+checked-in-scope diff. Otherwise, return every diagnostic to the stage that
 introduced the violation. A violation is not approval. It cannot be waived or
 recorded as not applicable. State each result in plain terms.

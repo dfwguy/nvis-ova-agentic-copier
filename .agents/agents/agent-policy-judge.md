@@ -28,7 +28,7 @@ drift.
   agent-policy manifest only for a full diff. That diff must be content-only.
 - Each manifest skill ID must resolve to a portable skill. It must also resolve
   to its linked role.
-- Check phase prerequisites. Check receipts. Check conditional N/A records.
+- Check stage prerequisites. Check receipts. Check conditional N/A records.
   Check rejection routes. All must be complete and nonconflicting.
 - Root and template policy mirrors must match. The declared rendered project
   context is the only exception.

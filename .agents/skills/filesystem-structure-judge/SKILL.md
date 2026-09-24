@@ -16,7 +16,7 @@ metadata:
 
 # Filesystem Judge
 
-Use this portable skill for the filesystem judge phase. Before acting, read and
+Use this portable skill for the filesystem review stage. Before acting, read and
 follow [the role instructions](../../agents/filesystem-structure-judge.md).
 That file is role-reference material. This directory is the shared skill entry
 point for Claude Code, Codex, and Pi.

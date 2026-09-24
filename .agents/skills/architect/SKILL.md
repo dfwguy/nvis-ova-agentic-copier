@@ -16,7 +16,7 @@ metadata:
 
 # Architect
 
-Use this portable workflow skill for the architect phase. Before acting, read
+Use this portable workflow skill for the architecture stage. Before acting, read
 and follow [the role instructions](../../agents/architect.md). That file is
 role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi.

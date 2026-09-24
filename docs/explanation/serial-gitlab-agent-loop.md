@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-24
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -98,15 +98,15 @@ The controller starts one session only after it selects the issue and prepares i
 | Coding | The Architect delegates Red behavior tests and the Diátaxis Writer in parallel. After their receipts, Green is the sole mutator. It implements and reconciles documentation, coordinates review and repair, then returns final validation to the Architect. |
 | Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
-Architecture, behavior tests, implementation, documentation, every applicable review role, license review, and final validation stay in the same session. The controller does not restore an individual Architect, writer, implementer, reviewer, or internal phase after a crash.
+Architecture, behavior tests, implementation, documentation, every applicable review role, license review, and final validation stay in the same session. The controller does not restore an individual Architect, writer, implementer, reviewer, or internal workflow stage after a crash.
 
-After implementation, Green starts the parallel review fan-out. It includes the Non-functional Reviewer, Implementation Judge, Diátaxis Judge, Quality Judge, Test Judge, CI/CD Judge, README Reviewer, and License Checker. The CLI Syntax Judge, Filesystem Structure Judge, and Agent-policy Judge join only when their subjects apply. Every initially applicable reviewer sees the same stable post-Green diff. Green waits for every receipt before it consolidates and repairs actionable findings. The License Checker does not wait for another receipt. The Architect then receives the full result and delegates the Finalizer. Documentation comes before implementation, implementation before reviews, and final validation after current license evidence.
+After implementation, Green stages one candidate. It asks the Validation Judge to run alone. The Judge runs the hook. The Non-functional Reviewer then checks the JUnit results and the same staged tree. Green waits for both receipts before it starts the parallel specialist review. This review includes the Diátaxis, Quality, Test, and CI/CD Judges, the README Reviewer, and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy Judges join when their topics apply. Each specialist sees the same staged tree, diff, and Judge evidence. Green waits for every receipt before it repairs findings. The Architect then gets the full result and asks the Finalizer to act. Documentation comes before code. Reviews follow code. Final validation uses current license evidence.
 
 ## Recovery is coarse and observable.
 
 An activation is bounded, but its evidence lasts. The ledger records the selected issue, coarse workflow state, retry data, retained worktree, branch and merge-request evidence, receipts, transition intent, and a redacted next action. GitLab labels give a simple status. The ledger holds transaction detail.
 
-After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
+After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal workflow stage. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
 
 Only the ledger keeps the concise audit. Status is an operational projection of that record plus best-effort live evidence. This avoids presenting an old retry or failure as current. It also keeps unavailable, stale, or conflicting observations honestly unknown. The exact fields, bounded output, and state mapping are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
 
