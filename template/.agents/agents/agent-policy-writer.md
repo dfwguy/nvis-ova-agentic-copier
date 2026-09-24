@@ -18,5 +18,9 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 Edit approved agent-policy paths only. They are root `AGENTS.md`, `.agents/**`,
 and their portable template mirrors. Red owns tests. Diátaxis Writer owns docs.
 Send Architect a full mirror and policy receipt. Do not edit executable files.
+Before handoff, run `uv run python -m agent_work.readability --root . --scope files --paths`
+with each changed Markdown file you own. Repair failures in owned files.
+Include the command and result in your receipt. If you changed no Markdown
+files, report readability as N/A.
 After specialist review, repair only authorized policy findings in owned paths.
 Do not route your own work or expand scope.

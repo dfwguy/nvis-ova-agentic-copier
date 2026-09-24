@@ -61,7 +61,11 @@ not add untested functionality.
    mutator. Never edit root/template
    `AGENTS.md` or `.agents`. Send any policy need found in implementation to
    Architect.
-4. **Prepare one exact candidate.** Run `uv run ruff check --fix`, `uv run
+4. **Prepare one exact candidate.** Before the Judge candidate, run
+   `uv run python -m agent_work.readability --root . --scope files --paths`
+   with each changed Markdown file you own. Repair failures in owned files.
+   Record the command and result in your receipt. If you changed no Markdown
+   files, report readability as N/A. Run `uv run ruff check --fix`, `uv run
    ruff format`, and `uv run ty check`. Run focused behavior tests. Stage with
    `git add --all`. Require no unstaged maintained files. Require no untracked
    maintained files. Record `git write-tree`. These fast commands repair the
