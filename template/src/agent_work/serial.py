@@ -86,6 +86,7 @@ from .worker import (
     build_worker_result,
     build_worker_result_artifact,
     format_worker_result_diagnostic,
+    parse_worker_result_accepted_artifact,
     parse_worker_result_artifact,
     parse_worker_result_build_input,
     validate_worker_result,
@@ -103,6 +104,12 @@ def _broker_artifact_builder(
     *,
     repository: RepositoryPort,
     red_checkpoint: RedCheckpointEvidence | None,
+    apply_red_checkpoint: Callable[
+        [int, RedCheckpointRequest, str], RedCheckpointEvidence
+    ]
+    | None = None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> Callable[[bytes], bytes]:
     """Bind one live broker to the controller's exact current observations."""
     if (
@@ -116,7 +123,10 @@ def _broker_artifact_builder(
     ):
         raise WorkerProtocolError("worker_result_broker", "identity mismatch")
 
+    candidate_identity: tuple[str, tuple[str, ...], str] | None = None
+
     def build(input_bytes: bytes) -> bytes:
+        nonlocal candidate_identity
         try:
             changed_paths = tuple(
                 sorted(set(repository.changed_paths(record.worktree)))
@@ -125,17 +135,80 @@ def _broker_artifact_builder(
             raise WorkerProtocolError(
                 "controller_invariant.changed_paths", "could not be observed"
             ) from error
+        try:
+            observed_head = repository.head(record.worktree)
+            candidate_tree = (
+                record.source_sha
+                if not changed_paths
+                else repository.red_candidate_tree(
+                    record.worktree, record.source_sha or "", changed_paths
+                )
+            )
+        except RepositoryError as error:
+            raise WorkerProtocolError(
+                "controller_invariant.red_checkpoint", "candidate could not be observed"
+            ) from error
+        current_identity = (observed_head, changed_paths, candidate_tree)
+        if candidate_identity is None:
+            candidate_identity = current_identity
+        elif current_identity != candidate_identity:
+            raise WorkerProtocolError("worker_result_broker", "candidate changed")
+        build_input = parse_worker_result_build_input(input_bytes)
+        accepted_checkpoint = red_checkpoint
+        if build_input.result_kind == "red_checkpoint_ready":
+            if (
+                record.workflow_lane is not WorkflowLane.UNKNOWN
+                or build_input.workflow_lane is not WorkflowLane.CODING
+                or build_input.red_checkpoint_request is None
+                or apply_red_checkpoint is None
+                or load_red_checkpoint is None
+                or record.source_sha is None
+            ):
+                raise WorkerProtocolError(
+                    "controller_invariant.red_checkpoint", "request is not exact"
+                )
+            if changed_paths != build_input.red_checkpoint_request.test_paths:
+                raise WorkerProtocolError(
+                    "controller_invariant.red_checkpoint", "changed paths do not match"
+                )
+            if candidate_tree is None:
+                raise WorkerProtocolError(
+                    "controller_invariant.red_checkpoint",
+                    "candidate could not be observed",
+                )
+            try:
+                accepted_checkpoint = apply_red_checkpoint(
+                    record.issue_iid,
+                    build_input.red_checkpoint_request,
+                    candidate_tree,
+                )
+                reloaded = load_red_checkpoint(
+                    record.project_id, record.issue_iid, record.source_sha
+                )
+            except (RedCheckpointError, RepositoryError, ValueError) as error:
+                raise WorkerProtocolError(
+                    "controller_invariant.red_checkpoint", "request was rejected"
+                ) from error
+            if accepted_checkpoint != reloaded:
+                raise WorkerProtocolError(
+                    "controller_invariant.red_checkpoint", "checkpoint did not reload"
+                )
         result = build_worker_result(
             record,
-            parse_worker_result_build_input(input_bytes),
+            build_input,
             changed_paths=changed_paths,
-            red_checkpoint=red_checkpoint,
+            red_checkpoint=accepted_checkpoint,
         )
         return build_worker_result_artifact(
             record,
             result,
             nonce=request.nonce,
             changed_paths=changed_paths,
+            red_checkpoint=(
+                accepted_checkpoint
+                if result.result_kind == "red_checkpoint_ready"
+                else None
+            ),
         )
 
     return build
@@ -2458,7 +2531,7 @@ def _execute(
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
     apply_red_checkpoint: (
-        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+        Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None,
 ) -> LedgerRecord | None:
     if not invoke.supports_worker_result_broker:
@@ -2666,6 +2739,8 @@ def _execute(
                     broker_request,
                     repository=repository,
                     red_checkpoint=retained_checkpoint,
+                    apply_red_checkpoint=apply_red_checkpoint,
+                    load_red_checkpoint=load_red_checkpoint,
                 ),
             )
         if red_invocation.protocol_error is not None:
@@ -2703,11 +2778,12 @@ def _execute(
             red_changed_paths = tuple(
                 sorted(set(repository.changed_paths(record.worktree)))
             )
-            red_result = parse_worker_result_artifact(
+            accepted_artifact = parse_worker_result_accepted_artifact(
                 red_invocation.worker_result,
                 request=broker_request,
                 changed_paths=red_changed_paths,
             )
+            red_result = accepted_artifact.envelope
         except WorkerProtocolError as error:
             return _record_retry(
                 record,
@@ -2742,21 +2818,6 @@ def _execute(
                 if checkpoint_request is None:
                     raise RedCheckpointError("red checkpoint request is missing")
                 try:
-                    record = ledger.persist(
-                        record.model_copy(update={"workflow_lane": WorkflowLane.CODING})
-                    )
-                    applied_checkpoint = apply_red_checkpoint(
-                        record.issue_iid, checkpoint_request
-                    )
-                except (RedCheckpointError, RepositoryError, ValueError):
-                    return _block_red_checkpoint(
-                        record,
-                        ledger=ledger,
-                        gitlab=gitlab,
-                        now=now,
-                        stage=RedCheckpointFailureStage.EXECUTION_PERSISTENCE,
-                    )
-                try:
                     retained_checkpoint = (
                         load_red_checkpoint(
                             record.project_id, record.issue_iid, record.source_sha
@@ -2765,24 +2826,31 @@ def _execute(
                         and record.source_sha is not None
                         else None
                     )
-                except RedCheckpointError:
-                    return _block_red_checkpoint(
-                        record,
-                        ledger=ledger,
-                        gitlab=gitlab,
-                        now=now,
-                        stage=RedCheckpointFailureStage.RETAINED_RELOAD_MISMATCH,
+                    if retained_checkpoint is None:
+                        raise RedCheckpointError("checkpoint did not reload")
+                    if retained_checkpoint != accepted_artifact.red_checkpoint:
+                        raise RedCheckpointError("checkpoint artifact did not reload")
+                    record = ledger.persist(
+                        transition_record(
+                            record,
+                            RunnerState.EXECUTING,
+                            phase=WorkflowPhase.WORKFLOW,
+                            workflow_lane=WorkflowLane.UNKNOWN,
+                            summary=red_result.change_summary,
+                            next_action=red_result.next_action,
+                            error_code=None,
+                        )
                     )
-                if (
-                    retained_checkpoint is None
-                    or retained_checkpoint != applied_checkpoint
-                ):
-                    return _block_red_checkpoint(
+                except (RedCheckpointError, RepositoryError, ValueError):
+                    return _record_retry(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
                         now=now,
-                        stage=RedCheckpointFailureStage.RETAINED_RELOAD_MISMATCH,
+                        error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+                        retry_delay=timedelta(),
+                        detail="worker_result_broker: red checkpoint was not retained",
+                        stop_on_unchanged_condition=True,
                     )
                 if remaining_seconds is not None:
                     remaining = remaining_seconds()
@@ -2856,6 +2924,8 @@ def _execute(
                     broker_request,
                     repository=repository,
                     red_checkpoint=retained_checkpoint,
+                    apply_red_checkpoint=apply_red_checkpoint,
+                    load_red_checkpoint=load_red_checkpoint,
                 ),
             )
     refreshed_correction = refresh_publication_correction_identity(
@@ -4122,7 +4192,7 @@ def run_segment(
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
     apply_red_checkpoint: (
-        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+        Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""

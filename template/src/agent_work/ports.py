@@ -218,6 +218,10 @@ class RepositoryPort(Protocol):
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]: ...
 
+    def red_candidate_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+    ) -> str: ...
+
     def observe_legacy_publication_candidate(
         self, worktree: Path
     ) -> LegacyPublicationCandidate: ...

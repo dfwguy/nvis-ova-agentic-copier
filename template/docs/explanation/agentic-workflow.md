@@ -95,37 +95,42 @@ Agent-policy Writer joins mixed coding work that touches portable policy. Green
 implements production changes. It reconciles docs with behavior, tests, and final
 interfaces. Green never edits agent-policy paths.
 
-Red keeps its verified failing-test boundary in one of two ways. In an
-interactive workflow, Main creates one approved checkpoint commit and local
-ref after Red proves the expected failures. The Finalizer later replaces the branch tip with exactly one passing commit
-over the original base while retaining the local Red ref. The failing tip is
-never pushed. Correctness does not depend on GitLab squash.
+Red keeps a verified failing-test boundary. In an interactive workflow, Main
+creates one approved checkpoint commit and local ref after Red proves the
+expected failures. The Finalizer later replaces the branch tip with one passing
+commit over the original base and keeps the local Red ref. The failing tip is
+never pushed. GitLab squash does not affect correctness.
 
-In a serial workflow, the AI worker cannot commit. The controller uses
-`red-checkpoint create` to save the declared changed tests as a local Git tree.
-The trusted controller later makes the one final commit for the whole change.
+In a serial workflow, the AI worker cannot commit. While the Red producer is
+still live, it calls the trusted broker boundary. The boundary sets the coding
+lane, reruns and checks Red, and saves the checkpoint before it accepts the
+producer's result. A standard rejection returns to the producer
+for one correction when the controller sees the same worktree evidence.
+The broker is small. Its rules are strict.
+It takes one request. It may take one fix. It keeps its own state.
+This is clear. This is safe.
 
 The serial checkpoint is a complete tree for the recorded base with only the
-declared test changes overlaid. It lives in an issue-namespaced local ref. Git
-keeps the snapshot durable and makes it easy to inspect with `git diff <ref>`.
-It is not branch history, and the ref is never pushed. Green, test review, and
-final audit receive its exact ref, tree, and path identity. Recovery can reuse
-it after an interruption only when that identity and the recorded base still
-match. Invalid, stale, missing, or changed evidence stops the workflow. It
-cannot weaken the Red boundary.
+declared test changes overlaid. A checkpoint commit records that tree and its
+bounded evidence under an issue local ref. Git keeps the snapshot and makes it
+easy to inspect with `git diff <ref>`.
+It is not branch history, and the ref is never pushed. The controller returns
+the exact ref, tree, and path identity as program-owned evidence. Green, test
+review, and final audit use that identity. On resume, the controller reloads it
+freshly and stops on invalid, stale, missing, or changed evidence. The trusted
+controller later makes the one final commit for the whole change.
 
-During implementation, Green runs the fast formatter and lint. It runs type checks. It runs
-focused behavior tests. It stages one exact candidate. It records its tree OID.
-During serial validation, TDD Judge uses an applied durable session. The session uses
-that tree as its key. It records running state. It runs exactly one
+Green runs the fast formatter, lint, type checks, and focused behavior tests.
+It stages one candidate and records its tree OID. During serial validation,
+TDD Judge uses an applied saved session keyed by that tree. It records running
+state and runs exactly one
 `git hook run pre-commit`. During that one hook execution, the validation session
-captures the immutable supported-version JUnit snapshots, digests, and test
-counts with its terminal evidence. Only terminal success lets Judge inspect the
-unchanged tree. Failure blocks the workflow. A frontend can lose the handle. It
-can also yield it. In either case, Judge and Non-functional Reviewer can
-authenticate the persisted evidence after handle loss without rerunning the
-hook. These checks come before Non-functional Reviewer. They also come before
-nine concurrent specialist reviews. The [serial GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
+captures fixed JUnit snapshots, digests, and test counts as final
+evidence. Judge inspects the unchanged tree only after success. Failure blocks
+the workflow. Judge and Non-functional Reviewer can authenticate persisted
+evidence after a frontend loses its handle without rerunning the hook. These
+checks run before Non-functional Reviewer and specialist reviews. The [serial
+GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
 defines run and read-only status commands.
 
 During finalization, Finalizer may use `--no-verify`. It may do so only after matching

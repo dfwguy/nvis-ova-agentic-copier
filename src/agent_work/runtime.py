@@ -98,7 +98,6 @@ from .red_checkpoint import (
     RedCheckpointDependencies,
     RedCheckpointError,
     RedCheckpointEvidence,
-    RedCheckpointReport,
     RedCheckpointRequest,
     RedCheckpointStore,
     create_red_checkpoint,
@@ -1260,7 +1259,7 @@ class RuntimeDependencies:
         Callable[[int, int, str], RedCheckpointEvidence | None] | None
     ) = None
     apply_red_checkpoint: (
-        Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
+        Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None
     run_segment_boundary: Callable[..., LedgerRecord | None] = run_segment
 
@@ -1276,9 +1275,17 @@ class RuntimeCheckpointRepository(RepositoryPort, Protocol):
         self, worktree: Path, argv: tuple[str, ...]
     ) -> CommandResult: ...
 
-    def snapshot_tests(
-        self, worktree: Path, base_sha: str, paths: tuple[str, ...], ref: str
+    def snapshot_test_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str: ...
+
+    def write_red_checkpoint_ref(
+        self, worktree: Path, evidence: RedCheckpointEvidence
+    ) -> None: ...
+
+    def read_red_checkpoint_ref(
+        self, worktree: Path, project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None: ...
 
 
 class RuntimeGitLabPort(GitLabPort, Protocol):
@@ -1296,8 +1303,6 @@ class RuntimeCheckpointStore(Protocol):
         self, project_id: int, issue_iid: int, base_sha: str
     ) -> RedCheckpointEvidence | None: ...
 
-    def write(self, evidence: RedCheckpointEvidence) -> None: ...
-
 
 class RuntimeCheckpointCreator(Protocol):
     """Trusted checkpoint transaction callable used by the composition root."""
@@ -1307,9 +1312,8 @@ class RuntimeCheckpointCreator(Protocol):
         *,
         issue_iid: int,
         request: RedCheckpointRequest,
-        apply: bool,
         dependencies: RedCheckpointDependencies,
-    ) -> RedCheckpointReport: ...
+    ) -> RedCheckpointEvidence: ...
 
 
 @dataclass(frozen=True)
@@ -1718,39 +1722,53 @@ def build_runtime_dependencies(
     def load_red_checkpoint(
         project_id: int, issue_iid: int, base_sha: str
     ) -> RedCheckpointEvidence | None:
-        evidence = checkpoint_store.read(project_id, issue_iid, base_sha)
-        if evidence is not None and repository.checkpoint_tree(evidence.ref) != (
-            evidence.tree_oid
+        record = ledger.load_read_only(issue_iid)
+        if record is None:
+            return None
+        evidence = repository.read_red_checkpoint_ref(
+            record.worktree, project_id, issue_iid, base_sha
+        )
+        if evidence is not None:
+            return evidence
+        # Retained blocked v1 work uses a sidecar/tree ref. It is read-only
+        # compatibility; every new checkpoint is written as one commit ref.
+        legacy = checkpoint_store.read(project_id, issue_iid, base_sha)
+        if (
+            legacy is not None
+            and repository.checkpoint_tree(legacy.ref) != legacy.tree_oid
         ):
             raise RedCheckpointError("red checkpoint ref does not match retained tree")
-        return evidence
+        return legacy
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, expected_tree_oid: str
     ) -> RedCheckpointEvidence:
-        def snapshot_tests(base_sha: str, paths: tuple[str, ...], ref: str) -> str:
+        def snapshot_test_tree(base_sha: str, paths: tuple[str, ...]) -> str:
             record = ledger.load_read_only(issue_iid)
             if record is None:
                 raise RedCheckpointError("red checkpoint record is unavailable")
-            return repository.snapshot_tests(record.worktree, base_sha, paths, ref)
+            return repository.snapshot_test_tree(record.worktree, base_sha, paths)
 
-        report = create_checkpoint(
+        def write_evidence(evidence: RedCheckpointEvidence) -> None:
+            record = ledger.load_read_only(issue_iid)
+            if record is None:
+                raise RedCheckpointError("red checkpoint record is unavailable")
+            repository.write_red_checkpoint_ref(record.worktree, evidence)
+
+        return create_checkpoint(
             issue_iid=issue_iid,
             request=request,
-            apply=True,
             dependencies=RedCheckpointDependencies(
                 load_record=ledger.load_read_only,
                 current_head=repository.head,
                 changed_paths=repository.changed_paths,
                 run_red_command=repository.run_red_command,
-                snapshot_tests=snapshot_tests,
+                snapshot_test_tree=snapshot_test_tree,
+                expected_tree_oid=expected_tree_oid,
                 read_evidence=load_red_checkpoint,
-                write_evidence=checkpoint_store.write,
+                write_evidence=write_evidence,
             ),
         )
-        if report.evidence is None:
-            raise RedCheckpointError("red checkpoint evidence was not created")
-        return report.evidence
 
     return RuntimeDependencies(
         config=config,
@@ -1800,6 +1818,14 @@ def build_worker_result_dependencies(
     def load_red_checkpoint(
         project_id: int, issue_iid: int, base_sha: str
     ) -> RedCheckpointEvidence | None:
+        record = ledger.load_read_only(issue_iid)
+        if record is None:
+            return None
+        evidence = repository.read_red_checkpoint_ref(
+            record.worktree, project_id, issue_iid, base_sha
+        )
+        if evidence is not None:
+            return evidence
         evidence = checkpoint_store.read(project_id, issue_iid, base_sha)
         if evidence is not None and repository.checkpoint_tree(evidence.ref) != (
             evidence.tree_oid

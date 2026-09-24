@@ -30,6 +30,7 @@ from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
+from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
 from .validation import HookFailure, parse_installed_precommit_failures
 
 
@@ -765,10 +766,173 @@ class GitRepository:
             raise RepositoryError("checkpoint ref could not be verified")
         return result.stdout.strip()
 
-    def snapshot_tests(
-        self, worktree: Path, base_sha: str, paths: tuple[str, ...], ref: str
+    def write_red_checkpoint_ref(
+        self, worktree: Path, evidence: RedCheckpointEvidence
+    ) -> None:
+        """Atomically bind one evidence-bearing commit to its empty checkpoint ref."""
+        message = evidence.model_dump_json()
+        commit_environment = {
+            **self._environment,
+            "GIT_AUTHOR_NAME": "agent-work",
+            "GIT_AUTHOR_EMAIL": "agent-work@localhost",
+            "GIT_COMMITTER_NAME": "agent-work",
+            "GIT_COMMITTER_EMAIL": "agent-work@localhost",
+            "GIT_AUTHOR_DATE": "1970-01-01T00:00:00Z",
+            "GIT_COMMITTER_DATE": "1970-01-01T00:00:00Z",
+        }
+        commit = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "commit-tree",
+                evidence.tree_oid,
+                "-p",
+                evidence.base_sha,
+                "-m",
+                message,
+            ),
+            environment=commit_environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        commit_oid = commit.stdout.strip()
+        if commit.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit_oid):
+            raise RepositoryError("red checkpoint commit could not be created")
+        updated = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "update-ref",
+                evidence.ref,
+                commit_oid,
+                "",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if updated.returncode != 0:
+            raise RepositoryError("red checkpoint ref could not be created")
+
+    def read_red_checkpoint_ref(
+        self, worktree: Path, project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        """Load and verify one atomic checkpoint commit without sidecar authority."""
+        ref = checkpoint_ref(issue_iid, base_sha)
+        resolved = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "rev-parse",
+                "-q",
+                "--verify",
+                ref,
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if resolved.returncode == 1 and not resolved.stdout.strip():
+            return None
+        if resolved.returncode != 0 or not re.fullmatch(
+            r"[0-9a-f]{40}", resolved.stdout.strip()
+        ):
+            raise RedCheckpointError("red checkpoint ref could not be verified")
+        object_type = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "cat-file",
+                "-t",
+                resolved.stdout.strip(),
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if object_type.returncode != 0:
+            raise RedCheckpointError("red checkpoint ref could not be verified")
+        if object_type.stdout.strip() == "tree":
+            return None
+        if object_type.stdout.strip() != "commit":
+            raise RedCheckpointError("red checkpoint ref has an invalid object type")
+        object_size = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "cat-file",
+                "-s",
+                resolved.stdout.strip(),
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        try:
+            size = int(object_size.stdout.strip())
+        except ValueError as error:
+            raise RedCheckpointError("red checkpoint object size is invalid") from error
+        if object_size.returncode != 0 or not 0 < size <= 65_536:
+            raise RedCheckpointError("red checkpoint object exceeds the durable bound")
+        commit_oid = resolved.stdout.strip()
+        body = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "show",
+                "-s",
+                "--format=%B",
+                commit_oid,
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        parents = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "show",
+                "-s",
+                "--format=%P",
+                commit_oid,
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        tree = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "rev-parse",
+                f"{commit_oid}^{{tree}}",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if body.returncode != 0 or parents.returncode != 0 or tree.returncode != 0:
+            raise RedCheckpointError("red checkpoint commit could not be read")
+        try:
+            evidence = RedCheckpointEvidence.model_validate_json(body.stdout)
+        except ValueError as error:
+            raise RedCheckpointError("red checkpoint evidence is malformed") from error
+        if (
+            evidence.project_id != project_id
+            or evidence.issue_iid != issue_iid
+            or evidence.base_sha != base_sha
+            or evidence.ref != ref
+            or evidence.tree_oid != tree.stdout.strip()
+            or parents.stdout.strip() != base_sha
+        ):
+            raise RedCheckpointError("red checkpoint commit identity is invalid")
+        return evidence
+
+    def snapshot_test_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str:
-        """Snapshot only declared tests over a base tree into one local ref."""
+        """Snapshot only declared tests over a base tree without publishing a ref."""
         descriptor, index_name = tempfile.mkstemp(prefix="agent-work-red-index-")
         os.close(descriptor)
         index_path = Path(index_name)
@@ -796,43 +960,15 @@ class GitRepository:
             tree_oid = indexed("write-tree").stdout.strip()
             if not re.fullmatch(r"[0-9a-f]{40}", tree_oid):
                 raise RepositoryError("Red checkpoint tree identity is invalid")
-            existing = self._bounded_command(
-                (
-                    str(self.config.git_path),
-                    "-C",
-                    str(worktree),
-                    "rev-parse",
-                    "-q",
-                    "--verify",
-                    f"{ref}^{{tree}}",
-                ),
-                environment=self._environment,
-                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
-            )
-            if existing.returncode == 0:
-                if existing.stdout.strip() != tree_oid:
-                    raise RepositoryError("checkpoint ref belongs to another tree")
-                return tree_oid
-            if existing.returncode != 1:
-                raise RepositoryError("checkpoint ref could not be verified")
-            updated = self._bounded_command(
-                (
-                    str(self.config.git_path),
-                    "-C",
-                    str(worktree),
-                    "update-ref",
-                    ref,
-                    tree_oid,
-                    "",
-                ),
-                environment=self._environment,
-                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
-            )
-            if updated.returncode != 0:
-                raise RepositoryError("checkpoint ref could not be created")
             return tree_oid
         finally:
             index_path.unlink(missing_ok=True)
+
+    def red_candidate_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+    ) -> str:
+        """Observe exact current candidate content as an unpublished tree identity."""
+        return self.snapshot_test_tree(worktree, base_sha, paths)
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

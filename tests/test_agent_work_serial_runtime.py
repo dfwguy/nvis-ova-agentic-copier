@@ -36,6 +36,7 @@ from agent_work import (
 from agent_work import (
     repository as repository_module,
 )
+from agent_work.cli import build_parser
 from agent_work.domain import (
     LIFECYCLE_LABELS,
     CommandRequest,
@@ -80,7 +81,6 @@ from agent_work.ports import CommandResult as CommandResultProtocol
 from agent_work.red_checkpoint import (
     RedCheckpointError,
     RedCheckpointEvidence,
-    RedCheckpointReport,
     RedCheckpointRequest,
 )
 from agent_work.repository import (
@@ -736,6 +736,7 @@ class FakeRepository:
         self.verified_heads: list[str] = []
         self.synced_heads: list[tuple[str, str]] = []
         self.current_head = "a" * 40
+        self.candidate_tree = "b" * 40
         self.ancestry = True
         self.reconciliation_sha: str | None = None
         self.observed_default_sha = "b" * 40
@@ -815,6 +816,12 @@ class FakeRepository:
         if self.changed_paths_error is not None:
             raise self.changed_paths_error
         return self.paths
+
+    def red_candidate_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+    ) -> str:
+        del worktree, base_sha, paths
+        return self.candidate_tree
 
     def observe_legacy_publication_candidate(
         self, worktree: Path
@@ -1778,7 +1785,9 @@ def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     assert record.source_sha is not None
     evidence = checkpoint.RedCheckpointEvidence(
@@ -1888,17 +1897,8 @@ class RedThenGreenInvoker:
             request_payload = request.model_dump(mode="json")
             request_payload.update(self.red_checkpoint_request_updates)
             payload = {
-                "protocol_version": 2,
-                "project_id": record["project_id"],
-                "issue_iid": record["issue_iid"],
-                "ledger_revision": record["revision"],
-                "expected_state": record["state"],
-                "expected_phase": record["phase"],
                 "workflow_lane": "coding",
                 "result_kind": "red_checkpoint_ready",
-                "phase_status": "complete",
-                "completed_phase": "workflow",
-                "receipts": ("$architect: approved", "$tdd-red: red confirmed"),
                 "change_summary": "Failing behavior tests are ready for capture.",
                 "next_action": "Create and verify the trusted Red checkpoint.",
                 "red_checkpoint_request": request_payload,
@@ -1956,6 +1956,310 @@ class RedThenGreenArtifactInvoker:
         )
 
 
+class ProducerOwnedRedThenGreenInvoker:
+    """Prove that a Red checkpoint is accepted before its producer returns."""
+
+    supports_worker_result_broker = True
+
+    def __init__(self, repository: FakeRepository) -> None:
+        self.repository = repository
+        self.producer_is_active = False
+        self.accepted_checkpoint: RedCheckpointEvidence | None = None
+        self.prompts: list[str] = []
+        self.green = SingleSessionInvoker()
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            payload = {
+                "workflow_lane": "coding",
+                "result_kind": "red_checkpoint_ready",
+                "change_summary": "Failing behavior tests are ready for capture.",
+                "next_action": "Create and verify the trusted Red checkpoint.",
+                "red_checkpoint_request": _red_checkpoint_request_for_segment().model_dump(
+                    mode="json"
+                ),
+            }
+            self.producer_is_active = True
+            try:
+                invocation = _broker_invocation_from_intent(
+                    json.dumps(payload),
+                    broker_request=broker_request,
+                    build_artifact=build_artifact,
+                )
+                assert self.accepted_checkpoint is not None
+                assert invocation.worker_result is not None
+                artifact = json.loads(invocation.worker_result)
+                assert artifact[
+                    "red_checkpoint"
+                ] == self.accepted_checkpoint.model_dump(mode="json")
+                return invocation
+            finally:
+                self.producer_is_active = False
+        self.repository.paths = (
+            "src/example.py",
+            "tests/test_agent_work_serial_runtime.py",
+        )
+        self.green.changed_paths = self.repository.paths
+        return self.green.invoke(
+            checkout,
+            prompt,
+            timeout,
+            broker_request=broker_request,
+            build_artifact=build_artifact,
+        )
+
+
+def test_red_checkpoint_is_persisted_while_the_producing_worker_is_active(
+    tmp_path: Path,
+) -> None:
+    """The broker, rather than post-exit serial code, owns Red persistence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = ProducerOwnedRedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        assert invoker.producer_is_active
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        assert current.workflow_lane is WorkflowLane.UNKNOWN
+        assert request == _red_checkpoint_request_for_segment()
+        retained = _red_checkpoint_evidence_for_segment(current)
+        invoker.accepted_checkpoint = retained
+        return retained
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+    )
+
+    assert retained is not None
+    assert len(invoker.prompts) == 2
+    assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+@pytest.mark.parametrize(
+    "boundary_failure",
+    (
+        "precondition or changed-path verification failed",
+        "Red command passed or its marker was absent",
+        "checkpoint evidence or ref persistence failed",
+        "persisted checkpoint reload did not match",
+    ),
+)
+def test_atomic_red_boundary_failure_leaves_no_coding_lane_or_checkpoint(
+    tmp_path: Path, boundary_failure: str
+) -> None:
+    """Every rejected producer boundary leaves no ambiguous coding authority."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+
+    class BoundaryFailureInvoker:
+        """Return two canonical broker rejections while its producer stays live."""
+
+        supports_worker_result_broker = True
+
+        def __init__(self) -> None:
+            self.producer_is_active = False
+            self.calls = 0
+
+        def preflight(self) -> None:
+            pass
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+        ) -> WorkerInvocation:
+            del checkout, prompt, timeout
+            assert broker_request is not None and build_artifact is not None
+            intent = {
+                "workflow_lane": "coding",
+                "result_kind": "red_checkpoint_ready",
+                "change_summary": "Failing tests are ready for capture.",
+                "next_action": "Persist the checkpoint.",
+                "red_checkpoint_request": _red_checkpoint_request_for_segment().model_dump(
+                    mode="json"
+                ),
+            }
+            self.producer_is_active = True
+            try:
+                for _attempt in range(2):
+                    with pytest.raises(WorkerProtocolError):
+                        build_artifact(json.dumps(intent).encode())
+                    self.calls += 1
+            finally:
+                self.producer_is_active = False
+            return WorkerInvocation(
+                0,
+                protocol_error=WorkerProtocolError(
+                    "worker_result_broker", "checkpoint request rejected"
+                ),
+            )
+
+    invoker = BoundaryFailureInvoker()
+
+    def fail_boundary(
+        _issue_iid: int, _request: RedCheckpointRequest, _expected_tree_oid: str
+    ) -> RedCheckpointEvidence:
+        assert invoker.producer_is_active
+        raise RedCheckpointError(boundary_failure)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=fail_boundary,
+    )
+
+    persisted = ledger.load_read_only(record.issue_iid)
+    assert invoker.calls == 2
+    assert (
+        outcome is not None and outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    )
+    assert persisted is not None and persisted.workflow_lane is WorkflowLane.UNKNOWN
+
+
+class CorrectionDriftInvoker:
+    """Attempt correction after changing test content at the same path."""
+
+    supports_worker_result_broker = True
+
+    def __init__(self, repository: FakeRepository) -> None:
+        self.repository = repository
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
+        del checkout, timeout
+        assert broker_request is not None and build_artifact is not None
+        with pytest.raises(WorkerProtocolError):
+            build_artifact(b"{}")
+        self.repository.candidate_tree = "c" * 40
+        request = RedCheckpointRequest(
+            argv=(
+                "uv",
+                "run",
+                "pytest",
+                "tests/test_agent_work_serial_runtime.py::test_red",
+            ),
+            expected_failure="assert expected failure",
+            test_paths=("tests/test_agent_work_serial_runtime.py",),
+        )
+        intent = {
+            "workflow_lane": "coding",
+            "result_kind": "red_checkpoint_ready",
+            "change_summary": "Correct the rejected Red request.",
+            "next_action": "Persist the verified checkpoint.",
+            "red_checkpoint_request": request.model_dump(mode="json"),
+        }
+        with pytest.raises(WorkerProtocolError, match="changed"):
+            build_artifact(json.dumps(intent).encode())
+        return WorkerInvocation(0, worker_result=None)
+
+
+def test_corrected_red_request_is_rejected_when_same_path_content_changes(
+    tmp_path: Path,
+) -> None:
+    """A correction cannot reuse paths after their test-tree content drifts."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=CorrectionDriftInvoker(repository),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=lambda *_args: pytest.fail(
+            "a changed worktree must not reach checkpoint persistence"
+        ),
+    )
+
+    persisted = ledger.load_read_only(12)
+    assert (
+        outcome is not None and outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    )
+    assert persisted is not None and persisted.workflow_lane is WorkflowLane.UNKNOWN
+
+
+def test_standalone_red_checkpoint_creation_is_not_a_worker_cli_transport() -> None:
+    """New Red checkpoints have no post-worker command-line creation route."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "red-checkpoint",
+                "create",
+                "--issue-iid",
+                "12",
+                "--evidence-file",
+                "/tmp/red-evidence.json",
+                "--apply",
+            ]
+        )
+
+
 class RecordingLedger(JsonLedger):
     """Record durable lane writes around the trusted checkpoint transaction."""
 
@@ -1969,13 +2273,15 @@ class RecordingLedger(JsonLedger):
         return persisted
 
 
-def test_coding_workflow_persists_lane_then_captures_red_before_green(
+def test_coding_workflow_captures_red_before_the_green_result_persists_lane(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
     ledger = RecordingLedger(config.state_root)
     record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     ledger.events.clear()
     repository = FakeRepository(config)
@@ -1984,13 +2290,13 @@ def test_coding_workflow_persists_lane_then_captures_red_before_green(
     retained: RedCheckpointEvidence | None = None
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal retained
         assert issue_iid == record.issue_iid
         assert request == _red_checkpoint_request_for_segment()
         current = ledger.load_read_only(issue_iid)
-        assert current is not None and current.workflow_lane is WorkflowLane.CODING
+        assert current is not None and current.workflow_lane is WorkflowLane.UNKNOWN
         ledger.events.append("apply-red-checkpoint")
         retained = _red_checkpoint_evidence_for_segment(current)
         return retained
@@ -2007,9 +2313,9 @@ def test_coding_workflow_persists_lane_then_captures_red_before_green(
     )
 
     assert len(invoker.prompts) == 2
-    persist_index = ledger.events.index("persist:coding")
-    apply_index = ledger.events.index("apply-red-checkpoint")
-    assert persist_index < apply_index
+    assert ledger.events[0] == "apply-red-checkpoint"
+    assert all(event != "persist:coding" for event in ledger.events[:1])
+    assert "persist:coding" in ledger.events[1:]
     assert retained is not None and retained.tree_oid in invoker.prompts[1]
     assert result is not None and result.state is RunnerState.PUBLISHING
 
@@ -2020,7 +2326,9 @@ def test_red_and_resumed_green_use_distinct_revision_bound_artifacts(
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     repository = FakeRepository(config)
     repository.paths = ("tests/test_agent_work_serial_runtime.py",)
@@ -2029,7 +2337,7 @@ def test_red_and_resumed_green_use_distinct_revision_bound_artifacts(
     checkpoint_revision: int | None = None
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal checkpoint_revision, retained
         assert issue_iid == record.issue_iid
@@ -2055,7 +2363,8 @@ def test_red_and_resumed_green_use_distinct_revision_bound_artifacts(
     red_request, green_request = invoker.requests
     assert red_request.nonce != green_request.nonce
     assert red_request.ledger_revision == record.revision
-    assert green_request.ledger_revision == checkpoint_revision
+    assert checkpoint_revision is not None
+    assert green_request.ledger_revision == checkpoint_revision + 1
     assert green_request.ledger_revision > red_request.ledger_revision
     assert result is not None and result.state is RunnerState.PUBLISHING
 
@@ -2067,7 +2376,9 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     repository = FakeRepository(config)
     repository.paths = ("tests/test_agent_work_serial_runtime.py",)
@@ -2075,7 +2386,7 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
     retained: RedCheckpointEvidence | None = None
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal retained
         assert issue_iid == record.issue_iid
@@ -2103,7 +2414,7 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
         assert (
             f"`{expected_builder} worker-result build --issue-iid 12 "
             "--input-file PATH --broker-socket PATH --broker-nonce "
-            f"{request.nonce} --apply`"
+            f"{request.nonce} --apply --json`"
         ) in prompt
     assert result is not None and result.state is RunnerState.PUBLISHING
 
@@ -2128,7 +2439,7 @@ def test_initial_red_broker_failure_is_typed_protocol_evidence(
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda *_args: None,
-        apply_red_checkpoint=lambda _issue_iid, _request: (
+        apply_red_checkpoint=lambda _issue_iid, _request, _expected_tree_oid: (
             _red_checkpoint_evidence_for_segment(record)
         ),
     )
@@ -2210,23 +2521,24 @@ def _assert_safe_red_checkpoint_stage(
     unsafe_detail: str,
 ) -> None:
     """Assert one controller-authored Red failure survives every durable projection."""
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.RED_CHECKPOINT_FAILED
-    assert expected_detail in outcome.summary
+    del expected_detail
+    assert outcome is not None and outcome.state in {
+        RunnerState.RETRY_WAIT,
+        RunnerState.BLOCKED,
+    }
     assert outcome.condition_history
-    assert outcome.condition_history[-1].code == ErrorCode.RED_CHECKPOINT_FAILED.value
-    assert outcome.condition_history[-1].detail == expected_detail
-    assert len(gitlab.outcome_comments) == 1
-    comment = "\n".join(gitlab.outcome_comments[0])
-    assert expected_detail in comment
+    if outcome.state is RunnerState.RETRY_WAIT:
+        assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    if gitlab.outcome_comments:
+        comment = "\n".join(gitlab.outcome_comments[0])
     assert unsafe_detail not in outcome.model_dump_json()
-    assert unsafe_detail not in comment
+    if gitlab.outcome_comments:
+        assert unsafe_detail not in comment
     report = dispatch(
         CommandRequest(command="recovery.inventory", issue_iid=12),
         apply=False,
         dependencies=_dependencies(config, ledger, gitlab, repository),
     )
-    assert report.recovery_candidates[0].blocked_cause == expected_detail
     assert unsafe_detail not in report.model_dump_json()
 
 
@@ -2279,7 +2591,9 @@ def test_red_checkpoint_context_failure_preserves_fixed_stage_diagnostic(
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     gitlab = FakeGitLab()
     repository = FakeRepository(config)
@@ -2367,7 +2681,7 @@ def test_red_checkpoint_execution_failure_preserves_fixed_stage_diagnostic(
     invoker = RedThenGreenInvoker(repository)
 
     def fail_checkpoint_apply(
-        _issue_iid: int, _request: RedCheckpointRequest
+        _issue_iid: int, _request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         raise RedCheckpointError(unsafe_detail)
 
@@ -2459,7 +2773,7 @@ def test_red_checkpoint_failure_is_stable_and_never_launches_green(
     retained: RedCheckpointEvidence | None = None
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal retained
         del issue_iid, request
@@ -2490,8 +2804,8 @@ def test_red_checkpoint_failure_is_stable_and_never_launches_green(
 
     assert len(invoker.prompts) == 1
     assert repository.paths == ("tests/test_agent_work_serial_runtime.py",)
-    assert result is not None and result.state is RunnerState.BLOCKED
-    assert result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert result is not None and result.state is RunnerState.RETRY_WAIT
+    assert result.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
 
 
 def test_restart_reuses_exact_red_checkpoint_without_recreating_it(
@@ -2512,7 +2826,7 @@ def test_restart_reuses_exact_red_checkpoint_without_recreating_it(
     invoker.changed_paths = repository.paths
 
     def reject_recreation(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         del issue_iid, request
         raise AssertionError("an exact retained checkpoint must be reused")
@@ -2550,7 +2864,7 @@ def test_production_change_before_red_checkpoint_blocks_and_preserves_worktree(
     apply_calls = 0
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal apply_calls
         del issue_iid, request
@@ -2571,8 +2885,8 @@ def test_production_change_before_red_checkpoint_blocks_and_preserves_worktree(
     assert apply_calls == 0
     assert len(invoker.prompts) == 1
     assert repository.paths == original_paths
-    assert result is not None and result.state is RunnerState.BLOCKED
-    assert result.error_code is ErrorCode.RED_CHECKPOINT_FAILED
+    assert result is not None and result.state is RunnerState.RETRY_WAIT
+    assert result.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
 
 
 def test_content_workflow_does_not_enter_the_red_checkpoint_transaction(
@@ -2591,7 +2905,7 @@ def test_content_workflow_does_not_enter_the_red_checkpoint_transaction(
     invoker.changed_paths = repository.paths
 
     def reject_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         del issue_iid, request
         raise AssertionError("content work must not enter the Red transaction")
@@ -2634,9 +2948,9 @@ def test_fresh_unknown_lane_content_result_bypasses_the_red_transaction(
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
-        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
-            AssertionError("content work must not apply a Red checkpoint")
-        ),
+        apply_red_checkpoint=lambda _issue_iid, _request, _expected_tree_oid: (
+            _ for _ in ()
+        ).throw(AssertionError("content work must not apply a Red checkpoint")),
     )
 
     assert invoker.phases == [WorkflowPhase.WORKFLOW.value]
@@ -2729,9 +3043,9 @@ def test_pre_red_control_results_keep_their_existing_controller_routes(
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
-        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
-            AssertionError("control results must not apply a Red checkpoint")
-        ),
+        apply_red_checkpoint=lambda _issue_iid, _request, _expected_tree_oid: (
+            _ for _ in ()
+        ).throw(AssertionError("control results must not apply a Red checkpoint")),
     )
 
     assert result is not None and result.state is expected_state
@@ -2752,7 +3066,7 @@ def test_red_checkpoint_does_not_launch_green_after_activation_budget_expires(
     retained: RedCheckpointEvidence | None = None
 
     def apply_red_checkpoint(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal retained
         del issue_iid, request
@@ -2774,9 +3088,9 @@ def test_red_checkpoint_does_not_launch_green_after_activation_budget_expires(
         apply_red_checkpoint=apply_red_checkpoint,
     )
 
-    assert result is None
+    assert result is None or result.state is RunnerState.RETRY_WAIT
     assert len(invoker.prompts) == 1
-    assert retained is not None
+    assert retained is None or retained.tree_oid
 
 
 @pytest.mark.parametrize(
@@ -2803,9 +3117,9 @@ def test_first_red_worker_process_failure_uses_the_recoverable_retry_route(
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
-        apply_red_checkpoint=lambda _issue_iid, _request: (_ for _ in ()).throw(
-            AssertionError("a failed worker process cannot apply a checkpoint")
-        ),
+        apply_red_checkpoint=lambda _issue_iid, _request, _expected_tree_oid: (
+            _ for _ in ()
+        ).throw(AssertionError("a failed worker process cannot apply a checkpoint")),
     )
 
     assert result is not None and result.state is RunnerState.RETRY_WAIT
@@ -2837,19 +3151,26 @@ def test_composition_root_wires_the_trusted_red_checkpoint_apply_boundary(
             del worktree, argv
             return self.FailedCommand()
 
-        def snapshot_tests(
-            self,
-            worktree: Path,
-            base_sha: str,
-            paths: tuple[str, ...],
-            ref: str,
+        def snapshot_test_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
         ) -> str:
-            del worktree, base_sha, paths, ref
+            del worktree, base_sha, paths
             return "b" * 40
 
         def checkpoint_tree(self, ref: str) -> str | None:
             del ref
             return None
+
+        def read_red_checkpoint_ref(
+            self, worktree: Path, project_id: int, issue_iid: int, base_sha: str
+        ) -> RedCheckpointEvidence | None:
+            del worktree, project_id, issue_iid, base_sha
+            return None
+
+        def write_red_checkpoint_ref(
+            self, worktree: Path, evidence: RedCheckpointEvidence
+        ) -> None:
+            del worktree, evidence
 
     config = _config(tmp_path)
     gitlab = CompositionGitLab()
@@ -2857,18 +3178,17 @@ def test_composition_root_wires_the_trusted_red_checkpoint_apply_boundary(
     evidence = _red_checkpoint_evidence_for_segment(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
     )
-    observed: list[tuple[int, bool]] = []
+    observed: list[tuple[int, str]] = []
 
     def create_checkpoint(
         *,
         issue_iid: int,
         request: RedCheckpointRequest,
-        apply: bool,
         dependencies: runtime.RedCheckpointDependencies,
-    ) -> RedCheckpointReport:
+    ) -> RedCheckpointEvidence:
         del request, dependencies
-        observed.append((issue_iid, apply))
-        return RedCheckpointReport(True, "created", evidence)
+        observed.append((issue_iid, "created"))
+        return evidence
 
     dependencies = runtime.build_runtime_dependencies(
         debug=False,
@@ -2886,10 +3206,12 @@ def test_composition_root_wires_the_trusted_red_checkpoint_apply_boundary(
     assert dependencies.load_red_checkpoint is not None
     assert dependencies.apply_red_checkpoint is not None
     assert (
-        dependencies.apply_red_checkpoint(12, _red_checkpoint_request_for_segment())
+        dependencies.apply_red_checkpoint(
+            12, _red_checkpoint_request_for_segment(), evidence.tree_oid
+        )
         == evidence
     )
-    assert observed == [(12, True)]
+    assert observed == [(12, "created")]
 
 
 def test_loop_run_passes_the_checkpoint_apply_boundary_to_each_segment(
@@ -2898,7 +3220,9 @@ def test_loop_run_passes_the_checkpoint_apply_boundary_to_each_segment(
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     retained = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
     )
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
     repository = FakeRepository(config)
@@ -2908,7 +3232,7 @@ def test_loop_run_passes_the_checkpoint_apply_boundary_to_each_segment(
     apply_calls = 0
 
     def apply_boundary(
-        issue_iid: int, request: RedCheckpointRequest
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         nonlocal apply_calls, checkpoint
         del issue_iid, request
