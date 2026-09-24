@@ -34,10 +34,11 @@ Use explicit stages. Each stage has a distinct role:
   exact retained Red checkpoint passes controller checks.
 - **Agent Policy Writer** — when needed, edits only approved root/template
   agent-policy paths. Serial work starts it only after the same checks.
-- **Architect** — accepts Red's exact evidence. It returns interactive work to
-  Main for a local Red commit. In serial work, it returns a
-  `red_checkpoint_ready` handoff. The deterministic controller runs the trusted
-  `agent-work red-checkpoint create` boundary. Architect stays read-only.
+- **Architect** — accepts and routes Red's direct evidence. It returns
+  interactive work to Main for a local Red commit. In serial work, the same
+  live workflow owner that assembles the exact boundary input invokes the
+  trusted result boundary through its identity-bound broker while active.
+  Architect stays read-only.
 - **Implementer** — starts only after all applicable preparation receipts/N/A
   and the exact mode-specific Red checkpoint. Writes production, tests, and
   docs. Reconciles drafts against final interfaces. Never edits agent-policy
@@ -55,33 +56,20 @@ local `--no-verify` Red commit. Main keeps its SHA and paths under a named local
 ref and returns them to Architect. It must not push or publish while that
 failing commit is the branch tip.
 
-Serial workers must not commit. The first workflow segment is Red-only. It
-returns one protocol-version-2 `red_checkpoint_ready` envelope. That envelope
-requires exactly the Architect and Red receipts, the exact
-`red_checkpoint_request`, a non-empty `change_summary`, and a non-empty
-`next_action`. Here, "only" excludes documentation or policy receipts, a
-merge-request draft, audit summary, split plan, error code, suggest-close
-evidence, and rejection route. It does not exclude `protocol_version`, the
-project, issue, and ledger identity, `expected_state`, `expected_phase`,
-`workflow_lane`, `result_kind`, `phase_status`, `completed_phase`, or the
-optional `redacted_summary`. The deterministic controller runs the command
-below. Architect and other model roles must not run it.
-
-```bash
-uv run agent-work red-checkpoint create \
-  --issue-iid IID --evidence-file PATH --apply
-```
-
-The controller persists the coding lane before the transaction. The executable
-reruns the evidence. It owns the serial local Git ref and state change. Its
-report binds the project, issue, branch, base, tree, ref, test paths, command,
-nonzero exit, failure marker, and output digest. It cannot commit, push, or
-publish. Before capture, only the approved test paths may change. A production,
-documentation, or policy change stops the transaction. Preserve those changes.
-The controller then loads and verifies the exact retained report. Only then may
-it start a resumed workflow segment. That segment may start documentation and
-policy preparation, then Green. Green requires this checkpoint. It inspects the
-ordinary Git diff from it before implementation and review.
+Serial workers do not commit. The first workflow segment does Red only. Its
+live owner assembles the `red_checkpoint_ready` intent. It invokes
+`agent-work worker-result build ... --apply` through the controller-owned,
+identity-bound broker before exit. The accepted boundary sets the coding lane.
+It checks preconditions and changed paths. It reruns Red. It persists and
+ref-binds the exact checkpoint. Then it reloads and verifies it. The accepted
+artifact is program-owned evidence. It binds the project, issue, branch, base,
+tree, ref, test paths, command, nonzero exit, failure marker, and output digest.
+It cannot commit, push, or publish. Before capture, only approved test paths may
+change. Production, documentation, or policy changes reject capture. They remain
+preserved. A canonical rejection goes to the live producer for one corrected
+request. Only accepted retained evidence may start the resumed segment,
+documentation and policy preparation, then Green. Green inspects the ordinary
+Git diff from that checkpoint before implementation and review.
 
 During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
 `uv run ty check`. It then runs focused behavior tests. It stages the exact

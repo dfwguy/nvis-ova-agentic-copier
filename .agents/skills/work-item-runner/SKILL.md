@@ -41,13 +41,13 @@ authority. A build without `--apply` is a non-mutating preview and does not
 publish a result. Use GitLab only for the configured numeric project. Do not
 commit. Do not push. Do not create an MR. Do not approve. Do not merge.
 
-The trusted `agent-work red-checkpoint create` boundary is the sole narrow
-Red-checkpoint Git mutation. The first serial coding workflow segment is
-Red-only. Architect accepts the Red evidence and returns a
-`red_checkpoint_ready` result. The deterministic controller alone runs the
-boundary. It owns the local Git tree ref and retained state. It verifies them
-and then starts a resumed workflow segment. The worker and AI roles must not
-apply the checkpoint, commit, push, or publish.
+The trusted `agent-work worker-result build ... --apply` boundary owns the
+producer-owned Red checkpoint. The first serial coding segment does Red only.
+While active, the live workflow owner assembles `red_checkpoint_ready` intent
+and invokes that boundary through the controller-owned, identity-bound broker.
+Accepted output owns the local Git tree ref and retained state. The program
+checks both. Then it starts a resumed segment. Worker and AI roles do not
+commit, push, or publish.
 
 The deterministic controller, AI workflow, and required nested agents use the
 same scoped Developer GitLab credential. Humans provide product and policy
@@ -81,24 +81,25 @@ Keep the scope fixed. Keep authority clear. Keep the target exact.
 
 The worker exception changes who publishes. It does not weaken the workflow.
 It also makes serial preparation Red-first. Ordinary interactive work stays
-concurrent. Before the controller applies the checkpoint, the dedicated
+concurrent. Before the accepted boundary captures the checkpoint, the dedicated
 worktree may change only at the approved test paths. A production,
 documentation, or policy change stops capture. Preserve that work for recovery.
-The controller persists the coding lane and applies the accepted request. It
-then loads the exact retained proof. That proof binds the project, issue,
-source branch, base SHA, tree OID, ref, test paths, command, nonzero exit,
-failure marker, and output digest. Only then may the resumed workflow segment
-run documentation or policy work and start Green. Green never starts from prose
-or an unverified checkpoint.
+The accepted boundary persists coding-lane authority. It verifies preconditions
+and changed paths. It reruns Red. It persists and ref-binds the checkpoint.
+Then it loads and verifies its exact retained proof. That proof binds the
+project, issue, source branch, base SHA, tree OID, ref, test paths, command,
+nonzero exit, failure marker, and output digest. Only then may the resumed
+segment run documentation or policy work and start Green. Green never starts
+from prose or an unverified checkpoint.
 
-The Red-only result is one protocol-version-2 `red_checkpoint_ready` envelope.
-It has the Architect and Red receipts. It also has the accepted
-`red_checkpoint_request`, a change summary, and the next action. It has no
-documentation or policy receipt. It has no merge-request draft, audit summary,
-split plan, or error result. The controller rejects a missing or mismatched
-checkpoint. It also rejects a passing command, a missing failure marker, or a
-failed checkpoint transaction. It does not start the resumed segment after a
-rejection.
+The Red-only intent is one protocol-version-2 `red_checkpoint_ready` envelope.
+It has the Architect and Red receipts, the exact `red_checkpoint_request`, a
+change summary, and the next action. It has no documentation or policy receipt,
+merge-request draft, audit summary, split plan, or error result. The trusted
+broker rejects a missing or mismatched checkpoint, a passing command, a missing
+failure marker, or a failed checkpoint transaction. A canonical rejection goes
+directly to the still-live producer for one corrected request. It does not start
+the resumed segment without accepted program-owned evidence.
 
 For a recoverable command, API, retained-work, or review failure, diagnose the
 evidence. Pursue one bounded safeguard-preserving alternative. Preserve the
