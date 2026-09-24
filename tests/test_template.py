@@ -1049,7 +1049,11 @@ def test_agent_loop_wrapper_checks_nonmutating_https_publication_readiness(
         git,
         'case " $* " in\n'
         '  *" push --dry-run "*)\n'
-        '    printf \'{"arguments":"%s","helper0":"%s","helper1":"%s","prompt":"%s"}\\n\' "$*" "$GIT_CONFIG_VALUE_0" "$AGENT_WORK_GIT_CREDENTIAL_HELPER" "$GIT_TERMINAL_PROMPT" > "$PUSH_MARKER"\n'
+        '    "$AGENT_WORK_JQ" -n --arg arguments "$*" --arg helper0 "$GIT_CONFIG_VALUE_0" --arg helper1 "$AGENT_WORK_GIT_CREDENTIAL_HELPER" --arg prompt "$GIT_TERMINAL_PROMPT" \'{arguments: $arguments, helper0: $helper0, helper1: $helper1, prompt: $prompt}\' > "$PUSH_MARKER"\n'
+        '    case " $* " in *" -c credential.helper= "*) ;; *) exit 29 ;; esac\n'
+        '    case " $* " in *" -c credential.helper=!exec \\"$AGENT_WORK_GIT_CREDENTIAL_HELPER\\" "*) ;; *) exit 29 ;; esac\n'
+        '    case " $* " in *" -c credential.useHttpPath=true "*) ;; *) exit 29 ;; esac\n'
+        '    case " $* " in *" -c core.askPass=/bin/false "*) ;; *) exit 29 ;; esac\n'
         '    printf "protocol=https\\nhost=gitlab.example.test\\n\\n" | "$AGENT_WORK_GIT_CREDENTIAL_HELPER" get\n'
         "    ;;\n"
         '  *" ls-remote "*)\n'
