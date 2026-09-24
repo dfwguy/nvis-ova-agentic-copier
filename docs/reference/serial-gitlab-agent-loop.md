@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-24
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -67,8 +67,9 @@ agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  [--apply] [--json]
 agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          --acceptance TEXT [--acceptance TEXT ...]
+                         --marker TEXT
                          [--impact TEXT] [--additional-context TEXT]
-                         [--marker TEXT] [--priority TEXT] [--severity TEXT]
+                         [--priority TEXT] [--severity TEXT]
                          [--label TEXT] [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work validation run --candidate-tree TREE [--apply] [--json]
 agent-work validation status --candidate-tree TREE
@@ -91,7 +92,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
-| `issue publish` | Title, problem, outcome, and repeated acceptance criteria | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
+| `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `migration preview` | None | Returns the planned migration actions. |
@@ -172,11 +173,15 @@ Its title and description are structured input. The description is rendered as
 real Markdown before publication. Literal escaped line breaks and
 percent-encoded line breaks are rejected; supply real line breaks instead.
 
+Each publication task needs its own `--marker`. An omitted or empty marker
+fails. The old shared marker `<!-- agent-work-issue-publication:v1 -->` also
+fails. The command checks this before it contacts GitLab. Use the same marker
+when updating that task's issue.
+
 Without `--apply`, the command previews the title and rendered description
-locally. It makes no GitLab calls or changes. With `--apply`, it uses
-`<!-- agent-work-issue-publication:v1 -->` when `--marker` is absent. It
-selects one exact open-marker match. More than one exact match fails closed. It
-creates only when no exact open match exists. It then reads back that issue.
+locally. It makes no GitLab calls or changes. With `--apply`, it selects one
+exact open-marker match. More than one exact match fails closed. It creates
+only when no exact open match exists. It then reads back that issue.
 The read-back must match the configured project,
 the returned IID, title, and rendered description. A mismatch fails closed. A
 malformed response or failed read-back does too. The command does not retry
