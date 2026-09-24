@@ -1345,11 +1345,28 @@ def test_agent_loop_wrapper_reemits_each_validated_report_once(
         Path("template/scripts/agent-work-systemd-run.sh"),
     ),
 )
-def test_agent_loop_wrapper_yields_after_prerequisite_label_reconciliation(
+def test_agent_loop_wrapper_continues_after_prerequisite_label_reconciliation_when_eligible(
     project_root: Path, tmp_path: Path, relative_wrapper: Path
 ) -> None:
-    """A label-only applied activation is journaled once and left to the timer."""
-    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    """Label reconciliation uses fresh eligibility and refreshes before another apply."""
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    writer = checkout.parent / "future-writer"
+    subprocess.run(
+        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (writer / "version").write_text("two\n")
+    _commit_repository_state(writer, "prepare future default branch")
+    _run_test_git(writer, "push", "origin", "HEAD:future")
+    advance = tmp_path / "advance-default-branch"
+    _write_command(
+        advance,
+        'sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/future)"\n'
+        'exec "$REAL_GIT" --git-dir "$LOCAL_ORIGIN" update-ref refs/heads/main "$sha"',
+    )
+    environment["UV_ADVANCE"] = str(advance)
     report = json.dumps(
         {
             "schema_version": 1,
@@ -1359,7 +1376,15 @@ def test_agent_loop_wrapper_yields_after_prerequisite_label_reconciliation(
             "stop_reason": "prerequisite_labels_reconciled",
         }
     )
-    calls = _scripted_wrapper_worker(tmp_path, environment, (report,))
+    preview = _preview_report("eligible")
+    next_apply = _applied_report("complete")
+    idle = _preview_report("idle")
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (report, preview, next_apply, idle),
+        advance_after_first_apply=True,
+    )
 
     result = subprocess.run(
         ["bash", str(project_root / relative_wrapper), "--apply"],
@@ -1371,8 +1396,58 @@ def test_agent_loop_wrapper_yields_after_prerequisite_label_reconciliation(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.count(report) == 1
+    assert all(result.stdout.count(item) == 1 for item in (preview, next_apply, idle))
     assert calls.read_text().splitlines() == [
-        "one|run agent-work loop run --apply --json"
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "two|run agent-work loop run --apply --json",
+        "two|run agent-work loop run --json",
+    ]
+    assert (checkout / "version").read_text() == "two\n"
+
+
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+@pytest.mark.parametrize(
+    "preview_outcome",
+    ("idle", "pipeline_wait", "pipeline_blocked", "pipeline_inventory_blocked"),
+)
+def test_agent_loop_wrapper_yields_after_prerequisite_label_reconciliation_when_preview_waits(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path, preview_outcome: str
+) -> None:
+    """A label-only activation previews once and yields without another apply."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    report = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "prerequisite_labels_reconciled",
+            "stop_reason": "prerequisite_labels_reconciled",
+        }
+    )
+    preview = _preview_report(preview_outcome)
+    calls = _scripted_wrapper_worker(tmp_path, environment, (report, preview))
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count(report) == 1
+    assert result.stdout.count(preview) == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
     ]
 
 

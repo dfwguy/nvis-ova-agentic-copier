@@ -316,7 +316,7 @@ while :; do
     stop 'agent-work applied activation report has no stop reason'
   fi
   case "$stop_reason" in
-    awaiting_human|blocked|failed|complete)
+    prerequisite_labels_reconciled|awaiting_human|blocked|failed|complete)
       ;;
     *)
       exit 0
