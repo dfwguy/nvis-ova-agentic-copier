@@ -2035,11 +2035,12 @@ def _redact(output: str, environment: Mapping[str, str]) -> str:
 
 
 def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Remove credentials and stale direnv bookkeeping from a worker process."""
+    """Remove credentials, Git overrides, and stale direnv worker state."""
     return {
         name: value
         for name, value in environment.items()
         if name not in _INHERITED_DIRENV_BOOKKEEPING_NAMES
+        and not name.startswith("GIT_CONFIG_")
         and (
             name == "GITLAB_TOKEN"
             or not re.search(
