@@ -13,7 +13,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-# TDD Red Phase — Test Writer
+# TDD Red Stage — Test Writer
 
 ## Role
 
@@ -73,7 +73,7 @@ safely for recovery.
 ## Constraints
 
 - Do not modify files outside `tests/`. Production code is not your concern in
-  this phase.
+  this stage.
 - Do not create a Git ref, commit, push, or publication. Main owns the
   interactive checkpoint commit and ref. The trusted `agent-work
   red-checkpoint create` executable owns the serial tree checkpoint.

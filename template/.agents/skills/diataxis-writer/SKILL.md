@@ -16,7 +16,7 @@ metadata:
 
 # Diátaxis Writer
 
-Use this portable skill for the coding lane's concurrent Diátaxis writer phase.
+Use this portable skill for the coding lane's concurrent Diátaxis writing stage.
 Before acting, read and follow [the role instructions](../../agents/diataxis-writer.md).
 That file is role-reference material. This directory is the shared skill entry
 point for Claude Code, Codex, and Pi.

@@ -55,7 +55,7 @@ inputs. Only humans may approve. Only humans may merge.
 
 Classify the whole change. Then delegate one live `$architect`. The live router
 is `.agents/agents/architect.md`. It owns coding routing. It owns
-documentation/policy routing. It owns admission, parentage, and phase
+documentation/policy routing. It owns admission, parentage, and stage
 contracts. It also owns receipts and correction cycles. It owns normal, Draft,
 or `needs_human` decisions. Mixed or
 uncertain work uses the coding route. Read and activate each exact `$skill-id`.

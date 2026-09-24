@@ -16,7 +16,7 @@ metadata:
 
 # Test Judge
 
-Use this skill for the test-judge phase. Read and follow [the role
+Use this skill for the test review stage. Read and follow [the role
 instructions](../../agents/judge-test.md) before acting. That file is
 role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi. Verify the accepted checkpoint and ordinary

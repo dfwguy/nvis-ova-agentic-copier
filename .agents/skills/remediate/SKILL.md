@@ -16,7 +16,7 @@ metadata:
 
 # Remediator
 
-Use this portable workflow skill for the remediation phase. Before you act,
+Use this portable workflow skill for the remediation stage. Before you act,
 read and follow [the role instructions](../../agents/remediate.md). That file
 is role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi.

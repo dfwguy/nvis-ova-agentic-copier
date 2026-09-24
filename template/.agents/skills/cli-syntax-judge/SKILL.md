@@ -16,7 +16,7 @@ metadata:
 
 # CLI Judge
 
-Use this portable workflow skill for the cli judge phase. Read and
+Use this portable workflow skill for the CLI review stage. Read and
 follow [the role instructions](../../agents/cli-syntax-judge.md) before acting. That
 file is role-reference material; this directory is the shared
 skill entry point for Claude Code, Codex, and Pi.

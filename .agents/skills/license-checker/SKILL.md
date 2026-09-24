@@ -25,9 +25,9 @@ is an initial, concurrent specialist review:
 uv run python scripts/check_licenses.py --root .
 ```
 
-This phase is read-only. Do not add headers, annotations, exclusions, or
+This review is read-only. Do not add headers, annotations, exclusions, or
 policy changes. Run it once. Return an approval receipt when the command exits
-successfully. On failure, report each diagnostic. Reject it to the phase that
+successfully. On failure, report each diagnostic. Reject it to the stage that
 introduced the noncompliant file.
 
 ## Model selection

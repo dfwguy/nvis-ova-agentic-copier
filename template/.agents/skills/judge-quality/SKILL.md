@@ -16,7 +16,7 @@ metadata:
 
 # Quality Judge
 
-Use this skill for the quality-judge phase. Read and follow [the role
+Use this skill for the quality review stage. Read and follow [the role
 instructions](../../agents/judge-quality.md) before acting. That file is
 role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi.

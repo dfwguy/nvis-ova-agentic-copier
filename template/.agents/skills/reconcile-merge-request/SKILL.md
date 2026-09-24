@@ -49,7 +49,7 @@ their proof. This is the only state path:
 `selected` → `prepared` → `reconciling` → `validated` → `published` →
 `pipeline_reconciled` → `awaiting_human`
 
-These names are lifecycle states. They are not workflow phase names. For each
+These names are lifecycle states. They are not workflow stage names. For each
 change, record:
 
 - the verified project and merge request;

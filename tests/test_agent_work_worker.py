@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import cast
 
@@ -489,22 +490,42 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     architect = prompt.index("Delegate Architect")
     red = prompt.index("delegates Red")
     green = prompt.index("then delegates Green")
-    judge = prompt.index("delegates the serial Phase-4 $tdd-judge")
+    judge = prompt.index("$tdd-judge alone")
     nonfunctional = prompt.index(
         "delegates $nonfunctional-review as its read-only child"
     )
-    fan_out = prompt.index("Phase-5 reviewer concurrently")
+    specialist_review = prompt.index("Quality Judge receives the architecture")
     repair = prompt.index(
         "evidence-based correction cycles while material progress exists"
     )
     feedback = prompt.index("returns all receipts and unresolved findings")
-    assert architect < red < green < judge < nonfunctional < fan_out < repair < feedback
+    assert (
+        architect
+        < red
+        < green
+        < judge
+        < nonfunctional
+        < specialist_review
+        < repair
+        < feedback
+    )
     assert "conditional $agent-policy-writer" in prompt
     assert "Green owns production, tests, and docs" in prompt
     assert "Quality Judge receives the architecture" in prompt
     assert "Test Judge receives the Red receipt" in prompt
     assert "still-live Architect" in prompt
     assert "Do not commit, push, approve, or merge" in prompt
+
+
+def test_workflow_prompt_uses_descriptive_stage_labels() -> None:
+    prompt = build_worker_prompt(
+        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    )
+
+    assert re.search(r"\bPhase-\d+\b", prompt) is None
 
 
 def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:

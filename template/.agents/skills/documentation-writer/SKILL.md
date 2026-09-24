@@ -21,6 +21,6 @@ and follow [the role instructions](../../agents/documentation-writer.md).
 
 ## Model selection
 
-The live Architect delegates this phase and waits. Only the writer may edit the
+The live Architect delegates this stage and waits. Only the writer may edit the
 worktree. Use this skill's `metadata.model-tier`. The Architect router maps
 delegation.
