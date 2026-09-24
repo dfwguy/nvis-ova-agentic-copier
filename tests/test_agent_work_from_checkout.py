@@ -97,3 +97,64 @@ def test_entrypoint_propagates_the_checkout_project_command_failure(
     )
 
     assert completed.returncode == 23
+
+
+def test_entrypoint_selects_bounded_uv_cache_from_xdg_cache_home(
+    entrypoint: Path, tmp_path: Path
+) -> None:
+    """The wrapper gives uv a writable cache without relying on HOME."""
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    recorded_cache = tmp_path / "uv-cache"
+    _write_command(
+        commands / "uv",
+        'printf "%s" "$UV_CACHE_DIR" > "$UV_CACHE_ARGUMENT"',
+    )
+    environment = os.environ | {
+        "PATH": f"{commands}:{os.environ['PATH']}",
+        "HOME": str(tmp_path / "read-only-home"),
+        "XDG_CACHE_HOME": str(tmp_path / "xdg-cache"),
+        "UV_CACHE_ARGUMENT": str(recorded_cache),
+    }
+    environment.pop("UV_CACHE_DIR", None)
+
+    completed = subprocess.run(
+        ["bash", str(entrypoint), "--help"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert recorded_cache.read_text() == str(tmp_path / "xdg-cache" / "uv")
+
+
+def test_entrypoint_preserves_explicit_uv_cache(
+    entrypoint: Path, tmp_path: Path
+) -> None:
+    """Callers can provide an isolated cache path explicitly."""
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    explicit_cache = tmp_path / "explicit-cache"
+    recorded_cache = tmp_path / "uv-cache"
+    _write_command(
+        commands / "uv",
+        'printf "%s" "$UV_CACHE_DIR" > "$UV_CACHE_ARGUMENT"',
+    )
+    environment = os.environ | {
+        "PATH": f"{commands}:{os.environ['PATH']}",
+        "UV_CACHE_DIR": str(explicit_cache),
+        "UV_CACHE_ARGUMENT": str(recorded_cache),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(entrypoint), "--help"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert recorded_cache.read_text() == str(explicit_cache)
