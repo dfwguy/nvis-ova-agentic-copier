@@ -897,14 +897,12 @@ class WorkerResultEnvelope(BoundaryModel):
     phase_status: Literal["complete", "rejected"]
     completed_phase: WorkflowPhase
     rejection_route: WorkflowPhase | None = None
-    receipts: tuple[str, ...] = ()
     split_plan: SplitPlan | None = None
     change_summary: str = Field(min_length=1, max_length=20_000)
     merge_request_draft: MergeRequestDraft | None = None
     error_code: ErrorCode | None = None
     redacted_summary: str = ""
     next_action: str = Field(min_length=1, max_length=2_000)
-    audit_summary: AuditReceiptSummary | None = None
     suggest_close_evidence: SuggestCloseEvidence | None = None
     red_checkpoint_request: RedCheckpointRequest | None = None
 
@@ -918,17 +916,11 @@ class WorkerResultEnvelope(BoundaryModel):
                 or self.workflow_lane is not WorkflowLane.CODING
                 or self.phase_status != "complete"
                 or self.red_checkpoint_request is None
-                or self.audit_summary is not None
                 or self.merge_request_draft is not None
                 or self.split_plan is not None
                 or self.error_code is not None
                 or self.suggest_close_evidence is not None
                 or self.rejection_route is not None
-                or len(self.receipts) != 2
-                or not self.receipts[0].startswith("$architect:")
-                or not self.receipts[1].startswith("$tdd-red:")
-                or not self.receipts[0].removeprefix("$architect:").strip()
-                or not self.receipts[1].removeprefix("$tdd-red:").strip()
             ):
                 raise ValueError("red_checkpoint_ready envelope has invalid context")
         elif self.red_checkpoint_request is not None:
@@ -938,12 +930,10 @@ class WorkerResultEnvelope(BoundaryModel):
         if self.result_kind == "split_required":
             if (
                 self.protocol_version != 2
-                or self.audit_summary is not None
                 or self.expected_phase is not WorkflowPhase.WORKFLOW
                 or self.completed_phase is not WorkflowPhase.WORKFLOW
                 or self.workflow_lane is not WorkflowLane.UNKNOWN
                 or self.phase_status != "complete"
-                or self.receipts
                 or self.merge_request_draft is not None
                 or self.error_code is not None
                 or self.split_plan is None
@@ -958,9 +948,7 @@ class WorkerResultEnvelope(BoundaryModel):
                 or self.phase_status != "complete"
                 or self.suggest_close_evidence is None
                 or self.suggest_close_evidence.issue_iid != self.issue_iid
-                or self.receipts
                 or self.merge_request_draft is not None
-                or self.audit_summary is not None
                 or self.error_code is not None
             ):
                 raise ValueError("suggest_close envelope has invalid context")
@@ -971,12 +959,8 @@ class WorkerResultEnvelope(BoundaryModel):
             and self.result_kind == "ready_to_publish"
             and self.phase_status == "complete"
         )
-        if is_completed_workflow and (
-            self.protocol_version != 2
-            or self.audit_summary is None
-            or self.audit_summary.lane != self.workflow_lane.value
-        ):
-            raise ValueError("completed workflow requires v2 matching audit_summary")
+        if is_completed_workflow and self.protocol_version != 2:
+            raise ValueError("completed workflow requires protocol version 2")
         return self
 
 

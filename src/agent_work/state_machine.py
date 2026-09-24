@@ -24,12 +24,7 @@ from .domain import (
     WorkKind,
     next_workflow_phase,
 )
-from .models import (
-    AuditReceiptSummary,
-    LedgerRecord,
-    WorkerResultEnvelope,
-    WorkflowReceiptRecord,
-)
+from .models import LedgerRecord, WorkerResultEnvelope
 
 ALLOWED_TRANSITIONS: Final = MappingProxyType(
     {
@@ -149,29 +144,6 @@ ALLOWED_TRANSITIONS: Final = MappingProxyType(
     }
 )
 
-REQUIRED_RECEIPTS: Final = MappingProxyType(
-    {
-        WorkflowPhase.DISCOVERY: ("$architect",),
-        WorkflowPhase.CODING_RED_DOCS: ("$tdd-red", "$diataxis-writer"),
-        WorkflowPhase.CODING_GREEN: ("$tdd-green",),
-        WorkflowPhase.CODING_NONFUNCTIONAL: ("$nonfunctional-review",),
-        WorkflowPhase.CODING_VALIDATION: ("$tdd-judge", "$diataxis-judge"),
-        WorkflowPhase.CODING_FINAL_REVIEW: (
-            "$judge-quality",
-            "$judge-test",
-            "$judge-cicd",
-            "$tdd-document",
-            "$cli-syntax-judge",
-            "$filesystem-structure-judge",
-        ),
-        WorkflowPhase.CODING_FINALIZE: ("$tdd-finalizer",),
-        WorkflowPhase.CONTENT_WRITE: ("$documentation-writer",),
-        WorkflowPhase.CONTENT_REVIEW: ("$diataxis-judge", "$agent-policy-judge"),
-        WorkflowPhase.CONTENT_FINALIZE: ("$documentation-finalizer",),
-        WorkflowPhase.POST_PUBLICATION: ("$pipeline-performance-judge",),
-    }
-)
-
 WORKFLOW_RECEIPTS: Final = MappingProxyType(
     {
         WorkflowLane.CODING: (
@@ -200,76 +172,6 @@ WORKFLOW_RECEIPTS: Final = MappingProxyType(
         ),
     }
 )
-
-WORKFLOW_REVIEWER_SKILLS: Final = frozenset(
-    {
-        "$nonfunctional-review",
-        "$tdd-judge",
-        "$diataxis-judge",
-        "$judge-quality",
-        "$judge-test",
-        "$judge-cicd",
-        "$tdd-document",
-        "$cli-syntax-judge",
-        "$filesystem-structure-judge",
-        "$agent-policy-judge",
-    }
-)
-
-
-def _has_not_applicable_status(receipt: str, skill: str) -> bool:
-    """Return whether one receipt's header records the named skill as N/A."""
-    header = receipt.split("\n", maxsplit=1)[0]
-    header_skill, separator, status = header.partition(":")
-    return (
-        separator == ":"
-        and header_skill == skill
-        and status.lstrip().casefold().startswith("not applicable")
-    )
-
-
-def has_complete_workflow_receipt(
-    record: LedgerRecord, *, requires_policy_review: bool = False
-) -> bool:
-    """Return whether durable workflow evidence exactly authorizes publication."""
-    required = WORKFLOW_RECEIPTS.get(record.workflow_lane, ())
-    audit = record.audit_evidence
-    if isinstance(audit, AuditReceiptSummary):
-        # Protocol-v2 audit evidence retains receipt boundaries.  The legacy
-        # flattened detail field cannot distinguish a multiline continuation
-        # from another skill receipt, so it remains only a fallback below.
-        receipt_lines = audit.role_receipts
-    else:
-        workflow_receipts = tuple(
-            receipt
-            for receipt in record.receipts
-            if receipt.phase is WorkflowPhase.WORKFLOW
-        )
-        if not workflow_receipts or workflow_receipts[-1].verdict != "complete":
-            return False
-        receipt_lines = tuple(workflow_receipts[-1].detail.splitlines())
-    receipt_skills = tuple(receipt.partition(":")[0] for receipt in receipt_lines)
-    complete = (
-        len(receipt_skills) == len(required)
-        and receipt_skills == required
-        and len(set(receipt_skills)) == len(receipt_skills)
-    )
-    if (
-        not complete
-        or not requires_policy_review
-        or record.workflow_lane is not WorkflowLane.CODING
-    ):
-        return complete
-    policy_receipts = tuple(
-        receipt
-        for receipt in receipt_lines
-        if receipt.partition(":")[0] in {"$agent-policy-writer", "$agent-policy-judge"}
-    )
-    return len(policy_receipts) == 2 and all(
-        not _has_not_applicable_status(receipt, receipt.partition(":")[0])
-        for receipt in policy_receipts
-    )
-
 
 REJECTION_ROUTES: Final = MappingProxyType(
     {
@@ -389,20 +291,13 @@ def apply_worker_result(
 ) -> PlannedOutcome:
     """Apply one validated worker result to a durable record."""
     if (
-        result.protocol_version == 2
-        and result.audit_summary is not None
-        and (
-            result.completed_phase is not WorkflowPhase.WORKFLOW
-            or result.phase_status != "complete"
-            or (
-                record.phase is not WorkflowPhase.WORKFLOW
-                and result.workflow_lane is not record.workflow_lane
-            )
-        )
+        result.project_id != record.project_id
+        or result.issue_iid != record.issue_iid
+        or result.ledger_revision != record.revision
+        or result.expected_state is not record.state
+        or result.expected_phase is not record.phase
     ):
-        raise ValueError(
-            "audit summary is only valid for a completed matching workflow"
-        )
+        raise ValueError("worker result identity does not match the recorded segment")
     if result.result_kind == "retryable":
         return plan_retry(record, now=now, retry_delay=timedelta())
     if result.result_kind == "needs_human":
@@ -430,21 +325,10 @@ def apply_worker_result(
         )
     if result.result_kind == "split_required":
         raise ValueError("split_required must be fulfilled by the executor")
-    required = (
-        WORKFLOW_RECEIPTS.get(result.workflow_lane, ())
-        if record.phase is WorkflowPhase.WORKFLOW
-        else REQUIRED_RECEIPTS.get(record.phase, ())
-    )
-    receipt_skills = tuple(receipt.partition(":")[0] for receipt in result.receipts)
-    has_receipts = (
-        len(receipt_skills) == len(required)
-        and receipt_skills == required
-        and len(set(receipt_skills)) == len(receipt_skills)
-    )
+    if result.result_kind == "red_checkpoint_ready":
+        raise ValueError("red_checkpoint_ready must be fulfilled by the controller")
     if (
         result.completed_phase is not record.phase
-        or not result.receipts
-        or not has_receipts
         or (
             record.workflow_lane is not WorkflowLane.UNKNOWN
             and result.workflow_lane is not record.workflow_lane
@@ -454,34 +338,7 @@ def apply_worker_result(
             and result.workflow_lane is WorkflowLane.UNKNOWN
         )
     ):
-        raise ValueError(
-            "worker result receipt is not coherent with the recorded phase"
-        )
-    if record.phase is WorkflowPhase.WORKFLOW and result.audit_summary is not None:
-        audit = AuditReceiptSummary.model_validate(result.audit_summary)
-        audit_receipt_skills = tuple(
-            receipt.partition(":")[0] for receipt in audit.role_receipts
-        )
-        expected_reviewers = tuple(
-            receipt
-            for receipt in result.receipts
-            if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
-        )
-        if (
-            audit.capacity.decision != "run"
-            or audit.capacity.shortfall not in {None, 0}
-            or audit.role_receipts != result.receipts
-            or not audit_receipt_skills
-            or len(set(audit_receipt_skills)) != len(audit_receipt_skills)
-            or audit.reviewers != expected_reviewers
-            or (result.workflow_lane is WorkflowLane.CODING and not audit.tests)
-        ):
-            raise ValueError("workflow audit is not coherent with worker receipts")
-    receipt = WorkflowReceiptRecord(
-        phase=result.completed_phase,
-        verdict=result.phase_status,
-        detail="\n".join(result.receipts),
-    )
+        raise ValueError("worker result is not coherent with the recorded phase")
     if result.phase_status == "rejected":
         route = result.rejection_route
         if route is None or route not in REJECTION_ROUTES.get(
@@ -493,7 +350,6 @@ def apply_worker_result(
                 record,
                 RunnerState.EXECUTING,
                 phase=route,
-                receipts=(*record.receipts, receipt),
                 summary=result.change_summary,
                 next_action=result.next_action,
                 error_code=result.error_code,
@@ -532,7 +388,6 @@ def apply_worker_result(
             next_state,
             phase=next_phase,
             workflow_lane=result.workflow_lane,
-            receipts=(*record.receipts, receipt),
             merge_request_draft=merge_request_draft,
             publication_sha=(
                 None
@@ -542,11 +397,5 @@ def apply_worker_result(
             summary=result.change_summary,
             next_action=result.next_action,
             error_code=None,
-            audit_evidence=(
-                result.audit_summary
-                if record.phase is WorkflowPhase.WORKFLOW
-                and result.phase_status == "complete"
-                else record.audit_evidence
-            ),
         )
     )

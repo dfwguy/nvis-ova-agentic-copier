@@ -14,7 +14,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
-import io
 import json
 import logging
 from collections.abc import Callable
@@ -22,7 +21,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Protocol, cast
+from typing import Any, ClassVar, Literal, cast
 
 import pytest
 from hypothesis import given
@@ -102,10 +101,9 @@ from agent_work.serial import (
 from agent_work.state_machine import WORKFLOW_RECEIPTS
 from agent_work.worker import (
     AgentInvoker,
-    HandoffCapture,
     WorkerInvocation,
     WorkerProtocolError,
-    WorkerResultHandoffRequest,
+    WorkerResultBrokerRequest,
     build_worker_prompt,
 )
 
@@ -718,7 +716,10 @@ class FakeRepository:
         self.prepared = False
         self.pushes = 0
         self.refreshed = 0
-        self.paths: tuple[str, ...] = ("src/example.py",)
+        self.paths: tuple[str, ...] = (
+            "src/example.py",
+            "tests/test_agent_work_serial_runtime.py",
+        )
         self.dirty = False
         self.worktree_present = True
         self.worktree_exists_error: RepositoryError | None = None
@@ -1042,7 +1043,49 @@ class SequencedPipelineGitLab(FakeGitLab):
         )
 
 
+_CONTROLLER_ENVELOPE_FIELDS = {
+    "protocol_version",
+    "project_id",
+    "issue_iid",
+    "ledger_revision",
+    "expected_state",
+    "expected_phase",
+    "phase_status",
+    "completed_phase",
+}
+_RETIRED_MODEL_AUTHORIZATION_FIELDS = {"receipts", "audit_summary"}
+
+
+def _broker_invocation_from_intent(
+    output: str,
+    *,
+    broker_request: WorkerResultBrokerRequest | None,
+    build_artifact: Callable[[bytes], bytes] | None,
+    returncode: int | None = 0,
+) -> WorkerInvocation:
+    """Model a producer submitting intent through the trusted live callback."""
+    if returncode != 0:
+        return WorkerInvocation(returncode, "untrusted stdout", "safe diagnostic")
+    assert broker_request is not None and build_artifact is not None
+    try:
+        payload = json.loads(output)
+        if not isinstance(payload, dict):
+            raise TypeError
+        intent = {
+            key: value
+            for key, value in payload.items()
+            if key not in _CONTROLLER_ENVELOPE_FIELDS
+            and key not in _RETIRED_MODEL_AUTHORIZATION_FIELDS
+        }
+        artifact = build_artifact(json.dumps(intent).encode())
+    except (TypeError, ValueError, WorkerProtocolError) as error:
+        return WorkerInvocation(0, "untrusted stdout", str(error), worker_result=None)
+    return WorkerInvocation(0, "untrusted stdout", "", worker_result=artifact)
+
+
 class FakeInvoker:
+    supports_worker_result_broker = True
+
     def __init__(
         self, output: str | list[str] = "", returncode: int | None = 0
     ) -> None:
@@ -1053,49 +1096,73 @@ class FakeInvoker:
     def preflight(self) -> None:
         pass
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
         output = self.output.pop(0) if isinstance(self.output, list) else self.output
-        return WorkerInvocation(self.returncode, output, "safe diagnostic")
+        return _broker_invocation_from_intent(
+            output,
+            broker_request=broker_request,
+            build_artifact=build_artifact,
+            returncode=self.returncode,
+        )
 
 
-class _HandoffRequest(Protocol):
-    """Controller-owned identity supplied only to handoff-aware invokers."""
+class ProtocolFailureInvoker:
+    """Return a typed controller broker failure after a process exit."""
 
-    path: Path
-    nonce: str
-    project_id: int
-    issue_iid: int
-    ledger_revision: int
-    source_branch: str
-    source_sha: str
+    supports_worker_result_broker = True
+
+    def __init__(self, error: WorkerProtocolError, *, returncode: int = 0) -> None:
+        self.error = error
+        self.returncode = returncode
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
+        del checkout, prompt, timeout, broker_request, build_artifact
+        return WorkerInvocation(
+            self.returncode,
+            stderr="untrusted process diagnostic",
+            protocol_error=self.error,
+        )
 
 
-class HandoffInvoker:
-    """Declare handoff support and return one controller-bound artifact."""
+class ArtifactInvoker:
+    """Declare broker support and return one controller-bound artifact."""
 
-    supports_worker_result_handoff = True
+    supports_worker_result_broker = True
 
     def __init__(
         self,
         *,
         artifact_updates: dict[str, object] | None = None,
         envelope_updates: dict[str, object] | None = None,
-        artifact_paths: tuple[str, ...] = ("src/example.py",),
+        artifact_paths: tuple[str, ...] = (
+            "src/example.py",
+            "tests/test_agent_work_serial_runtime.py",
+        ),
         stdout: str | None = None,
         malformed: bytes | None = None,
         missing: bool = False,
-        capture_status: Literal[
-            "captured",
-            "pre_run_cleanup_failed",
-            "artifact_not_written",
-            "artifact_unreadable",
-            "artifact_too_large",
-            "builder_rejected",
-            "builder_budget_exhausted",
-            "post_read_cleanup_failed",
-        ] = "captured",
+        capture_status: str | None = None,
         capture_diagnostic: str | None = None,
         on_invoke: Callable[[], None] | None = None,
     ) -> None:
@@ -1119,70 +1186,62 @@ class HandoffInvoker:
         prompt: str,
         timeout: int,
         *,
-        handoff: _HandoffRequest | None = None,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
     ) -> WorkerInvocation:
-        del checkout, timeout
-        assert handoff is not None
-        assert "exactly one strict WorkerResultBuildInput JSON object" in prompt
-        assert "trusted controller invokes the checkout-owned builder" in prompt
-        assert "worker-result build" not in prompt and "--apply" not in prompt
-        self.requests.append(handoff)
+        del checkout, timeout, build_artifact
+        assert broker_request is not None
+        assert "worker-result build" in prompt and "--broker-socket" in prompt
+        self.requests.append(broker_request)
         if self.on_invoke is not None:
             self.on_invoke()
         envelope = {
             "protocol_version": 2,
-            "project_id": handoff.project_id,
-            "issue_iid": handoff.issue_iid,
-            "ledger_revision": handoff.ledger_revision,
+            "project_id": broker_request.project_id,
+            "issue_iid": broker_request.issue_iid,
+            "ledger_revision": broker_request.ledger_revision,
             "expected_state": "executing",
             "expected_phase": "coding-green",
             "workflow_lane": "coding",
             "result_kind": "ready_to_publish",
             "phase_status": "complete",
             "completed_phase": "coding-green",
-            "receipts": ["$tdd-green: complete"],
             "change_summary": "Implementation is green.",
             "next_action": "Run nonfunctional review.",
             **self.envelope_updates,
         }
-        if self.missing:
+        if self.missing or self.capture_status is not None:
             payload = None
         elif self.malformed is not None:
             payload = self.malformed
         else:
             artifact = {
                 "schema_version": 1,
-                "nonce": handoff.nonce,
-                "project_id": handoff.project_id,
-                "issue_iid": handoff.issue_iid,
-                "ledger_revision": handoff.ledger_revision,
-                "source_branch": handoff.source_branch,
-                "source_sha": handoff.source_sha,
+                "nonce": broker_request.nonce,
+                "project_id": broker_request.project_id,
+                "issue_iid": broker_request.issue_iid,
+                "ledger_revision": broker_request.ledger_revision,
+                "source_branch": broker_request.source_branch,
+                "source_sha": broker_request.source_sha,
                 "changed_paths": list(self.artifact_paths),
                 "envelope": envelope,
                 **self.artifact_updates,
             }
             payload = json.dumps(artifact, separators=(",", ":")).encode()
-        capture = (
-            HandoffCapture(self.capture_status, self.capture_diagnostic)
-            if self.capture_diagnostic is not None
-            else HandoffCapture(self.capture_status)
-        )
         return WorkerInvocation(
             returncode=0,
             stdout=(
-                self.stdout
-                if self.stdout is not None
-                else f"<agent-work-result>{json.dumps(envelope)}</agent-work-result>"
+                self.stdout if self.stdout is not None else "untrusted model stdout"
             ),
             stderr="",
-            handoff=payload,
-            handoff_capture=capture,
+            worker_result=payload,
         )
 
 
 class BatchingInvoker:
     """Return coherent phase receipts for a complete coding workflow."""
+
+    supports_worker_result_broker = True
 
     receipts: ClassVar[dict[str, tuple[str, ...]]] = {
         "discovery": ("$architect: approved",),
@@ -1223,7 +1282,15 @@ class BatchingInvoker:
     def preflight(self) -> None:
         pass
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
         self.timeouts.append(timeout)
@@ -1296,15 +1363,17 @@ class BatchingInvoker:
             if "red_checkpoint" in record:
                 audit_summary = cast(dict[str, object], payload["audit_summary"])
                 audit_summary["red_checkpoint"] = record["red_checkpoint"]
-        return WorkerInvocation(
-            0,
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-            "",
+        return _broker_invocation_from_intent(
+            json.dumps(payload),
+            broker_request=broker_request,
+            build_artifact=build_artifact,
         )
 
 
 class SingleSessionInvoker:
     """Return one complete nested-workflow result."""
+
+    supports_worker_result_broker = True
 
     def __init__(self, *, lane: str = "coding", needs_human: bool = False) -> None:
         self.lane = lane
@@ -1317,7 +1386,15 @@ class SingleSessionInvoker:
     def preflight(self) -> None:
         pass
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
         del timeout
         self.checkouts.append(checkout)
         self.prompts.append(prompt)
@@ -1419,10 +1496,10 @@ class SingleSessionInvoker:
                     "next_action": "Review the unresolved finding.",
                 }
             )
-        return WorkerInvocation(
-            0,
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-            "",
+        return _broker_invocation_from_intent(
+            json.dumps(payload),
+            broker_request=broker_request,
+            build_artifact=build_artifact,
         )
 
 
@@ -1450,7 +1527,7 @@ def _record(
 
 
 def _pending_feedback_publication_record(tmp_path: Path) -> LedgerRecord:
-    """Build a dirty existing-MR feedback publication with exact audit paths."""
+    """Build an existing-MR publication with controller-owned exact paths."""
     feedback_sha = "a" * 40
     paths = ("src/review_fix.py",)
     audit = AuditReceiptSummary(
@@ -1479,6 +1556,19 @@ def _pending_feedback_publication_record(tmp_path: Path) -> LedgerRecord:
                 source="general",
                 note_id=31,
                 outcome="The reviewed fix is ready to publish.",
+            ),
+            "intent": TransitionIntentRecord(
+                operation_id="12:publish:0",
+                kind="publish_merge_request",
+                expected_evidence={
+                    "branch": "agent/issue-12",
+                    "baseline_sha": feedback_sha,
+                    "validated_path_count": len(paths),
+                    "validated_paths_fingerprint": hashlib.sha256(
+                        b"src/review_fix.py\0"
+                    ).hexdigest(),
+                    "validated_paths": '["src/review_fix.py"]',
+                },
             ),
             "audit_evidence": audit,
         }
@@ -1732,89 +1822,6 @@ def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
     assert evidence.tree_oid in invoker.prompts[0]
 
 
-@pytest.mark.parametrize("matches", (True, False))
-def test_workflow_runtime_reloads_checkpoint_created_during_worker_invocation(
-    tmp_path: Path, matches: bool
-) -> None:
-    """The first valid result uses the checkpoint created by that worker turn."""
-    checkpoint = importlib.import_module("agent_work.red_checkpoint")
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    assert record.source_sha is not None
-    test_path = "tests/test_agent_work_serial_runtime.py"
-    evidence = checkpoint.RedCheckpointEvidence(
-        project_id=record.project_id,
-        issue_iid=record.issue_iid,
-        source_branch=record.source_branch,
-        base_sha=record.source_sha,
-        tree_oid="b" * 40,
-        ref=f"refs/agent-work/red-checkpoints/{record.issue_iid}/{record.source_sha}",
-        test_paths=(test_path,),
-        argv=("uv", "run", "pytest", f"{test_path}::test_red"),
-        exit_code=1,
-        expected_failure="assert expected failure",
-        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
-    )
-    repository = FakeRepository(config)
-    repository.paths = ("src/example.py", test_path)
-    delegate = SingleSessionInvoker()
-    delegate.changed_paths = repository.paths
-    available = False
-
-    class CheckpointCreatingInvoker:
-        def preflight(self) -> None:
-            delegate.preflight()
-
-        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
-            nonlocal available
-            invocation = delegate.invoke(checkout, prompt, timeout)
-            payload = json.loads(
-                invocation.stdout.removeprefix("<agent-work-result>").removesuffix(
-                    "</agent-work-result>"
-                )
-            )
-            payload["audit_summary"]["red_checkpoint"] = evidence.model_dump(
-                mode="json"
-            )
-            available = True
-            return replace(
-                invocation,
-                stdout=f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-            )
-
-    loads: list[bool] = []
-
-    def load_checkpoint(project_id: int, issue_iid: int, base_sha: str) -> Any | None:
-        assert (project_id, issue_iid, base_sha) == (
-            record.project_id,
-            record.issue_iid,
-            record.source_sha,
-        )
-        loads.append(available)
-        if not available:
-            return None
-        return (
-            evidence if matches else evidence.model_copy(update={"tree_oid": "c" * 40})
-        )
-
-    result = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),
-        repository=repository,
-        invoke=CheckpointCreatingInvoker(),
-        timeout_seconds=10,
-        now=NOW,
-        load_red_checkpoint=load_checkpoint,
-    )
-
-    assert loads == [False, True]
-    expected_state = RunnerState.PUBLISHING if matches else RunnerState.RETRY_WAIT
-    assert result is not None and result.state is expected_state
-
-
 def _red_checkpoint_request_for_segment() -> RedCheckpointRequest:
     test_path = "tests/test_agent_work_serial_runtime.py"
     return RedCheckpointRequest(
@@ -1845,7 +1852,9 @@ def _red_checkpoint_evidence_for_segment(
 
 
 class RedThenGreenInvoker:
-    """Return a tests-only Red handoff, then run Green after trusted capture."""
+    """Return one Red artifact, then run Green after trusted capture."""
+
+    supports_worker_result_broker = True
 
     def __init__(
         self,
@@ -1861,7 +1870,15 @@ class RedThenGreenInvoker:
     def preflight(self) -> None:
         pass
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+    ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
         raw_record = prompt.split("Durable record: ", maxsplit=1)[1].splitlines()[0]
@@ -1886,10 +1903,10 @@ class RedThenGreenInvoker:
                 "next_action": "Create and verify the trusted Red checkpoint.",
                 "red_checkpoint_request": request_payload,
             }
-            return WorkerInvocation(
-                0,
-                f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-                "",
+            return _broker_invocation_from_intent(
+                json.dumps(payload),
+                broker_request=broker_request,
+                build_artifact=build_artifact,
             )
         assert "red_checkpoint" in record
         self.repository.paths = (
@@ -1897,21 +1914,24 @@ class RedThenGreenInvoker:
             "tests/test_agent_work_serial_runtime.py",
         )
         self.green.changed_paths = self.repository.paths
-        return self.green.invoke(Path("."), prompt, timeout)
+        return self.green.invoke(
+            Path("."),
+            prompt,
+            timeout,
+            broker_request=broker_request,
+            build_artifact=build_artifact,
+        )
 
 
-class RedThenGreenHandoffInvoker:
-    """Return both Red and resumed Green results through trusted artifacts."""
+class RedThenGreenArtifactInvoker:
+    """Return both Red and resumed Green results through the broker."""
 
-    supports_worker_result_handoff = True
+    supports_worker_result_broker = True
 
-    def __init__(
-        self, repository: FakeRepository, *, red_capture_status: str = "captured"
-    ) -> None:
+    def __init__(self, repository: FakeRepository) -> None:
         self.repository = repository
         self.legacy = RedThenGreenInvoker(repository)
-        self.red_capture_status = red_capture_status
-        self.requests: list[_HandoffRequest] = []
+        self.requests: list[WorkerResultBrokerRequest] = []
 
     def preflight(self) -> None:
         pass
@@ -1922,33 +1942,17 @@ class RedThenGreenHandoffInvoker:
         prompt: str,
         timeout: int,
         *,
-        handoff: _HandoffRequest | None = None,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
     ) -> WorkerInvocation:
-        assert handoff is not None
-        self.requests.append(handoff)
-        invocation = self.legacy.invoke(checkout, prompt, timeout)
-        envelope = json.loads(
-            invocation.stdout.removeprefix("<agent-work-result>").removesuffix(
-                "</agent-work-result>"
-            )
-        )
-        artifact = {
-            "schema_version": 1,
-            "nonce": handoff.nonce,
-            "project_id": handoff.project_id,
-            "issue_iid": handoff.issue_iid,
-            "ledger_revision": handoff.ledger_revision,
-            "source_branch": handoff.source_branch,
-            "source_sha": handoff.source_sha,
-            "changed_paths": list(self.repository.paths),
-            "envelope": envelope,
-        }
-        return WorkerInvocation(
-            0,
-            "untrusted stdout without a result envelope",
-            "",
-            handoff=json.dumps(artifact, separators=(",", ":")).encode(),
-            handoff_capture=HandoffCapture(cast(Any, self.red_capture_status)),
+        assert broker_request is not None
+        self.requests.append(broker_request)
+        return self.legacy.invoke(
+            checkout,
+            prompt,
+            timeout,
+            broker_request=broker_request,
+            build_artifact=build_artifact,
         )
 
 
@@ -2010,7 +2014,7 @@ def test_coding_workflow_persists_lane_then_captures_red_before_green(
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
-def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
+def test_red_and_resumed_green_use_distinct_revision_bound_artifacts(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -2020,7 +2024,7 @@ def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
     )
     repository = FakeRepository(config)
     repository.paths = ("tests/test_agent_work_serial_runtime.py",)
-    invoker = RedThenGreenHandoffInvoker(repository)
+    invoker = RedThenGreenArtifactInvoker(repository)
     retained: RedCheckpointEvidence | None = None
     checkpoint_revision: int | None = None
 
@@ -2050,11 +2054,6 @@ def test_red_and_resumed_green_use_distinct_revision_bound_handoffs(
     assert len(invoker.requests) == 2
     red_request, green_request = invoker.requests
     assert red_request.nonce != green_request.nonce
-    assert red_request.path != green_request.path
-    assert not red_request.path.is_relative_to(record.worktree)
-    assert not green_request.path.is_relative_to(record.worktree)
-    assert red_request.path.is_relative_to(config.state_root)
-    assert green_request.path.is_relative_to(config.state_root)
     assert red_request.ledger_revision == record.revision
     assert green_request.ledger_revision == checkpoint_revision
     assert green_request.ledger_revision > red_request.ledger_revision
@@ -2072,7 +2071,7 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
     )
     repository = FakeRepository(config)
     repository.paths = ("tests/test_agent_work_serial_runtime.py",)
-    invoker = RedThenGreenHandoffInvoker(repository)
+    invoker = RedThenGreenArtifactInvoker(repository)
     retained: RedCheckpointEvidence | None = None
 
     def apply_red_checkpoint(
@@ -2098,107 +2097,107 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
     )
 
     assert len(invoker.legacy.prompts) == len(invoker.requests) == 2
+    expected_builder = config.checkout / "bin" / "agent-work-from-checkout"
     for prompt, request in zip(invoker.legacy.prompts, invoker.requests, strict=True):
-        del request
         assert "exactly one strict WorkerResultBuildInput JSON object" in prompt
-        assert "trusted controller invokes the checkout-owned builder" in prompt
-        assert "worker-result build" not in prompt and "--apply" not in prompt
+        assert (
+            f"`{expected_builder} worker-result build --issue-iid 12 "
+            "--input-file PATH --broker-socket PATH --broker-nonce "
+            f"{request.nonce} --apply`"
+        ) in prompt
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
-@pytest.mark.parametrize(
-    ("missing", "malformed", "expected_detail"),
-    (
-        (
-            True,
-            None,
-            "worker_result_handoff: not written/missing after successful invocation",
-        ),
-        (
-            False,
-            b'{"unsafe":"/private/red-handoff.json"}',
-            "worker_result_handoff: malformed artifact",
-        ),
-    ),
-)
-def test_red_handoff_protocol_failure_retries_without_checkpoint_application(
-    tmp_path: Path,
-    missing: bool,
-    malformed: bytes | None,
-    expected_detail: str,
+@pytest.mark.parametrize("returncode", (0, 23))
+def test_initial_red_broker_failure_is_typed_protocol_evidence(
+    tmp_path: Path, returncode: int
 ) -> None:
-    """A clean successful Red worker keeps its canonical handoff diagnostic."""
+    """A process exit followed by broker failure is never classified as timeout."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
     )
-    repository = FakeRepository(config)
-    repository.paths = ()
-    invoker = HandoffInvoker(missing=missing, malformed=malformed, artifact_paths=())
-    gitlab = FakeGitLab()
-    apply_calls = 0
+    error = WorkerProtocolError("worker_result_broker", "request was not accepted")
 
-    def reject_checkpoint_apply(
-        _issue_iid: int, _request: RedCheckpointRequest
-    ) -> RedCheckpointEvidence:
-        nonlocal apply_calls
-        apply_calls += 1
-        raise AssertionError("a handoff protocol failure cannot apply a checkpoint")
-
-    first = run_segment(
+    outcome = run_segment(
         ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=invoker,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=ProtocolFailureInvoker(error, returncode=returncode),
         timeout_seconds=10,
         now=NOW,
-        apply_red_checkpoint=reject_checkpoint_apply,
+        load_red_checkpoint=lambda *_args: None,
+        apply_red_checkpoint=lambda _issue_iid, _request: (
+            _red_checkpoint_evidence_for_segment(record)
+        ),
     )
 
-    assert record.source_sha == repository.current_head
-    assert repository.paths == ()
-    assert apply_calls == 0
-    assert len(invoker.requests) == 1
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert first.condition_history[-1].detail == expected_detail
-    assert gitlab.outcome_comments == []
-    assert "unsafe" not in first.model_dump_json()
-    first_inventory = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
-    )
-    assert first_inventory.recovery_candidates[0].blocked_cause is None
-    assert "private/red-handoff.json" not in first_inventory.model_dump_json()
+    assert outcome is not None
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.condition_history[-1].detail == str(error)
 
-    second = run_segment(
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "request was not accepted",
+        "malformed request",
+        "request is not permitted",
+        "request rejected",
+        "cleanup failed",
+    ),
+)
+def test_resumed_workflow_broker_failures_are_typed_protocol_evidence(
+    tmp_path: Path, reason: str
+) -> None:
+    """Every broker terminal category persists one bounded protocol condition."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+    error = WorkerProtocolError("worker_result_broker", reason)
+
+    outcome = run_segment(
         ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=invoker,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=ProtocolFailureInvoker(error),
         timeout_seconds=10,
         now=NOW,
-        apply_red_checkpoint=reject_checkpoint_apply,
+        load_red_checkpoint=lambda *_args: checkpoint,
     )
 
-    assert apply_calls == 0
-    assert len(invoker.requests) == 2
-    assert second is not None and second.state is RunnerState.BLOCKED
-    assert second.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert second.condition_history[-1].detail == expected_detail
-    assert "unsafe" not in second.model_dump_json()
-    assert len(gitlab.outcome_comments) == 1
-    assert expected_detail in "\n".join(gitlab.outcome_comments[0])
-    assert "private/red-handoff.json" not in "\n".join(gitlab.outcome_comments[0])
-    second_inventory = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
+    assert outcome is not None
+    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert outcome.condition_history[-1].detail == str(error)
+
+
+def test_command_runtime_timeout_remains_worker_timeout(tmp_path: Path) -> None:
+    """Only the command runner timeout keeps the worker-timeout classification."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.CODING_GREEN,
+        )
     )
-    assert second_inventory.recovery_candidates[0].blocked_cause == expected_detail
-    assert "private/red-handoff.json" not in second_inventory.model_dump_json()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(returncode=None),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    assert outcome.error_code is ErrorCode.WORKER_TIMEOUT
 
 
 def _assert_safe_red_checkpoint_stage(
@@ -2726,9 +2725,7 @@ def test_pre_red_control_results_keep_their_existing_controller_routes(
         ledger=ledger,
         gitlab=FakeGitLab(),
         repository=repository,
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),
+        invoke=FakeInvoker(json.dumps(payload)),
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
@@ -3751,12 +3748,53 @@ def test_recovery_retry_preview_binds_exact_legacy_dirty_hook_evidence(
     assert evidence["legacy_index_fingerprint"]
     assert evidence["legacy_staged_paths"] == "src/example.py"
     assert evidence["legacy_unstaged_paths"] == "src/example.py"
-    assert isinstance(record.audit_evidence, AuditReceiptSummary)
-    assert record.audit_evidence.red_checkpoint is not None
-    assert (
-        evidence["legacy_red_checkpoint"]
-        == record.audit_evidence.red_checkpoint.model_dump_json()
+    load_checkpoint = _dependencies(
+        config, ledger, gitlab, repository
+    ).load_red_checkpoint
+    assert load_checkpoint is not None
+    trusted_checkpoint = load_checkpoint(
+        record.project_id, record.issue_iid, record.source_sha or ""
     )
+    assert trusted_checkpoint is not None
+    assert evidence["legacy_red_checkpoint"] == trusted_checkpoint.model_dump_json()
+
+
+def test_legacy_history_cannot_rescue_missing_controller_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """Handcrafted historical audit prose never authorizes dirty recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    historical = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="$architect: handcrafted approval",
+    )
+    record = ledger.persist(
+        _legacy_dirty_hook_publication_record(tmp_path).model_copy(
+            update={"receipts": (historical,)}
+        )
+    )
+    assert record.audit_evidence is not None and record.receipts == (historical,)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        load_red_checkpoint=lambda *_args: None,
+    )
+
+    with pytest.raises(RuntimeError, match="legacy.*ineligible"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="Review the controller-owned evidence only.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
 
 
 def test_recovery_retry_apply_routes_exact_legacy_dirty_hook_to_correction(
@@ -3807,8 +3845,9 @@ def test_recovery_retry_apply_routes_exact_legacy_dirty_hook_to_correction(
     assert isinstance(record.audit_evidence, AuditReceiptSummary)
     assert identity.red_checkpoint == record.audit_evidence.red_checkpoint
     assert resumed.intent is None and resumed.publication_sha is None
-    assert resumed.merge_request_draft is None and resumed.audit_evidence is None
-    assert resumed.receipts == () and resumed.worker_exit is None
+    assert resumed.merge_request_draft is None
+    assert resumed.audit_evidence == record.audit_evidence
+    assert resumed.receipts == record.receipts and resumed.worker_exit is None
     assert repository.binds == repository.prepares == repository.pushes == 0
     assert gitlab.created_merge_requests == 0 and gitlab.labels == ["agent::running"]
 
@@ -3988,7 +4027,7 @@ def test_recovery_retry_rejects_inexact_affected_dirty_correction_bootstrap(
 def test_dirty_correction_refreshes_after_invalid_worker_and_reviewed_retry_reinvokes(
     tmp_path: Path,
 ) -> None:
-    """Authorized edits survive an invalid handoff and remain exactly retryable."""
+    """Authorized edits survive an invalid broker artifact and remain exactly retryable."""
     config, ledger, gitlab, repository, original, resumed = (
         _apply_legacy_dirty_hook_correction(tmp_path)
     )
@@ -4005,7 +4044,7 @@ def test_dirty_correction_refreshes_after_invalid_worker_and_reviewed_retry_rein
 
     checkpoint = cast(AuditReceiptSummary, original.audit_evidence).red_checkpoint
     assert checkpoint is not None
-    invoker = HandoffInvoker(malformed=b"{", on_invoke=modify_candidate)
+    invoker = ArtifactInvoker(malformed=b"{", on_invoke=modify_candidate)
     run_dependencies = _dependencies(config, ledger, gitlab, repository)
     first = run_segment(
         ledger=ledger,
@@ -4042,7 +4081,7 @@ def test_dirty_correction_refreshes_after_invalid_worker_and_reviewed_retry_rein
         command="recovery.resolve",
         issue_iid=blocked.issue_iid,
         choice="retry",
-        reason="Retry the exact retained correction after the invalid handoff.",
+        reason="Retry the exact retained correction after the invalid broker artifact.",
     )
     preview = dispatch(request, apply=False, dependencies=run_dependencies)
     plan_file = tmp_path / "retained-correction-retry-plan.json"
@@ -4060,9 +4099,7 @@ def test_dirty_correction_refreshes_after_invalid_worker_and_reviewed_retry_rein
     assert repository.binds == repository.prepares == repository.pushes == 0
     assert gitlab.created_merge_requests == 0
 
-    next_invoker = FakeInvoker(
-        '<agent-work-result>{"protocol_version":1}</agent-work-result>'
-    )
+    next_invoker = FakeInvoker('{"protocol_version":1}')
     next_outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -4181,7 +4218,10 @@ def test_successful_validated_correction_clears_durable_identity(
         _apply_legacy_dirty_hook_correction(tmp_path)
     )
     assert getattr(resumed, "correction_identity", None) is not None
-    repository.paths = ("src/example.py",)
+    repository.paths = (
+        "src/example.py",
+        "tests/test_agent_work_serial_runtime.py",
+    )
     invoker = SingleSessionInvoker()
     invoker.changed_paths = repository.paths
     checkpoint = cast(AuditReceiptSummary, original.audit_evidence).red_checkpoint
@@ -4198,7 +4238,8 @@ def test_successful_validated_correction_clears_durable_identity(
     )
 
     assert result is not None and result.state is RunnerState.PUBLISHING
-    assert result.audit_evidence is not None
+    assert result.audit_evidence == original.audit_evidence
+    assert result.receipts == original.receipts
     assert getattr(result, "correction_identity", None) is None
 
 
@@ -4207,7 +4248,6 @@ def test_successful_validated_correction_clears_durable_identity(
     (
         "wrong_state",
         "wrong_error",
-        "missing_audit",
         "missing_draft",
         "no_unstaged",
         "staged_outside_audit",
@@ -4217,8 +4257,6 @@ def test_successful_validated_correction_clears_durable_identity(
         "merge_head",
         "rename",
         "unknown_lane",
-        "missing_checkpoint",
-        "mismatched_checkpoint",
     ),
 )
 def test_recovery_retry_preview_rejects_ineligible_legacy_dirty_hook_evidence(
@@ -4235,8 +4273,6 @@ def test_recovery_retry_preview_rejects_ineligible_legacy_dirty_hook_evidence(
         record = record.model_copy(update={"state": RunnerState.EXECUTING})
     elif defect == "wrong_error":
         record = record.model_copy(update={"error_code": ErrorCode.GIT_POLICY})
-    elif defect == "missing_audit":
-        record = record.model_copy(update={"audit_evidence": None})
     elif defect == "missing_draft":
         record = record.model_copy(update={"merge_request_draft": None})
     elif defect == "no_unstaged":
@@ -4255,29 +4291,6 @@ def test_recovery_retry_preview_rejects_ineligible_legacy_dirty_hook_evidence(
         repository.legacy_has_renames = True
     elif defect == "unknown_lane":
         record = record.model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
-    elif defect == "missing_checkpoint":
-        assert isinstance(record.audit_evidence, AuditReceiptSummary)
-        record = record.model_copy(
-            update={
-                "audit_evidence": record.audit_evidence.model_copy(
-                    update={"red_checkpoint": None}
-                )
-            }
-        )
-    else:
-        assert isinstance(record.audit_evidence, AuditReceiptSummary)
-        assert record.audit_evidence.red_checkpoint is not None
-        record = record.model_copy(
-            update={
-                "audit_evidence": record.audit_evidence.model_copy(
-                    update={
-                        "red_checkpoint": record.audit_evidence.red_checkpoint.model_copy(
-                            update={"tree_oid": "c" * 40}
-                        )
-                    }
-                )
-            }
-        )
     retained = ledger.persist(record)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
 
@@ -6052,15 +6065,13 @@ def test_execution_parses_identity_bound_result_and_advances_one_phase(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
 
     assert outcome is not None and outcome.phase is WorkflowPhase.CODING_NONFUNCTIONAL
-    assert len(outcome.receipts) == 1
+    assert outcome.receipts == () and outcome.audit_evidence == record.audit_evidence
 
 
 @pytest.mark.parametrize(
@@ -6097,7 +6108,7 @@ def test_controller_clock_records_deterministic_worker_phase_timing(
         "next_action": "Continue validation.",
     }
     invoker = (
-        FakeInvoker(f"<agent-work-result>{json.dumps(payload)}</agent-work-result>")
+        FakeInvoker(json.dumps(payload))
         if invocation == "success"
         else FakeInvoker(returncode=23)
     )
@@ -6242,9 +6253,7 @@ def test_split_required_workflow_creates_children_and_completes_parent_in_one_se
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6317,8 +6326,8 @@ def test_split_retry_reruns_semantic_intake_and_reuses_exact_children(
     retry_payload = {**payload, "ledger_revision": record.revision + 3}
     invoker = FakeInvoker(
         [
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-            f"<agent-work-result>{json.dumps(retry_payload)}</agent-work-result>",
+            json.dumps(payload),
+            json.dumps(retry_payload),
         ]
     )
 
@@ -6410,9 +6419,7 @@ def test_due_legacy_split_retry_reinvokes_worker_and_recovers_marker_child(
         "change_summary": "Split.",
         "next_action": "Create children.",
     }
-    invoker = FakeInvoker(
-        f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-    )
+    invoker = FakeInvoker(json.dumps(payload))
     outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -6469,9 +6476,7 @@ def test_malformed_split_envelope_blocks_before_any_decomposition_mutation(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(malformed)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(malformed)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6585,9 +6590,7 @@ def test_split_required_outside_fresh_intake_makes_no_decomposition_mutation(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6658,9 +6661,7 @@ def test_split_fulfillment_blocks_inexact_created_child_before_parent_mutation(
         ledger=ledger,
         gitlab=gitlab,
         repository=FakeRepository(config),
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),
+        invoke=FakeInvoker(json.dumps(payload)),
         timeout_seconds=10,
         now=NOW,
     )  # type: ignore[arg-type]
@@ -6728,9 +6729,7 @@ def test_split_workflow_blocks_ambiguous_marker_evidence_without_mutation(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6798,9 +6797,7 @@ def test_split_workflow_blocks_conflicting_marker_without_mutation(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -6887,691 +6884,6 @@ def test_worker_failure_is_a_successfully_recorded_retry(tmp_path: Path) -> None
     assert outcome.error_code is ErrorCode.WORKER_EXIT
 
 
-def test_agent_invoker_captures_fresh_handoff_and_removes_file(tmp_path: Path) -> None:
-    """The production process boundary rejects replay and leaves no handoff file."""
-    worker = importlib.import_module("agent_work.worker")
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    handoff_path.write_bytes(b"stale artifact must not survive")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    fresh = b'{"schema_version":1,"fresh":true}'
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-
-    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del kwargs
-        if command[0] != str(builder):
-            assert not handoff_path.exists()
-            return CommandResult(0, "untrusted model prose", "")
-        handoff_path.write_bytes(fresh)
-        return CommandResult(0, "", "")
-
-    invoker = AgentInvoker(
-        run_command,
-        environment={
-            "AGENT_WORK_AGENT": "codex",
-            "AGENT_WORK_AGENT_PATH": "/codex",
-        },
-        trusted_builder=builder,
-    )
-    assert invoker.supports_worker_result_handoff is True
-    invocation = invoker.invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff == fresh
-    assert invocation.handoff_capture.status == "captured"
-    assert not handoff_path.exists()
-
-
-@pytest.mark.parametrize("agent", ("codex", "claude", "pi"))
-@pytest.mark.parametrize(
-    ("budget", "clock_values", "expected_builder_timeout"),
-    ((10, (0.0, 2.1), 7), (20, (3.0, 7.2), 15)),
-)
-def test_agent_invoker_builds_handoff_from_controller_captured_final_input(
-    tmp_path: Path,
-    agent: str,
-    budget: int,
-    clock_values: tuple[float, float],
-    expected_builder_timeout: int,
-) -> None:
-    """Every supported agent routes final text through the trusted builder."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    calls: list[tuple[str, ...]] = []
-    builder_timeouts: list[int] = []
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    trap_builder = checkout / "bin" / "agent-work-from-checkout"
-    final_input = (
-        b'{"workflow_lane":"coding","result_kind":"needs_human",'
-        b'"change_summary":"Need human input.","next_action":"Await review."}'
-    )
-
-    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        calls.append(command)
-        assert command[0] != str(trap_builder)
-        if command[0] != str(builder):
-            if agent == "codex":
-                assert "--output-last-message" in command
-                captured_path = Path(
-                    command[command.index("--output-last-message") + 1]
-                )
-                assert not captured_path.is_relative_to(checkout)
-                captured_path.write_bytes(final_input)
-                return CommandResult(0, "untrusted model prose", "")
-            assert "--output-last-message" not in command
-            return CommandResult(0, final_input.decode(), "")
-        input_path = Path(command[command.index("--input-file") + 1])
-        builder_timeouts.append(cast(int, kwargs["timeout_seconds"]))
-        assert input_path.read_bytes() == final_input
-        assert command == (
-            str(builder),
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "12",
-            "--input-file",
-            str(input_path),
-            "--handoff-file",
-            str(handoff_path),
-            "--handoff-nonce",
-            request.nonce,
-            "--apply",
-        )
-        handoff_path.write_bytes(b'{"schema_version":1}')
-        return CommandResult(0, "", "")
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": agent, "AGENT_WORK_AGENT_PATH": f"/{agent}"},
-        trusted_builder=builder,
-        clock=iter(clock_values).__next__,
-    ).invoke(checkout, "trusted prompt", budget, handoff=request)
-
-    assert len(calls) == 2
-    assert invocation.handoff == b'{"schema_version":1}'
-    assert invocation.stdout == (
-        "untrusted model prose" if agent == "codex" else final_input.decode()
-    )
-    assert builder_timeouts == [expected_builder_timeout]
-    assert not handoff_path.exists()
-
-
-def test_agent_invoker_builder_rejection_cleans_transient_input_and_handoff(
-    tmp_path: Path,
-) -> None:
-    """A rejected trusted build leaks neither artifacts nor raw diagnostics."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    final_input = b'{"workflow_lane":"coding"}'
-    raw_builder_output = "raw builder payload /controller/input.json"
-    raw_builder_error = "raw builder stderr /controller/input.json"
-    captured_path: Path | None = None
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        nonlocal captured_path
-        if command[0] != str(builder):
-            captured_path = Path(command[command.index("--output-last-message") + 1])
-            captured_path.write_bytes(final_input)
-            return CommandResult(0, "untrusted model prose", "")
-        handoff_path.write_bytes(b"partial artifact")
-        return CommandResult(2, raw_builder_output, raw_builder_error)
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert captured_path is not None and not captured_path.exists()
-    assert not handoff_path.exists()
-    assert invocation.handoff is None
-    assert invocation.handoff_capture.status == "builder_rejected"
-    assert raw_builder_output not in invocation.stderr
-    assert raw_builder_error not in invocation.stderr
-    assert str(handoff_path) not in invocation.stderr
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    (
-        "builder_input.merge_request_draft: invalid type/shape/value",
-        "controller_invariant.receipts: required receipts are not coherent",
-        "worker_result_capture: input artifact missing or unreadable",
-        "worker_result_validation: unexpected internal failure",
-        "worker_result_handoff: could not be written",
-    ),
-)
-def test_agent_invoker_preserves_only_canonical_builder_diagnostic(
-    tmp_path: Path, diagnostic: str
-) -> None:
-    """A trusted canonical diagnostic crosses the builder boundary exactly."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    raw_builder_output = f"raw builder output from {handoff_path}"
-    input_path: Path | None = None
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        nonlocal input_path
-        if command[0] != str(builder):
-            input_path = Path(command[command.index("--output-last-message") + 1])
-            input_path.write_bytes(b'{"workflow_lane":"coding"}')
-            return CommandResult(0, "untrusted worker prose", "")
-        return CommandResult(2, raw_builder_output, diagnostic)
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff is None
-    assert invocation.handoff_capture.status == "builder_rejected"
-    assert invocation.handoff_capture.diagnostic == diagnostic
-    assert raw_builder_output not in invocation.stdout
-    assert raw_builder_output not in invocation.stderr
-    assert str(handoff_path) not in invocation.stderr
-    assert input_path is not None and str(input_path) not in invocation.stderr
-    assert not handoff_path.exists()
-    assert input_path is not None and not input_path.exists()
-
-
-@pytest.mark.parametrize(
-    "builder_stderr",
-    (
-        "builder_input.not_a_field: invalid type/shape/value",
-        "builder_input.merge_request_draft: invalid type/shape/value\nsecond line",
-        "builder_input.merge_request_draft: invalid type/shape/value /private/input.json",
-        "/private/input.json",
-        "builder_input.merge_request_draft: unexpected builder failure",
-    ),
-)
-def test_agent_invoker_collapses_unsafe_builder_diagnostic(
-    tmp_path: Path, builder_stderr: str
-) -> None:
-    """Unrecognized builder stderr cannot cross the trusted boundary."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    raw_builder_output = f"raw builder output from {handoff_path}"
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        if command[0] != str(builder):
-            captured_path = Path(command[command.index("--output-last-message") + 1])
-            captured_path.write_bytes(b'{"workflow_lane":"coding"}')
-            return CommandResult(0, "untrusted worker prose", "")
-        return CommandResult(2, raw_builder_output, builder_stderr)
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff_capture.status == "builder_rejected"
-    assert invocation.handoff_capture.diagnostic is None
-    assert raw_builder_output not in invocation.stdout
-    assert raw_builder_output not in invocation.stderr
-    assert builder_stderr not in invocation.stderr
-    assert str(handoff_path) not in invocation.stderr
-
-
-def test_agent_invoker_rejects_an_exhausted_builder_budget_without_invocation(
-    tmp_path: Path,
-) -> None:
-    """The builder cannot run after the worker consumes its whole budget."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    handoff_path.parent.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    calls: list[tuple[str, ...]] = []
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        calls.append(command)
-        if command[0] == str(builder):
-            pytest.fail("builder must not run after its budget is exhausted")
-        captured_path = Path(command[command.index("--output-last-message") + 1])
-        captured_path.write_bytes(b'{"workflow_lane":"coding"}')
-        return CommandResult(0, "untrusted prose", "")
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        trusted_builder=builder,
-        clock=iter((0.0, 10.0)).__next__,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert len(calls) == 1
-    assert invocation.handoff is None
-    assert invocation.handoff_capture.status == "builder_budget_exhausted"
-    assert invocation.handoff_capture.diagnostic is None
-    assert not handoff_path.exists()
-
-
-def test_agent_invoker_fails_closed_when_input_pre_cleanup_fails(
-    tmp_path: Path,
-) -> None:
-    """A stale final-input path blocks launch even when handoff cleanup succeeds."""
-    worker = importlib.import_module("agent_work.worker")
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    stale_input = tmp_path / "controller" / "stale-input"
-    stale_input.mkdir(parents=True)
-    handoff_path = tmp_path / "controller" / "worker-result.json"
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-
-    def transient_path_factory(
-        checkout: Path, handoff: WorkerResultHandoffRequest
-    ) -> Path:
-        del checkout, handoff
-        return stale_input
-
-    invocation = AgentInvoker(
-        lambda *_args, **_kwargs: pytest.fail("worker must not launch"),
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        transient_path_factory=transient_path_factory,
-        trusted_builder=tmp_path / "controller" / "agent-work-from-checkout",
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff_capture.status == "pre_run_cleanup_failed"
-
-
-def test_agent_invoker_fails_closed_when_builder_rejection_cleanup_fails(
-    tmp_path: Path,
-) -> None:
-    """A rejected builder cannot retain transport data after cleanup trouble."""
-    worker = importlib.import_module("agent_work.worker")
-
-    class FailingPostCleanupPath:
-        def __init__(self) -> None:
-            self.unlink_calls = 0
-
-        def unlink(self, *, missing_ok: bool) -> None:
-            assert missing_ok is True
-            self.unlink_calls += 1
-            if self.unlink_calls == 2:
-                raise OSError("raw cleanup failure")
-
-        def open(self, mode: str) -> io.BytesIO:
-            pytest.fail(f"artifact must not be read after rejected builder: {mode}")
-
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=FailingPostCleanupPath(),  # type: ignore[arg-type]
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        if command[0] == str(builder):
-            return CommandResult(
-                2,
-                "raw builder output",
-                "builder_input.merge_request_draft: invalid type/shape/value",
-            )
-        captured_path = Path(command[command.index("--output-last-message") + 1])
-        captured_path.write_bytes(b'{"workflow_lane":"coding"}')
-        return CommandResult(0, "untrusted prose", "")
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff is None
-    assert invocation.handoff_capture.status == "post_read_cleanup_failed"
-    assert invocation.handoff_capture.diagnostic is None
-    assert "raw builder" not in invocation.stderr
-
-
-@pytest.mark.parametrize(
-    ("capture_status", "expected_diagnostic"),
-    (
-        ("pre_run_cleanup_failed", "pre-run stale cleanup failed"),
-        ("artifact_not_written", "not written/missing after successful invocation"),
-        ("artifact_unreadable", "artifact unreadable"),
-        ("artifact_too_large", "artifact exceeds 1 MiB"),
-        ("builder_rejected", "trusted builder rejected captured result"),
-        ("builder_budget_exhausted", "trusted builder budget exhausted"),
-        ("post_read_cleanup_failed", "post-read cleanup failed"),
-    ),
-)
-def test_serial_rejects_typed_capture_failures_with_safe_diagnostics(
-    tmp_path: Path, capture_status: str, expected_diagnostic: str
-) -> None:
-    """Controller retry evidence keeps the capture stage without worker data."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=HandoffInvoker(capture_status=cast(Any, capture_status)),
-        timeout_seconds=10,
-        now=NOW,
-    )
-    assert outcome is not None
-    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert outcome.condition_history[-1].detail == (
-        f"worker_result_handoff: {expected_diagnostic}"
-    )
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    (
-        "builder_input.merge_request_draft: invalid type/shape/value",
-        "worker_result: could not be read or validated",
-        "worker_result_handoff: could not be written",
-    ),
-)
-def test_serial_preserves_canonical_builder_diagnostic_in_condition(
-    tmp_path: Path, diagnostic: str
-) -> None:
-    """Protocol retry evidence includes only the canonical builder diagnostic."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=HandoffInvoker(
-            capture_status="builder_rejected", capture_diagnostic=diagnostic
-        ),
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None
-    assert outcome.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert outcome.condition_history[-1].detail == diagnostic
-    assert "worker-result.json" not in outcome.condition_history[-1].detail
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    (
-        "worker_result_capture: input artifact missing or unreadable",
-        "worker_result_validation: unexpected internal failure",
-    ),
-)
-def test_recovery_inventory_surfaces_fixed_builder_diagnostic_after_repeat(
-    tmp_path: Path, diagnostic: str
-) -> None:
-    """A repeated fixed builder failure stays distinct through recovery inventory."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
-    )
-    gitlab = FakeGitLab()
-    repository = FakeRepository(config)
-
-    first = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=HandoffInvoker(
-            capture_status="builder_rejected", capture_diagnostic=diagnostic
-        ),
-        timeout_seconds=10,
-        now=NOW,
-    )
-    blocked = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=HandoffInvoker(
-            capture_status="builder_rejected", capture_diagnostic=diagnostic
-        ),
-        timeout_seconds=10,
-        now=NOW,
-    )
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
-    )
-
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    assert blocked is not None and blocked.state is RunnerState.BLOCKED
-    assert blocked.condition_history[-1].detail == diagnostic
-    assert report.recovery_candidates[0].blocked_cause == diagnostic
-    assert diagnostic in gitlab.outcome_comments[0][1]
-    assert "raw-worker-prose-secret" not in gitlab.outcome_comments[0][1]
-
-
-@pytest.mark.parametrize(("failure", "returncode"), [("exception", None), ("exit", 7)])
-def test_agent_invoker_removes_handoff_after_failed_process_boundary(
-    tmp_path: Path,
-    failure: str,
-    returncode: int | None,
-) -> None:
-    """Boundary exceptions and nonzero exits cannot retain a handoff file."""
-    worker = importlib.import_module("agent_work.worker")
-    handoff_path = tmp_path / "worker-result.json"
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-
-    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del command, kwargs
-        handoff_path.write_bytes(b"failed boundary artifact")
-        if failure == "exception":
-            raise RuntimeError("bounded failure")
-        return CommandResult(7, "", "bounded failure")
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={
-            "AGENT_WORK_AGENT": "codex",
-            "AGENT_WORK_AGENT_PATH": "/codex",
-        },
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.returncode == returncode
-    assert not handoff_path.exists()
-
-
-@pytest.mark.parametrize(
-    ("stage", "expected_status"),
-    (
-        ("pre_run_cleanup", "pre_run_cleanup_failed"),
-        ("unreadable", "post_read_cleanup_failed"),
-        ("oversize", "artifact_too_large"),
-    ),
-)
-def test_agent_invoker_records_a_typed_safe_capture_status_for_filesystem_failures(
-    tmp_path: Path, stage: str, expected_status: str
-) -> None:
-    """Filesystem capture failures never become worker prose or raw path diagnostics."""
-    worker = importlib.import_module("agent_work.worker")
-    handoff_path = tmp_path / "worker-result.json"
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    builder = tmp_path / "controller" / "agent-work-from-checkout"
-    if stage == "pre_run_cleanup":
-        handoff_path.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=handoff_path,
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-
-    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        del kwargs
-        if command[0] == str(builder):
-            return CommandResult(0, "", "")
-        if stage == "unreadable":
-            handoff_path.mkdir()
-        elif stage == "oversize":
-            handoff_path.write_bytes(b"x" * 1_048_577)
-        return CommandResult(0, "untrusted prose", "untrusted diagnostic")
-
-    invocation = AgentInvoker(
-        run_command,
-        environment={
-            "AGENT_WORK_AGENT": "codex",
-            "AGENT_WORK_AGENT_PATH": "/codex",
-        },
-        trusted_builder=builder,
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff_capture.status == expected_status
-    assert invocation.handoff is None
-
-
-def test_agent_invoker_records_post_read_cleanup_failure_as_a_typed_capture_status(
-    tmp_path: Path,
-) -> None:
-    """Cleanup failure invalidates an otherwise readable artifact without leaking it."""
-    worker = importlib.import_module("agent_work.worker")
-
-    class FailingCleanupPath:
-        """Minimal injected filesystem boundary with a failing second cleanup."""
-
-        def __init__(self) -> None:
-            self.unlink_calls = 0
-
-        def unlink(self, *, missing_ok: bool) -> None:
-            assert missing_ok is True
-            self.unlink_calls += 1
-            if self.unlink_calls == 2:
-                raise OSError("raw filesystem failure")
-
-        def open(self, mode: str) -> io.BytesIO:
-            assert mode == "rb"
-            return io.BytesIO(b'{"schema_version":1}')
-
-    path = FailingCleanupPath()
-    checkout = tmp_path / "retained-checkout"
-    checkout.mkdir()
-    request = worker.WorkerResultHandoffRequest(
-        path=path,  # type: ignore[arg-type]
-        nonce="0123456789abcdef" * 2,
-        project_id=310967,
-        issue_iid=12,
-        ledger_revision=3,
-        source_branch="agent/issue-12",
-        source_sha="a" * 40,
-    )
-    invocation = AgentInvoker(
-        lambda *_args, **_kwargs: CommandResult(0, "untrusted prose", ""),
-        environment={
-            "AGENT_WORK_AGENT": "codex",
-            "AGENT_WORK_AGENT_PATH": "/codex",
-        },
-        trusted_builder=tmp_path / "controller" / "agent-work-from-checkout",
-    ).invoke(checkout, "trusted prompt", 10, handoff=request)
-
-    assert invocation.handoff_capture.status == "post_read_cleanup_failed"
-    assert invocation.handoff is None
-
-
 def test_serial_prefers_valid_handoff_over_duplicate_or_malformed_stdout(
     tmp_path: Path,
 ) -> None:
@@ -7581,12 +6893,8 @@ def test_serial_prefers_valid_handoff_over_duplicate_or_malformed_stdout(
     record = ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
     )
-    stdout = (
-        "prose before a malformed result "
-        "<agent-work-result>{}</agent-work-result>"
-        "<agent-work-result>{}</agent-work-result>"
-    )
-    invoker = HandoffInvoker(stdout=stdout)
+    stdout = "arbitrary untrusted model stdout"
+    invoker = ArtifactInvoker(stdout=stdout)
 
     outcome = run_segment(
         ledger=ledger,
@@ -7603,7 +6911,7 @@ def test_serial_prefers_valid_handoff_over_duplicate_or_malformed_stdout(
     assert outcome.revision > record.revision
 
 
-def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
+def test_serial_verifies_successful_artifact_against_post_worker_changed_paths(
     tmp_path: Path,
 ) -> None:
     """A worker may add a path before its builder records the final observation."""
@@ -7615,7 +6923,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
     repository = FakeRepository(config)
     repository.paths = ("src/before.py",)
     final_paths = ("src/after.py", "tests/test_after.py")
-    invoker = HandoffInvoker(
+    invoker = ArtifactInvoker(
         artifact_paths=final_paths,
         on_invoke=lambda: setattr(repository, "paths", final_paths),
     )
@@ -7650,16 +6958,16 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             True,
-            "worker_result_handoff: not written/missing after successful invocation",
+            "worker_result_broker: result was not accepted",
         ),
-        ("malformed", {}, {}, b"{", False, "worker_result_handoff: malformed artifact"),
+        ("malformed", {}, {}, b"{", False, "worker_result_broker: malformed artifact"),
         (
             "nonce",
             {"nonce": "f" * 32},
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "project",
@@ -7667,7 +6975,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "issue",
@@ -7675,7 +6983,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "revision",
@@ -7683,7 +6991,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "branch",
@@ -7691,7 +6999,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "source-sha",
@@ -7699,7 +7007,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "paths",
@@ -7707,7 +7015,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {},
             None,
             False,
-            "worker_result_handoff: changed-path mismatch",
+            "worker_result_broker: changed-path mismatch",
         ),
         (
             "envelope-project",
@@ -7715,7 +7023,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {"project_id": 999},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "envelope-issue",
@@ -7723,7 +7031,7 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {"issue_iid": 999},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
         (
             "envelope-revision",
@@ -7731,11 +7039,11 @@ def test_serial_verifies_successful_handoff_against_post_worker_changed_paths(
             {"ledger_revision": 999},
             None,
             False,
-            "worker_result_handoff: identity mismatch",
+            "worker_result_broker: identity mismatch",
         ),
     ],
 )
-def test_serial_rejects_invalid_handoffs_with_specific_safe_diagnostics(
+def test_serial_rejects_invalid_artifacts_with_specific_safe_diagnostics(
     tmp_path: Path,
     case: str,
     updates: dict[str, object],
@@ -7744,7 +7052,7 @@ def test_serial_rejects_invalid_handoffs_with_specific_safe_diagnostics(
     missing: bool,
     expected_diagnostic: str,
 ) -> None:
-    """Each rejected handoff has one bounded controller-owned diagnostic."""
+    """Each rejected artifact has one bounded controller-owned diagnostic."""
     del case
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -7756,7 +7064,7 @@ def test_serial_rejects_invalid_handoffs_with_specific_safe_diagnostics(
         ledger=ledger,
         gitlab=FakeGitLab(),  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=HandoffInvoker(
+        invoke=ArtifactInvoker(
             artifact_updates=updates,
             envelope_updates=envelope_updates,
             malformed=malformed,
@@ -7771,7 +7079,7 @@ def test_serial_rejects_invalid_handoffs_with_specific_safe_diagnostics(
     assert outcome.condition_history[-1].detail == expected_diagnostic
 
 
-def test_identity_handoff_defects_share_stable_repeat_retry_classification(
+def test_identity_artifact_defects_share_stable_repeat_retry_classification(
     tmp_path: Path,
 ) -> None:
     """Different identity fields retain one controller-owned retry condition."""
@@ -7787,7 +7095,7 @@ def test_identity_handoff_defects_share_stable_repeat_retry_classification(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
-        invoke=HandoffInvoker(artifact_updates={"nonce": "f" * 32}),  # type: ignore[arg-type]
+        invoke=ArtifactInvoker(artifact_updates={"nonce": "f" * 32}),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -7795,7 +7103,7 @@ def test_identity_handoff_defects_share_stable_repeat_retry_classification(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
-        invoke=HandoffInvoker(artifact_updates={"project_id": 999}),  # type: ignore[arg-type]
+        invoke=ArtifactInvoker(artifact_updates={"project_id": 999}),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -7803,8 +7111,8 @@ def test_identity_handoff_defects_share_stable_repeat_retry_classification(
     assert first is not None and first.state is RunnerState.RETRY_WAIT
     assert second is not None and second.state is RunnerState.BLOCKED
     assert second.retry_count == first.retry_count == 1
-    assert second.condition_history[-1].detail == (
-        "worker_result_handoff: identity mismatch"
+    assert (
+        second.condition_history[-1].detail == "worker_result_broker: identity mismatch"
     )
 
 
@@ -8039,9 +7347,7 @@ def test_successful_worker_progress_clears_prior_worker_exit_evidence(
         ledger=ledger,
         gitlab=FakeGitLab(),
         repository=FakeRepository(config),
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(result)}</agent-work-result>"
-        ),
+        invoke=FakeInvoker(json.dumps(result)),
         timeout_seconds=10,
         now=NOW,
     )
@@ -8056,13 +7362,9 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         (FakeInvoker(returncode=None), ErrorCode.WORKER_TIMEOUT),
         (
             FakeInvoker(
-                '<agent-work-result>{"protocol_version":2,"project_id":310967,'
-                '"issue_iid":12,"ledger_revision":1,"expected_state":"executing",'
-                '"expected_phase":"coding-green","workflow_lane":"coding",'
-                '"result_kind":"retryable","phase_status":"rejected",'
-                '"completed_phase":"coding-green","receipts":["$tdd-green"],'
-                '"change_summary":"temporary","error_code":"gitlab_retryable",'
-                '"next_action":"retry"}</agent-work-result>'
+                '{"workflow_lane":"coding","result_kind":"retryable",'
+                '"rejection_route":"coding-green","change_summary":"temporary",'
+                '"error_code":"gitlab_retryable","next_action":"retry"}'
             ),
             ErrorCode.GITLAB_RETRYABLE,
         ),
@@ -8082,298 +7384,6 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
             now=NOW,
         )
         assert outcome is not None and outcome.error_code is expected
-
-
-@pytest.mark.parametrize(
-    ("case", "expected_code", "expected_detail", "sensitive_value"),
-    [
-        (
-            "protocol",
-            ErrorCode.WORKER_PROTOCOL_INVALID,
-            "final_envelope.protocol_version: must equal 2",
-            "raw-worker-prose-secret",
-        ),
-        (
-            "receipt",
-            ErrorCode.WORKER_RECEIPT_INVALID,
-            "controller_invariant.audit_summary.changed_paths: does not match observed changed paths",
-            "raw-worker-prose-secret",
-        ),
-    ],
-)
-def test_worker_validation_retry_persists_only_canonical_bounded_diagnostic(
-    tmp_path: Path,
-    case: str,
-    expected_code: ErrorCode,
-    expected_detail: str,
-    sensitive_value: str,
-) -> None:
-    """Protocol and audit failures retain a safe actionable retry reason."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    receipts = tuple(
-        f"{skill}: approved; uv run pytest"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    payload: dict[str, object] = {
-        "protocol_version": 2,
-        "project_id": 310967,
-        "issue_iid": 12,
-        "ledger_revision": record.revision,
-        "expected_state": "executing",
-        "expected_phase": "workflow",
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "phase_status": "complete",
-        "completed_phase": "workflow",
-        "receipts": receipts,
-        "change_summary": "Completed worker workflow.",
-        "next_action": "Publish after validation.",
-        "merge_request_draft": {
-            "title": "Worker builder",
-            "description": "Ready for human review.",
-        },
-        "audit_summary": {
-            "lane": "coding",
-            "capacity": {
-                "required": 12,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-            },
-            **_current_workflow_capacity("coding", receipts),
-            "role_receipts": receipts,
-            "changed_paths": ["src/example.py"],
-            "tests": ["uv run pytest"],
-            "reviewers": ["$tdd-judge: approved; uv run pytest"],
-            "findings": [],
-            "corrections": [],
-        },
-    }
-    if case == "protocol":
-        payload["protocol_version"] = 1
-        payload["change_summary"] = sensitive_value
-    else:
-        payload["audit_summary"] = {
-            **payload["audit_summary"],
-            "changed_paths": [sensitive_value],
-        }
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.error_code is expected_code
-    persisted = ledger.load(12)
-    assert persisted is not None and persisted.condition_history
-    diagnostic = persisted.condition_history[-1].detail
-    assert diagnostic == expected_detail
-    assert len(diagnostic.encode("utf-8")) <= 2048
-    assert sensitive_value not in diagnostic
-
-
-def test_nonfresh_split_envelope_blocks_repeat_and_exposes_safe_recovery(
-    tmp_path: Path,
-) -> None:
-    """A nonfresh split is retryable without retaining worker prose."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    record = ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(update={"work_kind": WorkKind.EXISTING_MR_REMEDIATION})
-    )
-    payload = {
-        "protocol_version": 2,
-        "project_id": 310967,
-        "issue_iid": 12,
-        "ledger_revision": record.revision,
-        "expected_state": "executing",
-        "expected_phase": "workflow",
-        "workflow_lane": "unknown",
-        "result_kind": "split_required",
-        "phase_status": "complete",
-        "completed_phase": "workflow",
-        "receipts": [],
-        "split_plan": {
-            "slices": [
-                {
-                    "ordinal": 1,
-                    "key": "first",
-                    "title": "First slice",
-                    "description": "Independent first work.",
-                    "depends_on": [],
-                },
-                {
-                    "ordinal": 2,
-                    "key": "second",
-                    "title": "Second slice",
-                    "description": "Dependent second work.",
-                    "depends_on": [1],
-                },
-            ]
-        },
-        "change_summary": "raw-worker-prose-secret",
-        "next_action": "Create the durable child issues.",
-    }
-    gitlab = FakeGitLab()
-    repository = FakeRepository(config)
-
-    first = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    blocked = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            "<agent-work-result>"
-            f"{json.dumps({**payload, 'ledger_revision': record.revision + 3})}"
-            "</agent-work-result>"
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
-    )
-
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    assert blocked is not None and blocked.state is RunnerState.BLOCKED
-    assert blocked.retry_count == first.retry_count == 1
-    assert blocked.condition_history[-1].detail == (
-        "controller_invariant.split_required: is limited to fresh ordinary intake"
-    )
-    candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == (
-        "controller_invariant.split_required: is limited to fresh ordinary intake"
-    )
-    assert candidate.next_action == (
-        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
-    )
-    assert "raw-worker-prose-secret" not in candidate.model_dump_json()
-
-
-def test_due_worker_protocol_repeat_blocks_without_consuming_another_retry(
-    tmp_path: Path,
-) -> None:
-    """A due retry stops on the same safe worker-protocol condition."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    original = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    gitlab = FakeGitLab()
-    repository = FakeRepository(config)
-
-    first = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1,'
-            '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    second = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1,'
-            '"change_summary":"another-raw-secret"}</agent-work-result>'
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert second is not None and second.state is RunnerState.BLOCKED
-    assert second.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert second.retry_count == first.retry_count == 1
-    assert second.retry_at is None and second.worktree == original.worktree
-    assert second.phase is WorkflowPhase.WORKFLOW
-    assert (
-        second.condition_history[-1].detail
-        == "final_envelope.protocol_version: must equal 2"
-    )
-    assert gitlab.labels == ["agent::running", "agent::running", "agent::blocked"]
-    assert len(gitlab.outcome_comments) == 1
-    comment = "\n".join(gitlab.outcome_comments[0])
-    assert "final_envelope.protocol_version: must equal 2" in comment
-    assert "raw-worker-prose-secret" not in comment
-    assert "agent-work loop retry --issue-iid 12 --apply" in comment
-
-
-def test_recovery_inventory_retains_safe_worker_protocol_blocker_after_repeat(
-    tmp_path: Path,
-) -> None:
-    """Read-only inventory exposes the retained safe blocker, never worker output."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    gitlab = FakeGitLab()
-    repository = FakeRepository(config)
-    output = (
-        '<agent-work-result>{"protocol_version":1,'
-        '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
-    )
-
-    first = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(output),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    blocked = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(output),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
-    )
-
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    assert blocked is not None and blocked.state is RunnerState.BLOCKED
-    assert len(report.recovery_candidates) == 1
-    candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == "final_envelope.protocol_version: must equal 2"
-    assert candidate.next_action == (
-        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
-    )
-    assert "raw-worker-prose-secret" not in candidate.model_dump_json()
 
 
 def test_recovery_inventory_hides_noncanonical_retained_protocol_detail(
@@ -8511,46 +7521,6 @@ def test_recovery_inventory_hides_forged_canonical_looking_detail(
     assert "retry --issue-iid" not in candidate.next_action
 
 
-@pytest.mark.parametrize(
-    "detail",
-    (
-        "final_envelope.audit_summary.tests.0: invalid type/shape/value",
-        "controller_invariant.split_required: is required",
-    ),
-)
-def test_recovery_inventory_retains_canonical_bounded_diagnostic(
-    tmp_path: Path, detail: str
-) -> None:
-    """Canonical collection and controller diagnostics remain actionable."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(
-            update={
-                "error_code": ErrorCode.WORKER_RECEIPT_INVALID,
-                "condition_history": (
-                    ConditionEvidence(
-                        code=ErrorCode.WORKER_RECEIPT_INVALID.value, detail=detail
-                    ),
-                ),
-            }
-        )
-    )
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(
-            config, ledger, FakeGitLab(), FakeRepository(config)
-        ),
-    )
-
-    candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == detail
-    assert "retry --issue-iid 12 --apply" in candidate.next_action
-
-
 def test_recovery_inventory_does_not_fall_back_past_latest_unsafe_detail(
     tmp_path: Path,
 ) -> None:
@@ -8586,52 +7556,6 @@ def test_recovery_inventory_does_not_fall_back_past_latest_unsafe_detail(
     candidate = report.recovery_candidates[0]
     assert candidate.blocked_cause is None
     assert "retry --issue-iid" not in candidate.next_action
-
-
-@pytest.mark.parametrize(
-    "detail",
-    (
-        "final_envelope.protocol_version: must equal 2",
-        "worker_result_handoff: trusted builder budget exhausted",
-    ),
-)
-def test_recovery_inventory_retains_safe_worker_cause_after_retry_exhaustion(
-    tmp_path: Path, detail: str
-) -> None:
-    """Retry exhaustion retains the latest safe underlying worker condition."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(
-            update={
-                "error_code": ErrorCode.RETRY_EXHAUSTED,
-                "condition_history": (
-                    ConditionEvidence(
-                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
-                        detail=detail,
-                    ),
-                    ConditionEvidence(
-                        code=ErrorCode.RETRY_EXHAUSTED.value,
-                        detail="Automatic retry budget exhausted.",
-                    ),
-                ),
-            }
-        )
-    )
-
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(
-            config, ledger, FakeGitLab(), FakeRepository(config)
-        ),
-    )
-
-    candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == detail
-    assert "retry --issue-iid" in candidate.next_action
 
 
 def test_recovery_inventory_retry_exhaustion_does_not_fall_back_past_unsafe_worker(
@@ -8721,32 +7645,34 @@ def test_recovery_inventory_prioritizes_pipeline_contradiction_over_retry(
     assert "retry --issue-iid" not in candidate.next_action
 
 
-def test_due_worker_protocol_with_changed_diagnostic_consumes_another_retry(
-    tmp_path: Path,
-) -> None:
-    """A changed bounded diagnostic remains eligible for ordinary retry."""
+def test_changed_broker_diagnostic_consumes_another_retry(tmp_path: Path) -> None:
+    """A changed bounded broker diagnostic remains eligible for ordinary retry."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
     )
     repository = FakeRepository(config)
 
     first = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
-        ),  # type: ignore[arg-type]
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProtocolFailureInvoker(
+            WorkerProtocolError("worker_result_broker", "malformed request")
+        ),
         timeout_seconds=10,
         now=NOW,
     )
     second = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker("<agent-work-result>{}</agent-work-result>"),  # type: ignore[arg-type]
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProtocolFailureInvoker(
+            WorkerProtocolError("worker_result_broker", "cleanup failed")
+        ),
         timeout_seconds=10,
         now=NOW,
     )
@@ -8754,30 +7680,30 @@ def test_due_worker_protocol_with_changed_diagnostic_consumes_another_retry(
     assert first is not None and first.retry_count == 1
     assert second is not None and second.state is RunnerState.RETRY_WAIT
     assert second.retry_count == 2
-    assert (
-        second.condition_history[-2].detail
-        == "final_envelope.protocol_version: must equal 2"
+    assert second.condition_history[-2].detail == (
+        "worker_result_broker: malformed request"
     )
-    assert second.condition_history[-1].detail != first.condition_history[-1].detail
+    assert second.condition_history[-1].detail == "worker_result_broker: cleanup failed"
 
 
-def test_due_worker_protocol_repeat_in_a_different_phase_consumes_another_retry(
+def test_same_broker_diagnostic_in_a_different_phase_consumes_another_retry(
     tmp_path: Path,
 ) -> None:
-    """The same validation identity in a new phase is not an automatic repeat."""
+    """The same broker condition in a new phase is not an automatic repeat."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
     )
     repository = FakeRepository(config)
+    error = WorkerProtocolError("worker_result_broker", "malformed request")
     first = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
-        ),  # type: ignore[arg-type]
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProtocolFailureInvoker(error),
         timeout_seconds=10,
         now=NOW,
     )
@@ -8792,13 +7718,12 @@ def test_due_worker_protocol_repeat_in_a_different_phase_consumes_another_retry(
             }
         )
     )
+
     second = run_segment(
         ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
-        ),  # type: ignore[arg-type]
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProtocolFailureInvoker(error),
         timeout_seconds=10,
         now=NOW,
     )
@@ -8806,180 +7731,6 @@ def test_due_worker_protocol_repeat_in_a_different_phase_consumes_another_retry(
     assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
     assert second is not None and second.state is RunnerState.RETRY_WAIT
     assert second.retry_count == 2
-
-
-def test_due_worker_validation_with_changed_code_consumes_another_retry(
-    tmp_path: Path,
-) -> None:
-    """A different worker-validation code remains eligible for ordinary retry."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    receipts = tuple(
-        f"{skill}: approved; uv run pytest"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    payload = {
-        "protocol_version": 2,
-        "project_id": 310967,
-        "issue_iid": 12,
-        "expected_state": "executing",
-        "expected_phase": "workflow",
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "phase_status": "complete",
-        "completed_phase": "workflow",
-        "receipts": receipts,
-        "change_summary": "safe summary",
-        "next_action": "Publish after validation.",
-        "merge_request_draft": {
-            "title": "Worker builder",
-            "description": "Ready for human review.",
-        },
-        "audit_summary": {
-            "lane": "coding",
-            "capacity": {
-                "required": 12,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-            },
-            **_current_workflow_capacity("coding", receipts),
-            "role_receipts": receipts,
-            "changed_paths": ["not-an-observed-path"],
-            "tests": ["uv run pytest"],
-            "reviewers": ["$tdd-judge: approved; uv run pytest"],
-            "findings": [],
-            "corrections": [],
-        },
-    }
-    first = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1}</agent-work-result>'
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    assert first is not None
-    payload["ledger_revision"] = first.revision + 1
-    second = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
-    assert second is not None and second.state is RunnerState.RETRY_WAIT
-    assert second.error_code is ErrorCode.WORKER_RECEIPT_INVALID
-    assert second.retry_count == 2
-
-
-def test_due_worker_receipt_repeat_blocks_without_consuming_another_retry(
-    tmp_path: Path,
-) -> None:
-    """Repeated receipt evidence failures stop with their bounded audit cause."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    original = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-    receipts = tuple(
-        f"{skill}: approved; uv run pytest"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-
-    def invalid_receipt(revision: int) -> str:
-        payload = {
-            "protocol_version": 2,
-            "project_id": 310967,
-            "issue_iid": 12,
-            "ledger_revision": revision,
-            "expected_state": "executing",
-            "expected_phase": "workflow",
-            "workflow_lane": "coding",
-            "result_kind": "ready_to_publish",
-            "phase_status": "complete",
-            "completed_phase": "workflow",
-            "receipts": receipts,
-            "change_summary": "raw-worker-prose-secret",
-            "next_action": "Publish after validation.",
-            "merge_request_draft": {
-                "title": "Worker builder",
-                "description": "Ready for human review.",
-            },
-            "audit_summary": {
-                "lane": "coding",
-                "capacity": {
-                    "required": 12,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                **_current_workflow_capacity("coding", receipts),
-                "role_receipts": receipts,
-                "changed_paths": ["raw-worker-prose-secret"],
-                "tests": ["uv run pytest"],
-                "reviewers": ["$tdd-judge: approved; uv run pytest"],
-                "findings": [],
-                "corrections": [],
-            },
-        }
-        return f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-
-    gitlab = FakeGitLab()
-    repository = FakeRepository(config)
-    first = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(invalid_receipt(original.revision)),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    assert first is not None and first.state is RunnerState.RETRY_WAIT
-    second = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(invalid_receipt(first.revision + 1)),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert second is not None and second.state is RunnerState.BLOCKED
-    assert second.error_code is ErrorCode.WORKER_RECEIPT_INVALID
-    assert second.retry_count == first.retry_count == 1
-    assert (
-        second.worktree == original.worktree and second.phase is WorkflowPhase.WORKFLOW
-    )
-    assert second.condition_history[-1].detail == (
-        "controller_invariant.audit_summary.changed_paths: does not match observed changed paths"
-    )
-    assert gitlab.labels[-1:] == ["agent::blocked"]
-    assert "raw-worker-prose-secret" not in "\n".join(gitlab.outcome_comments[0])
-    report = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(config, ledger, gitlab, repository),
-    )
-    candidate = report.recovery_candidates[0]
-    assert candidate.blocked_cause == (
-        "controller_invariant.audit_summary.changed_paths: "
-        "does not match observed changed paths"
-    )
-    assert candidate.next_action == (
-        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
-    )
 
 
 def test_explicit_retry_resets_budget_after_repeated_worker_protocol_block(
@@ -8998,7 +7749,7 @@ def test_explicit_retry_resets_budget_after_repeated_worker_protocol_block(
             ledger=ledger,
             gitlab=gitlab,  # type: ignore[arg-type]
             repository=repository,  # type: ignore[arg-type]
-            invoke=FakeInvoker(f"<agent-work-result>{payload}</agent-work-result>"),  # type: ignore[arg-type]
+            invoke=FakeInvoker(payload),  # type: ignore[arg-type]
             timeout_seconds=10,
             now=NOW,
         )
@@ -9019,94 +7770,6 @@ def test_explicit_retry_resets_budget_after_repeated_worker_protocol_block(
         persisted.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
     )
     assert persisted.condition_history[-1].retry_count == 1
-
-
-def test_fourth_worker_protocol_retry_retains_safe_cause_in_terminal_evidence(
-    tmp_path: Path,
-) -> None:
-    """A budget-exhausted worker retry retains its safe actionable cause."""
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    history = tuple(
-        ConditionEvidence(code=f"prior_condition_{index}", detail=f"prior {index}")
-        for index in range(64)
-    )
-    ledger.persist(
-        _record(
-            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
-        ).model_copy(update={"retry_count": 3, "condition_history": history})
-    )
-
-    gitlab = FakeGitLab()
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            '<agent-work-result>{"protocol_version":1,'
-            '"change_summary":"raw-worker-prose-secret"}</agent-work-result>'
-        ),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-    status = dispatch(
-        CommandRequest(command="loop.status", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(
-            config, ledger, FakeGitLab(), FakeRepository(config)
-        ),
-    )
-    inventory = dispatch(
-        CommandRequest(command="recovery.inventory", issue_iid=12),
-        apply=False,
-        dependencies=_dependencies(
-            config, ledger, FakeGitLab(), FakeRepository(config)
-        ),
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.RETRY_EXHAUSTED
-    assert outcome.retry_count == 3 and outcome.retry_at is None
-    assert outcome.next_action == (
-        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
-    )
-    assert len(outcome.condition_history) == 64
-    assert outcome.condition_history[0].code == "prior_condition_1"
-    assert outcome.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
-    assert (
-        outcome.condition_history[-1].detail
-        == "final_envelope.protocol_version: must equal 2"
-    )
-    assert inventory.recovery_candidates[0].blocked_cause == (
-        "final_envelope.protocol_version: must equal 2"
-    )
-    assert (
-        "retry --issue-iid 12 --apply" in inventory.recovery_candidates[0].next_action
-    )
-    assert status.items[0].current_condition is not None
-    assert status.items[0].current_condition.code == ErrorCode.RETRY_EXHAUSTED.value
-    assert (
-        "Automatic retry budget exhausted." in status.items[0].current_condition.detail
-    )
-    assert "worker_protocol_invalid" in status.items[0].current_condition.detail
-    assert (
-        "final_envelope.protocol_version: must equal 2"
-        in status.items[0].current_condition.detail
-    )
-    assert status.items[0].condition_history[-1] == outcome.condition_history[-1]
-    assert len(gitlab.outcome_comments) == 1
-    comment_code, comment_summary, comment_action = gitlab.outcome_comments[0]
-    assert comment_code == "retry_exhausted"
-    assert comment_action == (
-        "Resolve the blocker, then run agent-work loop retry --issue-iid 12 --apply."
-    )
-    assert "Automatic retry budget exhausted." in comment_summary
-    assert "worker_protocol_invalid" in comment_summary
-    assert "final_envelope.protocol_version: must equal 2" in comment_summary
-    comment = f"{comment_code}\n{comment_summary}\n{comment_action}"
-    assert "worker_protocol_invalid" in comment
-    assert "final_envelope.protocol_version: must equal 2" in comment
-    assert "raw-worker-prose-secret" not in comment
 
 
 def test_future_retry_wait_does_not_reserve_the_serial_slot(tmp_path: Path) -> None:
@@ -9466,9 +8129,7 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
         ledger=ledger,
         gitlab=FakeGitLab(),
         repository=FakeRepository(config),
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),
+        invoke=FakeInvoker(json.dumps(payload)),
         timeout_seconds=10,
         now=NOW,
         clock=lambda: next(moments),
@@ -10670,9 +9331,7 @@ def test_postpublication_handoff_revalidates_mr_after_worker_returns(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
         repository=FakeRepository(config),  # type: ignore[arg-type]
-        invoke=FakeInvoker(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        ),  # type: ignore[arg-type]
+        invoke=FakeInvoker(json.dumps(payload)),  # type: ignore[arg-type]
         timeout_seconds=10,
         now=NOW,
     )
@@ -12189,6 +10848,7 @@ def test_publication_commit_rejection_returns_ordinary_work_to_fresh_correction(
         invoke=FakeInvoker(),
         timeout_seconds=10,
         now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
     )
 
     assert outcome is not None and outcome.state is RunnerState.EXECUTING
@@ -12218,7 +10878,8 @@ def test_publication_commit_rejection_returns_ordinary_work_to_fresh_correction(
     assert identity.red_checkpoint == checkpoint
     assert outcome.merge_request_draft is None
     assert outcome.intent is None and outcome.publication_sha is None
-    assert outcome.receipts == () and outcome.audit_evidence is None
+    assert outcome.receipts == initial.receipts
+    assert outcome.audit_evidence == initial.audit_evidence
     assert outcome.worker_exit is None and outcome.retry_at is None
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
     assert gitlab.labels == [] and gitlab.comments == []
@@ -12243,6 +10904,7 @@ def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow
         phase=WorkflowPhase.READY_TO_PUBLISH,
         repair_attempt=repair,
     )
+    checkpoint = _red_checkpoint_evidence_for_segment(publishing)
     initial = ledger.persist(
         publishing.model_copy(
             update={
@@ -12250,11 +10912,7 @@ def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow
                 "merge_request_url": _mr().web_url,
                 "merge_request_draft": draft,
                 "audit_evidence": _completed_coding_audit().model_copy(
-                    update={
-                        "red_checkpoint": _red_checkpoint_evidence_for_segment(
-                            publishing
-                        )
-                    }
+                    update={"red_checkpoint": checkpoint}
                 ),
             }
         )
@@ -12270,6 +10928,7 @@ def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow
         invoke=FakeInvoker(),
         timeout_seconds=10,
         now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
     )
 
     assert outcome is not None and outcome.state is RunnerState.REPAIR
@@ -12280,7 +10939,8 @@ def test_publication_commit_rejection_returns_pipeline_repair_to_repair_workflow
     assert outcome.merge_request_url == initial.merge_request_url
     assert outcome.merge_request_draft is None
     assert outcome.intent is None and outcome.publication_sha is None
-    assert outcome.receipts == () and outcome.audit_evidence is None
+    assert outcome.receipts == initial.receipts
+    assert outcome.audit_evidence == initial.audit_evidence
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
     assert gitlab.labels == [] and gitlab.outcome_comments == []
 
@@ -12294,18 +10954,15 @@ def test_corrected_publication_can_publish_after_local_commit_rejection(
     publishing = _record(
         tmp_path, state=RunnerState.PUBLISHING, phase=WorkflowPhase.READY_TO_PUBLISH
     )
-    ledger.persist(
+    initial_checkpoint = _red_checkpoint_evidence_for_segment(publishing)
+    initial = ledger.persist(
         publishing.model_copy(
             update={
                 "merge_request_draft": MergeRequestDraft(
                     title="Change", description="Validated details"
                 ),
                 "audit_evidence": _completed_coding_audit().model_copy(
-                    update={
-                        "red_checkpoint": _red_checkpoint_evidence_for_segment(
-                            publishing
-                        )
-                    }
+                    update={"red_checkpoint": initial_checkpoint}
                 ),
             }
         )
@@ -12321,6 +10978,7 @@ def test_corrected_publication_can_publish_after_local_commit_rejection(
         invoke=FakeInvoker(),
         timeout_seconds=10,
         now=NOW,
+        load_red_checkpoint=lambda *_args: initial_checkpoint,
     )
     assert rejected is not None and rejected.state is RunnerState.EXECUTING
     assert rejected.merge_request_draft is None
@@ -12350,7 +11008,8 @@ def test_corrected_publication_can_publish_after_local_commit_rejection(
     assert ready is not None and ready.state is RunnerState.PUBLISHING
     assert ready.phase is WorkflowPhase.READY_TO_PUBLISH
     assert ready.error_code is None
-    assert ready.receipts and isinstance(ready.audit_evidence, AuditReceiptSummary)
+    assert ready.receipts == initial.receipts
+    assert ready.audit_evidence == initial.audit_evidence
     assert correction.checkouts == [rejected.worktree]
     assert correction.phases == [WorkflowPhase.WORKFLOW.value]
     assert len(correction.prompts) == 1
@@ -12367,8 +11026,6 @@ def test_corrected_publication_can_publish_after_local_commit_rejection(
     assert ready.worktree == rejected.worktree
     assert ready.merge_request_draft is not None
     assert ready.merge_request_draft.title == "Complete issue 12"
-    assert isinstance(ready.audit_evidence, AuditReceiptSummary)
-    assert ready.audit_evidence.red_checkpoint == checkpoint
     assert checkpoint.ref in correction_prompt
     assert checkpoint.tree_oid in correction_prompt
 
@@ -12500,7 +11157,8 @@ def test_content_publication_commit_rejection_runs_fresh_content_workflow(
     assert rejected.worktree == initial.worktree
     assert rejected.intent is None and rejected.publication_sha is None
     assert rejected.merge_request_draft is None
-    assert rejected.receipts == () and rejected.audit_evidence is None
+    assert rejected.receipts == initial.receipts
+    assert rejected.audit_evidence == initial.audit_evidence
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
     assert gitlab.labels == [] and gitlab.outcome_comments == []
 
@@ -12524,8 +11182,8 @@ def test_content_publication_commit_rejection_runs_fresh_content_workflow(
     assert ready is not None and ready.state is RunnerState.PUBLISHING
     assert ready.workflow_lane is WorkflowLane.CONTENT
     assert ready.error_code is None
-    assert ready.receipts and isinstance(ready.audit_evidence, AuditReceiptSummary)
-    assert ready.audit_evidence.lane == "content"
+    assert ready.receipts == initial.receipts
+    assert ready.audit_evidence == initial.audit_evidence
     assert ready.merge_request_draft is not None
     assert ready.merge_request_draft.title == "Complete issue 12"
     assert correction.phases == [WorkflowPhase.WORKFLOW.value]
@@ -12705,8 +11363,7 @@ def test_dirty_feedback_observes_current_default_before_commit_and_reroutes_conf
     assert outcome.main_sha == "b" * 40
     assert repository.observed_defaults == ["b" * 40]
     assert repository.ancestry_queries == [("b" * 40, "a" * 40)]
-    assert repository.publication_events[:3] == [
-        "verify-committed-paths",
+    assert repository.publication_events[:2] == [
         "observe-default",
         "prepare",
     ]
@@ -12738,8 +11395,7 @@ def test_dirty_feedback_on_current_default_commits_and_publishes_same_mr(
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
     assert outcome.merge_request_iid == record.merge_request_iid
     assert repository.observed_defaults == ["b" * 40]
-    assert repository.publication_events[:3] == [
-        "verify-committed-paths",
+    assert repository.publication_events[:2] == [
         "observe-default",
         "prepare",
     ]
@@ -12769,6 +11425,7 @@ def test_dirty_feedback_replay_observes_retained_head_before_binding(
                         "validated_paths_fingerprint": hashlib.sha256(
                             b"src/review_fix.py\0"
                         ).hexdigest(),
+                        "validated_paths": '["src/review_fix.py"]',
                     },
                 )
             }
@@ -12845,10 +11502,7 @@ def test_dirty_feedback_default_observation_failure_stops_before_commit_or_push(
 
     assert outcome is not None and outcome.state is state
     assert outcome.error_code is error_code
-    assert repository.publication_events == [
-        "verify-committed-paths",
-        "observe-default",
-    ]
+    assert repository.publication_events == ["observe-default"]
     assert repository.prepares == repository.pushes == 0
 
 
@@ -13798,49 +12452,18 @@ def test_workflow_audit_repository_failure_is_durably_blocked(tmp_path: Path) ->
     assert persisted.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
 
 
-@pytest.mark.parametrize(
-    "receipt",
-    [
-        None,
-        WorkflowReceiptRecord(
-            phase=WorkflowPhase.WORKFLOW,
-            verdict="complete",
-            detail="$architect: approved",
-        ),
-        WorkflowReceiptRecord(
-            phase=WorkflowPhase.WORKFLOW,
-            verdict="complete",
-            detail=(
-                "$architect: approved\n"
-                "$documentation-writer: complete\n"
-                "$wrong-skill: approved"
-            ),
-        ),
-        WorkflowReceiptRecord(
-            phase=WorkflowPhase.WORKFLOW,
-            verdict="complete",
-            detail=(
-                "$architect: approved\n"
-                "$documentation-writer: complete\n"
-                "$documentation-writer: complete"
-            ),
-        ),
-        WorkflowReceiptRecord(
-            phase=WorkflowPhase.WORKFLOW,
-            verdict="rejected",
-            detail=(
-                "$architect: approved\n"
-                "$documentation-writer: complete\n"
-                "$documentation-finalizer: approved"
-            ),
-        ),
-    ],
-)
-def test_protected_policy_publication_with_invalid_receipts_fails_closed(
-    tmp_path: Path, receipt: WorkflowReceiptRecord | None
+@pytest.mark.parametrize("with_historical_receipt", (False, True))
+def test_protected_policy_publication_uses_controller_owned_path_and_draft(
+    tmp_path: Path, with_historical_receipt: bool
 ) -> None:
+    """Historical role prose cannot alter an exact protected publication."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    historical = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="rejected",
+        detail="$architect: rejected handcrafted history",
+    )
     ledger.persist(
         _record(
             tmp_path,
@@ -13850,193 +12473,13 @@ def test_protected_policy_publication_with_invalid_receipts_fails_closed(
             update={
                 "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
                 "workflow_lane": WorkflowLane.CONTENT,
-                "merge_request_draft": MergeRequestDraft(
-                    title="Policy update", description="Validated policy update."
-                ),
-                "receipts": () if receipt is None else (receipt,),
+                "merge_request_draft": _decision_draft(),
+                "receipts": (historical,) if with_historical_receipt else (),
             }
         )
     )
     repository = FakeRepository(config)
-    repository.paths = ("AGENTS.md",)
-    gitlab = FakeGitLab()
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
-    assert repository.pushes == 0
-    assert gitlab.created_merge_requests == 0
-
-
-@pytest.mark.parametrize(
-    ("workflow_lane", "receipt", "draft"),
-    [
-        (
-            WorkflowLane.CODING,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-judge' else 'approved'}"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-                ),
-            ),
-            MergeRequestDraft(title="Policy update", description="Validated."),
-        ),
-        (
-            WorkflowLane.CODING,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-                ),
-            ),
-            MergeRequestDraft(title="Policy update", description="Validated."),
-        ),
-        (
-            WorkflowLane.CONTENT,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: approved"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-                ),
-            ),
-            MergeRequestDraft(
-                title="Draft: policy update",
-                is_draft=True,
-                description=(
-                    "unresolved findings; exact human decisions; tests; cycle ledger; "
-                    "unchanged project-owned values"
-                ),
-            ),
-        ),
-    ],
-)
-def test_protected_policy_publication_rejects_incoherent_receipt_or_draft(
-    tmp_path: Path,
-    workflow_lane: WorkflowLane,
-    receipt: WorkflowReceiptRecord,
-    draft: MergeRequestDraft,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
-            update={
-                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
-                "workflow_lane": workflow_lane,
-                "merge_request_draft": draft,
-                "receipts": (receipt,),
-            }
-        )
-    )
-    repository = FakeRepository(config)
-    repository.paths = ("AGENTS.md",)
-    gitlab = FakeGitLab()
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.error_code is ErrorCode.WORKER_RECEIPT_INVALID
-    assert repository.pushes == 0
-    assert gitlab.created_merge_requests == 0
-
-
-@pytest.mark.parametrize(
-    ("workflow_lane", "receipt", "draft"),
-    [
-        (
-            WorkflowLane.CODING,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: approved"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-                ),
-            ),
-            MergeRequestDraft(title="Policy update", description="Validated."),
-        ),
-        (
-            WorkflowLane.CONTENT,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: approved"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-                ),
-            ),
-            MergeRequestDraft(
-                title="Draft: policy update",
-                is_draft=True,
-                description=(
-                    "unresolved findings and evidence; exact human decisions; tests; "
-                    "cycle ledger; unchanged project-owned values"
-                ),
-            ),
-        ),
-        (
-            WorkflowLane.CONTENT,
-            WorkflowReceiptRecord(
-                phase=WorkflowPhase.WORKFLOW,
-                verdict="complete",
-                detail="\n".join(
-                    f"{skill}: approved"
-                    for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-                ),
-            ),
-            _decision_draft(),
-        ),
-    ],
-)
-def test_protected_policy_publication_with_complete_evidence_publishes(
-    tmp_path: Path,
-    workflow_lane: WorkflowLane,
-    receipt: WorkflowReceiptRecord,
-    draft: MergeRequestDraft,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
-            update={
-                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
-                "workflow_lane": workflow_lane,
-                "merge_request_draft": draft,
-                "receipts": (receipt,),
-            }
-        )
-    )
-    repository = FakeRepository(config)
-    repository.paths = ("AGENTS.md",)
+    repository.publication_paths = ("AGENTS.md",)
     gitlab = FakeGitLab()
 
     outcome = run_segment(
@@ -14049,8 +12492,50 @@ def test_protected_policy_publication_with_complete_evidence_publishes(
     )
 
     assert outcome is not None and outcome.state is RunnerState.OBSERVING
-    assert repository.pushes == 1
-    assert gitlab.created_merge_requests == 1
+    assert outcome.receipts == ((historical,) if with_historical_receipt else ())
+    assert repository.publication_targets == ["a" * 40]
+    assert repository.pushes == 1 and gitlab.created_merge_requests == 1
+
+
+def test_protected_policy_publication_rejects_incomplete_controller_draft(
+    tmp_path: Path,
+) -> None:
+    """Protected paths require the controller-owned exact human-decision draft."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
+                "workflow_lane": WorkflowLane.CONTENT,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Draft: policy update",
+                    is_draft=True,
+                    description="Missing exact human decision evidence.",
+                ),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.publication_paths = ("AGENTS.md",)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
 
 
 def test_publication_ignores_target_only_policy_changes_in_prospective_tree(
@@ -14171,91 +12656,6 @@ def test_reconciliation_persists_default_target_for_interrupted_merge_recovery(
 
     assert replayed is not None and replayed.state is RunnerState.OBSERVING
     assert repository.publication_targets == ["c" * 40, "b" * 40]
-
-
-@pytest.mark.parametrize(
-    ("receipts", "expected_state", "expected_pushes"),
-    [
-        (
-            (
-                WorkflowReceiptRecord(
-                    phase=WorkflowPhase.WORKFLOW,
-                    verdict="rejected",
-                    detail="$architect: rejected",
-                ),
-                WorkflowReceiptRecord(
-                    phase=WorkflowPhase.WORKFLOW,
-                    verdict="complete",
-                    detail="\n".join(
-                        f"{skill}: approved"
-                        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-                    ),
-                ),
-            ),
-            RunnerState.OBSERVING,
-            1,
-        ),
-        (
-            (
-                WorkflowReceiptRecord(
-                    phase=WorkflowPhase.WORKFLOW,
-                    verdict="complete",
-                    detail="\n".join(
-                        f"{skill}: approved"
-                        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-                    ),
-                ),
-                WorkflowReceiptRecord(
-                    phase=WorkflowPhase.WORKFLOW,
-                    verdict="rejected",
-                    detail="$architect: rejected",
-                ),
-            ),
-            RunnerState.BLOCKED,
-            0,
-        ),
-    ],
-)
-def test_protected_policy_publication_uses_latest_workflow_receipt(
-    tmp_path: Path,
-    receipts: tuple[WorkflowReceiptRecord, WorkflowReceiptRecord],
-    expected_state: RunnerState,
-    expected_pushes: int,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    ledger.persist(
-        _record(
-            tmp_path,
-            state=RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-        ).model_copy(
-            update={
-                "work_kind": WorkKind.PROTECTED_POLICY_MANUAL,
-                "workflow_lane": WorkflowLane.CONTENT,
-                "merge_request_draft": MergeRequestDraft(
-                    title="Policy update", description="Validated."
-                ),
-                "receipts": receipts,
-            }
-        )
-    )
-    repository = FakeRepository(config)
-    repository.paths = ("AGENTS.md",)
-    gitlab = FakeGitLab()
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=FakeInvoker(),  # type: ignore[arg-type]
-        timeout_seconds=10,
-        now=NOW,
-    )
-
-    assert outcome is not None and outcome.state is expected_state
-    assert repository.pushes == expected_pushes
-    assert gitlab.created_merge_requests == expected_pushes
 
 
 def test_closed_issue_is_reconciled_and_lifecycle_label_removed(tmp_path: Path) -> None:
@@ -15845,9 +14245,9 @@ def test_handoff_failure_retries_without_projecting_awaiting_human_label(
 
     recovered = run_segment(
         ledger=ledger,
-        gitlab=gitlab,  # type: ignore[arg-type]
-        repository=repository,  # type: ignore[arg-type]
-        invoke=SingleSessionInvoker(),  # type: ignore[arg-type]
+        gitlab=gitlab,
+        repository=repository,
+        invoke=SingleSessionInvoker(),
         timeout_seconds=10,
         now=persisted.retry_at,
     )
@@ -17670,11 +16070,25 @@ def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> N
             super().__init__()
             self.invocations = 0
 
-        def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation:
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+        ) -> WorkerInvocation:
             self.invocations += 1
             if self.invocations == 1:
                 return WorkerInvocation(23, "", "worker failed")
-            return super().invoke(checkout, prompt, timeout)
+            return super().invoke(
+                checkout,
+                prompt,
+                timeout,
+                broker_request=broker_request,
+                build_artifact=build_artifact,
+            )
 
     invoker = FailThenSucceedInvoker()
     report = dispatch(

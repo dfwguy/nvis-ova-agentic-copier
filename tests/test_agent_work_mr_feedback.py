@@ -1101,10 +1101,10 @@ def test_noop_feedback_dirty_worktree_blocks_before_acknowledgement(
     assert gitlab.feedback_outcomes == []
 
 
-def test_noop_feedback_retains_worker_receipts_before_acknowledgement(
+def test_noop_feedback_does_not_persist_model_authored_receipts(
     tmp_path: Path,
 ) -> None:
-    """The crash-safe acknowledgement record retains the completed workflow proof."""
+    """A feedback result advances without turning model prose into evidence."""
     config = _serial_config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(_awaiting_feedback_record(tmp_path))
@@ -1131,10 +1131,7 @@ def test_noop_feedback_retains_worker_receipts_before_acknowledgement(
     )  # type: ignore[arg-type]
 
     assert final is not None
-    assert any(
-        "$tdd-green: green confirmed and findings repaired" in receipt.detail
-        for receipt in final.receipts
-    )
+    assert final.receipts == () and final.audit_evidence == "unknown"
 
 
 def test_identity_drift_after_pipeline_success_blocks_before_feedback_acknowledgement(
@@ -1293,6 +1290,7 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         title="Draft: retained", is_draft=True, description="Retained\n\nCloses #12"
     )
     repository = FakeRepository(config)
+    repository.paths = ("src/example.py",)
     changed_feedback = SingleSessionInvoker()
     changed_feedback.changed_paths = ("src/example.py",)
 
@@ -1367,7 +1365,7 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
     assert len(gitlab.feedback_outcomes) == 1
 
 
-def test_feedback_publication_blocks_when_worktree_no_longer_matches_validated_audit_paths(
+def test_feedback_publication_blocks_when_worktree_no_longer_matches_controller_intent_paths(
     tmp_path: Path,
 ) -> None:
     """Publication may stage only the controller-validated feedback result."""
@@ -1410,10 +1408,123 @@ def test_feedback_publication_blocks_when_worktree_no_longer_matches_validated_a
     )  # type: ignore[arg-type]
 
     assert blocked is not None and blocked.state is RunnerState.BLOCKED
-    assert blocked.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+    assert blocked.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
     assert repository.pushes == 0
     assert "customer-export.csv" not in blocked.summary
     assert "customer-export.csv" not in blocked.next_action
+
+
+def _controller_feedback_publication(
+    tmp_path: Path,
+) -> tuple[JsonLedger, _FeedbackGitLab, FakeRepository, LedgerRecord]:
+    """Create one publication bound to controller-observed feedback paths."""
+    config = _serial_config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_awaiting_feedback_record(tmp_path))
+    gitlab = _FeedbackGitLab()
+    gitlab.feedback = (_feedback(31),)
+    repository = FakeRepository(config)
+    repository.paths = ("src/review_fix.py",)
+    run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )
+    publication = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=SingleSessionInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )
+    assert publication is not None and publication.intent is not None
+    return ledger, gitlab, repository, publication
+
+
+@pytest.mark.parametrize("defect", ("missing", "noncanonical", "extra", "fingerprint"))
+def test_feedback_publication_rejects_invalid_controller_intent_paths(
+    tmp_path: Path, defect: str
+) -> None:
+    """Only the exact canonical path set from the trusted transition may publish."""
+    ledger, gitlab, repository, publication = _controller_feedback_publication(tmp_path)
+    assert publication.intent is not None
+    evidence = dict(publication.intent.expected_evidence)
+    if defect == "missing":
+        evidence.pop("validated_paths")
+    elif defect == "noncanonical":
+        evidence["validated_paths"] = '["src/z.py","src/a.py"]'
+    elif defect == "extra":
+        paths = ("src/extra.py", "src/review_fix.py")
+        evidence.update(
+            {
+                "validated_path_count": len(paths),
+                "validated_paths_fingerprint": hashlib.sha256(
+                    "".join(f"{path}\0" for path in paths).encode()
+                ).hexdigest(),
+                "validated_paths": json.dumps(paths, separators=(",", ":")),
+            }
+        )
+    else:
+        evidence["validated_paths_fingerprint"] = "f" * 64
+    ledger.persist(
+        publication.model_copy(
+            update={
+                "intent": publication.intent.model_copy(
+                    update={"expected_evidence": evidence}
+                )
+            }
+        )
+    )
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
+    assert repository.pushes == 0
+
+
+@pytest.mark.parametrize(
+    "historical_paths", (("src/review_fix.py",), ("secrets/forged.txt",))
+)
+def test_historical_audit_paths_cannot_change_feedback_publication(
+    tmp_path: Path, historical_paths: tuple[str, ...]
+) -> None:
+    """Historical model prose cannot alter controller-owned intent paths."""
+    ledger, gitlab, repository, publication = _controller_feedback_publication(tmp_path)
+    historical = AuditReceiptSummary(
+        lane="coding",
+        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
+        role_receipts=("$tdd-finalizer: handcrafted",),
+        changed_paths=historical_paths,
+        tests=("handcrafted test prose",),
+        reviewers=("$tdd-judge: handcrafted",),
+        findings=(),
+        corrections=(),
+    )
+    ledger.persist(publication.model_copy(update={"audit_evidence": historical}))
+
+    published = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=30,
+        now=NOW,
+    )
+
+    assert published is not None and published.state is RunnerState.OBSERVING
+    assert repository.prepared_paths == ("src/review_fix.py",)
 
 
 def test_feedback_publication_replay_before_commit_prepares_exact_durable_intent(
@@ -1459,6 +1570,7 @@ def test_feedback_publication_replay_before_commit_prepares_exact_durable_intent
                         "baseline_sha": "a" * 40,
                         "validated_path_count": 1,
                         "validated_paths_fingerprint": fingerprint,
+                        "validated_paths": '["src/review_fix.py"]',
                     },
                 )
             }
@@ -1539,6 +1651,7 @@ def test_feedback_publication_replay_after_commit_binds_only_an_exact_path_set(
                         "baseline_sha": "a" * 40,
                         "validated_path_count": 1,
                         "validated_paths_fingerprint": fingerprint,
+                        "validated_paths": '["src/review_fix.py"]',
                     },
                 )
             }
@@ -1556,7 +1669,7 @@ def test_feedback_publication_replay_after_commit_binds_only_an_exact_path_set(
 
     assert resumed is not None and resumed.state is expected_state
     if expected_state is RunnerState.BLOCKED:
-        assert resumed.error_code is ErrorCode.WORKER_RECEIPT_INVALID
+        assert resumed.error_code is ErrorCode.PUBLICATION_IDENTITY_MISMATCH
         assert repository.binds == 0
         assert repository.pushes == 0
     else:
@@ -1617,6 +1730,7 @@ def test_feedback_publication_replay_after_push_requires_a_clean_exact_worktree(
                         "publication_sha": published_sha,
                         "validated_path_count": 1,
                         "validated_paths_fingerprint": fingerprint,
+                        "validated_paths": '["src/review_fix.py"]',
                     },
                 ),
             }
@@ -1676,9 +1790,11 @@ def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
         now=NOW,
     )  # type: ignore[arg-type]
     assert publishing is not None and publishing.state is RunnerState.PUBLISHING
-    assert publishing.audit_evidence != "unknown"
-    assert publishing.audit_evidence is not None
-    assert publishing.audit_evidence.changed_paths == repository.paths
+    assert publishing.audit_evidence == "unknown"
+    assert publishing.intent is not None
+    assert publishing.intent.expected_evidence["validated_paths"] == json.dumps(
+        repository.paths, separators=(",", ":")
+    )
     observed = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -1717,188 +1833,6 @@ def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
     assert rerouted.pending_feedback.acknowledgement_ready is False
     assert gitlab.feedback_outcomes == []
     assert gitlab.created_merge_requests == 0
-
-
-def test_legacy_preparing_feedback_retry_publishes_exact_retained_audit_before_acknowledgement(
-    tmp_path: Path,
-) -> None:
-    """A decided legacy retry republishes its exact dirty audit before replying."""
-    config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    paths = ("src/review_fix.py",)
-    cursor = MergeRequestFeedbackCursor(
-        last_processed_general_note_id=31,
-        feedback_source_sha="a" * 40,
-    )
-    audit = AuditReceiptSummary(
-        lane="coding",
-        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
-        role_receipts=("$tdd-finalizer: approved",),
-        changed_paths=paths,
-        tests=("uv run tox",),
-        reviewers=("$tdd-judge: approved",),
-        findings=(),
-        corrections=(),
-    )
-    ledger.persist(
-        _awaiting_feedback_record(tmp_path).model_copy(
-            update={
-                "state": RunnerState.PREPARING,
-                "phase": WorkflowPhase.POST_PUBLICATION,
-                "summary": "Human-directed retry requested.",
-                "feedback_cursor": cursor,
-                "pending_feedback": PendingMergeRequestFeedback(
-                    target_cursor=cursor,
-                    source_sha="a" * 40,
-                    source="general",
-                    note_id=31,
-                    outcome="The reviewed fix is ready to publish.",
-                    acknowledgement_ready=True,
-                ),
-                "audit_evidence": audit,
-            }
-        )
-    )
-    gitlab = _FeedbackGitLab()
-    gitlab.feedback = (_feedback(31),)
-    gitlab.existing_mr = _mr()
-    repository = FakeRepository(config)
-    repository.paths = paths
-    repository.dirty = True
-
-    publishing = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=FakeInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-
-    assert publishing is not None and publishing.state is RunnerState.PUBLISHING
-    assert publishing.phase is WorkflowPhase.READY_TO_PUBLISH
-    assert publishing.pending_feedback is not None
-    assert publishing.pending_feedback.acknowledgement_ready is False
-    assert publishing.audit_evidence == audit
-    assert gitlab.feedback_outcomes == []
-
-    repository.dirty = False
-    observed = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=FakeInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-
-    assert observed is not None and observed.state is RunnerState.OBSERVING
-    assert repository.prepared_paths == paths
-    assert repository.pushes == 1
-    assert gitlab.created_merge_requests == 0
-    assert observed.source_sha is not None
-    gitlab.pipeline = PipelineEvidence(
-        id=4,
-        status="success",
-        sha=observed.source_sha,
-        web_url="https://pipeline/4",
-    )
-    assessed = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=FakeInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-    assert assessed is not None and assessed.phase is WorkflowPhase.POST_PUBLICATION
-
-    acknowledged = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=SingleSessionInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-    assert acknowledged is not None and acknowledged.state is RunnerState.AWAITING_HUMAN
-    assert len(gitlab.feedback_outcomes) == 1
-
-    recovered = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=FakeInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-    assert recovered is None
-    assert ledger.load(12) == acknowledged
-    assert repository.pushes == 1
-    assert len(gitlab.feedback_outcomes) == 1
-
-
-def test_legacy_preparing_feedback_retry_rejects_retained_path_mismatch(
-    tmp_path: Path,
-) -> None:
-    """A legacy retry never acknowledges retained paths absent from its audit."""
-    config = _serial_config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    cursor = MergeRequestFeedbackCursor(
-        last_processed_general_note_id=31,
-        feedback_source_sha="a" * 40,
-    )
-    audit = AuditReceiptSummary(
-        lane="coding",
-        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
-        role_receipts=("$tdd-finalizer: approved",),
-        changed_paths=("src/review_fix.py",),
-        tests=("uv run tox",),
-        reviewers=("$tdd-judge: approved",),
-        findings=(),
-        corrections=(),
-    )
-    ledger.persist(
-        _awaiting_feedback_record(tmp_path).model_copy(
-            update={
-                "state": RunnerState.PREPARING,
-                "phase": WorkflowPhase.POST_PUBLICATION,
-                "summary": "Human-directed retry requested.",
-                "feedback_cursor": cursor,
-                "pending_feedback": PendingMergeRequestFeedback(
-                    target_cursor=cursor,
-                    source_sha="a" * 40,
-                    source="general",
-                    note_id=31,
-                    outcome="The reviewed fix is ready to publish.",
-                    acknowledgement_ready=True,
-                ),
-                "audit_evidence": audit,
-            }
-        )
-    )
-    gitlab = _FeedbackGitLab()
-    gitlab.feedback = (_feedback(31),)
-    gitlab.existing_mr = _mr()
-    repository = FakeRepository(config)
-    repository.paths = ("src/unvalidated.py",)
-    repository.dirty = False
-
-    outcome = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=FakeInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert outcome.summary == (
-        "Feedback publication paths no longer match validated receipt evidence."
-    )
-    assert gitlab.feedback_outcomes == []
-    assert repository.pushes == 0
 
 
 @pytest.mark.parametrize(

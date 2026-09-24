@@ -56,7 +56,8 @@ agent-work recovery resolve --issue-iid IID
 agent-work credential rotate --environment-file PATH --unit-name NAME [--apply] [--json] [--debug]
 agent-work service-environment migrate --environment-file PATH --unit-name NAME [--apply | --dry-run] [--json] [--debug]
 agent-work worker-result build --issue-iid IID --input-file PATH
-                               [--handoff-file PATH --handoff-nonce NONCE]
+                               [--broker-socket PATH]
+                               [--broker-nonce NONCE]
                                [--json] [--apply] [--debug]
 agent-work red-checkpoint create --issue-iid IID --evidence-file PATH
                                  [--json] [--apply] [--debug]
@@ -90,7 +91,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `recovery resolve` | Exact `--issue-iid`, explicit `--choice`, and `--reason` | Applying also needs the exact reviewed `--plan-file`; some choices need evidence, a replacement IID, or a target label. |
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
-| `worker-result build` | Exact `--issue-iid`, `--input-file PATH` | Without `--apply`, previews the validated envelope. Applied handoff creation also requires `--handoff-file PATH` and `--handoff-nonce NONCE`. |
+| `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
 | `red-checkpoint create` | Exact `--issue-iid` and bounded `--evidence-file` | Bare invocation previews; `--apply` verifies and retains one durable Red checkpoint. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, and repeated acceptance criteria | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
@@ -152,12 +153,12 @@ controller sees and checks the handoff between two worker runs.
 
 | Condition or step | Controller contract |
 | --- | --- |
-| Fresh coding work without a retained checkpoint | The first worker segment may change only declared test paths. It returns `red_checkpoint_ready` with `change_summary`, `next_action`, the `$architect` and `$tdd-red` receipts, and one `red_checkpoint_request` with `argv`, `expected_failure`, and `test_paths`. It does not start Green or return the full workflow receipts. |
+| Fresh coding work without a retained checkpoint | The first worker segment may change only declared test paths. It submits `red_checkpoint_ready` with `change_summary`, `next_action`, and one `red_checkpoint_request` with `argv`, `expected_failure`, and `test_paths`. It does not start Green or authorize a later workflow transition. |
 | Durable lane selection | Before applying the trusted checkpoint transaction, the controller persists `workflow_lane: coding` in the ledger. The applied transaction therefore cannot run against an unknown or inferred lane. |
 | Trusted checkpoint transaction | The controller rejects production-path changes, validates the Red-only result, applies `red-checkpoint create`, then loads the retained evidence through the trusted checkpoint boundary. The returned and loaded evidence must match exactly. |
-| Later coding segment | Only after exact checkpoint verification does the controller start a new worker invocation. Its prompt includes the retained checkpoint identity. That invocation completes Green and the remaining coding workflow and returns the full coding receipt set. |
+| Later coding segment | Only after exact checkpoint verification does the controller start a new worker invocation. Its prompt includes the retained checkpoint identity. That invocation completes Green and the remaining coding workflow for fresh controller verification. |
 | Restart with exact evidence | When the trusted loader finds the exact checkpoint for the project, issue, source branch, and recorded base, the controller reuses it. It does not recreate the checkpoint or repeat the Red-only segment. It starts the later full workflow with the same retained identity. |
-| Failed boundary | A failed Red worker-result handoff capture, parsing, or validation remains a worker-protocol outcome and retains its existing canonical bounded worker diagnostic. Retained-checkpoint precheck, checkpoint-context preparation, request and path verification, checkpoint execution and persistence, and retained-evidence reload mismatch each stop at distinct fixed recovery-safe Red checkpoint stages. Recovery inventory projects the exact allowlisted diagnostic for that stage. The ledger, status, inventory, and issue notes never retain raw worker content, rejected values, exception text, command output, or unsafe paths. The controller preserves the worktree and never starts the later coding segment. A reviewed retry is allowed only for the historical pre-checkpoint test-only shape: ordinary work with the exact retained branch, base, head, and worktree; a clean index; tracked test-only unstaged paths; and no prior workflow, correction, publication, audit, merge, untracked, unmerged, rename, or open-dependency evidence. Apply rechecks the saved plan and resumes `preparing` without creating checkpoint, lane, correction, or publication evidence. All other failed-boundary records remain blocked. |
+| Failed boundary | A failed Red broker request, parsing, or validation remains a worker-protocol outcome and retains its existing canonical bounded worker diagnostic. Retained-checkpoint precheck, checkpoint-context preparation, request and path verification, checkpoint execution and persistence, and retained-evidence reload mismatch each stop at distinct fixed recovery-safe Red checkpoint stages. Recovery inventory projects the exact allowlisted diagnostic for that stage. The ledger, status, inventory, and issue notes never retain raw worker content, rejected values, exception text, command output, or unsafe paths. The controller preserves the worktree and never starts the later coding segment. A reviewed retry is allowed only for the historical pre-checkpoint test-only shape: ordinary work with the exact retained branch, base, head, and worktree; a clean index; tracked test-only unstaged paths; and no prior workflow, correction, publication, audit, merge, untracked, unmerged, rename, or open-dependency evidence. Apply rechecks the saved plan and resumes `preparing` without creating checkpoint, lane, correction, or publication evidence. All other failed-boundary records remain blocked. |
 | Content lane | Content work keeps its existing single coarse workflow invocation. It does not enter the Red checkpoint transaction. |
 
 ### `merge-request publish`
@@ -429,58 +430,50 @@ accepted for consistent invocation and changes nothing.
 | Invalid manifest, unreadable credential file, access/API failure, or response-verification failure | Exits `1` with sanitized diagnostics. |
 | Invalid usage | Exits `2`. |
 
-`worker-result build` validates a captured `WorkerResultBuildInput` object and
-builds one worker result.
-
-```text
-<agent-work-result>{...}</agent-work-result>
-```
+`worker-result build` validates one `WorkerResultBuildInput` object during the
+live worker session and builds one controller-owned worker result.
 
 | Worker-result action, field, or outcome | Contract |
 | --- | --- |
-| Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object, captured from a supported worker's final message, with the retained ledger and worktree for the supplied issue. The object is untrusted builder input. |
-| Derived fields and checks | Derives protocol-v2 identity, state, completed phase, and duplicated audit fields. Uses the trusted controller and receipt-coherence rules from a workflow transition. |
-| Preview | Without `--apply`, validates and emits the result but makes no change. It does not write a handoff artifact. |
-| Successful preview output | Has exactly one compact delimited result. |
-| Standard error | Receives human status and sanitized failures. |
-| Preview without `--json` | Success emits the delimited worker envelope. |
-| `--json` | Preview emits the same compact envelope without delimiters. Applied mode emits only the bounded `action`, `applied`, and `issue_iid` receipt; it never emits the protected envelope. JSON does not relax validation. |
-| `--debug` | Adds local sanitized diagnostics without credentials, environment values, worker prose, prompts, or transcripts. |
-| Applied handoff | Trusted `AgentInvoker` invokes its controller-owned helper with `--apply`, controller-supplied issue, input, handoff, and nonce values. It rejects a helper inside the worker checkout. After strict validation, it atomically writes one artifact to the controller-supplied `--handoff-file`. A worker does not invoke this helper. Applied success does not emit the envelope on standard output. |
-| Temporary transport | The controller creates the temporary input and handoff files below its state root, outside the retained worker checkout. It attempts to clear both before launch and after every capture outcome. Any cleanup failure rejects the capture. |
-| Builder time bound | The controller gives the builder only the worker time still remaining. The builder cannot extend the worker budget. If no time remains, the capture identifies builder budget exhaustion instead of treating it as a builder validation rejection. |
-| Artifact identity | The artifact binds its schema version and nonce to the project, issue, ledger revision, source branch, source SHA, sorted changed paths observed when it is built, and validated envelope. |
-| Controller verification | After the worker returns, the controller observes the final changed paths and accepts only the fresh artifact whose complete identity and bound paths match. Missing, malformed, stale, or mismatched artifacts fail closed. The captured input, worker prose, and standard-output envelopes cannot replace or override it. |
-| Mutation boundary | Apply writes only the transient untracked handoff artifact. It never changes tracked worktree content, the ledger, Git, GitLab, or publication state. |
+| Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object from the live workflow owner’s private scratch file. The object is untrusted builder input. The broker injects the current record, expected changed paths, and checkpoint dependencies; the worker cannot provide them. |
+| Private broker | `AgentInvoker` creates one private Unix-socket broker in a fresh private `/tmp` directory for each invocation. It gives the worker the socket only for the live builder request. The worker receives no ledger directory, state-root path, or writable controller handoff artifact. |
+| Request limit | The broker accepts one request. A canonical rejection returns directly to the live producer for at most one corrected request within the existing worker budget. A third request fails closed. |
+| Builder time bound | Each request has the worker time still remaining. The builder cannot extend the worker budget. Timeout, deletion, race, oversize input, malformed framing, or an extra request fails closed. |
+| Controller-owned result | The broker constructs the accepted result in controller memory. It writes no durable acceptance record and exposes no accepted artifact to the worker. Model standard output and raw input are never controller state. |
+| Controller verification | After the worker exits, the controller freshly verifies the nonce, project, issue, ledger revision, branch, source SHA, state, phase, envelope, and observed changed paths before its normal ledger transition. Missing, malformed, stale, or mismatched evidence fails closed. |
+| Cleanup | The controller removes the private scratch and socket directory for every outcome. A deletion or cleanup failure rejects the result. |
+| Standard error and debug | Human status and diagnostics are sanitized. They never include credentials, environment values, worker prose, prompts, raw input, or transcripts. |
+| Mutation boundary | Broker acceptance alone changes no ledger, Git, GitLab, publication, or tracked worktree content. The exact verified ledger transition remains the durable proof. |
+| Preview stdout | Without `--json`, stdout is one concise human-readable status line. With `--json`, stdout is exactly one `WorkerResultEnvelope` JSON object. Preview output is diagnostic and is never controller state. |
+| Applied JSON stdout | `--apply --json` emits exactly one canonical object containing `accepted: true` and the exact broker nonce after broker acceptance. |
 | Success | Exits `0`. |
 | Validation or runtime failure | Exits `1`. |
 | Argparse usage failure | Exits `2`. |
-| Input object | One strict `WorkerResultBuildInput` JSON object containing only worker intent. The worker returns it as its final message. Unknown fields are rejected. |
-| Required worker intent | `workflow_lane`, `result_kind`, `receipts`, `change_summary`, and `next_action`. |
-| Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, `red_checkpoint_request`, and bounded `audit_summary` evidence: `capacity`, `tests`, `findings`, and `corrections`. |
-| Controller-derived values | Protocol version; project and issue identity; ledger revision; expected state and phase; completed phase; audit lane; role receipts; changed paths; reviewer receipt list. The input must not contain `identity`, `state`, `phase`, audit `lane`, `role_receipts`, `changed_paths`, or `reviewers`. |
+| Input object | One strict `WorkerResultBuildInput` JSON object containing only bounded worker intent. The live producer stores it in private scratch and invokes the controller-checkout builder through the broker. Unknown fields are rejected. |
+| Required worker intent | `workflow_lane`, `result_kind`, `change_summary`, and `next_action`. |
+| Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, and `red_checkpoint_request`. |
+| Program-owned values | Protocol version; project and issue identity; ledger revision; expected state and phase; completed phase; changed paths; checkpoint dependencies; and the accepted envelope are controller-derived or controller-verified. The input must not contain them. |
+| Non-authoritative discussion | Specialist receipts and audit prose may remain AI-to-AI context. They are not program authorization and `audit_summary` is not an input field. |
 
 | Result state or receipt | Contract |
 | --- | --- |
 | `phase_status` | Controller-derived. The worker does not supply it. |
 | Ordinary `workflow` | Every recorded result gets `complete`, including `split_required`. |
 | `post-publication` | Gets `complete` only for `ready_to_publish`. Failed, actionable, and other non-success results remain `rejected`. |
-| Successful post-publication assessment | Supplies the needed complete `$pipeline-performance-judge` receipt and advances the verified exact-source handoff to `awaiting-human`. |
+| Successful post-publication assessment | Advances the verified exact-source handoff to `awaiting-human`. The `$pipeline-performance-judge` role and its prose remain AI discussion context rather than worker-result fields. |
 | Malformed, contradictory, failed, or actionable assessment | Keeps existing rejection and feedback handling; it does not advance that handoff. |
-| Red-only coding handoff | `red_checkpoint_ready` is valid only for a coarse coding `workflow` without exact retained Red evidence. It has the required `change_summary` and `next_action`, complete `$architect` and `$tdd-red` receipts, and one `red_checkpoint_request`. It has no documentation or policy receipts, audit summary, merge-request draft, split plan, or error code, and it cannot advance to publication. |
-| Completed ordinary workflow lane | Use `coding` or `content` with that lane's exact `WORKFLOW_RECEIPTS` set. |
-| Coding receipts | `$architect`, `$tdd-red`, `$diataxis-writer`, `$agent-policy-writer`, `$tdd-green`, `$tdd-judge`, `$nonfunctional-review`, `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, `$license-checker`, and `$tdd-finalizer`. All 17 are needed for coding `ready_to_publish`. |
-| Content receipts | `$architect`, `$documentation-writer`, and `$documentation-finalizer`. All three are needed for completed content `ready_to_publish`. |
-| Receipt format | Every receipt starts with its exact skill name and can include full multiline nested-role evidence. A conditionally inapplicable role is exactly `$skill: not applicable — reason`. Arbitrary, omitted, duplicated, or invented receipts cannot advance the workflow. |
-| Coarse and legacy route | The 17-receipt coding set applies to the completed result from a new coarse `WORKFLOW`, after the Red-only handoff when one is needed. A legacy recorded phased route remains compatible and finishes its recorded route. |
-| `ready_to_publish` | Completes a coherent ordinary workflow. It needs exact receipts, a successful audit (including capacity and tests for coding), and a merge-request draft when retained work needs new publication metadata. |
+| Red-only coding result | `red_checkpoint_ready` is valid only for a coarse coding `workflow` without exact retained Red evidence. It has the required `change_summary`, `next_action`, and one `red_checkpoint_request`. It has no merge-request draft, split plan, or error code, and it cannot advance to publication. |
+| Completed ordinary workflow lane | Use `coding` or `content` with that lane's applicable controller-owned checkpoints and final interface. |
+| Workflow evidence | The controller verifies the applicable program-owned checkpoints and final interface before a transition. Model-authored specialist receipts and audit prose cannot authorize a result. |
+| Coarse and legacy route | New coarse `WORKFLOW` results use the broker boundary. A legacy recorded phased route remains readable and finishes its recorded route. |
+| `ready_to_publish` | Completes a coherent ordinary workflow. It needs the verified final interface, applicable controller-owned evidence, and a merge-request draft when retained work needs new publication metadata. |
 | Draft metadata | The draft has nonempty `title` and `description`. A controversial but safe human handoff has a title beginning `Draft:`, an agreeing draft flag, and a decision review covering decisions and assumptions, alternatives, risks, reviewer checks, unresolved findings and evidence, tests, the correction-cycle ledger, and unchanged project-owned values. Existing-MR remediation is the exception: it supplies no new publication metadata. |
 
 The other result kinds preserve their distinct controller transitions:
 
 | Result kind | Use and needed intent |
 | --- | --- |
-| `red_checkpoint_ready` | A tests-only coding handoff for controller capture. Supply the required `change_summary` and `next_action`, exactly the `$architect` and `$tdd-red` receipts, and the exact `red_checkpoint_request`. Do not supply documentation or policy receipts, `merge_request_draft`, `audit_summary`, `split_plan`, or `error_code`. The controller verifies and retains the handoff before any later coding segment. |
+| `red_checkpoint_ready` | A tests-only coding result. Supply the required `change_summary`, `next_action`, and exact `red_checkpoint_request`. Do not supply a merge-request draft, split plan, or error code. The controller verifies and retains its checkpoint before any later coding segment. |
 | `retryable` | A bounded transient outcome. Include the applicable error code and redacted summary when available. The controller schedules ordinary retained-worktree recovery. |
 | `needs_human` | A blocker requiring human authority or a decision. Provide the bounded redacted summary, next action, and applicable error code. |
 | `split_required` | An oversized fresh workflow. Use `workflow_lane: unknown` and a `split_plan` of 2–25 ordered, independently mergeable slices. It needs no receipts, audit, merge-request draft, or error code. |
@@ -492,7 +485,7 @@ The other result kinds preserve their distinct controller transitions:
 | Retention ban | Failures never retain request values, worker prose, prompts, chain-of-thought, credentials, environment values, or unbounded exception output. |
 | Issues #40 and #78 | Protocol failures remain retryable, so retained worktrees stay in place for ordinary recovery. |
 | Issue #80 | This does not claim an underlying cause for its retry exhaustion. |
-| Envelope handling | Return only strict `WorkerResultBuildInput` JSON as the final message. `AgentInvoker` supplies it to the controller-owned builder. Neither helper output nor other prose is directly authoritative. |
+| Envelope handling | The live producer stores strict `WorkerResultBuildInput` in private scratch and invokes the controller-checkout builder through the broker. Final messages, helper output, and other prose are never authoritative. |
 
 ### Worker validation diagnostics
 
@@ -616,7 +609,7 @@ work.
 | GitLab label | Ledger state or outcome | Meaning |
 | --- | --- | --- |
 | `agent::running` | preparing, executing, retry-wait, publishing, observing, or repair | Work is active or safely resumable. |
-| `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, needed receipts, and one factory-authored actionable issue handoff await human review. |
+| `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
 | `agent::needs_repair` | needs-repair | A legacy or manually checkpointed repair awaits exact recovery. Ordinary exact pipeline failures do not enter this state. |
@@ -797,7 +790,7 @@ The ledger is the durable audit record. It keeps facts a restart must use.
 | Version 2 fields | Bounded issue title; activation, latest-meaningful-event, and completion timestamps; main, source, publication, and merge-request identities; and bounded retry and failure history apart from the current actionable error. |
 | Phase timing | `phase_timings` keeps the newest 64 controller-computed entries. Phase timing is the public schema term because entries identify a durable `WorkflowPhase` value or a controller-observed role; the ordered human workflow groups remain stages. Each entry has `phase_or_role`, `attempt`, `started_at`, `finished_at`, `elapsed_seconds`, `outcome`, and `classification`. Classification is `execution` or `wait`. The timestamps come from controller clock boundaries, not agent narration. The controller records only boundaries it can observe; the list does not claim timing for unobserved subagent internals. |
 | Exhausted retry | The current condition is `retry_exhausted`. Bounded history keeps the latest sanitized underlying condition code and detail. Human and JSON status show the retained actionable cause, and the safe lifecycle result is `agent::blocked`. |
-| Final workflow summary | A typed, bounded summary keeps selected lane, capacity decision, nested roles, changed paths, tests and JUnit evidence, reviewers, findings, and corrections. The runner checks its canonical changed-path list against the durable worktree. Checked worker receipts must contain the other entries, but the runner does not independently verify AI claims. |
+| Historical workflow context | Legacy records may keep a bounded workflow summary and role discussion. The runner treats that prose as non-authoritative. Current transitions use controller-observed state, phase, revision, and source identity. They also use controller-owned checkpoints and observed changed paths. |
 | Excluded audit data | The ledger never stores prompts, chain-of-thought, credentials, environment values, issue bodies, comments, transcripts, raw output, or unbounded data. |
 | Legacy records | Old records stay readable. A missing `phase_timings` field loads as an empty list. Other missing legacy evidence is `unknown`. The next persist adds current fields and never invents past values. |
 | Local log | The application writes `agent-work.log` in that XDG project-state directory. It is application-owned evidence beside, not instead of, the systemd service journal. |
@@ -822,7 +815,7 @@ ledger state and coarse phase.
 | Output or evidence | Contract |
 | --- | --- |
 | Human item line | States whether work runs, what changed, the current failure or condition, and the next action. It includes issue, projected and raw state, phase, identity facts, and available worker-exit evidence. When phase timing evidence exists, it includes one concise `timing=` token with the entry count, summed execution seconds, summed wait seconds, and the latest phase, outcome, and elapsed seconds. |
-| JSON detail | Includes the full bounded `phase_timings` list, detailed check evidence—tests, reviewers, and audit receipts—plus timestamps, conditions, and corroboration. |
+| JSON detail | Includes the full bounded `phase_timings` list, controller evidence, timestamps, conditions, and corroboration. Historical role and audit prose remains non-authoritative context. |
 | JSON form | It is compact, versioned `CommandReport` version 2. Status records have the human view's identity, projection, current-versus-history, bounded audit, and observation data. |
 | List bounds | A report gives total matching records and truncation metadata. Only an unfiltered list is capped at 100 records. |
 | Observation use | Treat a missing, stale, failed, or mismatched observation as that condition, never as current truth. |
@@ -866,24 +859,22 @@ The oneshot service has a bounded outer limit. `TimeoutStartSec=190min`.
 | Timeout action | At the outer limit, systemd sends TERM to the full service control group. It gives TERM 30 seconds before KILL, then kills survivors. |
 | Timeout evidence | The unit journal records `Result=timeout` and relevant sanitized wrapper diagnostics. The durable ledger and retained issue worktree stay in place. Normal retry and human diagnosis use that evidence. |
 
-A workflow-owning worker returns one strict `WorkerResultBuildInput` JSON
-object as its final message. For the handoff-aware production `AgentInvoker`,
-that message is untrusted builder input, not a handoff result. `AgentInvoker`
-captures Codex's final message through `--output-last-message` and the
-supported final-text output from Claude or Pi. It then invokes the
-controller-owned `worker-result build` helper with controller-owned issue,
-input, handoff, and nonce values and `--apply`. Only the resulting
-controller-owned artifact can be accepted as a handoff result. Other standard
-output and model prose, including output from a successful worker process,
-are never accepted as a handoff result.
+While the workflow owner is live, it stores one strict
+`WorkerResultBuildInput` JSON object in private scratch and invokes the trusted
+controller-checkout `worker-result build` helper through its private broker.
+The broker returns a canonical rejection to that same producer for one bounded
+correction. It keeps an accepted result in controller memory. It does not write
+a handoff artifact. Final messages and all model standard output, including
+output from a successful worker process, are never controller state or a
+handoff result.
 
 | Envelope field or check | Contract |
 | --- | --- |
 | Result | `red_checkpoint_ready` for the coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, or `split_required` for a workflow-owning result. |
-| Content | Include the coarse completed state, receipts, diagnostic, and next action. |
-| Trusted runner | Before changing state, check the ledger, configured numeric project, Git evidence, and needed workflow receipts. |
-| Trusted capture | `AgentInvoker` captures the supported worker's final message, supplies it to the builder, and retains one typed capture outcome: `captured`, `pre_run_cleanup_failed`, `artifact_not_written`, `artifact_unreadable`, `artifact_too_large`, `builder_rejected`, `builder_budget_exhausted`, or `post_read_cleanup_failed`. The controller accepts a result only from `captured` after its identity and changed paths match the controller's expected handoff. |
-| Rejected capture | A missing, malformed, or rejected captured final message; a missing artifact after a successful worker; a malformed artifact; controller identity mismatch; changed-path mismatch; or applicable filesystem capture, cleanup, or size-limit failure rejects the result. The durable diagnostic is a bounded constant that identifies the stage and category. A builder rejection can retain the fixed `worker_result: could not be read or validated` or `worker_result_handoff: could not be written` diagnostic, or an existing canonical, allowlisted validation diagnostic. The controller suppresses all other builder standard output and standard error. Diagnostics never retain raw exceptions, output, paths, identities, secrets, payloads, or worker data. Cleanup is attempted for every captured artifact; a cleanup failure rejects the result. |
+| Content | Include bounded worker intent, diagnostic, and next action. Specialist receipts and audit prose are discussion context only. |
+| Trusted runner | Before changing state, freshly check the nonce, ledger, configured numeric project, revision, branch, source SHA, state, phase, accepted envelope, observed changed paths, and applicable controller-owned checkpoints. |
+| Broker result | `AgentInvoker` accepts one request, then at most one corrected request after a canonical rejection. The broker keeps an accepted result only in controller memory. |
+| Rejected request | A missing, malformed, oversized, late, deleted, raced, or extra request rejects the result. The durable diagnostic is a bounded constant that identifies the stage and category. The controller suppresses raw builder standard output and standard error. Diagnostics never retain raw exceptions, output, paths, identities, secrets, payloads, or worker data. |
 | Coding final audit | Name Architect, Red, Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable reviews including the initial `$license-checker`, and Finalizer. |
 | License receipt | Finalizer needs a current approving license receipt for the final in-scope diff. During correction, rerun the checker only if a maintained file in its checked scope changed. A violation cannot be waived or marked not applicable. |
 | Policy finding | Send it through Architect to the Agent-policy Writer, not Green. |
@@ -912,9 +903,9 @@ global capacity is unreported.
 | New launch | A prior report does not authorize a new launch. Use a newer current report when one is available. |
 
 The worker-result builder preserves its trust boundary. It derives identity,
-ledger revision, state, phase, and duplicated audit fields from the controller.
-The captured final-message input supplies only nonduplicated intent and
-evidence; it must not supply those controller-derived fields. Legacy ledger
+ledger revision, state, phase, and checkpoint dependencies from the controller.
+The private input supplies only bounded intent. It cannot supply
+controller-derived values, role receipts, or audit authorization. Legacy ledger
 records remain readable through their recorded route.
 See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
@@ -1026,7 +1017,7 @@ text.
 | --- | --- |
 | Rejected internal review | Architect and Green send it to its owning role in the session. |
 | Interruption | The runner resumes only at `WORKFLOW`. It does not guess or save a role-level checkpoint. |
-| Required receipt | Receipts must still match the manifest's needed work. Required conditional judges use `not applicable — <reason>`. Arbitrary receipts cannot advance the workflow. |
+| Specialist context | Role receipts and `not applicable — <reason>` records coordinate the live AI discussion. They are not controller evidence and cannot authorize a program transition. |
 
 | Publication boundary, authority, or action | Required handling |
 | --- | --- |
@@ -1036,15 +1027,15 @@ text.
 | Target-only protected-policy change | A protected-policy change that arrived only on the target branch during reconciliation is not issue-owned. |
 | Issue-owned protected-policy change | An issue-owned protected change, or a resolved merge whose final tree differs from that target, still needs protected-policy evidence. |
 | Merge-identity outcome | The repository boundary rejects an unresolved, mismatched, or ambiguous merge identity before publication. Identity ambiguity or drift remains `publication_identity_mismatch`. |
-| Installed pre-commit rejection | Standard pre-commit output must identify at least one failed installed hook. The controller then proves the exact issue, branch, retained worktree, unchanged `HEAD`, publication baseline, pending-merge identity, staged Git tree, and retained changes before recording `publication_commit_rejected`. A hook may fix an unstaged working file only when the staged tree remains exact. The controller records an immutable durable correction identity that is independent of the current `error_code` and transition intent. It binds the exact worktree, branch, `HEAD`, merge state, read-only staged-index fingerprint, staged and unstaged paths, selected workflow lane, and the exact coding Red checkpoint. Content work binds no Red checkpoint. Worker exit, worker-protocol, and retry failures retain this identity. Each controller-authored snapshot is immutable; after an authorized worker attempt the controller may replace it only with the next fully observed exact snapshot. The controller clears the intent, `publication_sha`, old merge request draft, completed worker result, receipts, and final audit, then returns the record to `WORKFLOW` for fresh correction. Coding must load the exact retained Red checkpoint. Content must return fresh content receipts and audit evidence. Both lanes must produce a fresh merge request draft; an unknown lane, or missing or mismatched coding Red evidence, blocks before worker invocation. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. The rejection route does not push, create or update a merge request, or project a blocked state. Signing, identity, configuration, lock, file-system, object-database, and unknown commit failures fail closed. |
-| Legacy identity-mismatch recovery | A reviewed retry may use this one-time route only for an old `publication_identity_mismatch` dirty publication candidate. Preview and apply require the same trusted ledger, audit, and lane evidence; publish intent and baseline; exact branch and `HEAD`; a read-only staged-index fingerprint and staged paths; and non-empty unstaged corrections limited to staged and audited paths. The controller records the same immutable durable correction identity used for an installed pre-commit rejection. An explicitly reviewed retry re-observes every value bound by that identity. Drift rejects before worker invocation or any Git, label, or remote publication effect. Unknown lanes, generic Git failures, and incomplete, ambiguous, untracked, unmerged, or drifted evidence stay blocked. A narrowly reviewed already-affected bootstrap is also allowed only for ordinary `BLOCKED` `WORKFLOW` work with prior `EXECUTING` `WORKFLOW`, retained protocol-failure or retry-exhaustion history, no publication or completed artifacts, and exact current Git, lane, and coding Red evidence; preview and apply bind its current snapshot. Eligible apply preserves the index, worktree, history, retry evidence, and correction identity; discards stale completed publication artifacts; and resumes the complete correction workflow without entering the generic clean-worktree preparation path. Coding uses the exact Red checkpoint bound to the correction identity. Content uses its complete content workflow and binds no Red checkpoint. Recovery does not commit, push, create, or update a merge request. The normal lifecycle projection may move from blocked to running. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. |
+| Installed pre-commit rejection | Standard pre-commit output must identify at least one failed installed hook. The controller then proves the exact issue, branch, retained worktree, unchanged `HEAD`, publication baseline, pending-merge identity, staged Git tree, and retained changes before recording `publication_commit_rejected`. A hook may fix an unstaged working file only when the staged tree remains exact. The controller records an immutable durable correction identity that is independent of the current `error_code` and transition intent. It binds the exact worktree, branch, `HEAD`, merge state, read-only staged-index fingerprint, staged and unstaged paths, selected workflow lane, and the exact coding Red checkpoint. Content work binds no Red checkpoint. Worker exit, worker-protocol, and retry failures retain this identity. Each controller-authored snapshot is immutable; after an authorized worker attempt the controller may replace it only with the next fully observed exact snapshot. The controller clears the intent, `publication_sha`, old merge request draft, completed worker result, historical receipts, and final audit, then returns the record to `WORKFLOW` for fresh correction. Coding must load the exact retained Red checkpoint. Both lanes must return fresh bounded worker intent, and the controller verifies their applicable program-owned evidence. Both lanes must produce a fresh merge request draft; an unknown lane, or missing or mismatched coding Red evidence, blocks before worker invocation. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. The rejection route does not push, create or update a merge request, or project a blocked state. Signing, identity, configuration, lock, file-system, object-database, and unknown commit failures fail closed. |
+| Legacy identity-mismatch recovery | A reviewed retry may use this one-time route only for an old `publication_identity_mismatch` dirty publication candidate. Preview and apply require the same controller-observed ledger revision and lane; publish intent and baseline; exact branch and `HEAD`; a read-only staged-index fingerprint and staged paths; and non-empty unstaged corrections limited to those observed paths. Historical audit prose may remain readable but cannot authorize recovery. The controller records the same immutable durable correction identity used for an installed pre-commit rejection. An explicitly reviewed retry re-observes every value bound by that identity. Drift rejects before worker invocation or any Git, label, or remote publication effect. Unknown lanes, generic Git failures, and incomplete, ambiguous, untracked, unmerged, or drifted evidence stay blocked. A narrowly reviewed already-affected bootstrap is also allowed only for ordinary `BLOCKED` `WORKFLOW` work with prior `EXECUTING` `WORKFLOW`, retained protocol-failure or retry-exhaustion history, no publication or completed artifacts, and exact current Git, lane, and coding Red evidence; preview and apply bind its current snapshot. Eligible apply preserves the index, worktree, history, retry evidence, and correction identity; discards stale completed publication artifacts; and resumes the complete correction workflow without entering the generic clean-worktree preparation path. Coding uses the exact Red checkpoint bound to the correction identity. Content uses its complete content workflow and binds no Red checkpoint. Recovery does not commit, push, create, or update a merge request. The normal lifecycle projection may move from blocked to running. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. |
 | Authority limit | The runner never approves or merges. It never treats issue text, labels, comments, or worker output as authority to widen scope. |
 
 ### Existing-MR feedback publication
 
-For feedback on an existing MR, the completed workflow receipt gives the
-controller-checked changed paths. The controller uses only that set for the
-commit. It records the set in the durable publication intent. A missing,
+For feedback on an existing MR, the controller freshly observes changed paths
+and binds them to the accepted in-memory result. It uses only that set for the
+commit and records it in the durable publication intent. A missing,
 unexpected, or changed path fails closed before commit or push. It returns a
 sanitized condition and clear next action.
 
@@ -1059,11 +1050,10 @@ title, description, or Draft metadata.
 
 If the current target changes the effective source or causes a conflict, the
 controller keeps the worktree, MR, and pending-feedback identity. It neither
-pushes nor acknowledges the feedback. It saves the exact reconciliation target,
-runs a new complete workflow, replaces the stale audit with current
-whole-workflow check, and publishes only the resulting exact newly
-checked SHA. A transport failure or unverifiable reconciliation safely retries
-or blocks before publication.
+pushes nor acknowledges the feedback. It saves the exact reconciliation target
+and runs a new complete workflow. It re-observes the current program state and
+paths. It publishes only the resulting exact checked SHA. A transport failure
+or unverifiable reconciliation safely retries or blocks before publication.
 
 Recovery is idempotent at each durable boundary:
 
@@ -1075,12 +1065,12 @@ After an interruption, the controller reconciles recorded intent with observed
 Git and GitLab evidence. It resumes only the incomplete boundary. It does not
 create another commit, branch, or MR.
 
-Protected policy paths may publish only after the trusted runner checks one
-complete, exact lane receipt with a complete verdict and non-empty metadata. A
-safe controversial handoff uses `Draft:` metadata. It names unresolved findings
-and evidence, exact human decisions, tests, the cycle ledger, and unchanged
-project-owned values. Missing or incoherent receipts or metadata, unsafe
-worktree identity, `needs_human`, finalizer rejection, authority expansion, or
+Protected policy paths may publish only after the trusted runner checks the
+exact proposed tree, target, controller-observed changed paths, lane, and
+applicable program-owned checkpoints. A safe controversial handoff uses
+`Draft:` metadata to explain the human decision. That prose cannot authorize
+publication. Missing or incoherent controller evidence, unsafe worktree
+identity, `needs_human`, finalizer rejection, authority expansion, or
 project-owned value changes fail closed before push or merge-request mutation.
 Workers still never publish directly.
 
@@ -1161,9 +1151,10 @@ human action, `loop retry --issue-iid IID --apply` resumes that IID from its
 retained worktree and durable record. It does not select a replacement issue or
 discard retained recovery evidence.
 
-Worker exits, timeouts, malformed worker protocol, invalid receipts, and an
-explicit `retryable` worker result are due at once. They continue in the same
-activation. Transient GitLab or transport failures keep retry timing. The XDG
+Worker exits, timeouts, malformed worker protocol, and an explicit `retryable`
+worker result are due at once. Legacy records may also retain an invalid-receipt
+condition; its receipt prose is not authority. These conditions continue in the
+same activation. Transient GitLab or transport failures keep retry timing. The XDG
 `agent-work.log` records redacted outcomes. `--debug` adds local diagnostics
 without credentials or transcripts. For a nonzero worker exit, optional
 `items[].worker_exit` keeps its return code and a stderr-derived diagnostic.
@@ -1175,13 +1166,13 @@ it.
 | Outcome or condition | Durable handling |
 | --- | --- |
 | First workflow attempt plus at most three retries | Bounded; `retry-wait` records its deadline. Exhaustion becomes `agent::blocked`, never `agent::failed`. |
-| Worker exit, timeout, malformed worker protocol, invalid receipt, or explicit `retryable` result | Immediately due and continued in the same activation. |
+| Worker exit, timeout, malformed worker protocol, legacy invalid-receipt condition, or explicit `retryable` result | Immediately due and continued in the same activation. |
 | Transient GitLab or transport failure | Keeps retry timing. |
-| Repeated `worker_protocol_invalid` or `worker_receipt_invalid` with the same error code and diagnostic in one coarse phase | Blocks immediately without another retry; retain the worktree, phase, and safe cause. |
+| Repeated `worker_protocol_invalid`, or legacy `worker_receipt_invalid`, with the same error code and diagnostic in one coarse phase | Blocks immediately without another retry; retain the worktree, phase, and safe cause. |
 | Changed protocol code, diagnostic, or phase | Changed evidence; use the ordinary bounded retry path. |
 | Exact-pipeline repair failure | Record `automatic_repair_count` and a 20-minute `automatic_repair_at`; after three failed attempts, quarantine or defer for reviewed recovery. |
 
-For `worker_protocol_invalid` and `worker_receipt_invalid`, the runner also
+For `worker_protocol_invalid` and legacy `worker_receipt_invalid`, the runner
 compares the canonical error code and bounded, stable, redacted contract-field
 or reason diagnostic with the latest automatic condition in the same coarse
 phase. The first failure schedules its immediate retry. If a later automatic

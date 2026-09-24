@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-19
+last_reviewed: 2026-09-24
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -124,10 +124,12 @@ with Pi. The unattended path requires exactly Developer access (`30`) for the
 alone proves repository policy.
 
 For Codex, also verify that `codex exec --help` advertises `--add-dir` before
-enabling `--apply`. The worker grants only the prepared issue checkout's
-`.agents` and `template/.agents` directories through that option. This permits
-the approved workflow policy while bounding writable scope. Upgrade Codex or
-select another supported agent if the option is absent.
+enabling `--apply`. The worker grants the prepared issue checkout's `.agents`
+and `template/.agents` directories through that option. During one invocation,
+it also grants a fresh private broker directory. The producer writes its bounded
+input there. It then connects to the controller-owned socket. No controller
+state directory is granted. Upgrade Codex or select another supported agent if
+the option is absent.
 
 ```bash
 codex exec --help | grep -Eq '(^|[[:space:]])--add-dir([[:space:]]|$)'
