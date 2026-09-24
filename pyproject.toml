@@ -103,14 +103,21 @@ test = [
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
 ]
-dev = [
-    {include-group = "test"},
+tooling = [
     "kingfisher-bin>=1.112.0",
-    "pre-commit>=4.6.2",
-    "ty>=0.0.1a11",
     "yamllint>=1.37.1",
     "ruff>=0.16.4",
     "textstat>=0.7.4",
+]
+typing = [
+    "ty>=0.0.1a11",
+    "textstat>=0.7.4",
+]
+dev = [
+    {include-group = "test"},
+    {include-group = "tooling"},
+    {include-group = "typing"},
+    "pre-commit>=4.6.2",
     "tox>=4.27.0",
     "tox-uv>=1.20",
 ]

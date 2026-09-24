@@ -37,19 +37,27 @@ three rootless BuildKit candidates from the current `Dockerfile`,
 
 | Target | Locked dependency scope | Candidate tag | Jobs |
 | --- | --- | --- | --- |
-| `tooling` | `dev` group | `$CI_REGISTRY_IMAGE/validation-tooling:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`, and `shellcheck` |
-| `pytest-py311` | Project default dependencies and the `test` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The 17 `pytest-py311` shards and `coverage-py311` |
+| `tooling` | Only the `tooling` group | `$CI_REGISTRY_IMAGE/validation-tooling:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `readability-check`, and `shellcheck` |
+| `pytest-py311` | Project defaults, `test` group, and `typing` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The 17 `pytest-py311` shards, `coverage-py311`, `type-check`, and `license-check` |
 | `pytest-py314` | Project default dependencies and the `test` group on Python 3.14.3 | `$CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The six `pytest-py314` shards and `coverage-py314` |
 
-The tooling image has pinned Git, jq, and ShellCheck. Both pytest images have
-pinned Git and jq because the tests exercise repository and JSON behavior.
-They do not include ShellCheck or the tooling-only Python packages. Each job
+The `tooling` group has Kingfisher, Ruff, textstat, and yamllint. The `typing`
+group has ty and textstat. Ty needs textstat to check the readability code.
+Local development includes test, tooling,
+and typing groups, plus pre-commit and tox. The tooling image also has pinned
+Git, jq, and ShellCheck.
+Both pytest images have pinned Git and jq because the tests exercise
+repository and JSON behavior.
+They do not include ShellCheck, Kingfisher, Ruff, or yamllint. Each job
 waits only for its lane's image. Each image has the locked packages its lane
 needs. Jobs must not run `apt-get`, `uv python install`, `uv sync`, or an
-install fallback. Most tooling jobs use `uv run --no-sync`.
-`readability-check` uses
-`uv run --locked --all-groups`. Test and coverage jobs select the environment
-already prepared in their Python-specific image.
+install fallback. Validation jobs use `uv run --no-sync`.
+`readability-check` also uses the prepared tooling image, with `src` on
+`PYTHONPATH` so it can import `agent_work` without installing dependencies at
+runtime. `type-check` and `license-check` use the Python 3.11 image to resolve
+test and project imports.
+Test and coverage jobs select the environment already prepared in their
+Python-specific image.
 
 The tooling image build runs the locked Kingfisher version as its non-root
 user. It compiles Kingfisher's unchanged built-in Vectorscan rules once. It
