@@ -1165,8 +1165,9 @@ def test_broker_creates_private_socket_and_fails_closed_without_a_request(
     try:
         assert stat.S_IMODE(session.socket_path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(session.socket_path.stat().st_mode) == 0o600
-        with pytest.raises(WorkerProtocolError, match="request"):
+        with pytest.raises(WorkerProtocolError) as failure:
             session.close_and_capture()
+        assert str(failure.value) == "worker_result_broker: no request received"
     finally:
         try:
             session.close_and_capture()
@@ -1419,6 +1420,76 @@ def test_broker_accepts_one_corrected_request_and_retains_no_worker_prose(
             session.close_and_capture()
         except WorkerProtocolError:
             pass
+
+
+@pytest.mark.parametrize(
+    ("input_bytes", "shape"),
+    (
+        (b'{"secret_key":"credential-value"}', "JSON object"),
+        (b'["credential-value"]', "other JSON"),
+        (b"credential-value{", "invalid JSON"),
+        pytest.param(b"9" * 100_000, "invalid JSON", id="integer-digit-limit"),
+    ),
+)
+def test_broker_reports_missing_correction_without_revealing_rejected_input(
+    tmp_path: Path, input_bytes: bytes, shape: str
+) -> None:
+    """The producer sees the builder rejection; capture reports only its coarse stage."""
+    worker = importlib.import_module("agent_work.worker")
+
+    def reject(_input_bytes: bytes) -> bytes:
+        raise WorkerProtocolError("builder_input.change_summary", "is required")
+
+    session = worker.create_worker_result_broker(
+        _request(),
+        build_artifact=reject,
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(WorkerProtocolError) as producer_failure:
+        worker.submit_worker_result_to_broker(
+            session.socket_path, _request(), input_bytes, timeout_seconds=10
+        )
+    assert str(producer_failure.value) == "builder_input.change_summary: is required"
+
+    with pytest.raises(WorkerProtocolError) as controller_failure:
+        session.close_and_capture()
+    assert str(controller_failure.value) == (
+        f"worker_result_broker: correction absent after rejected {shape}"
+    )
+    assert not session.socket_path.parent.exists()
+
+
+def test_broker_reports_missing_correction_for_deeply_nested_input(
+    tmp_path: Path,
+) -> None:
+    """A bounded payload that exceeds JSON parser depth stays a fixed category."""
+    worker = importlib.import_module("agent_work.worker")
+
+    def reject(_input_bytes: bytes) -> bytes:
+        raise WorkerProtocolError("builder_input.change_summary", "is required")
+
+    session = worker.create_worker_result_broker(
+        _request(),
+        build_artifact=reject,
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+        clock=lambda: 0.0,
+    )
+    nested_input = b"[" * 100_000 + b"0" + b"]" * 100_000
+
+    with pytest.raises(WorkerProtocolError, match="builder_input.change_summary"):
+        worker.submit_worker_result_to_broker(
+            session.socket_path, _request(), nested_input, timeout_seconds=10
+        )
+    with pytest.raises(WorkerProtocolError) as failure:
+        session.close_and_capture()
+    assert str(failure.value) == (
+        "worker_result_broker: correction absent after rejected invalid JSON"
+    )
+    assert not session.socket_path.parent.exists()
 
 
 def test_broker_rejects_correction_after_original_session_deadline(

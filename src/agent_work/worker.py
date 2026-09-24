@@ -579,6 +579,7 @@ class WorkerResultBrokerSession:
         self._requests = 0
         self._artifact: bytes | None = None
         self._failure: WorkerProtocolError | None = None
+        self._rejected_input_shape: str | None = None
         self._stop = threading.Event()
         self._active_connection: socket.socket | None = None
         self._connection_lock = threading.Lock()
@@ -686,6 +687,16 @@ class WorkerResultBrokerSession:
                     except WorkerProtocolError as error:
                         if self._requests != 1:
                             raise
+                        try:
+                            rejected_input = json.loads(input_bytes)
+                        except (ValueError, RecursionError):
+                            self._rejected_input_shape = "invalid JSON"
+                        else:
+                            self._rejected_input_shape = (
+                                "JSON object"
+                                if isinstance(rejected_input, dict)
+                                else "other JSON"
+                            )
                         _write_frame(
                             connection,
                             json.dumps(
@@ -828,9 +839,15 @@ class WorkerResultBrokerSession:
         if self._failure is not None:
             raise self._failure
         if self._artifact is None:
-            raise WorkerProtocolError(
-                "worker_result_broker", "request was not accepted"
-            )
+            if self._requests == 0:
+                reason = "no request received"
+            elif self._rejected_input_shape is not None:
+                reason = (
+                    f"correction absent after rejected {self._rejected_input_shape}"
+                )
+            else:
+                reason = "request was not accepted"
+            raise WorkerProtocolError("worker_result_broker", reason)
         return self._artifact
 
 
@@ -1083,6 +1100,10 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
         "split_required": {"is required", "is limited to fresh ordinary intake"},
         "identity": {"does not match the segment"},
         "worker_result_broker": {
+            "no request received",
+            "correction absent after rejected JSON object",
+            "correction absent after rejected other JSON",
+            "correction absent after rejected invalid JSON",
             "result was not accepted",
             "malformed artifact",
             "identity mismatch",
