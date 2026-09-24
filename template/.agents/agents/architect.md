@@ -38,8 +38,8 @@ receipts.
 ## Workflow router and admission owner
 
 This role is the canonical detailed workflow router. Each skill sets its own
-`metadata.model-tier`. Codex maps `most-capable` to `gpt-5.6-sol` / `high`. It
-maps `balanced` to `gpt-5.6-terra` / `medium`. It maps `fast` to `gpt-5.6-luna`
+`metadata.model-tier`. Codex maps `most-capable` to `gpt-6-sol` / `high`. It
+maps `balanced` to `gpt-6-sol` / `medium`. It maps `fast` to `gpt-6-luna`
 / `low`. Do not choose Frontier. Do not swap a tier.
 
 Readability work must keep every rule and technical term equivalent. It must
