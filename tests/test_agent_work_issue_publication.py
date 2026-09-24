@@ -25,8 +25,14 @@ from agent_work.repository import CommandResult
 class RecordingIssuePort:
     """Record the explicit issue-publication transport calls."""
 
-    def __init__(self, *, existing_iid: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        existing_iid: int | None = None,
+        existing_description: object = "<!-- agent-work-issue-publication:v1 -->",
+    ) -> None:
         self.existing_iid = existing_iid
+        self.existing_description = existing_description
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def list_issues(
@@ -40,7 +46,7 @@ class RecordingIssuePort:
                 "project_id": project_id,
                 "iid": self.existing_iid,
                 "title": "Existing title",
-                "description": "Existing description",
+                "description": self.existing_description,
                 "labels": ("old",),
                 "state": "opened",
             },
@@ -152,6 +158,7 @@ def test_issue_publication_apply_mutates_once_then_reads_back_every_requested_fi
     existing_iid: int | None, issue_iid: int | None, expected_action: str
 ) -> None:
     port = RecordingIssuePort(existing_iid=existing_iid)
+    canonical_description = _publish(RecordingIssuePort(), apply=False).description
 
     report = _publish(port, apply=True, issue_iid=issue_iid)
 
@@ -162,6 +169,7 @@ def test_issue_publication_apply_mutates_once_then_reads_back_every_requested_fi
     assert report.issue.iid == 71
     assert report.issue.title == "Publish structured issue Markdown"
     assert report.issue.description == report.description
+    assert report.description == canonical_description
     assert report.issue.labels == ("agent::factory", "kind::enhancement")
     assert report.issue.state == "opened"
     mutations = [call for call in port.calls if call[0] in {"create", "update"}]
@@ -184,6 +192,67 @@ def test_issue_publication_explicit_unmatched_iid_fails_before_mutation() -> Non
             },
         )
     ]
+
+
+def test_issue_publication_creates_when_search_returns_only_fuzzy_candidate() -> None:
+    port = RecordingIssuePort(
+        existing_iid=177,
+        existing_description="Unrelated issue returned by fuzzy search.",
+    )
+
+    report = _publish(port, apply=True)
+
+    assert report.action == "create"
+    assert report.issue is not None and report.issue.iid == 71
+    assert [action for action, _values in port.calls] == ["list", "create", "fetch"]
+
+
+def test_issue_publication_updates_exact_match_after_fuzzy_candidate() -> None:
+    class FuzzyFirstPort(RecordingIssuePort):
+        def list_issues(
+            self, *, project_id: int, marker: str
+        ) -> tuple[dict[str, object], ...]:
+            return (
+                {"iid": 177, "description": "Unrelated fuzzy search result."},
+                *super().list_issues(project_id=project_id, marker=marker),
+            )
+
+    port = FuzzyFirstPort(existing_iid=71)
+
+    report = _publish(port, apply=True)
+
+    assert report.action == "update"
+    assert report.issue is not None and report.issue.iid == 71
+    assert [action for action, _values in port.calls] == ["list", "update", "fetch"]
+
+
+def test_issue_publication_ignores_non_string_description_with_marker_text() -> None:
+    class CoercibleDescription:
+        def __str__(self) -> str:
+            return "<!-- agent-work-issue-publication:v1 -->"
+
+    port = RecordingIssuePort(
+        existing_iid=177, existing_description=CoercibleDescription()
+    )
+
+    report = _publish(port, apply=True)
+
+    assert report.action == "create"
+    assert [action for action, _values in port.calls] == ["list", "create", "fetch"]
+
+
+def test_issue_publication_explicit_iid_rejects_fuzzy_candidate_before_mutation() -> (
+    None
+):
+    port = RecordingIssuePort(
+        existing_iid=177,
+        existing_description="Unrelated issue returned by fuzzy search.",
+    )
+
+    with pytest.raises(gitlab.IssuePublicationError, match="exact marker match"):
+        _publish(port, apply=True, issue_iid=177)
+
+    assert [action for action, _values in port.calls] == ["list"]
 
 
 def test_issue_publication_rejects_an_explicit_empty_marker_before_selection() -> None:
