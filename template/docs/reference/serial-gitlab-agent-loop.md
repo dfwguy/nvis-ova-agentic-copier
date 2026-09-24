@@ -558,6 +558,10 @@ This table gives the safe diagnostic rules.
 | --- | --- |
 | Contents | The diagnostic has only its stable origin, an allowlisted field path, and a stable corrective reason. |
 | Exclusions and bound | It never includes a worker-supplied unknown field name, supplied value, raw output, prompts, or credentials. It is one line of at most 2,048 UTF-8 bytes. |
+| No submission | If the live producer sends no broker request, the diagnostic is `worker_result_broker: no request received`. |
+| Rejected JSON object without correction | `worker_result_broker: correction absent after rejected JSON object`. |
+| Rejected other JSON without correction | `worker_result_broker: correction absent after rejected other JSON`. |
+| Rejected invalid JSON without correction | `worker_result_broker: correction absent after rejected invalid JSON`. |
 | Controller record | The controller carries the same safe diagnostic in condition history, status, recovery inventory, and the GitLab handoff. |
 | Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. The operator corrects the condition, then runs `agent-work loop retry --issue-iid IID --apply`. |
 | Changed evidence | A changed error code, diagnostic, or phase is changed evidence and follows the existing bounded retry path. |
