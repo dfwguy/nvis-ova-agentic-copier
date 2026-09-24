@@ -735,7 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
     issue_publish.add_argument("--acceptance", action="append", required=True)
     issue_publish.add_argument("--impact")
     issue_publish.add_argument("--additional-context")
-    issue_publish.add_argument("--marker")
+    issue_publish.add_argument("--marker", required=True)
     issue_publish.add_argument("--priority")
     issue_publish.add_argument("--severity")
     issue_publish.add_argument("--label", action="append", default=[])

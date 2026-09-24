@@ -303,9 +303,12 @@ def publish_issue(
     port: IssuePublicationPort,
 ) -> IssuePublicationReport:
     """Preview or mutate one exact issue and verify its authoritative read-back."""
-    if marker == "":
+    if (
+        not isinstance(marker, str)
+        or not marker.strip()
+        or marker == "<!-- agent-work-issue-publication:v1 -->"
+    ):
         raise IssuePublicationError("issue publication marker is invalid")
-    marker = marker or "<!-- agent-work-issue-publication:v1 -->"
     values = (
         title,
         problem,
