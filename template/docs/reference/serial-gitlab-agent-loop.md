@@ -948,7 +948,7 @@ worker process, are never controller state or a handoff result.
 ### Live-agent capacity launch contract
 
 Every Architect launch has one fixed global requirement: `12` live slots for
-coding and `3` for content. This includes terminal, normal serial,
+coding and `5` for content. This includes terminal, normal serial,
 retained-worktree retry, and systemd launches. Check before delegation, fanout,
 or a worktree change.
 
@@ -961,7 +961,7 @@ global capacity is unreported.
 | --- | --- |
 | Valid source | A current global report from the active frontend or runtime. |
 | Invalid source | Repository data, issue and task text, user or provider setup, service environment values, and retained ledger or audit values do not prove live capacity. |
-| Requirement | `12` total live slots for coding; `3` for content. The selected lane sets the requirement. |
+| Requirement | `12` total live slots for coding; `5` for content. The selected lane sets the requirement. |
 | Missing report | Continue. Missing global capacity is not a shortage. |
 | Reported shortage | Return `needs_human` before delegation, fanout, or a worktree change. State the lane, fixed requirement, reported total, shortfall, and an actionable frontend remedy. |
 | Prohibited inference | Do not request or calculate topology, widest-row, retained-object, current-use, fresh-handle, per-owner, direct-child, descendant, or owner-headroom counts. None creates another capacity gate. |
@@ -974,6 +974,22 @@ controller-derived values, role receipts, or audit authorization. Legacy ledger
 records remain readable through their recorded route.
 See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
+
+### Architect proposal gate
+
+One Architect owns each fresh session. Before a child can edit files, it starts
+three read-only proposals at once: one `$architect-proposal-balanced` and two
+separate `$architect-proposal-fast` children with high reasoning effort. They
+work alone. Architect gets all three, checks them, and picks one design. It
+stays the router and issues the sole formal `$architect` receipt. This gate
+has no Architect Judge.
+
+| Proposal property | Contract |
+| --- | --- |
+| Candidate authority | A candidate cannot delegate, edit files, or call program boundaries. |
+| Output | Candidate prose is AI-to-AI context. It is not a role receipt or controller state. |
+| Completion | Get all three before starting a child that edits. If one fails, check the cause and try one fresh child with the same skill and tier. Stop before any edit if one is still missing. |
+| Fresh session | Run the gate in each fresh session, including serial Red-first and resumed segments. Earlier prose does not grant approval. |
 
 ### Intake sizing contract
 

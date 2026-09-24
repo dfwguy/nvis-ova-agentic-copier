@@ -75,7 +75,7 @@ For each activation, the controller performs these stages in order:
 | **Observe pipeline safety** | Inspect the newest default-branch pipeline and each open merge request's newest pipeline for its current source SHA. Missing, malformed, or inaccessible evidence blocks work. In an applied activation, poll nonterminal evidence in place with a short, bounded exponential delay. A terminal failure takes priority over ordinary work. |
 | **Select** | After safe resumable work and the pipeline gate, select at most one eligible item, or stop. Consider exact failed-pipeline repairs before fresh issues. If the first repair is deferred, scan for another eligible exact repair. Fresh selection is deterministic: exact high priority, normal, then exact low priority; creation time and IID break ties. |
 | **Prepare worktree** | Create or recover the selected issue's retained worktree. Invoke AI only after selection and preparation. |
-| **Run the workflow session** | One bounded AI session owns the issue. |
+| **Run the workflow session** | One bounded AI session handles the current segment. |
 | **Validate and publish** | Validate the bounded result against the ledger, Git, required receipts, and configured project. When justified, publish or update the same branch and merge request, then verify that handoff. |
 | **Record and exit** | Persist evidence and the next safe action. Exit rather than take another issue. |
 
@@ -89,16 +89,25 @@ The controller keeps selection and recovery safe and visible.
 | Attributable recovery | Favor visible, attributable recovery over guessing which issue should repair shared or unclear pipeline evidence. The [reference contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate) defines statuses and exact checks. |
 | Safe diagnostics | For an eligible repair, select one current failed job from the exact pipeline and ignore superseded retries. Read only that job's trace, remove secret-like text and control sequences, and keep a bounded diagnostic. Validate and save it before repair begins, so a restart uses the same verified context. Never pass a raw trace to the ledger, report, or workflow prompt. Missing, ambiguous, stale, or malformed job or trace evidence stops repair; the workflow does not guess, retry, or cancel a job or pipeline. |
 
-## The work stays inside one AI session.
+## The work uses bounded AI sessions.
 
-The controller starts one session only after it selects the issue and prepares its worktree. A live Architect owns that session. Before any worktree mutation, the Architect decides whether the issue is one reviewable, mergeable outcome within the budget.
+The controller selects an issue and prepares its worktree, then starts one
+session. Architect owns it. Before any edit, Architect checks whether the issue
+fits one reviewable, mergeable outcome within the budget. It also gets three
+independent read-only design proposals at once and picks one design. The same
+Architect stays the router and owns the formal receipt. The proposals do not
+become controller state.
 
 | Lane | What runs, and when |
 | --- | --- |
-| Coding | The Architect delegates Red behavior tests first. After the accepted Red checkpoint and any policy preparation, Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging through the private candidate socket. Green coordinates review and routes documentation findings to the writer before returning final validation to the Architect. |
+| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging through the private candidate socket. Green coordinates review and routes documentation findings to the writer before returning final validation to Architect. |
 | Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
-Architecture, behavior tests, implementation, documentation, every applicable review role, license review, and final validation stay in the same session. The controller does not restore an individual Architect, writer, implementer, reviewer, or internal workflow stage after a crash.
+The Red-first coding session ends after the trusted checkpoint. A fresh session
+then handles policy preparation, concurrent Green and documentation work,
+review, and final validation. Content work uses one session. The controller
+does not restore an individual Architect, writer, implementer, reviewer, or
+internal workflow stage after a crash.
 
 After Green and the Diátaxis Writer finish, Green asks the private controller
 socket to stage their combined changes. The controller returns the tree ID.
@@ -117,7 +126,7 @@ asks the Finalizer to act. Final validation uses current license evidence.
 
 An activation is bounded, but its evidence lasts. The ledger records the selected issue, coarse workflow state, retry data, retained worktree, branch and merge-request evidence, receipts, transition intent, and a redacted next action. GitLab labels give a simple status. The ledger holds transaction detail.
 
-After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal workflow stage. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
+After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. Its new Architect repeats the three-proposal gate before any mutable child. This also applies to a fresh Red-first segment. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
 
 Only the ledger keeps the concise audit. Status is an operational projection of that record plus best-effort live evidence. This avoids presenting an old retry or failure as current. It also keeps unavailable, stale, or conflicting observations honestly unknown. The exact fields, bounded output, and state mapping are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
 

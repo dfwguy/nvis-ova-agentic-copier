@@ -5,7 +5,7 @@ summary: Set live-agent capacity for a workflow lane.
 audience: practitioner
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-24
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why capacity is a workflow precondition.
@@ -27,7 +27,7 @@ related:
 Check capacity now.
 
 Each lane has one fixed global limit. Code work needs **12 total live slots**.
-Docs and agent-policy work needs **3 total live slots**. Do not make another
+Docs and agent-policy work needs **5 total live slots**. Do not make another
 limit from the route or current use. Do not use retained agents, fresh handles,
 or parent and child space to make one.
 
@@ -66,7 +66,7 @@ lane before you delegate, fan out, or change the worktree. Use a trusted current
 global report if the active frontend or runtime gives one.
 
 - Admit coding when a current report shows at least 12 total live slots.
-- Admit docs and agent-policy work when it shows at least 3.
+- Admit docs and agent-policy work when it shows at least 5.
 - Stop when a current report shows fewer slots than the fixed requirement.
 - Continue when global capacity is not reported. Missing facts are not a
   shortage.

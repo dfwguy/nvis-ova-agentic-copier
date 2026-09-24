@@ -923,7 +923,7 @@ def _required_live_agent_capacity(lane: WorkflowLane) -> int:
     if lane is WorkflowLane.CODING:
         return 12
     if lane is WorkflowLane.CONTENT:
-        return 3
+        return 5
     raise ValueError("workflow lane has no capacity requirement")
 
 
@@ -1749,6 +1749,19 @@ def build_worker_prompt(
             "from an earlier session. When current evidence changes before work begins, the "
             "current launch governs. The controller records its own admission decision. "
             "Delegate Architect with the issue context and repository instructions. "
+            "Every fresh Architect session, before its first mutable child, launches exactly three concurrent "
+            "independent read-only proposals: one $architect-proposal-balanced, one "
+            "$architect-proposal-fast, and a second separate $architect-proposal-fast child. "
+            "Give each the same issue, acceptance criteria, and "
+            "relevant repository context. They cannot see each other; instruct each: do not delegate, "
+            "do not mutate, do not create formal receipts, and do not invoke program boundaries. "
+            "Architect directly receives all three, verifies repository sources, judges the candidates, "
+            "and synthesizes one design. It owns the sole $architect formal receipt and remains the router. "
+            "If a proposal fails or returns a refusal, diagnose it. Each proposal slot may receive at most "
+            "one fresh replacement with its exact skill and tier. If its replacement fails, stop before "
+            "any worktree mutation. Require all three; do not mutate with fewer. Candidate prose is AI-to-AI "
+            "context only, never WorkerResultBuildInput or controller state. This gate applies to "
+            "fresh Red-first and resumed checkpoint segments, content work, and reconciliation. "
             "Architect then makes one semantic intake sizing decision before it "
             "delegates Red or a Documentation Writer and before any worktree mutation. "
             "Assess behavioral boundaries, dependency/order boundaries, and whether one "

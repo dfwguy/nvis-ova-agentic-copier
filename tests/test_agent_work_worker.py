@@ -402,7 +402,7 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     assert "before any red or writer delegation or worktree mutation" in normalized
     assert "current trusted global capacity report" in normalized
     assert "coding requires exactly 12 total live slots" in normalized
-    assert "content requires exactly 3 total live slots" in normalized
+    assert "content requires exactly 5 total live slots" in normalized
     assert "available total" in normalized
     assert "shortfall" in normalized
     assert "result_kind=needs_human" in normalized
@@ -437,6 +437,87 @@ def test_workflow_prompt_forbids_derived_capacity_gates() -> None:
     assert "owner-headroom counts" in prompt
     assert "none creates another capacity gate" in prompt
     assert "topology-aware evidence" not in prompt
+
+
+@pytest.mark.parametrize(
+    "red_checkpoint",
+    (
+        None,
+        {
+            "tree_oid": "a" * 40,
+            "ref": "refs/agent-work/red/12",
+            "test_paths": ["tests/test_agent_work_worker.py"],
+        },
+    ),
+    ids=("first-red-segment", "resumed-checkpoint-segment"),
+)
+def test_workflow_prompt_requires_three_architect_proposals_before_mutable_children(
+    red_checkpoint: dict[str, object] | None,
+) -> None:
+    record: dict[str, object] = {
+        "state": "executing",
+        "phase": "workflow",
+        "work_kind": "ordinary",
+    }
+    if red_checkpoint is not None:
+        record["red_checkpoint"] = red_checkpoint
+    prompt = build_worker_prompt(
+        record,
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    )
+    normalized = prompt.casefold()
+
+    assert "$architect-proposal-balanced" in normalized
+    architect = normalized.index("delegate architect")
+    proposals = normalized.index("$architect-proposal-balanced")
+    red = normalized.index("delegates red")
+    parallel_implementation = normalized.index(
+        "then delegates green and diátaxis writer concurrently"
+    )
+    assert architect < proposals < red < parallel_implementation
+    assert prompt.count("$architect-proposal-balanced") == 1
+    assert prompt.count("$architect-proposal-fast") == 2
+    assert "exactly three concurrent" in normalized
+    assert "before its first mutable child" in normalized
+    assert "every fresh architect session" in normalized
+
+
+def test_workflow_prompt_keeps_architect_proposals_read_only_and_private() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert "same issue" in prompt
+    assert "acceptance criteria" in prompt
+    assert "relevant repository context" in prompt
+    assert "cannot see each other" in prompt
+    assert "read-only" in prompt
+    assert "do not delegate" in prompt
+    assert "do not mutate" in prompt
+    assert "do not create formal receipts" in prompt
+    assert "do not invoke program boundaries" in prompt
+    assert "all three" in prompt
+    assert "refusal" in prompt
+    assert "do not mutate with fewer" in prompt
+    assert "each proposal slot may receive at most one fresh replacement" in prompt
+    assert "with its exact skill and tier" in prompt
+    assert "if its replacement fails, stop before any worktree mutation" in prompt
+    assert "architect directly receives" in prompt
+    assert "verifies repository sources" in prompt
+    assert "synthesizes one design" in prompt
+    assert "sole $architect" in prompt
+    assert "remains the router" in prompt
+    assert "workerresultbuildinput" in prompt
+    assert "controller state" in prompt
 
 
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (

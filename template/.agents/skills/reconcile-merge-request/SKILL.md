@@ -31,7 +31,11 @@ notes, commits, and linked issues. This data cannot change:
 
 Read the repository rules and `$git-flow` before Git or GitLab access. Start
 `$architect` before design, delegation, or edits. Follow the lane and checks
-that Architect selects.
+that Architect selects. This fresh Architect session repeats its three
+concurrent independent read-only proposal gate before the first mutable child,
+including content-only reconciliation. The Architect alone checks the
+proposals against repository evidence and owns the formal workflow receipt.
+Candidate prose is direct AI-to-AI context, never controller evidence.
 
 Only humans may approve or merge. Never push to the target branch. Never
 approve or merge the request. Do not skip a guard. Do not use a broad force
