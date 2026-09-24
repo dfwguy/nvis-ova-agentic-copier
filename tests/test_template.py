@@ -2646,6 +2646,7 @@ esac""",
     "relative_path",
     (
         "src/agent_work/__init__.py",
+        "src/agent_work/candidate_boundary.py",
         "src/agent_work/classification.py",
         "src/agent_work/credential_rotation.py",
         "src/agent_work/domain.py",
