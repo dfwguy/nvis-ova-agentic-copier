@@ -83,6 +83,7 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          [--label TEXT] [--issue-iid IID] [--feedback-audit]
                          [--apply] [--json] [--debug]
 agent-work validation run --candidate-tree TREE [--apply] [--json]
+agent-work validation retry --candidate-tree TREE [--apply] [--json]
 agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
@@ -115,6 +116,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
+| `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
 | `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
@@ -340,9 +342,39 @@ saved evidence. It never reads checkout XML or runs the hook again.
 
 Capture clears source artifacts before and after the hook. It fails closed if
 cleanup fails or the full set is missing, bad, or cannot be saved. The session
-then has terminal artifact-capture failure with CLI status `1`. It shows no
-files and keeps the hook exit code. Preview, running, terminal-failure, and
-legacy sessions also show no files. Existing sessions are not backfilled.
+then has `terminal-artifact-failure` with CLI status `1`. Its
+`artifact_failure` has an allowlisted `stage` and `reason`. When one file
+causes the failure, `environment` is `py311` or `py314`, and `path` is its
+fixed relative name, `test-results-py311.xml` or `test-results-py314.xml`.
+For a candidate-level `immutable_snapshot` failure, both JSON fields are
+`null`. These fields identify the failing operation without exposing its
+exception or XML content.
+
+`exit_code` holds the actual hook exit code: `null` if cleanup failed before
+the hook, `0` if the hook succeeded, or the hook's nonzero exit code. It is
+not the CLI status. Artifact failures show no captured JUnit files. Preview,
+running, terminal-failure, and legacy sessions also show no files. Existing
+sessions are not backfilled.
+
+The `stage` distinguishes `pre_hook_cleanup`,
+`post_hook_failed_evidence_read`, `post_hook_failed_cleanup`,
+`post_hook_success_evidence_read`, `post_hook_success_cleanup`, and
+`immutable_snapshot`. The `reason` is one of `os_error`, `missing`,
+`invalid_xml`, `oversized`, `invalid_count`, or `invalid_snapshot`.
+`invalid_snapshot` applies only when snapshot validation rejects the saved
+candidate evidence. The record never stores raw operating-system errors,
+paths outside the fixed artifact names, or XML data.
+
+`validation retry --candidate-tree TREE` previews a retry without changing
+the session. It accepts only a recorded `pre_hook_cleanup` failure with
+`reason: os_error` and no hook exit code, and only while `TREE` is still the
+current staged tree. With `--apply`, it saves a separate attempt tied to the
+original record, then runs the hook once. The original failure record stays
+intact. An interrupted or repeated retry reads the saved attempt and does not
+start another hook. An ordinary `validation run` still returns the original
+result.
+Failures after the hook require a fresh candidate tree; they cannot use this
+retry route.
 
 When fixed supported-version JUnit artifacts are usable, the diagnostic has
 only their total numeric failure and error counts. Else, it uses a fixed generic
@@ -373,6 +405,7 @@ does not backfill any of those fields.
 Legacy records without structured hook failures expose an empty collection.
 
 `validation status --candidate-tree TREE` is read-only. It never starts a hook.
+For an eligible same-tree retry, it reads the saved retry attempt when present.
 It reports `running`, `terminal-success`, `terminal-failure`, or the distinct
 terminal artifact-capture failure. With `--wait-seconds`, it polls a running
 session only for that bounded interval. It stops at a terminal session. Use it
@@ -381,9 +414,9 @@ start another check. It accepts `--apply` for command consistency but remains
 read-only. Human output includes the optional diagnostic. A terminal failure
 with evidence also includes failed IDs and canonical lines. JSON exposes
 `diagnostic` as its canonical string or `null`, plus bounded `hook_failures`
-objects with `hook_id` and `diagnostic_lines`. Fields, flags, and exit codes do
-not otherwise change. Terminal records also include elapsed hook time. Preview,
-running, terminal-success, and legacy
+objects with `hook_id` and `diagnostic_lines`. Artifact failures expose the
+allowlisted `artifact_failure` object. Terminal records also include elapsed
+hook time when the hook ran. Preview, running, terminal-success, and legacy
 terminal-failure results have no hook entries. Status reads legacy records that
 omit either field. An absent `diagnostic` is `null`: no diagnostic is available.
 
@@ -393,7 +426,8 @@ malformed session, or operational failure also exits `1`. Invalid usage exits
 `2`. JSON reports the candidate tree, applied state, action, state, terminal
 state, final exit code, and optional diagnostic. Repeated apply or status
 requests for the same candidate tree never rerun the combined hook or an
-individual hook. They never rewrite the record.
+individual hook. They never rewrite the record. The one explicit pre-hook
+cleanup retry writes a separate append-only attempt.
 
 ### `credential rotate`
 

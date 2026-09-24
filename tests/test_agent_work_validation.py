@@ -24,9 +24,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_work import validation
+from agent_work.cli import _read_validation_artifact
 from agent_work.ledger import state_home
 from agent_work.repository import CommandResult
 from agent_work.validation import (
+    FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
     JudgeValidationError,
     observe_judge_validation,
@@ -163,6 +165,537 @@ def test_preview_never_runs_hook_or_mutates_durable_session() -> None:
     assert calls == []
     assert state.writes == []
     assert state.locks == []
+
+
+@pytest.mark.parametrize(
+    ("phase", "returncode", "expected_stage", "expected_reason", "expected_code"),
+    (
+        ("before", 0, "pre_hook_cleanup", "os_error", None),
+        ("failed_read", 7, "post_hook_failed_evidence_read", "os_error", 7),
+        ("failed_cleanup", 7, "post_hook_failed_cleanup", "os_error", 7),
+        ("success_read", 0, "post_hook_success_evidence_read", "os_error", 0),
+        ("success_cleanup", 0, "post_hook_success_cleanup", "os_error", 0),
+        ("snapshot", 0, "immutable_snapshot", "os_error", 0),
+    ),
+)
+def test_artifact_io_failure_persists_bounded_stage_and_actual_hook_code(
+    phase: str,
+    returncode: int,
+    expected_stage: str,
+    expected_reason: str,
+    expected_code: int | None,
+) -> None:
+    state = ValidationStateFake()
+    calls: list[tuple[str, ...]] = []
+    removed = 0
+    read = 0
+
+    def remove(_path: Path) -> None:
+        nonlocal removed
+        removed += 1
+        if (phase == "before" and removed == 1) or (
+            phase in {"failed_cleanup", "success_cleanup"} and removed == 3
+        ):
+            raise OSError("PRIVATE_TOKEN=cleanup-secret /home/private")
+
+    def read_artifact(_path: Path) -> bytes:
+        nonlocal read
+        read += 1
+        if phase in {"failed_read", "success_read"}:
+            raise OSError("PRIVATE_TOKEN=read-secret /home/private")
+        return b"<testsuite tests='1' failures='1' errors='0'/>"
+
+    def capture(_tree: str, _artifacts: object) -> tuple[Path, ...]:
+        if phase == "snapshot":
+            raise OSError("PRIVATE_TOKEN=snapshot-secret /home/private")
+        return ()
+
+    dependencies, _ = _dependencies(state, returncode=returncode)
+    dependencies = replace(
+        dependencies,
+        run_command=lambda command, **_kwargs: (
+            calls.append(command)
+            or CommandResult(returncode, "PRIVATE_TOKEN=hook-secret", "")
+        ),
+        remove_junit_artifact=remove,
+        read_artifact=read_artifact,
+        capture_junit_artifacts=capture,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert report.state == status.state == "terminal-artifact-failure"
+    assert report.returncode == status.returncode == expected_code
+    assert report.artifact_failure is not None
+    assert status.artifact_failure is not None
+    assert (
+        report.artifact_failure.stage == status.artifact_failure.stage == expected_stage
+    )
+    assert report.artifact_failure.reason == expected_reason
+    assert report.artifact_failure.environment == (
+        None if phase == "snapshot" else "py311"
+    )
+    assert report.artifact_failure.path == (
+        None if phase == "snapshot" else Path("test-results-py311.xml")
+    )
+    assert state.records[_CANDIDATE]["artifact_failure"] == {
+        "stage": expected_stage,
+        "reason": expected_reason,
+        **(
+            {}
+            if phase == "snapshot"
+            else {"environment": "py311", "path": "test-results-py311.xml"}
+        ),
+    }
+    assert len(calls) == (0 if phase == "before" else 1)
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize(
+    ("artifact", "reason"),
+    (
+        (None, "missing"),
+        (b"<testsuite>", "invalid_xml"),
+        (b"x" * 1_048_577, "oversized"),
+        (b"<testsuite tests='unknown'/>", "invalid_count"),
+    ),
+    ids=("missing", "malformed", "oversized", "invalid-count"),
+)
+def test_successful_hook_classifies_unusable_fixed_xml_without_raw_bytes(
+    artifact: bytes | None, reason: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    dependencies = replace(dependencies, read_artifact=lambda _path: artifact)
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.returncode == 0
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == "post_hook_success_evidence_read"
+    assert report.artifact_failure.reason == reason
+    assert report.artifact_failure.environment == "py311"
+    assert report.artifact_failure.path == Path("test-results-py311.xml")
+    assert len(str(state.records[_CANDIDATE]).encode()) < 2048
+
+
+def test_actual_failed_xml_file_is_classified_through_fixed_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("test-results-py311.xml").write_bytes(
+        b"<testsuite tests='private-count'><secret>PRIVATE_TOKEN</secret></testsuite>"
+    )
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    dependencies = replace(
+        dependencies,
+        read_artifact=_read_validation_artifact,
+        remove_junit_artifact=lambda _path: None,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.reason == "invalid_count"
+    assert report.artifact_failure.path == Path("test-results-py311.xml")
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize(
+    ("cleanup_fails", "expected_stage"),
+    (
+        (False, "post_hook_failed_evidence_read"),
+        (True, "post_hook_failed_cleanup"),
+    ),
+)
+def test_failed_hook_read_error_still_attempts_both_fixed_cleanup_paths(
+    cleanup_fails: bool, expected_stage: str
+) -> None:
+    state = ValidationStateFake()
+    removed: list[Path] = []
+    dependencies, calls = _dependencies(state, returncode=7)
+
+    def remove(path: Path) -> None:
+        removed.append(path)
+        if cleanup_fails and len(removed) == 3:
+            raise OSError("PRIVATE_TOKEN=cleanup-secret")
+
+    def read(_path: Path) -> bytes:
+        raise OSError("PRIVATE_TOKEN=read-secret")
+
+    dependencies = replace(
+        dependencies, remove_junit_artifact=remove, read_artifact=read
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert removed == [
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+    ]
+    assert report.state == "terminal-artifact-failure"
+    assert report.returncode == 7
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == expected_stage
+    assert report.artifact_failure.path == Path("test-results-py311.xml")
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize("schema_version", (None, 2), ids=("legacy", "schema2"))
+def test_old_artifact_failure_without_detail_stays_readable(
+    schema_version: int | None,
+) -> None:
+    old: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "state": "terminal-artifact-failure",
+        "returncode": None,
+    }
+    if schema_version is not None:
+        old["schema_version"] = schema_version
+    state = ValidationStateFake(records={_CANDIDATE: old})
+    dependencies, calls = _dependencies(state)
+
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert status.state == "terminal-artifact-failure"
+    assert status.artifact_failure is None
+    assert calls == []
+    assert state.writes == []
+
+
+def test_pre_hook_cleanup_retry_is_dry_run_then_one_append_only_attempt() -> None:
+    state = ValidationStateFake()
+    commands: list[tuple[str, ...]] = []
+    retry_records: dict[str, dict[str, object]] = {}
+    retry_writes: list[dict[str, object]] = []
+    initial_dependencies, _ = _dependencies(state)
+    initial_dependencies = replace(
+        initial_dependencies,
+        remove_junit_artifact=lambda _path: (_ for _ in ()).throw(
+            OSError("private cleanup failure")
+        ),
+    )
+    original = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=initial_dependencies
+    )
+    original_record = json.loads(json.dumps(state.records[_CANDIDATE]))
+
+    def write_retry(tree: str, record: dict[str, object]) -> None:
+        assert tree == _CANDIDATE
+        assert not retry_records or retry_records[tree]["state"] == "running"
+        retry_records[tree] = record
+        retry_writes.append(record)
+
+    retry_dependencies = replace(
+        initial_dependencies,
+        remove_junit_artifact=lambda _path: None,
+        run_command=lambda command, **_kwargs: (
+            commands.append(command) or CommandResult(0, "", "")
+        ),
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=write_retry,
+    )
+
+    preview = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=False, dependencies=retry_dependencies
+    )
+    assert preview.action == "retry_preview"
+    assert retry_records == {}
+    assert commands == []
+
+    retried = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    repeated = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    ordinary_run = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=retry_dependencies
+    )
+
+    assert original.returncode is None
+    assert retried.state == repeated.state == status.state == "terminal-success"
+    assert repeated.action == "existing_retry"
+    assert ordinary_run.state == "terminal-artifact-failure"
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert state.records[_CANDIDATE] == original_record
+    assert len(state.writes) == 2
+    assert retry_writes[0]["state"] == "running"
+    assert retry_records[_CANDIDATE]["candidate_tree"] == _CANDIDATE
+    assert (
+        retry_records[_CANDIDATE]["original_sha256"]
+        == hashlib.sha256(
+            json.dumps(original_record, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("stage", "returncode"),
+    (
+        ("post_hook_failed_evidence_read", 7),
+        ("post_hook_success_evidence_read", 0),
+        ("post_hook_success_cleanup", 0),
+        ("immutable_snapshot", 0),
+    ),
+)
+def test_retry_rejects_every_post_hook_artifact_failure(
+    stage: str, returncode: int
+) -> None:
+    original: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
+        "state": "terminal-artifact-failure",
+        "returncode": returncode,
+        "artifact_failure": {
+            "stage": stage,
+            "reason": "os_error",
+            "environment": "py311",
+            "path": "test-results-py311.xml",
+        },
+    }
+    state = ValidationStateFake(records={_CANDIDATE: original})
+    dependencies, calls = _dependencies(state)
+    retry_records: dict[str, dict[str, object]] = {}
+    dependencies = replace(
+        dependencies,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+    )
+
+    with pytest.raises(JudgeValidationError, match="retry"):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+
+    assert calls == []
+    assert retry_records == {}
+    assert state.records[_CANDIDATE] == original
+
+
+def test_retry_requires_exact_current_staged_tree_and_preserves_running_attempt() -> (
+    None
+):
+    original: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
+        "state": "terminal-artifact-failure",
+        "artifact_failure": {
+            "stage": "pre_hook_cleanup",
+            "reason": "os_error",
+            "environment": "py311",
+            "path": "test-results-py311.xml",
+        },
+    }
+    state = ValidationStateFake(records={_CANDIDATE: original})
+    retry_records: dict[str, dict[str, object]] = {}
+    dependencies, calls = _dependencies(state, current_tree=_OTHER_CANDIDATE)
+    dependencies = replace(
+        dependencies,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+    )
+
+    with pytest.raises(JudgeValidationError, match="staged tree"):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+    assert retry_records == {}
+    assert calls == []
+
+    retry_records[_CANDIDATE] = {
+        "candidate_tree": _CANDIDATE,
+        "state": "running",
+        "original_sha256": hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    dependencies = replace(dependencies, current_staged_tree=lambda: _CANDIDATE)
+    result = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert result.state == "running"
+    assert calls == []
+    assert state.records[_CANDIDATE] == original
+
+
+def test_status_wait_polls_the_retry_record_until_it_is_terminal() -> None:
+    original: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
+        "state": "terminal-artifact-failure",
+        "artifact_failure": {
+            "stage": "pre_hook_cleanup",
+            "reason": "os_error",
+            "environment": "py311",
+            "path": "test-results-py311.xml",
+        },
+    }
+    state = ValidationStateFake(records={_CANDIDATE: original})
+    original_sha256 = hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    retry_records: dict[str, dict[str, object]] = {
+        _CANDIDATE: {
+            "candidate_tree": _CANDIDATE,
+            "state": "running",
+            "original_sha256": original_sha256,
+        }
+    }
+    clock = 0.0
+
+    def now() -> float:
+        return clock
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+        retry_records[_CANDIDATE] = {
+            "candidate_tree": _CANDIDATE,
+            "state": "terminal-failure",
+            "returncode": 7,
+            "original_sha256": original_sha256,
+        }
+
+    dependencies, calls = _dependencies(state, monotonic_clock=now, sleeper=sleep)
+    dependencies = replace(dependencies, read_retry_record=retry_records.get)
+
+    report = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies, wait_seconds=2
+    )
+
+    assert report.state == "terminal-failure"
+    assert report.returncode == 7
+    assert calls == []
+    assert state.records[_CANDIDATE] == original
+
+
+@pytest.mark.parametrize("retry_case", ("wrong_sha", "forged_success"))
+def test_retry_record_rejects_unbound_or_forged_terminal_evidence(
+    retry_case: str,
+) -> None:
+    original: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "schema_version": 2,
+        "state": "terminal-artifact-failure",
+        "artifact_failure": {
+            "stage": "pre_hook_cleanup",
+            "reason": "os_error",
+            "environment": "py311",
+            "path": "test-results-py311.xml",
+        },
+    }
+    state = ValidationStateFake(records={_CANDIDATE: original})
+    original_sha256 = hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    retry_record: dict[str, object] = {
+        "candidate_tree": _CANDIDATE,
+        "state": "running" if retry_case == "wrong_sha" else "terminal-success",
+        "original_sha256": "b" * 64 if retry_case == "wrong_sha" else original_sha256,
+    }
+    if retry_case == "forged_success":
+        retry_record["returncode"] = 0
+        retry_record["schema_version"] = 2
+    dependencies, calls = _dependencies(state)
+    dependencies = replace(
+        dependencies,
+        read_retry_record=lambda _tree: retry_record,
+    )
+
+    with pytest.raises(JudgeValidationError, match="malformed"):
+        observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
+    with pytest.raises(JudgeValidationError, match="malformed"):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+    assert calls == []
+    assert state.records[_CANDIDATE] == original
+
+
+def test_snapshot_py314_write_failure_names_only_its_fixed_artifact(
+    tmp_path: Path,
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+
+    def write_bytes(path: Path, contents: bytes) -> None:
+        if path.name == "test-results-py314.xml":
+            raise OSError("secret py314 path")
+        path.write_bytes(contents)
+
+    store = FilesystemJUnitSnapshotStore(tmp_path, write_bytes=write_bytes)
+    dependencies = replace(
+        dependencies,
+        capture_junit_artifacts=lambda tree, artifacts: store.capture(
+            candidate_tree=tree, artifacts=artifacts
+        ),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == "immutable_snapshot"
+    assert report.artifact_failure.reason == "os_error"
+    assert report.artifact_failure.environment == "py314"
+    assert report.artifact_failure.path == Path("test-results-py314.xml")
+    assert "secret" not in str(state.records[_CANDIDATE])
+
+
+def test_snapshot_invalid_candidate_has_no_false_artifact_attribution() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    dependencies = replace(
+        dependencies,
+        capture_junit_artifacts=lambda _tree, _artifacts: (_ for _ in ()).throw(
+            JudgeValidationError("private existing snapshot")
+        ),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == "immutable_snapshot"
+    assert report.artifact_failure.reason == "invalid_snapshot"
+    assert report.artifact_failure.environment is None
+    assert report.artifact_failure.path is None
+    assert "private" not in str(state.records[_CANDIDATE])
 
 
 def test_terminal_failure_persists_only_aggregate_supported_junit_counts() -> None:
