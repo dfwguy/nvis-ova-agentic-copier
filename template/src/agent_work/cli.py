@@ -115,6 +115,7 @@ from .validation import (
     JudgeValidationDependencies,
     JudgeValidationError,
     observe_judge_validation,
+    retry_judge_validation,
     run_judge_validation,
 )
 from .worker import (
@@ -192,12 +193,34 @@ class _JUnitTiming(Protocol):
     def slowest_cases(self) -> Sequence[_SlowTestCase]: ...
 
 
+class _ArtifactFailure(Protocol):
+    @property
+    def stage(self) -> str: ...
+
+    @property
+    def reason(self) -> str: ...
+
+    @property
+    def environment(self) -> str | None: ...
+
+    @property
+    def path(self) -> Path | None: ...
+
+
 class _ValidationReport(Protocol):
     """Bounded validation report consumed by CLI rendering."""
 
     candidate_tree: str
     applied: bool
-    action: Literal["preview", "ran", "existing", "status"]
+    action: Literal[
+        "preview",
+        "ran",
+        "existing",
+        "status",
+        "retry_preview",
+        "retried",
+        "existing_retry",
+    ]
     state: Literal[
         "preview",
         "running",
@@ -209,6 +232,9 @@ class _ValidationReport(Protocol):
     exit_code: int | None
     diagnostic: str | None
     elapsed_seconds: float | None
+
+    @property
+    def artifact_failure(self) -> _ArtifactFailure | None: ...
 
     @property
     def failed_tests(self) -> Sequence[str]: ...
@@ -238,6 +264,12 @@ class _ValidationStatusAction(Protocol):
     def __call__(
         self, *, candidate_tree: str, wait_seconds: int | None
     ) -> _ValidationReport: ...
+
+
+class _ValidationRetryAction(Protocol):
+    """Injected append-only validation retry action."""
+
+    def __call__(self, *, candidate_tree: str, apply: bool) -> _ValidationReport: ...
 
 
 class _RegistryCleanupAction(Protocol):
@@ -917,7 +949,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common(issue_publish, apply_help="create or update the issue; omit for preview")
     validation = resources.add_parser(
-        "validation", help="run or observe one durable Judge validation"
+        "validation", help="run, retry, or observe one durable Judge validation"
     )
     validation_actions = validation.add_subparsers(dest="action", required=True)
     validation_run = validation_actions.add_parser(
@@ -938,6 +970,19 @@ def build_parser() -> argparse.ArgumentParser:
         validation_status,
         apply_help="accepted for command consistency; validation status remains read-only",
     )
+    validation_retry_parser = validation_actions.add_parser(
+        "retry",
+        help="preview or apply one pre-hook cleanup retry",
+        description=(
+            "Without --apply, preview without changing state. With --apply, run one "
+            "retry only when recorded cleanup failed before the hook started and "
+            "the candidate is the current staged tree."
+        ),
+    )
+    validation_retry_parser.add_argument(
+        "--candidate-tree", type=_candidate_tree, required=True
+    )
+    _common(validation_retry_parser, apply_help="run the one permitted cleanup retry")
     handoff = resources.add_parser(
         "review-handoff", help="retain Green's interactive correction ledger"
     )
@@ -1603,6 +1648,7 @@ def main(
     publish_template_update: Callable[..., object] | None = None,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
+    validation_retry: _ValidationRetryAction | None = None,
     read_validation_artifact: Callable[[Path], bytes | None] = (
         _read_validation_artifact
     ),
@@ -1890,8 +1936,10 @@ def main(
         return assessment.exit_code
     if parsed.resource == "validation":
         try:
-            if (parsed.action == "run" and validation_run is None) or (
-                parsed.action == "status" and validation_status is None
+            if (
+                (parsed.action == "run" and validation_run is None)
+                or (parsed.action == "status" and validation_status is None)
+                or (parsed.action == "retry" and validation_retry is None)
             ):
                 import fcntl
 
@@ -1928,6 +1976,24 @@ def main(
                         json.dumps(record, separators=(",", ":")).encode(),
                     )
 
+                def read_retry_record(tree: str) -> dict[str, object] | None:
+                    path = state_root / f"{tree}.retry.json"
+                    if not path.exists():
+                        return None
+                    record = json.loads(path.read_text())
+                    if not isinstance(record, dict):
+                        raise JudgeValidationError(
+                            "validation retry record is malformed"
+                        )
+                    return record
+
+                def write_retry_record(tree: str, record: dict[str, object]) -> None:
+                    state_root.mkdir(parents=True, exist_ok=True)
+                    atomic_write(
+                        state_root / f"{tree}.retry.json",
+                        json.dumps(record, separators=(",", ":")).encode(),
+                    )
+
                 @contextmanager
                 def candidate_lock(tree: str) -> Iterator[None]:
                     state_root.mkdir(parents=True, exist_ok=True)
@@ -1949,14 +2015,20 @@ def main(
                     capture_junit_artifacts=lambda tree, artifacts: (
                         snapshot_store.capture(candidate_tree=tree, artifacts=artifacts)
                     ),
+                    read_retry_record=read_retry_record,
+                    atomic_write_retry_record=write_retry_record,
                 )
                 if parsed.action == "run":
                     validation_run = partial(
                         run_judge_validation, dependencies=validation_dependencies
                     )
-                else:
+                elif parsed.action == "status":
                     validation_status = partial(
                         observe_judge_validation, dependencies=validation_dependencies
+                    )
+                else:
+                    validation_retry = partial(
+                        retry_judge_validation, dependencies=validation_dependencies
                     )
             if parsed.action == "run":
                 assert validation_run is not None
@@ -1964,11 +2036,17 @@ def main(
                     candidate_tree=parsed.candidate_tree,
                     apply=getattr(parsed, "apply", False),
                 )
-            else:
+            elif parsed.action == "status":
                 assert validation_status is not None
                 report = validation_status(
                     candidate_tree=parsed.candidate_tree,
                     wait_seconds=getattr(parsed, "wait_seconds", None),
+                )
+            else:
+                assert validation_retry is not None
+                report = validation_retry(
+                    candidate_tree=parsed.candidate_tree,
+                    apply=getattr(parsed, "apply", False),
                 )
         except (JudgeValidationError, OSError, RuntimeError, ValueError) as error:
             write_stderr(str(error))
@@ -2012,6 +2090,16 @@ def main(
                 for artifact in report.junit_artifacts
             ],
         }
+        if (failure := getattr(report, "artifact_failure", None)) is not None:
+            payload = {
+                **payload,
+                "artifact_failure": {
+                    "stage": failure.stage,
+                    "reason": failure.reason,
+                    "environment": failure.environment,
+                    "path": str(failure.path) if failure.path is not None else None,
+                },
+            }
         write_stdout(
             json.dumps(payload, separators=(",", ":"))
             if parsed.json
@@ -2035,7 +2123,7 @@ def main(
         )
         if parsed.action == "run" and not getattr(parsed, "apply", False):
             return 0
-        return 0 if report.state == "terminal-success" else 1
+        return 0 if report.state in {"preview", "terminal-success"} else 1
     if parsed.resource == "template" and parsed.action == "preview":
         try:
             runner = template_run_command

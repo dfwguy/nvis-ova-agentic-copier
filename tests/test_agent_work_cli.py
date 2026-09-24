@@ -663,6 +663,110 @@ def test_validation_cli_help_and_argument_errors_use_argparse_statuses() -> None
     assert invalid_exit.value.code == 2
 
 
+@pytest.mark.parametrize("action", ("run", "status"))
+def test_validation_cli_json_projects_bounded_artifact_failure(action: str) -> None:
+    report = SimpleNamespace(
+        candidate_tree="a" * 40,
+        applied=action == "run",
+        action="ran" if action == "run" else "status",
+        state="terminal-artifact-failure",
+        terminal=True,
+        exit_code=0,
+        diagnostic=None,
+        artifact_failure=SimpleNamespace(
+            stage="post_hook_success_evidence_read",
+            reason="invalid_count",
+            environment="py311",
+            path=Path("test-results-py311.xml"),
+        ),
+        hook_failures=(),
+        junit_artifacts=(),
+        failed_tests=(),
+        failed_junit_digests=(),
+        elapsed_seconds=0.1,
+        junit_timings=(),
+    )
+    output: list[str] = []
+    arguments = ["validation", action, "--candidate-tree", "a" * 40, "--json"]
+    if action == "run":
+        arguments.append("--apply")
+
+    exit_code = main(
+        arguments,
+        validation_run=lambda **_kwargs: report,
+        validation_status=lambda **_kwargs: report,
+        write_stdout=output.append,
+    )
+
+    assert exit_code == 1
+    assert json.loads(output[0])["artifact_failure"] == {
+        "stage": "post_hook_success_evidence_read",
+        "reason": "invalid_count",
+        "environment": "py311",
+        "path": "test-results-py311.xml",
+    }
+
+
+def test_validation_retry_cli_supports_help_json_dry_run_and_apply(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = "a" * 40
+    calls: list[tuple[str, bool]] = []
+    output: list[str] = []
+
+    def retry(*, candidate_tree: str, apply: bool) -> SimpleNamespace:
+        calls.append((candidate_tree, apply))
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=apply,
+            action="retried" if apply else "retry_preview",
+            state="terminal-success" if apply else "preview",
+            terminal=apply,
+            exit_code=0 if apply else None,
+            diagnostic=None,
+            artifact_failure=None,
+            hook_failures=(),
+            junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
+        )
+
+    with pytest.raises(SystemExit) as help_exit:
+        main(["validation", "retry", "--help"], validation_retry=retry)
+    assert help_exit.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "Without --apply, preview" in help_text
+    assert "current staged tree" in help_text
+    with pytest.raises(SystemExit) as malformed_exit:
+        main(
+            ["validation", "retry", "--candidate-tree", "bad"],
+            validation_retry=retry,
+        )
+    assert malformed_exit.value.code == 2
+
+    assert (
+        main(
+            ["validation", "retry", "--candidate-tree", candidate, "--json"],
+            validation_retry=retry,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["action"] == "retry_preview"
+    assert (
+        main(
+            ["validation", "retry", "--candidate-tree", candidate, "--apply", "--json"],
+            validation_retry=retry,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["action"] == "retried"
+    assert calls == [(candidate, False), (candidate, True)]
+
+
 def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boundary() -> (
     None
 ):
