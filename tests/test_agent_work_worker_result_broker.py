@@ -959,14 +959,16 @@ def test_broker_rejects_correction_after_original_session_deadline(
     worker = importlib.import_module("agent_work.worker")
     clock = _ManualClock()
     accepted_correction = threading.Event()
+    correction_sent = threading.Event()
     accepted_count = 0
 
     def on_connection_accepted() -> None:
         nonlocal accepted_count
         accepted_count += 1
         if accepted_count == 2:
-            clock.advance(2)
             accepted_correction.set()
+            assert correction_sent.wait(timeout=1)
+            clock.advance(2)
 
     def build_artifact(_input_bytes: bytes) -> bytes:
         raise WorkerProtocolError("builder_input.change_summary", "is required")
@@ -990,17 +992,20 @@ def test_broker_rejects_correction_after_original_session_deadline(
         clock.advance(9)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(str(session.socket_path))
-            client.sendall(
-                _frame(
-                    json.dumps(
-                        {
-                            "request": {"nonce": _request().nonce},
-                            "input": '{"workflow_lane":"coding","result_kind":"needs_human"}',
-                        }
-                    ).encode()
-                )
-            )
             assert accepted_correction.wait(timeout=1)
+            try:
+                client.sendall(
+                    _frame(
+                        json.dumps(
+                            {
+                                "request": {"nonce": _request().nonce},
+                                "input": '{"workflow_lane":"coding","result_kind":"needs_human"}',
+                            }
+                        ).encode()
+                    )
+                )
+            finally:
+                correction_sent.set()
             session._thread.join(timeout=1)
             assert not session._thread.is_alive()
         with pytest.raises(WorkerProtocolError, match="timed out"):
