@@ -244,6 +244,17 @@ def transition_record(
     """Return one validated state transition with its accompanying updates."""
     if not validate_transition(record.state, target):
         raise ValueError(f"undeclared transition: {record.state} -> {target}")
+    projection = record.outcome_projection
+    if projection is not None:
+        changing_target = (
+            target is not projection.target_state
+            or updates.get("phase", record.phase) != projection.target_phase
+        )
+        discarding_projection = updates.get("outcome_projection", projection) is None
+        if changing_target or discarding_projection:
+            if not projection.label_complete or not projection.note_complete:
+                raise ValueError("pending outcome projection must be replayed")
+            updates["outcome_projection"] = None
     return record.model_copy(update={"state": target, **updates})
 
 

@@ -16,6 +16,7 @@ import html
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -38,6 +39,7 @@ from .domain import (
     WorkflowLane,
     WorkflowPhase,
     WorkKind,
+    label_for_state,
 )
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
 
@@ -779,6 +781,73 @@ class PhaseTiming(BoundaryModel):
         return self
 
 
+_OUTCOME_NOTE_FIELDS = (
+    "outcome",
+    "explanation",
+    "evidence",
+    "retained_work",
+    "next_action",
+    "human_decision",
+)
+
+
+def outcome_note_fingerprint(fields: Mapping[str, str]) -> str:
+    """Hash exactly the six canonical note fields for durable comparison."""
+    if fields.keys() != set(_OUTCOME_NOTE_FIELDS):
+        raise ValueError("outcome note fingerprint requires six exact fields")
+    return hashlib.sha256(
+        json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class OutcomeProjectionRecord(BoundaryModel):
+    """Durable progress for projecting one structured issue outcome."""
+
+    target_state: RunnerState
+    target_phase: WorkflowPhase
+    target_label: str
+    outcome_key: str = Field(min_length=1, max_length=512)
+    outcome: str = Field(min_length=1, max_length=20_000)
+    explanation: str = Field(min_length=1, max_length=20_000)
+    evidence: str = Field(min_length=1, max_length=20_000)
+    retained_work: str = Field(min_length=1, max_length=20_000)
+    next_action: str = Field(min_length=1, max_length=20_000)
+    human_decision: str = Field(min_length=1, max_length=20_000)
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    label_complete: bool = False
+    note_complete: bool = False
+
+    @field_validator("outcome_key")
+    @classmethod
+    def validate_outcome_key_bytes(cls, value: str) -> str:
+        """Match the GitLab outcome note identity byte limit."""
+        if len(value.encode()) > 512:
+            raise ValueError("outcome key exceeds GitLab byte limit")
+        return value
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> OutcomeProjectionRecord:
+        """Bind the label and fingerprint to the durable target and note."""
+        if self.target_state not in {
+            RunnerState.RETRY_WAIT,
+            RunnerState.BLOCKED,
+            RunnerState.FAILED,
+            RunnerState.NEEDS_REPAIR,
+            RunnerState.REPAIR_FAILED,
+            RunnerState.SUGGEST_CLOSE,
+        }:
+            raise ValueError("state has no outcome projection")
+        if self.target_label != label_for_state(self.target_state):
+            raise ValueError("outcome projection label does not match state")
+        fields = {name: getattr(self, name) for name in _OUTCOME_NOTE_FIELDS}
+        expected = outcome_note_fingerprint(fields)
+        if self.fingerprint != expected:
+            raise ValueError("outcome projection fingerprint does not match note")
+        if self.note_complete and not self.label_complete:
+            raise ValueError("outcome note cannot complete before label")
+        return self
+
+
 class LedgerRecord(BoundaryModel):
     """Durable state for one issue."""
 
@@ -812,6 +881,7 @@ class LedgerRecord(BoundaryModel):
     suggest_close_evidence: SuggestCloseEvidence | None = None
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
+    outcome_projection: OutcomeProjectionRecord | None = None
     error_code: ErrorCode | None = None
     worker_exit: WorkerExitEvidence | None = None
     activation_started_at: datetime | None = None
@@ -859,6 +929,11 @@ class LedgerRecord(BoundaryModel):
     @model_validator(mode="after")
     def validate_lifecycle(self) -> LedgerRecord:
         """Keep durable lifecycle evidence coherent."""
+        if self.outcome_projection is not None and (
+            self.outcome_projection.target_state is not self.state
+            or self.outcome_projection.target_phase is not self.phase
+        ):
+            raise ValueError("outcome projection does not match durable state")
         if (
             self.state is RunnerState.SUGGEST_CLOSE
             and self.suggest_close_evidence is None

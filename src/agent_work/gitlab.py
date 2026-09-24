@@ -35,7 +35,7 @@ from .domain import (
     legacy_prerequisite_label_iid,
     parse_split_marker,
     prerequisite_label_iid,
-    sanitize_diagnostic,
+    sanitize_outcome_note_field,
 )
 from .models import (
     AgentWorkConfig,
@@ -1819,13 +1819,7 @@ class GitLabGateway:
             + hashlib.sha256(identity.encode()).hexdigest()
             + " -->"
         )
-        safe_values = tuple(
-            sanitize_diagnostic(
-                re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value), limit=512
-            )
-            or "Not recorded."
-            for value in values
-        )
+        safe_values = tuple(sanitize_outcome_note_field(value) for value in values)
         body = "\n\n".join(
             (
                 marker,

@@ -175,6 +175,41 @@ def test_outcome_note_posts_one_sanitized_labeled_body_when_marker_is_absent(
     )
 
 
+def test_outcome_note_body_keeps_exact_sanitized_format(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> _Result:
+        calls.append(command)
+        return _Result(0, "[]" if _method(command) == "GET" else "{}")
+
+    _invoke(
+        GitLabGateway(_config(tmp_path), fake),
+        outcome="glpat-secret",
+        explanation="\x00",
+        evidence="é" * 300,
+        retained_work="\x1b[31mkept",
+        next_action="",
+        human_decision="",
+    )
+
+    posts = [call for call in calls if _method(call) == "POST"]
+    assert len(posts) == 1
+    body = next(
+        field.removeprefix("body=") for field in posts[0] if field.startswith("body=")
+    )
+    assert body == "\n\n".join(
+        (
+            _marker(310967, 12, "issue-180-outcome"),
+            "## Outcome\n[REDACTED]",
+            "## What happened\nNot recorded.",
+            "## Evidence\n" + "é" * 256,
+            "## Retained work\nkept",
+            "## Next action\nNot recorded.",
+            "## Human decision\nNot recorded.",
+        )
+    )
+
+
 def test_outcome_note_scans_page_two_then_updates_only_its_factory_target(
     tmp_path: Path,
 ) -> None:
