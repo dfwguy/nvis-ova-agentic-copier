@@ -13,6 +13,8 @@ related:
     why: Explains why the loop uses durable serial recovery.
   - path: ../explanation/serial-agent-loop-recovery-design.md
     why: Explains the state machine and migration rationale.
+  - path: update-a-generated-project.md
+    why: Describes the separate opt-in template-update timer and its preview default.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

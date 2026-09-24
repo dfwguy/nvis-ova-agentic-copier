@@ -628,6 +628,19 @@ class GitLabMergeRequestPublisher:
             raise GitLabError("GitLab returned invalid merge request list")
         return tuple(self._mr(item) for item in payload)
 
+    def list_any_merge_requests(
+        self, *, project_id: int, source_branch: str
+    ) -> tuple[MergeRequestEvidence, ...]:
+        """Find even closed requests before a replayable branch publication."""
+        self._require_project(project_id)
+        payload = self._call(
+            f"projects/{project_id}/merge_requests",
+            fields=("state=all", f"source_branch={source_branch}", "per_page=100"),
+        )
+        if not isinstance(payload, list) or len(payload) >= 100:
+            raise GitLabError("GitLab returned ambiguous merge request inventory")
+        return tuple(self._mr(item) for item in payload)
+
     def create_merge_request(
         self,
         *,

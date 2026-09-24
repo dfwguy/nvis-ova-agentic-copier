@@ -1,16 +1,18 @@
 ---
 title: How to update a generated project
 type: how-to
-summary: Update a Copier project with a reviewed template revision.
+summary: Apply a reviewed template revision and inspect its human-review merge request.
 audience: practitioner
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-24
 related:
   - path: preview-template-revision.md
     why: Compares the recorded template revision with the revision to apply.
   - path: ../reference/template-update.md
     why: Defines the update command, durable states, and result data.
+  - path: setup-serial-gitlab-agent-loop.md
+    why: Shows the user-bus check used to supervise an optional template-update timer.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -25,7 +27,7 @@ related:
 # How to update a generated project
 
 Use this guarded command to apply a reviewed template revision to a Copier
-project.
+project and publish a change for human review.
 
 1. Preview the revision. It compares template commits. It cannot predict
    rendered files or Copier conflicts.
@@ -49,15 +51,50 @@ project.
    kept worktree and branch in XDG state, then runs Copier there. Copier keeps
    project answers and later edits under its update rules.
 
-4. Read the result. A changed update checks the generated project's needed
-   workflow in the worktree and returns merge-request draft data. It does not
-   commit, push, create a merge request, approve, merge, schedule work, or
-   change issue state. Publishing and scheduling are outside this command.
+4. Read the result. For a changed update, the controller checks the final
+   worktree and runs its own exact-tree validation, then commits the tree and verifies
+   one merge request. Open that request for human review. Only a human may
+   approve or merge it. An unchanged update has no merge request to publish.
 
-5. Stop for `prepared`, `applying`, `workflow`, `conflict`, or an interrupted
-   state. The command never replays an unclear state. It keeps the worktree
-   and reports a safe recovery state, paths, and next action. Follow that
-   action in the kept worktree. Do not discard, reset, or stash it.
+5. Follow the reported recovery action if Copier, validation, or publication
+   stops. The command keeps the worktree and evidence. It does not guess
+   whether an uncertain remote write succeeded or create another merge
+   request. Check the retained branch and request named by the result. Do not
+   discard, reset, or stash the work.
+
+## Set up an optional scheduled preview
+
+The separate template-update user timer is opt-in. Install its generated
+service and timer only after you choose the candidate revision and the
+checkout to inspect. This repository's unit names are
+`agentic-copier-template-update.service` and
+`agentic-copier-template-update.timer`; generated projects use their project
+slug in place of `agentic-copier`. Keep the candidate revision in the private
+environment file at `%h/.config/agentic-copier-template-update/template-update.env`
+for this repository, or `%h/.config/<project-slug>-template-update/template-update.env`
+for a generated project; set
+`TEMPLATE_UPDATE_CANDIDATE_REVISION` to the revision you reviewed. The service
+also reads absolute `AGENT_WORK_CHECKOUT` and `AGENT_WORK_DIRENV` paths from
+that file. Do not put a token in the file or unit. The service uses `direnv`
+in the active checkout, then calls its `bin/agent-work-from-checkout`. Set up
+that checkout's ignored `.envrc` to load `GITLAB_HOST`, `GITLAB_PROJECT_ID`,
+`AGENT_WORK_BASE_BRANCH`, `AGENT_WORK_FACTORY_USERNAME`, and absolute
+`AGENT_WORK_GIT` and `AGENT_WORK_GLAB` paths. Load `GITLAB_TOKEN` from your
+secure store. Restrict the env file to your user. The template source must be
+public HTTPS or fetchable through
+the SSH agent in `SSH_AUTH_SOCK`; this command does not pass a token to the
+template fetch. If the source cannot be fetched, the preview stops safely.
+Its default invocation omits `--apply`, so a timer activation only previews the
+update. Review the preview before explicitly enabling apply in your local
+service configuration. The generated project does not install or enable these
+units for you.
+
+Before running `systemctl --user` or `journalctl --user`, confirm that the
+current user's runtime directory exists, is owned by that user, and contains
+the user-bus socket. Then inspect the template-update service and timer through
+that bus. Keep the main serial issue-loop units separate from this optional
+timer. The [serial-loop setup guide](setup-serial-gitlab-agent-loop.md#establish-a-validated-user-bus-boundary)
+shows the user-bus check.
 
 Use the [template update reference](../reference/template-update.md) for the
 full interface, states, and result data. Use the

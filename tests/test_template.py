@@ -2584,6 +2584,7 @@ esac""",
         "src/agent_work/upstream_finding.py",
         "src/agent_work/upstream_gitlab.py",
         "src/agent_work/validation.py",
+        "src/agent_work/template_update_publication.py",
     ),
 )
 def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
@@ -2672,6 +2673,27 @@ def test_serial_runner_ships_completion_relative_user_systemd_units(
     assert "logger" not in wrapper
 
 
+def test_template_update_timer_is_opt_in_and_previews_by_default(
+    generated_project: Path, project_root: Path
+) -> None:
+    """Generated projects can schedule the same guarded update command safely."""
+    for root, stem in (
+        (project_root, "agentic-copier"),
+        (generated_project, "my_test_project"),
+    ):
+        service = (root / "systemd" / f"{stem}-template-update.service").read_text()
+        timer = (root / "systemd" / f"{stem}-template-update.timer").read_text()
+
+        assert "template update" in service
+        assert "--candidate-revision" in service
+        assert "--apply" not in service
+        assert "GITLAB_TOKEN=" not in service
+        assert "${AGENT_WORK_DIRENV} exec ${AGENT_WORK_CHECKOUT}" in service
+        assert "--candidate-revision ${TEMPLATE_UPDATE_CANDIDATE_REVISION}" in service
+        assert f"Unit={stem}-template-update.service" in timer
+        assert "[Install]" in timer
+
+
 def test_runtime_has_no_approval_or_merge_operation(project_root: Path) -> None:
     """The serial wrapper can verify MRs but cannot approve or merge them."""
     runtime = "\n".join(
@@ -2725,6 +2747,7 @@ def test_template_executable_mirrors_match_root(
         Path(".pre-commit-config.yaml"),
         Path("src/agent_work/state_machine.py"),
         Path("src/agent_work/worker.py"),
+        Path("src/agent_work/template_update_publication.py"),
     ):
         assert (project_root / relative_path).read_bytes() == (
             template_dir / relative_path
