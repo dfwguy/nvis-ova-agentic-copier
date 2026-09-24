@@ -41,9 +41,10 @@ Stop.
 Use one clear plan.
 
 The installed service can process consecutive terminally handed-off issues in
-one run. Each issue has its own bounded run. Empty queues and saved retry waits
-return to the 20-minute timer. An applied run waits for nonterminal pipeline
-proof in place.
+one run. It also checks for ready work after it fixes prerequisite labels.
+Each issue has its own bounded run. Empty queues and saved retry waits return
+to the 20-minute timer. An applied run waits for nonterminal pipeline proof in
+place.
 
 Use one set checkout and one user timer for one GitLab project. Starting the
 project timer authorizes the loop. It selects only ready issues. They must be
@@ -604,8 +605,10 @@ from affected issues, and adds the full ordered canonical set. It deletes
 matching legacy project-label definitions only after every issue-label
 transition succeeds. A partial transition keeps those definitions for a safe
 retry. A pass that repairs projection drift only repairs. It does not claim
-work, create a ledger record or worktree, or start a worker. A later run
-resumes normal selection.
+work, create a ledger record or worktree, or start a worker. After that pass,
+the service wrapper previews the queue. It starts a new applied run only if
+work is ready. It reads GitLab again before it picks an issue. If none is
+ready, the service exits and the timer checks later.
 
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or
