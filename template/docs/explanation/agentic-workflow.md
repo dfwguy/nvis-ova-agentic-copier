@@ -313,10 +313,9 @@ reserves `agent/issue-<iid>` for issue worktrees. These names identify contexts.
 They do not claim separate runtime branch enforcement. For non-trivial coding
 work, Architect names every stage. It does not group them as “final judges.” Each
 manifest records applicability, ownership, prerequisites, receipts, and reroutes.
-Each delegated manifest row names its exact tier and Codex model/effort.
-`gpt-5.6-sol` / `high` is for most-capable work. `gpt-5.6-terra` / `medium` is
-for balanced work. `gpt-5.6-luna` / `low` is for focused checks. Other supported
-frontends use only their enabled equivalent. Frontier is never a fallback.
+Each manifest row names a semantic tier. The live Architect router owns the
+Codex mapping. It sets each tier's current model and reasoning effort. Other
+enabled frontends use equivalent tiers. Frontier is never a fallback.
 
 Architect owns one coding workflow session. It does not launch unrelated
 top-level processes. It sends design to Red and Diátaxis Writer at once. When
