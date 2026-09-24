@@ -19,12 +19,19 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
+from .gitlab_safeguards import (
+    USERNAME_PATTERN,
+    SafeguardPayloadError,
+    default_branch_from_project,
+    username_from_payload,
+    verify_approval_rules,
+    verify_default_branch,
+)
 from .ports import CommandResult, CommandRunner
 
 
@@ -166,7 +173,7 @@ _REQUIRED_KEYS = {
 _SECRET_NAME = re.compile(
     r"(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY)", re.IGNORECASE
 )
-_USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_USERNAME = USERNAME_PATTERN
 _UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*")
 
 
@@ -376,93 +383,36 @@ def _json_call(
         raise CredentialRotationError("GitLab verification failed") from error
 
 
-def _require_mapping(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise CredentialRotationError("GitLab verification failed")
-    return cast(dict[str, object], value)
-
-
-def _optional_mapping(value: object) -> dict[str, object] | None:
-    """Narrow an API list member when it is an object."""
-    return cast(dict[str, object], value) if isinstance(value, dict) else None
-
-
-def _numeric_value(value: object) -> int | None:
-    """Accept JSON numbers while excluding Python's Boolean subclass."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _is_global_approval_rule(value: object) -> bool:
-    """Recognize one unambiguous globally applicable approval rule."""
-    rule = _optional_mapping(value)
-    if rule is None:
-        return False
-    required = _numeric_value(rule.get("approvals_required"))
-    return (
-        required is not None
-        and required >= 1
-        and (
-            "protected_branches" not in rule
-            or rule["protected_branches"] == []
-            or rule.get("applies_to_all_protected_branches") is True
-        )
-    )
-
-
 def verify_service_safeguards(
     dependencies: RotationDependencies, configuration: RotationEnvironment
 ) -> str:
-    user = _require_mapping(_json_call(dependencies, configuration, "user"))
-    username = user.get("username")
-    if not isinstance(username, str) or not _USERNAME.fullmatch(username):
-        raise CredentialRotationError("GitLab verification failed")
-    project = _require_mapping(
-        _json_call(dependencies, configuration, f"projects/{configuration.project_id}")
-    )
-    if (
-        project.get("id") != configuration.project_id
-        or not isinstance(project.get("default_branch"), str)
-        or not project["default_branch"]
-    ):
-        raise CredentialRotationError("GitLab verification failed")
-    permissions_value = project.get("permissions")
-    if not isinstance(permissions_value, dict):
-        raise CredentialRotationError("GitLab verification failed")
-    permissions = _require_mapping(permissions_value)
-    levels = tuple(
-        level
-        for entry in permissions.values()
-        if (permission := _optional_mapping(entry)) is not None
-        and (level := _numeric_value(permission.get("access_level"))) is not None
-    )
-    if not levels or max(levels) != 30:
-        raise CredentialRotationError("GitLab verification failed")
-    default_branch = cast(str, project["default_branch"])
-    branch = _require_mapping(
-        _json_call(
-            dependencies,
-            configuration,
-            f"/projects/{configuration.project_id}/repository/branches/{quote(default_branch, safe='')}",
+    try:
+        username = username_from_payload(
+            _json_call(dependencies, configuration, "user")
         )
-    )
-    if not (
-        branch.get("name") == default_branch
-        and branch.get("default") is True
-        and branch.get("protected") is True
-        and branch.get("developers_can_push") is False
-        and branch.get("developers_can_merge") is False
-        and branch.get("can_push") is False
-    ):
-        raise CredentialRotationError("GitLab verification failed")
-    rules = _json_call(
-        dependencies,
-        configuration,
-        f"/projects/{configuration.project_id}/approval_rules",
-    )
-    if not isinstance(rules, list) or not any(
-        _is_global_approval_rule(rule) for rule in rules
-    ):
-        raise CredentialRotationError("GitLab verification failed")
+        default_branch = default_branch_from_project(
+            _json_call(
+                dependencies, configuration, f"projects/{configuration.project_id}"
+            ),
+            project_id=configuration.project_id,
+        )
+        verify_default_branch(
+            _json_call(
+                dependencies,
+                configuration,
+                f"/projects/{configuration.project_id}/repository/branches/{quote(default_branch, safe='')}",
+            ),
+            branch=default_branch,
+        )
+        verify_approval_rules(
+            _json_call(
+                dependencies,
+                configuration,
+                f"/projects/{configuration.project_id}/approval_rules",
+            )
+        )
+    except SafeguardPayloadError as error:
+        raise CredentialRotationError("GitLab verification failed") from error
     return username
 
 

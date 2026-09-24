@@ -37,6 +37,13 @@ from .domain import (
     prerequisite_label_iid,
     sanitize_diagnostic,
 )
+from .gitlab_safeguards import (
+    SafeguardPayloadError,
+    default_branch_from_project,
+    username_from_payload,
+    verify_approval_rules,
+    verify_default_branch,
+)
 from .models import (
     AgentWorkConfig,
     GitLabIssue,
@@ -301,6 +308,8 @@ def publish_issue(
     issue_iid: int | None = None,
     apply: bool = False,
     port: IssuePublicationPort,
+    feedback_audit: bool = False,
+    audit_feedback: Callable[[], None] | None = None,
 ) -> IssuePublicationReport:
     """Preview or mutate one exact issue and verify its authoritative read-back."""
     if (
@@ -382,6 +391,10 @@ def publish_issue(
         port.update_issue(iid=selected.iid, **fields)
         expected_iid = selected.iid
     else:
+        if feedback_audit:
+            if audit_feedback is None:
+                raise IssuePublicationError("feedback audit is unavailable")
+            audit_feedback()
         submitted = port.create_issue(**fields)
         if not isinstance(submitted, dict) or not isinstance(submitted.get("iid"), int):
             raise IssuePublicationError("issue creation response is invalid")
@@ -765,6 +778,31 @@ class GitLabIssuePublisher:
     def _require_project(self, project_id: int) -> None:
         if project_id != self._project_id:
             raise GitLabError("publication project does not match configured project")
+
+    def audit_feedback(self, *, username: str) -> None:
+        """Verify the configured factory identity and human review safeguards."""
+        try:
+            if username_from_payload(self._call("user")) != username:
+                raise SafeguardPayloadError("feedback audit user is invalid")
+            default_branch = default_branch_from_project(
+                self._call(f"projects/{self._project_id}"),
+                project_id=self._project_id,
+                require_issues=True,
+            )
+            verify_default_branch(
+                self._call(
+                    f"projects/{self._project_id}/repository/branches/"
+                    f"{quote(default_branch, safe='')}"
+                ),
+                branch=default_branch,
+            )
+            verify_approval_rules(
+                self._call(f"projects/{self._project_id}/approval_rules")
+            )
+        except SafeguardPayloadError as error:
+            raise IssuePublicationError(
+                "feedback audit safeguards are invalid"
+            ) from error
 
     def list_issues(
         self, *, project_id: int, marker: str
