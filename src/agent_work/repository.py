@@ -538,6 +538,26 @@ class GitRepository:
             raise RepositoryError("service checkout must be clean")
         self._git("pull", "--ff-only", transient=True)
 
+    def default_branch_head(self) -> str:
+        """Read the exact fetched default-branch commit."""
+        return self._git("rev-parse", f"origin/{self.config.default_branch}")
+
+    def refresh_default_branch(self) -> str:
+        """Refresh the configured default branch before fresh issue work."""
+        self.refresh_base()
+        self._git("fetch", "origin", self.config.default_branch, transient=True)
+        return self.default_branch_head()
+
+    def fresh_issue_branch_available(self, issue_iid: int) -> bool:
+        """Check the exact new issue branch against local and remote owners."""
+        branch = f"agent/issue-{issue_iid}"
+        path = self.config.state_root / "worktrees" / str(issue_iid)
+        return (
+            not path.exists()
+            and not self._git("branch", "--list", branch)
+            and not self._git("ls-remote", "--heads", "origin", branch, transient=True)
+        )
+
     def create_issue_worktree(
         self,
         issue_iid: int,
@@ -549,10 +569,16 @@ class GitRepository:
         """Create or verify the durable worktree for an ordinary issue."""
         path = self.config.state_root / "worktrees" / str(issue_iid)
         if path.exists():
+            if not allow_existing_branch:
+                raise RepositoryError("worktree ownership is ambiguous")
             actual = self._git("branch", "--show-current", cwd=path)
             if actual != branch:
                 raise RepositoryError("worktree ownership is ambiguous")
             return path
+        if not allow_existing_branch and not self.fresh_issue_branch_available(
+            issue_iid
+        ):
+            raise RepositoryError("branch ownership is ambiguous")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         remote_ref = f"refs/remotes/origin/{branch}"
         local_exists = bool(self._git("branch", "--list", branch))

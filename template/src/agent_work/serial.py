@@ -1075,11 +1075,53 @@ def _can_reconcile_published_ordinary_work(record: LedgerRecord) -> bool:
 
 
 def _is_fresh_ordinary_preparation(record: LedgerRecord) -> bool:
-    """Return whether an un-revised ordinary record is about to prepare work."""
+    """Return whether an ordinary record has not yet bound a base commit."""
     return (
         record.work_kind is WorkKind.ORDINARY
-        and record.revision == 0
         and record.state is RunnerState.PREPARING
+        and (record.revision == 0 or record.source_sha is None)
+    )
+
+
+def _merged_remediation_is_exact(
+    record: LedgerRecord,
+    *,
+    gitlab: GitLabPort,
+    default_branch: str,
+) -> bool:
+    """Treat a merged MR as provenance only after exact identity checks."""
+    if record.merge_request_iid is None or record.source_sha is None:
+        return False
+    mr = gitlab.fetch_merge_request(record.merge_request_iid)
+    return (
+        mr.iid == record.merge_request_iid
+        and mr.state == "merged"
+        and mr.source_project_id == record.project_id
+        and mr.target_project_id == record.project_id
+        and mr.source_branch == record.source_branch
+        and mr.target_branch == default_branch
+        and gitlab.merge_request_contains_commit(mr.iid, record.source_sha)
+    )
+
+
+def _fresh_ordinary_from_merged(
+    record: LedgerRecord, *, refreshed_base_sha: str
+) -> LedgerRecord:
+    """Keep the issue while dropping the merged branch's publication identity."""
+    return record.model_copy(
+        update={
+            "state": RunnerState.PREPARING,
+            "phase": WorkflowPhase.WORKFLOW,
+            "work_kind": WorkKind.ORDINARY,
+            "source_branch": f"agent/issue-{record.issue_iid}",
+            "source_sha": None,
+            "main_sha": refreshed_base_sha,
+            "merge_request_iid": None,
+            "merge_request_url": None,
+            "error_code": None,
+            "summary": "Merged review verified; prepare fresh issue work.",
+            "next_action": "Prepare a new branch from current main.",
+        }
     )
 
 
@@ -1682,6 +1724,55 @@ def select_record(
                 return reconciliable, issues[reconciliable.issue_iid]
         except (GitLabError, TypeError):
             return reconciliable, issues[reconciliable.issue_iid]
+    for retained in records:
+        if not (
+            retained.state is RunnerState.BLOCKED
+            and retained.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
+            and retained.work_kind is WorkKind.EXISTING_MR_REMEDIATION
+            and retained.phase is WorkflowPhase.WORKFLOW
+            and retained.source_sha is not None
+            and retained.main_sha is None
+            and retained.publication_sha is None
+            and retained.intent is None
+            and not retained.receipts
+            and retained.audit_evidence in {None, "unknown"}
+            and retained.merge_request_draft is None
+            and retained.pending_feedback is None
+            and retained.repair_attempt is None
+            and not repository.worktree_exists(retained.worktree)
+        ):
+            continue
+        issue = issues[retained.issue_iid]
+        if issue.state != "opened":
+            continue
+        try:
+            classification = classify_work(issue, project_id=project.id)
+            if (
+                classification.kind is not WorkKind.EXISTING_MR_REMEDIATION
+                or classification.merge_request_iid != retained.merge_request_iid
+                or classification.source_branch != retained.source_branch
+                or classification.source_sha != retained.source_sha
+                or not _merged_remediation_is_exact(
+                    retained,
+                    gitlab=gitlab,
+                    default_branch=repository.config.default_branch,
+                )
+            ):
+                continue
+            refreshed_base_sha = repository.refresh_default_branch()
+            if repository.worktree_exists(retained.worktree):
+                continue
+            if not repository.fresh_issue_branch_available(retained.issue_iid):
+                continue
+        except (ClassificationError, GitLabError, RepositoryError):
+            continue
+        requeued = ledger.persist(
+            _fresh_ordinary_from_merged(
+                retained,
+                refreshed_base_sha=refreshed_base_sha,
+            )
+        )
+        return requeued, issue
     lifecycle = set(LIFECYCLE_LABELS)
     for record in records:
         if (record.state is RunnerState.RETRY_WAIT and not _due(record, now)) or (
@@ -2405,7 +2496,11 @@ def _prepare(
     repository: RepositoryPort,
     now: datetime,
 ) -> LedgerRecord:
-    newly_claimed = record.revision == 0
+    newly_claimed = record.revision == 0 or (
+        record.work_kind is WorkKind.ORDINARY
+        and record.state is RunnerState.PREPARING
+        and record.source_sha is None
+    )
     if newly_claimed:
         record = ledger.persist(
             record.model_copy(
@@ -2429,6 +2524,62 @@ def _prepare(
                     "remediation record lacks exact merge request evidence"
                 )
             mr = gitlab.fetch_merge_request(record.merge_request_iid)
+            if mr.state == "merged":
+                try:
+                    marker = classify_work(issue, project_id=record.project_id)
+                except ClassificationError as error:
+                    raise SegmentError(
+                        "merged remediation marker is invalid"
+                    ) from error
+                if (
+                    marker.kind is not record.work_kind
+                    or marker.merge_request_iid != record.merge_request_iid
+                    or marker.source_branch != record.source_branch
+                    or marker.source_sha != record.source_sha
+                ):
+                    raise SegmentError("merged remediation marker has changed")
+                if not _merged_remediation_is_exact(
+                    record,
+                    gitlab=gitlab,
+                    default_branch=repository.config.default_branch,
+                ):
+                    raise SegmentError("merged remediation origin is not exact")
+                if repository.worktree_exists(record.worktree):
+                    raise SegmentError("fresh issue worktree already exists")
+                refreshed_base_sha = repository.refresh_default_branch()
+                if not repository.fresh_issue_branch_available(record.issue_iid):
+                    raise SegmentError("fresh issue branch already exists")
+                record = ledger.persist(
+                    _fresh_ordinary_from_merged(
+                        record,
+                        refreshed_base_sha=refreshed_base_sha,
+                    )
+                )
+                if repository.default_branch_head() != refreshed_base_sha:
+                    raise RepositoryError("default branch changed before preparation")
+                worktree = repository.create_issue_worktree(
+                    issue.iid,
+                    record.source_branch,
+                    repository.config.default_branch,
+                    allow_existing_branch=False,
+                )
+                source_sha = repository.head(worktree)
+                if source_sha != refreshed_base_sha:
+                    raise RepositoryError(
+                        "fresh issue worktree does not match refreshed default branch"
+                    )
+                return ledger.persist(
+                    transition_record(
+                        record,
+                        RunnerState.EXECUTING,
+                        worktree=worktree,
+                        source_sha=source_sha,
+                        main_sha=source_sha,
+                        intent=None,
+                        summary="Fresh issue worktree prepared from current main.",
+                        next_action="Run the recorded workflow phase.",
+                    )
+                )
             if (
                 mr.state != "opened"
                 or mr.source_project_id != record.project_id
@@ -2464,8 +2615,16 @@ def _prepare(
                 issue.iid, record.source_branch, mr.sha
             )
         else:
-            if newly_claimed:
+            if newly_claimed and record.main_sha is None:
                 repository.refresh_base()
+            if (
+                newly_claimed
+                and record.main_sha is not None
+                and repository.default_branch_head() != record.main_sha
+            ):
+                raise RepositoryError(
+                    "recorded default branch changed before preparation"
+                )
             worktree = repository.create_issue_worktree(
                 issue.iid,
                 record.source_branch,
@@ -2474,6 +2633,10 @@ def _prepare(
             )
             if newly_claimed:
                 source_sha = repository.head(worktree)
+                if record.main_sha is not None and source_sha != record.main_sha:
+                    raise RepositoryError(
+                        "fresh issue worktree does not match recorded default branch"
+                    )
             else:
                 expected_head = record.source_sha
                 if expected_head is None or not retained_ordinary_is_untouched(record):

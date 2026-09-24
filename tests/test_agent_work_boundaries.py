@@ -72,6 +72,59 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
     )
 
 
+@pytest.mark.parametrize("marker_is_member", (True, False))
+def test_gitlab_checks_marker_sha_in_numeric_project_mr_commit_inventory(
+    tmp_path: Path, marker_is_member: bool
+) -> None:
+    """A marker can name an earlier MR commit, but never an unrelated commit."""
+    marker_sha = "c" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(
+            0,
+            json.dumps(
+                [
+                    {"id": "d" * 40},
+                    {"id": marker_sha if marker_is_member else "e" * 40},
+                ]
+            ),
+            "",
+        )
+
+    found = GitLabGateway(_config(tmp_path), api).merge_request_contains_commit(
+        269, marker_sha
+    )
+
+    assert found is marker_is_member
+    assert len(commands) == 1
+    assert "projects/310967/merge_requests/269/commits" in commands[0]
+    assert all("gitlab.example.com" in command for command in commands)
+
+
+def test_gitlab_finds_marker_commit_on_later_merge_request_page(tmp_path: Path) -> None:
+    """A valid historical marker can be beyond the first commit page."""
+    marker_sha = "c" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        commits = (
+            [{"id": "d" * 40}] * 100 if len(commands) == 1 else [{"id": marker_sha}]
+        )
+        return CommandResult(0, json.dumps(commits), "")
+
+    assert GitLabGateway(_config(tmp_path), api).merge_request_contains_commit(
+        269, marker_sha
+    )
+    assert len(commands) == 2
+    assert any("page=2" in argument for argument in commands[1])
+    assert all(
+        "projects/310967/merge_requests/269/commits" in command for command in commands
+    )
+
+
 def test_changed_paths_parses_raw_porcelain_without_losing_initial_characters(
     tmp_path: Path,
 ) -> None:

@@ -448,6 +448,10 @@ class FakeGitLab:
             return self.fetched_merge_request_results.pop(0)
         return self.existing_mr or _mr()
 
+    def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+        del mr_iid, sha
+        return False
+
     def find_merge_request_by_branch(self, branch: str) -> MergeRequestEvidence | None:
         del branch
         return self.existing_mr
@@ -771,6 +775,17 @@ class FakeRepository:
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
         self.refreshed += 1
+
+    def default_branch_head(self) -> str:
+        return self.current_head
+
+    def refresh_default_branch(self) -> str:
+        self.refresh_base()
+        return self.default_branch_head()
+
+    def fresh_issue_branch_available(self, issue_iid: int) -> bool:
+        del issue_iid
+        return True
 
     def create_issue_worktree(
         self,
@@ -8977,6 +8992,356 @@ def test_prepare_adopts_exact_controller_descendant_for_issue_100(
     assert prepared.source_sha == new_sha
     assert prepared.merge_request_iid == 88
     assert repository.verified_heads[-1] == new_sha
+
+
+def _merged_remediation_issue(
+    *, iid: int = 197, mr_iid: int = 269, marker_sha: str = "c" * 40
+) -> GitLabIssue:
+    return _issue(
+        iid=iid,
+        description=f"""Repair a finding from the merged review.
+<!-- agent-mr-remediation
+project_id: 310967
+merge_request_iid: {mr_iid}
+source_branch: agent/issue-158
+source_sha: {marker_sha}
+finding: judge-quality|src/example.py|repair after merge
+-->""",
+    )
+
+
+@pytest.mark.parametrize("marker_sha", ("c" * 40, "d" * 40))
+def test_merged_remediation_starts_fresh_issue_branch_when_marker_commit_belongs_to_mr(
+    tmp_path: Path, marker_sha: str
+) -> None:
+    """A merged review is provenance; later work starts at refreshed main."""
+    config = _config(tmp_path)
+    issue = _merged_remediation_issue(marker_sha=marker_sha)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+
+    class CommitAwareGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(issue)
+            self.commit_checks: list[tuple[int, str]] = []
+
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            self.commit_checks.append((mr_iid, sha))
+            return sha in {"c" * 40, "d" * 40}
+
+    class BranchRecordingRepository(FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(config)
+            self.created_branches: list[tuple[int, str, str, bool]] = []
+
+        def create_issue_worktree(
+            self,
+            issue_iid: int,
+            branch: str,
+            default_branch: str,
+            *,
+            allow_existing_branch: bool = True,
+        ) -> Path:
+            self.created_branches.append(
+                (issue_iid, branch, default_branch, allow_existing_branch)
+            )
+            return super().create_issue_worktree(
+                issue_iid,
+                branch,
+                default_branch,
+                allow_existing_branch=allow_existing_branch,
+            )
+
+    gitlab = CommitAwareGitLab()
+    gitlab.existing_mr = _mr(
+        iid=269,
+        state="merged",
+        source_branch="agent/issue-158",
+        sha="d" * 40,
+    )
+    repository = BranchRecordingRepository()
+    repository.worktree_present = False
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert prepared.issue_iid == 197
+    assert prepared.source_branch == "agent/issue-197"
+    assert prepared.work_kind is WorkKind.ORDINARY
+    assert prepared.main_sha == repository.current_head
+    assert repository.refreshed == 1
+    assert repository.created_branches == [(197, "agent/issue-197", "main", False)]
+    assert gitlab.commit_checks == [(269, marker_sha)]
+    assert gitlab.reopened_issues == []
+
+
+@pytest.mark.parametrize("replay", (False, True))
+def test_fresh_merged_issue_rejects_changed_branch_base_before_execution(
+    tmp_path: Path, replay: bool
+) -> None:
+    """A branch created from a different main SHA cannot enter workflow execution."""
+    config = _config(tmp_path)
+    issue = _merged_remediation_issue()
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+
+    class CommitAwareGitLab(FakeGitLab):
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            return (mr_iid, sha) == (269, "c" * 40)
+
+    class MovingBaseRepository(FakeRepository):
+        def head(self, worktree: Path) -> str:
+            return "a" * 40 if worktree == self.config.checkout else "b" * 40
+
+    gitlab = CommitAwareGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=269, state="merged", source_branch="agent/issue-158", sha="d" * 40
+    )
+    repository = MovingBaseRepository(config)
+    repository.worktree_present = False
+    if replay:
+        ledger.persist(
+            _record(
+                tmp_path, state=RunnerState.PREPARING, phase=WorkflowPhase.WORKFLOW
+            ).model_copy(
+                update={
+                    "issue_iid": 197,
+                    "work_kind": WorkKind.ORDINARY,
+                    "source_branch": "agent/issue-197",
+                    "worktree": config.state_root / "worktrees" / "197",
+                    "source_sha": None,
+                    "main_sha": "a" * 40,
+                }
+            )
+        )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.BRANCH_OWNERSHIP_AMBIGUOUS
+
+
+@pytest.mark.parametrize("issue_iid,mr_iid", ((197, 269), (200, 278), (218, 285)))
+def test_blocked_merged_remediation_requeues_only_untouched_issue_work(
+    tmp_path: Path, issue_iid: int, mr_iid: int
+) -> None:
+    """A previously blocked merged origin can resume on its own fresh branch."""
+    config = _config(tmp_path)
+    issue = _merged_remediation_issue(iid=issue_iid, mr_iid=mr_iid)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.BLOCKED,
+            phase=WorkflowPhase.WORKFLOW,
+        ).model_copy(
+            update={
+                "issue_iid": issue_iid,
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "source_branch": "agent/issue-158",
+                "worktree": config.state_root / "worktrees" / str(issue_iid),
+                "source_sha": "c" * 40,
+                "merge_request_iid": mr_iid,
+                "error_code": ErrorCode.REMEDIATION_MR_MISMATCH,
+            }
+        )
+    )
+
+    class CommitAwareGitLab(FakeGitLab):
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            return (mr_iid, sha) == (expected_mr_iid, "c" * 40)
+
+    expected_mr_iid = mr_iid
+    gitlab = CommitAwareGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=mr_iid,
+        state="merged",
+        source_branch="agent/issue-158",
+        sha="d" * 40,
+    )
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert prepared.source_branch == f"agent/issue-{issue_iid}"
+    assert prepared.work_kind is WorkKind.ORDINARY
+    assert repository.refreshed == 1
+    assert gitlab.reopened_issues == []
+
+
+def test_merged_remediation_refuses_an_existing_new_issue_branch(
+    tmp_path: Path,
+) -> None:
+    """A fresh issue never adopts another owner's branch."""
+    config = _config(tmp_path)
+    issue = _merged_remediation_issue()
+
+    class CommitAwareGitLab(FakeGitLab):
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            return (mr_iid, sha) == (269, "c" * 40)
+
+    class CollidingRepository(FakeRepository):
+        def fresh_issue_branch_available(self, issue_iid: int) -> bool:
+            assert issue_iid == 197
+            return False
+
+    gitlab = CommitAwareGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=269, state="merged", source_branch="agent/issue-158", sha="d" * 40
+    )
+    repository = CollidingRepository(config)
+    repository.worktree_present = False
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
+    assert blocked.work_kind is WorkKind.EXISTING_MR_REMEDIATION
+    assert repository.refreshed == 1
+    assert repository.prepared is False
+
+
+@pytest.mark.parametrize("retained_evidence", ("receipt", "intent", "worktree"))
+def test_blocked_merged_remediation_keeps_retained_work_blocked(
+    tmp_path: Path, retained_evidence: str
+) -> None:
+    """Authored or in-progress work cannot be silently requeued."""
+    config = _config(tmp_path)
+    retained_issue = _merged_remediation_issue().model_copy(
+        update={"labels": ("agent::blocked",)}
+    )
+    fresh_issue = _merged_remediation_issue(iid=200, mr_iid=278)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    updates: dict[str, object] = {
+        "issue_iid": 197,
+        "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+        "source_branch": "agent/issue-158",
+        "worktree": config.state_root / "worktrees" / "197",
+        "source_sha": "c" * 40,
+        "merge_request_iid": 269,
+        "error_code": ErrorCode.REMEDIATION_MR_MISMATCH,
+    }
+    if retained_evidence == "receipt":
+        updates["receipts"] = (
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="Retained work was authored.",
+            ),
+        )
+    elif retained_evidence == "intent":
+        updates["intent"] = TransitionIntentRecord(
+            operation_id="197:prepare:retained",
+            kind="prepare_worktree",
+        )
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update=updates)
+    )
+
+    class CommitAwareGitLab(FakeGitLab):
+        def fetch_merge_request(self, iid: int) -> MergeRequestEvidence:
+            return _mr(
+                iid=iid,
+                state="merged",
+                source_branch="agent/issue-158",
+                sha="d" * 40,
+            )
+
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            return mr_iid in {269, 278} and sha == "c" * 40
+
+    gitlab = CommitAwareGitLab(fresh_issue)
+    gitlab.issues[197] = retained_issue
+
+    class RecordAwareRepository(FakeRepository):
+        def worktree_exists(self, worktree: Path) -> bool:
+            return retained_evidence == "worktree" and worktree.name == "197"
+
+    repository = RecordAwareRepository(config)
+
+    selected = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert selected is not None and selected.issue_iid == 200
+    assert selected.state is RunnerState.EXECUTING
+    assert ledger.load(197) == record
+    assert repository.refreshed == 1
+
+
+def test_unknown_marker_commit_cannot_create_an_issue_branch(tmp_path: Path) -> None:
+    """No fresh branch is allowed without exact merged origin provenance."""
+    config = _config(tmp_path)
+    issue = _merged_remediation_issue()
+
+    class CommitAwareGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(issue)
+            self.commit_checks: list[tuple[int, str]] = []
+
+        def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+            self.commit_checks.append((mr_iid, sha))
+            return False
+
+    gitlab = CommitAwareGitLab()
+    gitlab.existing_mr = _mr(
+        iid=269,
+        state="merged",
+        source_branch="agent/issue-158",
+        sha="d" * 40,
+    )
+    repository = FakeRepository(config)
+
+    blocked = run_segment(
+        ledger=JsonLedger(config.state_root, clock=lambda: NOW),
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=FakeInvoker(),  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.REMEDIATION_MR_MISMATCH
+    assert repository.prepared is False
+    assert repository.refreshed == 0
+    assert gitlab.commit_checks == [(269, "c" * 40)]
 
 
 def test_prepare_rejects_non_descendant_locally_then_selects_a_fresh_issue(
