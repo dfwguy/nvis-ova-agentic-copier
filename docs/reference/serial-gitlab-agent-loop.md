@@ -130,6 +130,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | Before work selection | Reconciles prerequisite-label projections for split children. If it fixes projection drift, it does only that work. It does not claim a dependent issue, create a ledger record or worktree, or start a worker. A partial remote failure is retryable, and it is safe to repeat the reconciliation. |
 | Without `--apply` | Reports each current and intended prerequisite-label projection but makes no writes. |
 | Open factory MR awaiting review | `AGENT_WORK_FACTORY_USERNAME` is needed and must equal the authenticated GitLab service username. The loop reads bounded general comments and inline discussion replies. New human feedback wakes only that issue for existing-MR remediation. It acknowledges no-change feedback once. Code changes reuse the same MR and preserve its title, description, and closing reference. |
+| Finding against a merged MR | An open finding issue with an exact remediation marker starts ordinary work on a fresh `agent/issue-<IID>` branch from refreshed `main` only after the runner verifies the configured project, source branch, target branch, and that the marker commit belongs to the merged MR. The merged MR remains context for the finding; publication uses the new issue's branch and MR. A blocked mismatch with no retained worktree may be rechecked against the same evidence. Missing or ambiguous evidence stays blocked. |
 
 The tables list the commands and their use.
 
@@ -1091,6 +1092,7 @@ rules keep the view clear.
 | --- | --- |
 | New-MR work | Each new-MR work kind, including protected policy work, enters `ready_to_publish` only when the envelope returns a non-empty `merge_request_draft`, or the ledger already has one. |
 | Existing-MR remediation | It may omit a draft because it publishes only to the verified existing MR. |
+| Finding against a merged MR | It follows ordinary new-MR publication and needs a draft. The original merged MR is not updated. |
 | Legacy ordinary record | A `PUBLISHING` or `READY_TO_PUBLISH` record with `source_sha`, no draft, and `intent=null` returns to its lane finalizer without side effects. The runner never makes a draft from issue text. |
 | Stale-record check | Before retry, worker, worktree-baseline, push, or MR creation handling, an ordinary stale record may reconcile work already published. The runner lists every open MR for its recorded source branch in the configured numeric project. An empty list follows the ordinary recovery path. |
 | Nonempty MR list | It must have exactly one MR with the recorded branch, configured target branch and project on both sides, its exact source SHA, and GitLab's closing relation to the issue. The durable worktree must resolve to that branch and SHA. |

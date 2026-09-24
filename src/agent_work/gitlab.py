@@ -1518,6 +1518,30 @@ class GitLabGateway:
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid merge request data") from error
 
+    def merge_request_contains_commit(self, mr_iid: int, sha: str) -> bool:
+        """Verify an exact SHA in the configured project's MR commit inventory."""
+        if mr_iid <= 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise GitLabError("invalid merge request commit identity")
+        endpoint = f"projects/{self._config.project_id}/merge_requests/{mr_iid}/commits"
+        for page in range(1, _MAX_MERGE_REQUEST_PAGES + 1):
+            commits = self._items(
+                self._call(endpoint, fields=("per_page=100", f"page={page}")),
+                "merge request commits",
+            )
+            ids = tuple(commit.get("id") for commit in commits)
+            if any(
+                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
+                for value in ids
+            ):
+                raise GitLabError(
+                    "GitLab returned invalid merge request commit identity"
+                )
+            if sha in ids:
+                return True
+            if len(commits) < 100:
+                return False
+        raise GitLabError("GitLab returned too many merge request commit pages")
+
     def find_merge_request_by_branch(self, branch: str) -> MergeRequestEvidence | None:
         """Return the newest exact source-branch MR."""
         payload = self._call(
