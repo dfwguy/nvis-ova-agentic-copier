@@ -135,6 +135,13 @@ the exact repeatable `argv`, `expected_failure`, and changed `test_paths` fields
 in that file. Architect checks that the accepted Red command, failure marker,
 and paths match it. Architect then selects the exact mode-specific boundary.
 
+Before accepting the Diátaxis Writer handoff, get its exact changed Markdown
+paths. If there are none, record readability as N/A. Otherwise, run
+`uv run python -m agent_work.readability --root . --scope files --paths`
+with those paths. Return failures to Diátaxis Writer for repair in its owned
+files, then check again. Record the command and result with its receipt.
+This check does not replace the independent validation Judge.
+
 In ordinary interactive work, send the accepted evidence and exact approved
 test paths to Main. Main alone stages only those paths and creates the local
 failing-test checkpoint:

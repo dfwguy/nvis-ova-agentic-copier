@@ -49,6 +49,10 @@ Keep the goal in view.
    aligns the draft with the final interface before review.
 5. Regenerate the affected type landing page and `docs/index.md` when a page
    is added, removed, renamed, retyped, or its summary changes.
+6. Send Architect the exact changed Markdown paths in your receipt. Architect
+   checks their readability before accepting the handoff. Repair any failure
+   in files you own, then send the updated paths back for another check. If
+   you changed no Markdown files, report readability as N/A.
 
 ## Output
 

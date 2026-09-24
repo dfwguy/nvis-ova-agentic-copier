@@ -36,7 +36,12 @@ Use plain words. State the next step.
    configuration or source. Do not document speculative behavior.
 5. Preserve mirror parity and smoke-render rendered content when required by
    `.agents/project.md`.
-6. Receive one consolidated finalizer result. Repair all resolvable findings
+6. Before handoff, run
+   `uv run python -m agent_work.readability --root . --scope files --paths`
+   with each changed Markdown file you own. Repair failures in owned files.
+   Include the command and result in your receipt.
+   If you changed no Markdown files, report readability as N/A.
+7. Receive one consolidated finalizer result. Repair all resolvable findings
    in one pass. Return complete evidence to the still-live Architect.
 
 ## Output
