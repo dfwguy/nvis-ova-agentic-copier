@@ -682,3 +682,23 @@ def test_recovery_prompt_exposes_retained_checkpoint_without_publication_authori
     assert TREE_OID in prompt and CHECKPOINT_REF in prompt
     assert "restore" in prompt.casefold()
     assert "Do not commit, push, approve, or merge" in prompt
+
+
+def test_retained_red_provenance_contract_preserves_complete_identity() -> None:
+    """Feedback repair must carry every retained Red identity field unchanged."""
+    checkpoint = _evidence()
+    identity = checkpoint.model_dump(mode="json")
+    assert identity == {
+        "schema_version": 1,
+        "project_id": 310967,
+        "issue_iid": 81,
+        "source_branch": "agent/issue-81",
+        "base_sha": BASE_SHA,
+        "tree_oid": "b" * 40,
+        "ref": CHECKPOINT_REF,
+        "test_paths": [TEST_PATH],
+        "argv": ["uv", "run", "pytest", f"{TEST_PATH}::test_red"],
+        "exit_code": 1,
+        "expected_failure": "assert 1 == 2",
+        "output_sha256": hashlib.sha256(b"assert 1 == 2\n").hexdigest(),
+    }

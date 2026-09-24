@@ -2736,3 +2736,17 @@ def test_worker_prompt_marks_selected_feedback_and_excludes_later_unseen_work() 
     assert [note["id"] for note in feedback["notes"]] == [1]
     assert feedback["context_truncated"] is False
     assert feedback["omitted_future_note_count"] == 1
+
+
+def test_feedback_repair_prompt_separates_retained_red_from_fresh_merge_proof() -> None:
+    """Existing-MR repair must identify historical Red evidence separately."""
+    prompt = build_worker_prompt(
+        {"phase": "workflow", "repair_kind": "existing_merge_request"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+        merge_request_feedback=(),
+    )
+    assert "retained Red-to-source provenance" in prompt
+    assert "fresh three-way" in prompt
+    assert "human approval" in prompt

@@ -296,3 +296,17 @@ def test_worker_prompt_routes_the_live_producer_through_the_private_broker() -> 
     assert "private scratch" in prompt and "one corrected request" in prompt
     for forbidden in ("audit_summary",):
         assert forbidden not in prompt
+
+
+def test_worker_prompt_keeps_human_approval_and_merge_outside_the_guarded_worker() -> (
+    None
+):
+    """Workers may repair and propose; only humans approve or merge."""
+    prompt = build_worker_prompt(
+        {"phase": "workflow", "repair_kind": "existing_merge_request"},
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=600,
+    )
+    assert "Do not commit, push, approve, or merge" in prompt
+    assert "human approval" in prompt

@@ -290,13 +290,7 @@ def refresh_publication_correction_identity(
     """Replace a correction snapshot after an authorized worker attempt."""
     if record.correction_identity is None:
         return record
-    checkpoint = (
-        None
-        if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None
-        else load_red_checkpoint(
-            record.project_id, record.issue_iid, record.source_sha or ""
-        )
-    )
+    checkpoint = _retained_red_checkpoint(record, load_red_checkpoint)
     try:
         identity = build_publication_correction_identity(
             record,
@@ -306,6 +300,35 @@ def refresh_publication_correction_identity(
     except (RepositoryError, SegmentError):
         return None
     return record.model_copy(update={"correction_identity": identity})
+
+
+def _retained_red_checkpoint(
+    record: LedgerRecord,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> RedCheckpointEvidence | None:
+    """Resolve trusted Red provenance across an existing-MR source update."""
+    if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None:
+        return None
+    if record.source_sha is not None:
+        current = load_red_checkpoint(
+            record.project_id, record.issue_iid, record.source_sha
+        )
+        if current is not None:
+            return current
+    audit = record.audit_evidence
+    checkpoint = None if audit in {None, "unknown"} else audit.red_checkpoint
+    if checkpoint is None:
+        return None
+    if (
+        checkpoint.project_id != record.project_id
+        or checkpoint.issue_iid != record.issue_iid
+        or checkpoint.source_branch != record.source_branch
+    ):
+        return None
+    reloaded = load_red_checkpoint(
+        record.project_id, record.issue_iid, checkpoint.base_sha
+    )
+    return reloaded if reloaded == checkpoint else None
 
 
 AUTOMATIC_REPAIR_MAX_ATTEMPTS = 3
@@ -2624,11 +2647,8 @@ def _execute(
                 summary="Publication correction workflow lane is unknown.",
             )
         retained_checkpoint = (
-            load_red_checkpoint(record.project_id, record.issue_iid, record.source_sha)
-            if load_red_checkpoint is not None
-            and record.phase is WorkflowPhase.WORKFLOW
-            and record.workflow_lane is not WorkflowLane.CONTENT
-            and record.source_sha is not None
+            _retained_red_checkpoint(record, load_red_checkpoint)
+            if record.phase is WorkflowPhase.WORKFLOW
             else None
         )
         if (
@@ -2824,13 +2844,8 @@ def _execute(
                 if checkpoint_request is None:
                     raise RedCheckpointError("red checkpoint request is missing")
                 try:
-                    retained_checkpoint = (
-                        load_red_checkpoint(
-                            record.project_id, record.issue_iid, record.source_sha
-                        )
-                        if load_red_checkpoint is not None
-                        and record.source_sha is not None
-                        else None
+                    retained_checkpoint = _retained_red_checkpoint(
+                        record, load_red_checkpoint
                     )
                     if retained_checkpoint is None:
                         raise RedCheckpointError("checkpoint did not reload")
@@ -3172,13 +3187,9 @@ def _execute(
                     retry_delay=timedelta(),
                 )
             try:
-                if (
-                    load_red_checkpoint is not None
-                    and result.workflow_lane is WorkflowLane.CODING
-                    and record.source_sha is not None
-                ):
-                    retained_checkpoint = load_red_checkpoint(
-                        record.project_id, record.issue_iid, record.source_sha
+                if result.workflow_lane is WorkflowLane.CODING:
+                    retained_checkpoint = _retained_red_checkpoint(
+                        record, load_red_checkpoint
                     )
                     validate_worker_result(
                         record,

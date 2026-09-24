@@ -1265,11 +1265,13 @@ def build_worker_result(
             red_checkpoint.project_id != record.project_id
             or red_checkpoint.issue_iid != record.issue_iid
             or red_checkpoint.source_branch != record.source_branch
-            or red_checkpoint.base_sha != record.source_sha
             or not expected_paths
             or (
                 initial_ordinary_candidate
-                and not expected_paths.issubset(changed_paths)
+                and (
+                    red_checkpoint.base_sha != record.source_sha
+                    or not expected_paths.issubset(changed_paths)
+                )
             )
         ):
             raise WorkerProtocolError(
@@ -1802,6 +1804,9 @@ def build_worker_prompt(
             "Do not create or update child issues, do not execute proposed slices "
             "in this worker, and do not automatically retry. "
             f"{coding_checkpoint_workflow}"
+            "For existing-MR feedback repair, retain the exact retained Red-to-source provenance "
+            "separately from fresh three-way reconciliation proof; never substitute one for the other. "
+            "Human approval remains required before publication or merge. "
             "After the trusted coding checkpoint is present, Architect remains live: it delegates conditional $agent-policy-writer "
             "with its design and acceptance criteria, receives its receipt or N/A, then delegates Green and Diátaxis Writer concurrently "
             "with the design, Red receipt, failing-test diff, and shared worktree. The Policy Writer exclusively owns policy paths. "
