@@ -403,6 +403,13 @@ returns to recovery.
 
 ## Design Process
 
+For each recovery plan, ask if its cause can recur after merge. State the
+answer and proof in the design. Keep a lasting support path only for a state
+that can recur. Name its owner, behavior tests, and ongoing contract. If a
+saved case cannot recur, use a bounded operational repair of its records or
+data, or build the needed work anew in the current workflow. Keep all
+safeguards. Fix a bug that can recur, even if one saved case exposed it.
+
 1. **Know the need** — Restate it in your own words. Ask the user about any
    unclear point.
 2. **Read the codebase** — Read the files that show its shape, norms, and limits.

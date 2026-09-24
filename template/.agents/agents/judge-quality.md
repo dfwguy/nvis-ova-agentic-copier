@@ -92,6 +92,11 @@ Effects, Efficiency and Maintenance, and Clarity. Report a result for every
 applicable convention section in each loaded `.agents/lang/` file. Apply the
 severity taxonomy to every finding.
 
+For a lasting recovery path, check proof its cause can recur after merge.
+Check its owner, behavior tests, and ongoing contract. A path for one saved
+case is **Major** and requires `Overall: Reject`. Send the design change
+through Green to Architect. A bug that can recur may still need a lasting fix.
+
 ## Output format
 
 Start with one compact scope record. Preserve these field names and do not add
