@@ -41,11 +41,22 @@ Use plain words. State the next step.
    with each changed Markdown file you own. Repair failures in owned files.
    Include the command and result in your receipt.
    If you changed no Markdown files, report readability as N/A.
-7. Receive one consolidated finalizer result. Repair all resolvable findings
+7. Check that every dirty, staged, or untracked path is in the approved scope.
+   In interactive work, stop for unrelated work. Stage only exact approved
+   paths with `git add -- <approved-path>...`. Check for unstaged or untracked
+   maintained files. Record `git write-tree`, the base commit, changed paths,
+   and base-to-tree diff for the read-only judge and Finalizer. In
+   reconciliation, also record the source, target, and joined-tree proof.
+   After a fix, stage a new tree and get a fresh review. In serial work, do
+   not stage or call `git write-tree`. Report edited paths and source checks;
+   the controller checks changed paths after worker exit.
+8. Receive one consolidated finalizer result. Repair all resolvable findings
    in one pass. Return complete evidence to the still-live Architect.
 
 ## Output
 
 Return the changed-file list, source-of-truth comparisons, and mirror status.
 Return the `DIATAXIS.md` documentation change report when applicable. Report
-unresolved or repeated findings instead of starting another repair.
+the interactive staged tree and clean-tree proof when applicable. Report
+unresolved or
+repeated findings instead of starting another repair.

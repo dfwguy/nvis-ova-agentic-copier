@@ -148,7 +148,7 @@ role is N/A only when facts show it does not apply.
 | Red and policy preparation | `$tdd-red`, conditional `$agent-policy-writer` | Red establishes the exact mode-specific checkpoint first. Serial work runs only Red before the producer-owned trusted result boundary. Policy preparation finishes before implementation. |
 | Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. After both stop editing, interactive Main stages their combined candidate; serial Green requests controller-owned staging. |
 | Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
-| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
+| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, interactive-only `$consistency-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
@@ -238,6 +238,24 @@ data from trusted code. Model prose cannot prove a pass in either mode.
 Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
 not be waived.
+
+In interactive work, use `$consistency-judge` when a copied fact changes.
+This includes a capability map, count, enum, limit, name, path, schema,
+command, version, or root/template
+contract. Run it if unsure. Else record exactly
+`$consistency-judge: not applicable — <reason>`. Give it the design, base
+commit, staged tree OID, changed paths, and base-to-tree diff. Get its receipt
+for that tree before finalization. A new tree voids approval. In reconciliation,
+give it the source, target, and joined tree too. In serial work, record exactly
+`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+Do not claim exact-tree review from worker prose or a broker response.
+
+Keep the Consistency Judge verdict or exact N/A as an internal review receipt.
+For guarded template updates, `WORKFLOW_RECEIPTS` in
+`src/agent_work/state_machine.py` fixes the top-level tuple. Put the judge
+verdict and evidence inside the existing `$tdd-finalizer:` completion receipt
+and durable audit. Do not add a top-level tuple item. Review prose is not
+controller program authorization.
 
 After interactive Judge success, the workflow owner starts a ledger session
 from a separate trusted controller checkout with `bin/agent-work-from-checkout
@@ -394,16 +412,38 @@ and merge. The timer remains irrelevant. Keep each proof. Check each result.
 | Publication setup | `$git-flow` | Main owns branch and publication preflight. |
 | Design | `$architect` | Content/mirror design and final decision. |
 | Writing | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
-| Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, and source-of-truth verdict. |
+| Consistency review | Interactive-only conditional `$consistency-judge` | Read-only comparison of changed repeated facts on Writer's exact staged tree. Serial work records the exact boundary-unavailable N/A. |
+| Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, and source-of-truth verdict. |
 | Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after every MR update. |
 
 Writer needs the approved content design and shared worktree. Its receipt lists
 edits, source-of-truth comparisons, mirrors, the documentation report, and
-validation. Scope expansion returns here for coding reclassification.
+validation. Writer checks all dirty paths against approved scope. In interactive
+work, unrelated work stops staging. Writer stages only exact approved paths.
+No maintained file may be unstaged or untracked. Writer records `git write-tree`.
+The review gets that tree, the design, base commit, changed paths, and
+base-to-tree diff. In reconciliation, it also gets the source, target, and
+joined tree. In serial work, Writer neither stages nor calls `git write-tree`;
+the controller checks changed paths after worker exit. Scope growth returns
+here for coding reclassification.
 
-Finalizer receives that report, the final diff, and applicable Diátaxis or
-policy context. It returns one consolidated verdict here. After approval,
+In interactive work, use the same judge rule as in coding. If unsure, run it.
+If false, record
+exactly `$consistency-judge: not applicable — <reason>`. Its receipt must name
+Writer's staged tree. Architect sends content findings to Writer. After a fix,
+Writer stages a new tree. The judge checks it again before finalization. In
+serial work, record exactly
+`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+
+For guarded template updates, put the judge verdict or exact N/A and its
+evidence inside the existing `$documentation-finalizer:` completion receipt
+and durable audit. Do not add a top-level `WORKFLOW_RECEIPTS` tuple item.
+The internal review does not grant controller program authority.
+
+Finalizer receives that report, the final diff, the consistency receipt or
+exact N/A, and applicable Diátaxis or policy context. It returns one
+consolidated verdict here. After approval,
 `$git-flow` returns commit, push, and verified MR evidence. Pipeline Judge
 returns its own post-publication receipt. A Writer or Finalizer rejection goes
 back to Writer only for an approved fix that makes real progress.

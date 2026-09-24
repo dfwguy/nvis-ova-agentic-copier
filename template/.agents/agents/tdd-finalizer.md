@@ -28,8 +28,15 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 1. Check for the Judge's current non-functional child receipt and each needed
    specialist-review receipt, including the current approving license receipt. Check the
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
-   matching the final policy diff. Check the writer's final docs and README
-   receipt. Check the Diátaxis and README Judge verdicts against the staged
+   matching the final policy diff. Get the Consistency Judge receipt or
+   Architect's exact `$consistency-judge: not applicable — <reason>`.
+   In serial work, require the exact
+   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+   An interactive receipt must approve the final staged tree and name its base
+   and tree
+   OID. In reconciliation, it also names source, target, and joined-tree proof.
+   Check the writer's final docs and README receipt. Check the Diátaxis and
+   README Judge verdicts against the staged
    tree. Check that both writers stopped before the applicable staging
    boundary, including after a fix. Check the correction ledger and allowed
    N/A records. In serial work, use the existing repair ledger.
@@ -57,8 +64,9 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    verdicts to the final diff. Do not rerun language commands, suites, or
    pre-commit.
 4. Last, for interactive work, require `git write-tree` to match Judge's tree
-   ID. No maintained file may be unstaged or untracked. For serial work,
-   require the controller's tree and changed-path proof.
+   ID and the Consistency Judge's tree OID when applicable. No maintained
+   file may be unstaged or untracked. For serial work, require the
+   controller's tree and changed-path proof.
    Do not run worker-side Git staging or `git write-tree`.
 5. In coding reconciliation, require the captured old source SHA, exact target
    SHA, mechanically re-proved retained Red-to-source provenance, and fresh
@@ -109,6 +117,11 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 Approve only when all evidence and the exact-tree check pass. Else reject to
 Green or Architect with the missing or stale proof. A draft-safety verdict does
 not approve merge.
+
+For a guarded template update, put the judge verdict or exact N/A and its proof
+in the existing `$tdd-finalizer:` completion receipt and durable audit. Never
+add a top-level `WORKFLOW_RECEIPTS` tuple item for this judge. This review does
+not grant controller program authority.
 
 ## Constraints
 
