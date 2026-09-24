@@ -1230,8 +1230,10 @@ def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
         "check_boundary() {\n"
         '  [ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] &&\n'
         '  [ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] &&\n'
-        '  [ "$GIT_CONFIG_VALUE_0" = "" ] &&\n'
-        '  [ "$GIT_CONFIG_VALUE_1" = \'!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"\' ] &&\n'
+        '  [ -z "${GIT_CONFIG_COUNT:-}" ] &&\n'
+        '  [ -z "${GIT_CONFIG_KEY_0:-}" ] &&\n'
+        '  [ -z "${GIT_CONFIG_VALUE_0:-}" ] &&\n'
+        '  [ -n "$AGENT_WORK_GIT_CREDENTIAL_HELPER" ] &&\n'
         '  [ "$GIT_ASKPASS" = /bin/false ] &&\n'
         '  [ -z "${GIT_CONFIG_PARAMETERS:-}" ]\n'
         "}\n"
@@ -1246,7 +1248,10 @@ def test_agent_loop_wrapper_uses_one_checkout_env_for_authenticated_boundaries(
         commands / "uv",
         '[ "$GITLAB_TOKEN" = "$TEST_SENTINEL" ] || exit 29\n'
         '[ "$GITLAB_HOST:$GITLAB_PROJECT_ID" = "gitlab.example.test:123" ] || exit 30\n'
-        '[ "$GIT_CONFIG_VALUE_1" = \'!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"\' ] || exit 31\n'
+        '[ -z "${GIT_CONFIG_COUNT:-}" ] || exit 31\n'
+        '[ -z "${GIT_CONFIG_KEY_0:-}" ] || exit 34\n'
+        '[ -z "${GIT_CONFIG_VALUE_0:-}" ] || exit 35\n'
+        '[ -n "$AGENT_WORK_GIT_CREDENTIAL_HELPER" ] || exit 36\n'
         '[ "$GIT_ASKPASS" = /bin/false ] || exit 32\n'
         '[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || exit 33\n'
         'printf "runner:ok\\n" >> "$STAGE_MARKER"\n'

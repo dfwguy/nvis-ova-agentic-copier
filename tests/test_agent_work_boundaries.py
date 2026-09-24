@@ -588,9 +588,10 @@ def test_discovery_and_git_repository_use_recorded_executables_and_environment(
     git_call = calls[-1]
     assert git_call[0][0] == str(git)
     assert "not-in-argv" not in " ".join(git_call[0])
-    assert (
-        git_environments[-1]["GIT_CONFIG_VALUE_1"]
-        == '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"'
+    assert "GIT_CONFIG_COUNT" not in git_environments[-1]
+    assert not any(
+        key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+        for key in git_environments[-1]
     )
     assert git_environments[-1]["AGENT_WORK_GIT_CREDENTIAL_HELPER"] == str(
         config.checkout / "src" / "agent-work-git-credential.sh"
@@ -777,20 +778,13 @@ def test_git_credential_environment_disables_prompts_and_uses_only_repository_he
 
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert environment["GCM_INTERACTIVE"] == "never"
-    assert environment["GIT_CONFIG_COUNT"] == "4"
-    assert environment["GIT_CONFIG_KEY_0"] == "credential.helper"
-    assert environment["GIT_CONFIG_VALUE_0"] == ""
-    assert environment["GIT_CONFIG_KEY_1"] == "credential.helper"
-    assert (
-        environment["GIT_CONFIG_VALUE_1"] == '!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"'
+    assert "GIT_CONFIG_COUNT" not in environment
+    assert not any(
+        key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for key in environment
     )
     assert environment["AGENT_WORK_GIT_CREDENTIAL_HELPER"] == str(credential_helper)
-    assert environment["GIT_CONFIG_KEY_2"] == "credential.useHttpPath"
-    assert environment["GIT_CONFIG_VALUE_2"] == "true"
     assert environment["GIT_ASKPASS"] == "/bin/false"
     assert environment["SSH_ASKPASS"] == "/bin/false"
-    assert environment["GIT_CONFIG_KEY_3"] == "core.askPass"
-    assert environment["GIT_CONFIG_VALUE_3"] == "/bin/false"
     assert environment["GITLAB_TOKEN"] == "secret-value"
     assert "GIT_CONFIG_PARAMETERS" not in environment
 

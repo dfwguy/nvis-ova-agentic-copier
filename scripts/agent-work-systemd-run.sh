@@ -91,39 +91,36 @@ case "$agent_name" in
 esac
 require_path AGENT_WORK_DIRENV
 
-git=("$AGENT_WORK_GIT" -c core.hooksPath=/dev/null)
 checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
 credential_helper="$checkout/src/agent-work-git-credential.sh"
 if [[ ! -f "$credential_helper" || -L "$credential_helper" || ! -x "$credential_helper" ]]; then
   stop 'repository Git credential helper must be an executable regular file'
 fi
 export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
-export GIT_CONFIG_COUNT=4 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
-export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
-export GIT_CONFIG_KEY_1=credential.helper
-export GIT_CONFIG_VALUE_1="!exec \"\$AGENT_WORK_GIT_CREDENTIAL_HELPER\""
+export GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
 export AGENT_WORK_GIT_CREDENTIAL_HELPER="$credential_helper"
-export GIT_CONFIG_KEY_2=credential.useHttpPath GIT_CONFIG_VALUE_2=true
-export GIT_CONFIG_KEY_3=core.askPass GIT_CONFIG_VALUE_3=/bin/false
 unset GIT_CONFIG_PARAMETERS
+git=("$AGENT_WORK_GIT" -c core.hooksPath=/dev/null
+  -c credential.helper= -c "credential.helper=!exec \"$AGENT_WORK_GIT_CREDENTIAL_HELPER\""
+  -c credential.useHttpPath=true -c core.askPass=/bin/false)
 authenticated() {
   local bounded=false
   if [[ "${1:-}" == --housekeeping ]]; then
     bounded=true
     shift
   fi
-  local command=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env -u GIT_CONFIG_PARAMETERS
+  local command=("$AGENT_WORK_DIRENV" exec "$checkout" /usr/bin/env
+    -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS
+    -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0
+    -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1
+    -u GIT_CONFIG_KEY_2 -u GIT_CONFIG_VALUE_2
+    -u GIT_CONFIG_KEY_3 -u GIT_CONFIG_VALUE_3
     "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" \
     "AGENT_WORK_FACTORY_USERNAME=$factory_username" \
     "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" \
     "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never" \
     "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false" \
-    "GIT_CONFIG_COUNT=4" "GIT_CONFIG_KEY_0=credential.helper" \
-    "GIT_CONFIG_VALUE_0=" "GIT_CONFIG_KEY_1=credential.helper" \
-    "GIT_CONFIG_VALUE_1=!exec \"\$AGENT_WORK_GIT_CREDENTIAL_HELPER\"" \
-    "AGENT_WORK_GIT_CREDENTIAL_HELPER=$credential_helper" \
-    "GIT_CONFIG_KEY_2=credential.useHttpPath" "GIT_CONFIG_VALUE_2=true" \
-    "GIT_CONFIG_KEY_3=core.askPass" "GIT_CONFIG_VALUE_3=/bin/false")
+    "AGENT_WORK_GIT_CREDENTIAL_HELPER=$credential_helper")
   if "$bounded"; then
     housekeeping "${command[@]}" "$@"
   else
