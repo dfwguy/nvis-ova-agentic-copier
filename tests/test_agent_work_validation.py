@@ -17,8 +17,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from string import ascii_letters, digits
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agent_work import validation
 from agent_work.ledger import state_home
@@ -32,6 +35,8 @@ from agent_work.validation import (
 
 _CANDIDATE = "a" * 40
 _OTHER_CANDIDATE = "b" * 40
+_PARAM_ID_FIRST = ascii_letters + digits + "_-"
+_PARAM_ID_REST = _PARAM_ID_FIRST + "."
 
 
 @pytest.mark.parametrize("environment", ({}, {"XDG_STATE_HOME": ""}))
@@ -279,6 +284,96 @@ def test_success_junit_timing_summary_is_bounded_and_durable() -> None:
         "tests.test_module::test_slow"
     )
     assert "private-secret" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize(
+    ("safe_name", "unsafe_name"),
+    [
+        ("test_case[linux-x86_64]", "test_case[/home/private]"),
+        ("tests.test_module::test_case[py3.11]", "test_case[../private]"),
+        ("tests/test_module.py::test_case[case_2]", "test_case[foo/../bar]"),
+        ("test_case[42]", "test_case[.hidden]"),
+        ("test_case[alpha]", "test_case[foo bar]"),
+        ("test_case[alpha]", "test_case[foo\nbar]"),
+        ("test_case[alpha]", "test_case[foo\\bar]"),
+        ("test_case[alpha]", "test_case[foo]suffix"),
+        ("test_case[alpha]", "test_case[[nested]]"),
+        ("test_case[alpha]", "test_case[unclosed"),
+        ("test_case[alpha]", "test_case[]"),
+        ("test_case[alpha]", "test_case[" + "x" * 256 + "]"),
+        ("test_case[alpha]", "tests/../private::test_case[alpha]"),
+        ("test_case[alpha]", "/private::test_case[alpha]"),
+    ],
+)
+def test_parameterized_junit_name_accepts_safe_id_and_rejects_unsafe_variant(
+    safe_name: str, unsafe_name: str
+) -> None:
+    assert validation.is_safe_junit_test_name(safe_name)
+    assert not validation.is_safe_junit_test_name(unsafe_name)
+
+
+@given(
+    first=st.sampled_from(tuple(_PARAM_ID_FIRST)),
+    rest=st.text(alphabet=_PARAM_ID_REST, max_size=148),
+    unsafe=st.sampled_from(("/", "\\", " ", "\t", "\n", "[", "]")),
+)
+def test_generated_parameter_id_safety_invariant(
+    first: str, rest: str, unsafe: str
+) -> None:
+    safe_id = first + rest
+    assert validation.is_safe_junit_test_name(f"test_case[{safe_id}]")
+    assert not validation.is_safe_junit_test_name(f"test_case[{first}{unsafe}{rest}]")
+    assert not validation.is_safe_junit_test_name(f"test_case[.{safe_id}]")
+
+
+def test_parameterized_junit_failure_evidence_retains_only_safe_names() -> None:
+    artifact = (
+        b"<testsuite tests='4' failures='4' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_case[linux-x86_64]'>"
+        b"<failure/></testcase>"
+        b"<testcase classname='tests.test_module' name='test_case[../private]'>"
+        b"<failure/></testcase>"
+        b"<testcase classname='/private' name='test_case[alpha]'>"
+        b"<failure/></testcase>"
+        b"<testcase classname='tests.test_module' name='test_case[unclosed'>"
+        b"<failure/></testcase></testsuite>"
+    )
+    state = ValidationStateFake()
+    dependencies, _calls, _reads = _diagnostic_dependencies(
+        state, artifacts={Path("test-results-py311.xml"): artifact}
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.failed_tests == ("tests.test_module::test_case[linux-x86_64]",)
+    assert state.records[_CANDIDATE]["failed_tests"] == [
+        "tests.test_module::test_case[linux-x86_64]"
+    ]
+
+
+def test_parameterized_junit_timing_evidence_retains_only_safe_names() -> None:
+    artifact = (
+        b"<testsuite tests='4' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_case[linux-x86_64]' time='4'/>"
+        b"<testcase classname='tests.test_module' name='test_case[../private]' time='3'/>"
+        b"<testcase classname='/private' name='test_case[alpha]' time='2'/>"
+        b"<testcase classname='tests.test_module' name='test_case[unclosed' time='1'/>"
+        b"</testsuite>"
+    )
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    dependencies = replace(dependencies, read_artifact=lambda _path: artifact)
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.junit_timings[0].total_seconds == 10.0
+    assert [case.name for case in report.junit_timings[0].slowest_cases] == [
+        "tests.test_module::test_case[linux-x86_64]"
+    ]
 
 
 def test_junit_evidence_drops_absolute_and_traversal_classnames() -> None:

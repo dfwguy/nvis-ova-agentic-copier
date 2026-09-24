@@ -69,7 +69,10 @@ _CANONICAL_HOOK_LINE = re.compile(
     r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+:[0-9]+:[0-9]+: (?:[A-Z][0-9]{1,5}|[a-z][a-z0-9-]*))$"
 )
 _FALLBACK_HOOK_LINE = "No safe structured diagnostic available."
-_SAFE_TEST_NAME = re.compile(r"^(?:[A-Za-z0-9_./:-]+::)?test_[A-Za-z0-9_./:-]{1,150}$")
+_SAFE_TEST_NAME = re.compile(
+    r"^(?:[A-Za-z0-9_./:-]+::)?test_[A-Za-z0-9_./:-]{1,150}"
+    r"(?:\[[A-Za-z0-9_-][A-Za-z0-9_.-]{0,149}\])?$"
+)
 _SECONDS = re.compile(r"^[0-9]+(?:\.[0-9]{1,6})?$")
 
 
