@@ -252,7 +252,7 @@ if [[ "${1:-}" != --apply ]]; then
 else
   refresh_base
 fi
-if ! authenticated --housekeeping "$AGENT_WORK_GIT" -c core.hooksPath=/dev/null -C "$checkout" \
+if ! authenticated --housekeeping "${git[@]}" -C "$checkout" \
   push --dry-run origin "HEAD:refs/heads/agent/readiness" >/dev/null 2>&1; then
   stop 'Git credential-helper publication readiness check failed'
 fi
