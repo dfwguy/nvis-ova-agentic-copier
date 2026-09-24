@@ -59,6 +59,7 @@ from .models import (
     SplitPlan,
     TransitionIntentRecord,
 )
+from .outcome_projection import replay_outcome_projection
 from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
 from .red_checkpoint import (
     RedCheckpointError,
@@ -1497,6 +1498,11 @@ def select_record(
     records = ledger.list_records()
     if any(record.project_id != project.id for record in records):
         raise SegmentError("ledger record belongs to another project")
+    for record in records:
+        projection = record.outcome_projection
+        if projection is not None and not projection.note_complete:
+            replay_outcome_projection(record, ledger=ledger, gitlab=gitlab)
+            return None, None
     scheduler_plan = plan_scheduler_inventory(records, now=now)
     if scheduler_plan.project_stop is not None and not (
         allow_pinned_conflict and issue_iid is not None

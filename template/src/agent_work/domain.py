@@ -309,6 +309,14 @@ def sanitize_diagnostic(value: str, *, limit: int = _DIAGNOSTIC_MAX_BYTES) -> st
     return encoded[:limit].decode("utf-8", errors="ignore")
 
 
+def sanitize_outcome_note_field(value: str) -> str:
+    """Return the exact bounded text shown in a structured outcome note."""
+    return (
+        sanitize_diagnostic(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value), limit=512)
+        or "Not recorded."
+    )
+
+
 class PipelineJobEvidence(_Evidence):
     """One validated GitLab job from an exact pipeline inventory."""
 
