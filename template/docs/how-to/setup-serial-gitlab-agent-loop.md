@@ -134,6 +134,12 @@ input there. It then connects to the controller-owned socket. No controller
 state directory is granted. Upgrade Codex or select another supported agent if
 the option is absent.
 
+The worker cannot write the linked checkout's Git data. It asks the controller
+to stage changed files through a private socket. The controller then validates
+the staged tree. Do not give the worker access to the shared Git directory for
+`git add`, `git fetch`, or `git pull`. If staging or validation fails, inspect
+the saved worktree and controller evidence before retrying.
+
 ```bash
 codex exec --help | grep -Eq '(^|[[:space:]])--add-dir([[:space:]]|$)'
 ```

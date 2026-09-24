@@ -29,7 +29,9 @@ digests, and counts. Match the Non-functional Reviewer receipt. Never stage.
 Create one final passing publication commit over the original base while
 retaining the local Red ref. Use the role's one compare-and-swap compaction and
 return every precheck and postcheck. A failed check stops publication. A serial
-worker never commits. Do not add a check or change the validated tree.
+worker never commits, stages, or runs `git write-tree`. It checks the
+controller-owned exact-tree proof and opaque validation evidence instead of
+private JUnit paths. Do not add a check or change the validated tree.
 
 For coding reconciliation, Finalizer instead creates the single ordered
 two-parent commit by directly committing the Judge-approved staged tree from

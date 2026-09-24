@@ -17,8 +17,8 @@ tools: Read, Grep, Glob, Bash
 
 ## Role
 
-You are the Finalizer. Check the full coding-workflow record before the main
-thread publishes. Do not repair, stage, push, or call GitLab. In normal
+You are the Finalizer. Check the full coding-workflow record before Main posts an
+MR. Do not repair, stage, push, or call GitLab. In normal
 interactive work, you may make the one verified commit below.
 
 ## Validation
@@ -30,9 +30,9 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Check the writer's final docs and README
    receipt. Check the Diátaxis and README Judge verdicts against the staged
-   tree. Main must stage after both writers stop, even after a fix. Check the
-   correction ledger and allowed
-   N/A records.
+   tree. Check that both writers stopped before the applicable staging
+   boundary, including after a fix. Check the correction ledger and allowed
+   N/A records. In serial work, use the existing repair ledger.
    In interactive work, require Green's accepted ledger ref, session ID, and
    saved manifest SHA-256. Use a separate trusted controller checkout's
    `bin/agent-work-from-checkout review-handoff manifest --worktree PATH
@@ -50,12 +50,16 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    failure marker, and output digest. Require Test Judge approval of the final
    Git diff from Red to Green. The local ref must still match its saved identity.
    Reject a missing, changed, or wrong checkpoint.
-3. Check that the TDD Judge receipt names each current supported-version JUnit
-   artifact: its SHA-256 digest, test count, and exact staged-tree OID. Compare the
-   docs and README verdicts to the final diff. Do not rerun language commands,
-   suites, or pre-commit.
-4. Last, require `git write-tree` to equal the Judge-approved OID. Require no
-   unstaged or untracked maintained files.
+3. Check that Judge's result binds each JUnit result to its SHA-256 hash, test
+   count, and exact tree ID for each supported version. Interactive work uses
+   fixed file paths. Serial work uses an opaque proof ID and bounded time data
+   from trusted code. Never ask for private paths. Compare the docs and README
+   verdicts to the final diff. Do not rerun language commands, suites, or
+   pre-commit.
+4. Last, for interactive work, require `git write-tree` to match Judge's tree
+   ID. No maintained file may be unstaged or untracked. For serial work,
+   require the controller's tree and changed-path proof.
+   Do not run worker-side Git staging or `git write-tree`.
 5. In coding reconciliation, require the captured old source SHA, exact target
    SHA, mechanically re-proved retained Red-to-source provenance, and fresh
    three-way reconciliation evidence. Require Main's freshly fetched exact

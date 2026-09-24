@@ -95,12 +95,23 @@ The controller starts one session only after it selects the issue and prepares i
 
 | Lane | What runs, and when |
 | --- | --- |
-| Coding | The Architect delegates Red behavior tests first. After the accepted Red checkpoint and any policy preparation, Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. Main stages their combined work after both stop editing. Green coordinates review and routes documentation findings to the writer before returning final validation to the Architect. |
+| Coding | The Architect delegates Red behavior tests first. After the accepted Red checkpoint and any policy preparation, Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging through the private candidate socket. Green coordinates review and routes documentation findings to the writer before returning final validation to the Architect. |
 | Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
 Architecture, behavior tests, implementation, documentation, every applicable review role, license review, and final validation stay in the same session. The controller does not restore an individual Architect, writer, implementer, reviewer, or internal workflow stage after a crash.
 
-After Green and the Diátaxis Writer finish, Main stages one candidate. The Validation Judge runs alone against that tree. The Judge runs the hook. The Non-functional Reviewer then checks the JUnit results and the same staged tree. Green waits for both receipts before it starts the parallel specialist review. This review includes the Diátaxis, Quality, Test, and CI/CD Judges, the read-only README Reviewer, and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy Judges join when their topics apply. Each specialist sees the same staged tree, diff, and Judge evidence. Green waits for every receipt and routes findings to their file owners. The Architect then gets the full result and asks the Finalizer to act. Final validation uses current license evidence.
+After Green and the Diátaxis Writer finish, Green asks the private controller
+socket to stage their combined changes. The controller returns the tree ID.
+The Validation Judge uses that socket to ask the controller to run the hook
+against the tree and return bounded evidence. The Non-functional Reviewer then
+checks the JUnit summary and the same staged tree. Green waits for both
+receipts before it starts the parallel specialist review. This review includes
+the Diátaxis, Quality, Test, and CI/CD Judges, the read-only README Reviewer,
+and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy
+Judges join when their topics apply. Each specialist sees the same staged
+tree, diff, and Judge evidence. Green waits for every receipt and routes
+findings to their file owners. The Architect then gets the full result and
+asks the Finalizer to act. Final validation uses current license evidence.
 
 ## Recovery is coarse and observable.
 

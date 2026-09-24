@@ -73,19 +73,26 @@ request. Only accepted retained evidence may start the resumed segment,
 policy preparation, then concurrent Green and documentation writing. Green inspects the ordinary
 Git diff from that checkpoint before implementation and review.
 
-During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
-`uv run ty check`. It then runs focused behavior tests. Main waits until Green
-and the Diátaxis Writer stop editing, stages their combined exact candidate,
-and records its tree OID. Repeat this boundary after each correction. These
-fast commands are repair tools.
-Validation verifies the candidate. It owns the one expensive tox/full-suite
-run. In serial validation, Judge invokes exactly one mutation-gated durable validation
-session for that staged tree. The session runs the installed hook and persists
-evidence. Judge checks and returns the unchanged tree OID plus immutable
-supported-version JUnit snapshot paths and SHA-256 digests. It also returns
-test counts and its Non-functional Reviewer child receipt. Every coding
-candidate runs the full hook. Only then may Green start concurrent specialist
-reviews. Test Judge verifies the Red-to-Green Git diff. During finalization,
+During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`,
+and `uv run ty check`. It then runs focused behavior tests. The workflow owner
+waits until Green and the Diátaxis Writer stop editing. In interactive work, Main stages
+their combined exact candidate and records its tree OID. In serial work,
+Green requests staging through the controller-owned boundary while active;
+the controller observes and normalizes the exact worktree's changed paths,
+stages only allowed changes, and returns its tree OID. No model path list
+authorizes serial staging. Repeat the applicable boundary after each correction.
+
+These fast commands are repair tools. Validation verifies the candidate. It
+owns the one expensive tox/full-suite run. In serial work, Judge invokes the
+controller-owned durable validation and status boundary for that exact tree.
+The session runs the installed hook and persists evidence. The controller
+returns an unchanged-tree proof, opaque evidence identity, and bounded
+program-derived JUnit counts, digests, and timing summary without revealing
+controller-private snapshot paths. Interactive work keeps immutable JUnit
+snapshot paths, SHA-256 digests, and counts. Judge returns its Non-functional
+Reviewer child receipt. Every coding candidate runs the full hook. Only then
+may Green start concurrent specialist reviews. Test Judge verifies the
+Red-to-Green Git diff. During finalization,
 Finalizer checks that diff, checkpoint, and validation proof. In interactive
 work, it creates one final passing commit over the original base. It keeps the
 Red ref. Main publishes only that tip. Its history has one final commit over

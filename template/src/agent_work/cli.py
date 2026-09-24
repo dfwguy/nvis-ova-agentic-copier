@@ -121,6 +121,7 @@ from .worker import (
     build_worker_result,
     format_worker_result_diagnostic,
     parse_worker_result_build_input,
+    request_candidate_validation,
     submit_worker_result_to_broker,
 )
 
@@ -165,6 +166,19 @@ class _JUnitArtifact(Protocol):
     test_count: int
 
 
+class _SlowTestCase(Protocol):
+    name: str
+    seconds: float
+
+
+class _JUnitTiming(Protocol):
+    environment: str
+    total_seconds: float
+
+    @property
+    def slowest_cases(self) -> Sequence[_SlowTestCase]: ...
+
+
 class _ValidationReport(Protocol):
     """Bounded validation report consumed by CLI rendering."""
 
@@ -181,12 +195,22 @@ class _ValidationReport(Protocol):
     terminal: bool
     exit_code: int | None
     diagnostic: str | None
+    elapsed_seconds: float | None
+
+    @property
+    def failed_tests(self) -> Sequence[str]: ...
+
+    @property
+    def failed_junit_digests(self) -> Sequence[str]: ...
 
     @property
     def hook_failures(self) -> Sequence[_HookFailure]: ...
 
     @property
     def junit_artifacts(self) -> Sequence[_JUnitArtifact]: ...
+
+    @property
+    def junit_timings(self) -> Sequence[_JUnitTiming]: ...
 
 
 class _ValidationRunAction(Protocol):
@@ -486,6 +510,17 @@ class _AgentWorkParser(argparse.ArgumentParser):
             and (parsed.broker_socket is None or parsed.broker_nonce is None)
         ):
             self.error("--apply requires --broker-socket and --broker-nonce")
+        if (
+            (getattr(parsed, "resource", None), getattr(parsed, "action", None))
+            in {
+                ("candidate", "stage"),
+                ("candidate", "validate"),
+                ("candidate", "status"),
+            }
+            and parsed.apply
+            and (parsed.candidate_socket is None or parsed.broker_nonce is None)
+        ):
+            self.error("--apply requires --candidate-socket and --broker-nonce")
         return parsed
 
 
@@ -675,13 +710,17 @@ def build_parser() -> argparse.ArgumentParser:
     template_update_parser = template_actions.add_parser(
         "update",
         help="plan or apply one isolated recoverable Copier template update",
-        description="Dry-run is the default. --apply creates only a retained isolated worktree.",
+        description=(
+            "Dry-run is the default. --apply prepares and validates an isolated "
+            "update; a ready update with changes is published as a merge request "
+            "for human review."
+        ),
     )
     template_update_parser.add_argument("--candidate-revision", required=True)
     template_update_parser.add_argument("--project-root", type=Path, default=Path("."))
     _common(
         template_update_parser,
-        apply_help="apply one isolated Copier update after recording durable state",
+        apply_help="apply the update and publish ready changes for human review",
         debug_help="show a traceback on failure",
     )
     finding = resources.add_parser(
@@ -732,6 +771,35 @@ def build_parser() -> argparse.ArgumentParser:
         debug_help="retain bounded diagnostics on failure",
         json_help="emit the preview envelope or applied broker receipt as stable JSON",
     )
+    candidate = resources.add_parser(
+        "candidate", help="preview or request live controller candidate validation"
+    )
+    candidate_actions = candidate.add_subparsers(dest="action", required=True)
+    for action in ("stage", "validate", "status"):
+        candidate_action = candidate_actions.add_parser(
+            action,
+            help=f"preview or request live candidate {action}; --json selects JSON output",
+            description=(
+                f"Preview candidate {action} without --apply. A live request needs "
+                "--candidate-socket and --broker-nonce; --json selects JSON output."
+            ),
+        )
+        candidate_action.add_argument(
+            "--issue-iid", type=_positive_integer, required=True
+        )
+        candidate_action.add_argument("--candidate-socket", type=Path)
+        candidate_action.add_argument("--broker-nonce", type=_broker_nonce)
+        if action != "stage":
+            candidate_action.add_argument(
+                "--candidate-tree", type=_candidate_tree, required=True
+            )
+        _common(
+            candidate_action,
+            apply_help=(
+                f"send candidate {action} to the live private controller socket "
+                "instead of previewing"
+            ),
+        )
     merge_request = resources.add_parser(
         "merge-request", help="preview or publish one merge request"
     )
@@ -1446,6 +1514,7 @@ def main(
     ] = template_update.execute_template_update,
     template_update_dependencies: template_update.TemplateUpdateDependencies
     | None = None,
+    candidate_request: Callable[..., dict[str, object]] = request_candidate_validation,
     publish_template_update: Callable[..., object] | None = None,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
@@ -1828,6 +1897,20 @@ def main(
                 }
                 for failure in report.hook_failures
             ],
+            "failed_tests": list(report.failed_tests),
+            "failed_junit_digests": list(report.failed_junit_digests),
+            "elapsed_seconds": report.elapsed_seconds,
+            "junit_timings": [
+                {
+                    "environment": item.environment,
+                    "total_seconds": item.total_seconds,
+                    "slowest_cases": [
+                        {"name": case.name, "seconds": case.seconds}
+                        for case in item.slowest_cases
+                    ],
+                }
+                for item in report.junit_timings
+            ],
             "junit_artifacts": [
                 {
                     "environment": artifact.environment,
@@ -2000,6 +2083,57 @@ def main(
     ):
         write_stderr("--apply requires --plan-file")
         return 2
+    if parsed.resource == "candidate" and parsed.action in {
+        "stage",
+        "validate",
+        "status",
+    }:
+        if not parsed.apply:
+            preview = {
+                "action": parsed.action,
+                "applied": False,
+                "candidate_tree": getattr(parsed, "candidate_tree", None),
+                "issue_iid": parsed.issue_iid,
+                "state": "preview",
+            }
+            write_stdout(
+                json.dumps(preview, separators=(",", ":"), sort_keys=True)
+                if parsed.json
+                else " ".join(f"{key}={value}" for key, value in preview.items())
+            )
+            return 0
+        try:
+            receipt = candidate_request(
+                cast(Path, parsed.candidate_socket),
+                WorkerResultBrokerClientRequest(
+                    nonce=cast(str, parsed.broker_nonce), issue_iid=parsed.issue_iid
+                ),
+                action=parsed.action,
+                candidate_tree=getattr(parsed, "candidate_tree", None),
+            )
+        except WorkerProtocolError as error:
+            write_stderr(format_worker_result_diagnostic(error))
+            return 1
+        write_stdout(
+            json.dumps(receipt, separators=(",", ":"), sort_keys=True)
+            if parsed.json
+            else " ".join(
+                f"{key}={receipt[key]}"
+                for key in (
+                    "candidate_tree",
+                    "state",
+                    "changed_path_count",
+                    "evidence_id",
+                    "diagnostic",
+                )
+                if key in receipt and receipt[key] is not None
+            )
+        )
+        return (
+            0
+            if parsed.action == "stage" or receipt.get("state") == "terminal-success"
+            else 1
+        )
     if parsed.resource == "worker-result" and parsed.action == "build":
         try:
             input_bytes = read_bytes(parsed.input_file)

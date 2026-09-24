@@ -5,7 +5,7 @@ summary: Check a change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-24
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.

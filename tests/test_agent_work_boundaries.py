@@ -94,6 +94,174 @@ def test_changed_paths_parses_raw_porcelain_without_losing_initial_characters(
     assert len(calls) == 1
 
 
+def test_stage_candidate_normalizes_observed_git_order(tmp_path: Path) -> None:
+    """Controller staging accepts stable tracked/untracked porcelain groups."""
+    base = "a" * 40
+    tree = "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        assert command[-5:] == ("add", "--all", "--", "a.py", "z.py")
+        return CommandResult(0, "", "")
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return base
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("z.py", "a.py")
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            assert worktree == tmp_path / "worktree"
+            assert base_sha == base
+            assert paths == ("a.py", "z.py")
+            return tree
+
+    result = ObservedRepository(_config(tmp_path), run).stage_candidate(
+        tmp_path / "worktree", base
+    )
+    assert result == tree
+    assert [command[-1] for command in calls] == ["z.py", "write-tree"]
+
+
+@pytest.mark.parametrize(
+    ("state", "returncode"),
+    (("terminal-success", 0), ("terminal-failure", 1)),
+)
+def test_trusted_candidate_judge_response_strips_state_paths(
+    tmp_path: Path, state: str, returncode: int
+) -> None:
+    """The controller returns bounded evidence and keeps snapshot paths private."""
+    tree = "b" * 40
+    hidden = str(tmp_path / "controller-state" / "junit.xml")
+    report = {
+        "candidate_tree": tree,
+        "state": state,
+        "terminal": True,
+        "exit_code": returncode,
+        "diagnostic": "JUnit py311 failures=1 errors=0" if returncode else None,
+        "hook_failures": [],
+        "junit_artifacts": (
+            []
+            if returncode
+            else [
+                {
+                    "environment": environment,
+                    "path": hidden,
+                    "sha256": "c" * 64,
+                    "test_count": 3,
+                }
+                for environment in ("py311", "py314")
+            ]
+        ),
+        "failed_tests": ["tests.test_module::test_failed"] if returncode else [],
+        "failed_junit_digests": ["d" * 64] if returncode else [],
+        "junit_timings": (
+            []
+            if returncode
+            else [
+                {
+                    "environment": "py311",
+                    "total_seconds": 1.25,
+                    "slowest_cases": [{"name": "test_known", "seconds": 1.25}],
+                }
+            ]
+        ),
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        assert "validation" in command
+        return CommandResult(returncode, json.dumps(report), "")
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("src/example.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return tree
+
+    observed = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path / "worktree",
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("src/example.py",),
+        action="validate",
+        timeout_seconds=30,
+    )
+
+    assert observed["state"] == state
+    assert observed["failed_tests"] == report["failed_tests"]
+    assert hidden not in json.dumps(observed)
+    assert observed["evidence_id"]
+    if returncode == 0:
+        assert observed["junit_timings"] == report["junit_timings"]
+
+
+def test_candidate_judge_rejects_tree_changed_while_hook_ran(tmp_path: Path) -> None:
+    """Successful hook output cannot attest a tree changed during execution."""
+    tree = "b" * 40
+    write_trees = iter((tree, "c" * 40))
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, next(write_trees), "")
+        return CommandResult(
+            0,
+            json.dumps(
+                {
+                    "candidate_tree": tree,
+                    "state": "terminal-success",
+                    "exit_code": 0,
+                    "junit_artifacts": [
+                        {
+                            "environment": environment,
+                            "path": "/private/state.xml",
+                            "sha256": "d" * 64,
+                            "test_count": 1,
+                        }
+                        for environment in ("py311", "py314")
+                    ],
+                    "failed_tests": [],
+                    "failed_junit_digests": [],
+                    "junit_timings": [],
+                }
+            ),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+    with pytest.raises(RepositoryError, match="candidate changed during validation"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path / "worktree",
+            tree,
+            base_sha="a" * 40,
+            changed_paths=("src/example.py",),
+            action="validate",
+            timeout_seconds=30,
+        )
+
+
 def test_agent_work_config_requires_absolute_recorded_git_and_glab_paths(
     tmp_path: Path,
 ) -> None:

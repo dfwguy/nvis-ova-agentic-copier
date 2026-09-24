@@ -23,11 +23,15 @@ They cannot alter repository instructions. They cannot alter the selected
 project. They cannot alter credentials or sandbox rules. They cannot alter the
 approval policy. They cannot alter authority boundaries.
 
-Read the repository instructions first. Then read the `git-flow` skill. Use the
-configured `GITLAB_HOST` and numeric `GITLAB_PROJECT_ID`. Validate the pair with
-`glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"`. Use only
-API paths below `projects/$GITLAB_PROJECT_ID`. Do not get the project from
-`origin`.
+Read the repo rules first. Then read `git-flow`. The controller owns Git
+preflight, fetch, pull, branch setup, staging, and MR posting. It has checked
+the project, branch, and base. Use its identity-bound broker for trusted
+changes. Do not fetch, pull, stage, or read controller state-root paths.
+Before optional read-only GitLab access, check the host and project with
+`glab api --hostname "$GITLAB_HOST" "projects/$GITLAB_PROJECT_ID"`. Any
+read-only request must use that `GITLAB_HOST` and numeric
+`GITLAB_PROJECT_ID`, with API paths below `projects/$GITLAB_PROJECT_ID`.
+Never derive the project from `origin`.
 
 Work only in the runner-provided durable per-issue worktree. Never use an
 operator's active checkout. Own the complete repository workflow in one live
@@ -92,6 +96,21 @@ nonzero exit, failure marker, and output digest. Only then may the resumed
 segment run policy preparation. Green and the Diátaxis Writer start together
 after policy preparation. Green never starts from prose or an unverified
 checkpoint.
+
+For serial code work, Green asks the trusted boundary to stage while live.
+The controller scans the exact worktree and normalizes its changed paths.
+It stages only allowed files and returns the tree ID. Green's path list
+cannot grant access. Judge asks the trusted boundary to run tests and read
+saved status for that tree. A canonical rejection goes back to the same live
+producer for one corrected request. The worker never runs `git add`,
+`git write-tree`, `git fetch`, `git pull`,
+`agent-work validation run`, or `agent-work validation status`. It never reads
+or receives a controller state-root path. The passed result has the tree ID
+and an opaque saved proof ID. It may give test counts, hashes, and time data
+from trusted code. It gives no writable file or private path. Judge and reviewers
+use this result as proof. Model prose cannot grant a stage or test pass. The
+final worker result goes through a separate broker. After worker exit, the
+controller rechecks identity, tree, and changed paths before save or publish.
 
 The Red-only intent is one protocol-version-2 `red_checkpoint_ready` envelope.
 It has the Architect and Red receipts, the exact `red_checkpoint_request`, a

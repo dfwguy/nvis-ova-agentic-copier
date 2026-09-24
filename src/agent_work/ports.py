@@ -222,6 +222,19 @@ class RepositoryPort(Protocol):
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str: ...
 
+    def stage_candidate(self, worktree: Path, base_sha: str) -> str: ...
+
+    def judge_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        changed_paths: tuple[str, ...],
+        action: str,
+        timeout_seconds: int,
+    ) -> dict[str, object]: ...
+
     def observe_legacy_publication_candidate(
         self, worktree: Path
     ) -> LegacyPublicationCandidate: ...
@@ -288,6 +301,7 @@ class InvokerPort(Protocol):
         *,
         broker_request: WorkerResultBrokerRequest,
         build_artifact: Callable[[bytes], bytes],
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation: ...
 
 

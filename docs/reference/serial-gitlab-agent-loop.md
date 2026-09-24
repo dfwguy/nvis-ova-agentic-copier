@@ -84,6 +84,12 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
 agent-work validation run --candidate-tree TREE [--apply] [--json]
 agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
+agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
+                           [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate validate --issue-iid IID --candidate-tree TREE
+                              [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate status --issue-iid IID --candidate-tree TREE
+                            [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -109,6 +115,9 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
+| `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
+| `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
+| `candidate status` | Same identity and returned tree | Reads the durable result without rerunning the hook. |
 | `migration preview` | None | Returns the planned migration actions. |
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
@@ -248,9 +257,41 @@ already verified labels. Callers, not the CLI boundary, must verify labels
 before supplying `--label`. It never assigns, approves, or merges an issue.
 `--json` returns the bounded publication result.
 
+### Candidate stage, validate, and status
+
+For coding results, the serial worker uses private `candidate` commands in
+addition to its Red and worker-result boundaries. Each live request includes
+a nonce. A `stage` request has no model path list. The controller
+finds changed files, stages them outside the worker sandbox, and returns the
+tree ID and path count. `validate` requires that ID. It runs Judge while the
+producer is active. A failed result returns safe test names and JUnit digests
+when that evidence is available, so the producer can fix code and stage a new
+tree. `status` reads the saved
+result without another hook run. `validate` and `status` return an opaque
+evidence ID, test counts, digests, and hook time when available. For success,
+JUnit also gives
+total test time and the three slowest safe test names per Python version.
+These summaries remain in the saved record for later status reads. They
+contain no controller state or JUnit file path. After the worker exits, the
+controller checks the tree and changed files again before publication. It
+keeps no extra authorization ledger.
+
+The socket has a private directory and a fixed deadline. Frame size, total
+bytes, and request count have limits. Missing, replaced, malformed, late, or
+extra requests fail closed. A failed Judge result goes back to the same live
+producer for a fix within the worker budget. The worker must not run direct
+`validation` commands, stage through Git, or write controller state.
+
+Without `--apply`, each candidate command previews its action on standard
+output and does not contact the socket. `--json` selects JSON output. Live
+requests need both the socket and nonce. `validate` and `status` exit nonzero
+unless the saved result is terminal success. The worker uses `--apply --json`
+so it can parse the bounded response, including a failed validation result.
+
 ### `validation run` and `validation status`
 
-The Judge checks one staged candidate in a durable session keyed by `TREE`.
+The trusted controller or an interactive Judge checks one staged candidate in a
+durable session keyed by `TREE`.
 Use `validation run --candidate-tree TREE` to preview the action. It does not
 change state or start a hook without `--apply`.
 
@@ -286,9 +327,11 @@ The serialized evidence is at most 4096 UTF-8 bytes. A terminal record stores
 one snapshot. It never keeps history.
 
 The record and command output exclude raw standard output and standard error.
-They also exclude arbitrary source, messages, carets, context, test names,
-exception text, raw JUnit XML, environment values, prompts, credentials,
-secrets, controls, ANSI sequences, and unrecognized data.
+They also exclude arbitrary source, messages, carets, context, exception text,
+raw JUnit XML, environment values, prompts, credentials, secrets, controls,
+ANSI sequences, and unrecognized data. A failed JUnit artifact may contribute
+up to 16 safe `test_` names and two SHA-256 digests. The names and digests remain
+in the terminal record after the source XML is removed.
 
 Inspect an unchanged tree and JUnit evidence only after terminal zero. A
 terminal nonzero blocks that check. An existing record for the same candidate
@@ -308,7 +351,8 @@ read-only. Human output includes the optional diagnostic. A terminal failure
 with evidence also includes failed IDs and canonical lines. JSON exposes
 `diagnostic` as its canonical string or `null`, plus bounded `hook_failures`
 objects with `hook_id` and `diagnostic_lines`. Fields, flags, and exit codes do
-not otherwise change. Preview, running, terminal-success, and legacy
+not otherwise change. Terminal records also include elapsed hook time. Preview,
+running, terminal-success, and legacy
 terminal-failure results have no hook entries. Status reads legacy records that
 omit either field. An absent `diagnostic` is `null`: no diagnostic is available.
 
@@ -694,7 +738,7 @@ Use this note to review the shown work.
 | New work | Uses `WORKFLOW`. |
 | Approved design | Architect gives it to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
 | Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
-| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. Main stages their combined work and records one tree OID for the serial validation TDD Judge. |
+| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. In serial work, Green requests controller staging through the private candidate socket and receives one tree ID for Judge validation. In interactive work, Main stages their combined work and records its tree ID. |
 | Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
 | Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. |
 | Findings | Green combines all initial findings. |

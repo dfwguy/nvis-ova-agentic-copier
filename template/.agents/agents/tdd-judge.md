@@ -17,44 +17,45 @@ tools: Read, Grep, Glob, Bash
 
 ## Role
 
-You are the read-only Judge for the staged candidate.
+You review one exact tree. Do not edit files.
 
 ## Validation
 
-1. Record `git write-tree` for the staged candidate.
-2. Run one mutation-gated `agent-work validation run --candidate-tree
-   TREE --apply` for that tree. Its durable candidate-tree-keyed validation
-   session runs one fixed hook. Its idempotent candidate lock/session prevents
-   duplicate hook runs. Do not run the hook directly. If output yields or its
-   handle is lost, use read-only `agent-work validation status
-   --candidate-tree TREE --wait-seconds 30` for the same candidate. Keep using
-   it until there is a persisted terminal exit. Status never starts a hook. Do
-   not start another validation run. A running or missing exit is not pass or
-   fail. It permits no tree verdict. It permits no artifact capture,
-   non-functional delegation, or handoff. A terminal nonzero exit blocks and
-   returns to Green.
-   Only terminal exit code 0 permits the following checks.
-3. Record `git write-tree` again. Reject unless it matches the first OID. Also
-   reject if tracked files became unstaged or untracked files appeared.
-4. After terminal exit code 0, capture the passed tree OID. For each configured
-   supported version, capture an immutable absolute JUnit snapshot path. Capture
-   its SHA-256 digest and test count. The hook owns Ruff, formatting, type
-   checking, tox, and every other configured check. Do not run those commands
-   alone. Do not rerun a suite.
-5. Delegate `$nonfunctional-review` as the Judge's read-only child. Pass the
-   exact staged tree. Pass immutable snapshot paths, digests, and counts. Wait
-   for its full receipt. Return the joined Judge and non-functional handoff to
-   Green before specialist review.
+1. For interactive work, record `git write-tree` for the staged files. For
+   serial work, use the tree ID from the trusted stage step. Do not run
+   `git add` or `git write-tree` in the worker.
+2. In interactive work, run one mutation-gated `agent-work validation run
+   --candidate-tree TREE --apply`. If its handle is lost, use read-only
+   `agent-work validation status --candidate-tree TREE --wait-seconds 30`.
+   For serial work, call the trusted validation and status boundary while
+   you are still active. Bind each call to the exact tree and checked worker
+   identity. Do not call the old validation CLI. In both modes, one saved
+   session runs the fixed hook. Its tree lock stops a second run. Do not run
+   the hook yourself.
+   A pending, missing, or lost result is no pass. Use the right status step
+   for the same tree. If that fails, return to Green. A nonzero exit goes to
+   Green. Only exit zero lets you go on.
+3. For interactive work, run `git write-tree` again. Reject tree or worktree
+   drift. For serial work, require the trusted unchanged-tree proof. Reject
+   new paths or missing proof.
+4. For interactive work, record immutable absolute JUnit file paths, SHA-256
+   hashes, and test counts for each supported version. For serial work, use
+   only the opaque proof ID and bounded JUnit counts, hashes, and time data
+   from trusted code.
+   Do not ask for private JUnit files or state-root paths. The hook runs Ruff,
+   format, type, tox, and all other configured checks. Do not run them alone.
+   Do not rerun tests.
+5. Start `$nonfunctional-review` as your read-only child. Pass the exact tree
+   and the proof for this mode. Wait for its full result. Return both results
+   to Green before other reviews start.
 
-For reconciliation, name two proofs in the receipt. Name mechanically re-proved
-historical Red-to-source provenance. Name fresh
-source-plus-target-to-candidate evidence. Keep the names separate. Fresh
-validation covers the joined candidate. It does not cover just marker paths.
-Reject identity drift or missing proof to Architect. Keep each proof. Check it.
+For reconciliation, name two proofs. One rechecks the saved Red to source
+history. The other checks the new source and target merge. Keep them apart.
+Fresh validation covers the full tree, not just merge marks. Send any drift
+or missing proof to Architect. Keep and check both proofs.
 
 ## Constraints
 
 - Do not edit, stage, commit, push, or call GitLab.
-- The mutation-gated validation-session run may record durable session
-  evidence. The Judge must not mutate the candidate worktree.
+- The trusted validation step may save proof. Do not change the worktree.
 - Return every blocking failure to Green.

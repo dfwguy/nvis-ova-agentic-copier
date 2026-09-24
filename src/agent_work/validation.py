@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import tempfile
@@ -68,6 +69,8 @@ _CANONICAL_HOOK_LINE = re.compile(
     r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+:[0-9]+:[0-9]+: (?:[A-Z][0-9]{1,5}|[a-z][a-z0-9-]*))$"
 )
 _FALLBACK_HOOK_LINE = "No safe structured diagnostic available."
+_SAFE_TEST_NAME = re.compile(r"^(?:[A-Za-z0-9_./:-]+::)?test_[A-Za-z0-9_./:-]{1,150}$")
+_SECONDS = re.compile(r"^[0-9]+(?:\.[0-9]{1,6})?$")
 
 
 def _safe_path(value: str) -> bool:
@@ -75,6 +78,18 @@ def _safe_path(value: str) -> bool:
         _SAFE_PATH.fullmatch(value)
         and not value.startswith("/")
         and all(part not in {".", ".."} for part in value.split("/"))
+    )
+
+
+def is_safe_junit_test_name(value: str) -> bool:
+    """Allow only relative test identifiers, never private filesystem paths."""
+    if _SAFE_TEST_NAME.fullmatch(value) is None:
+        return False
+    classname, separator, test_name = value.rpartition("::")
+    if separator and not _safe_path(classname):
+        return False
+    return not test_name.startswith("/") and all(
+        part not in {".", ".."} for part in test_name.split("/")
     )
 
 
@@ -140,6 +155,40 @@ class _PersistedJUnitArtifact(BaseModel):
     test_count: int = Field(strict=True, ge=0, le=_MAX_COUNTER)
 
 
+@dataclass(frozen=True)
+class SlowTestCase:
+    """One safe test name and its observed JUnit duration."""
+
+    name: str
+    seconds: float
+
+
+@dataclass(frozen=True)
+class JUnitTiming:
+    """Bounded timing summary from one supported JUnit artifact."""
+
+    environment: Literal["py311", "py314"]
+    total_seconds: float
+    slowest_cases: tuple[SlowTestCase, ...]
+
+
+class _PersistedSlowCase(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: str
+    seconds: float = Field(ge=0, le=1_000_000)
+
+    def model_post_init(self, _context: object) -> None:
+        if not is_safe_junit_test_name(self.name):
+            raise ValueError("invalid slow test name")
+
+
+class _PersistedJUnitTiming(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    environment: Literal["py311", "py314"]
+    total_seconds: float = Field(ge=0, le=1_000_000)
+    slowest_cases: tuple[_PersistedSlowCase, ...] = Field(max_length=3)
+
+
 class _Record(BaseModel):
     """Bounded persisted state for a single staged tree."""
 
@@ -153,6 +202,10 @@ class _Record(BaseModel):
     diagnostic: str | None = None
     hook_failures: tuple[_PersistedHookFailure, ...] = ()
     junit_artifacts: tuple[_PersistedJUnitArtifact, ...] = ()
+    failed_tests: tuple[str, ...] = ()
+    failed_junit_digests: tuple[str, ...] = ()
+    elapsed_seconds: float | None = Field(default=None, ge=0, le=10_800)
+    junit_timings: tuple[_PersistedJUnitTiming, ...] = Field(default=(), max_length=2)
 
     def model_post_init(self, _context: object) -> None:
         terminal = self.state in {
@@ -217,6 +270,27 @@ class _Record(BaseModel):
             raise ValueError("invalid JUnit artifact evidence")
         if self.state != "terminal-success" and self.junit_artifacts:
             raise ValueError("invalid JUnit artifact evidence")
+        if self.state == "running" and self.elapsed_seconds is not None:
+            raise ValueError("running validation has no terminal timing")
+        if (
+            self.state != "terminal-success"
+            and self.junit_timings
+            or tuple(item.environment for item in self.junit_timings)
+            != tuple(sorted({item.environment for item in self.junit_timings}))
+        ):
+            raise ValueError("invalid JUnit timing evidence")
+        if (
+            self.state != "terminal-failure"
+            and (self.failed_tests or self.failed_junit_digests)
+            or len(self.failed_tests) > 16
+            or len(self.failed_junit_digests) > 2
+            or any(not is_safe_junit_test_name(name) for name in self.failed_tests)
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                for digest in self.failed_junit_digests
+            )
+        ):
+            raise ValueError("invalid failed JUnit evidence")
 
 
 @dataclass(frozen=True)
@@ -238,6 +312,10 @@ class JudgeValidationReport:
     diagnostic: str | None
     hook_failures: tuple[HookFailure, ...] = ()
     junit_artifacts: tuple[JUnitArtifact, ...] = ()
+    failed_tests: tuple[str, ...] = ()
+    failed_junit_digests: tuple[str, ...] = ()
+    elapsed_seconds: float | None = None
+    junit_timings: tuple[JUnitTiming, ...] = ()
 
     @property
     def exit_code(self) -> int | None:
@@ -424,6 +502,46 @@ def _junit_test_count(artifact: bytes | None) -> int | None:
     return total if total <= _MAX_COUNTER else None
 
 
+def _junit_timing_summary(
+    environment: Literal["py311", "py314"], artifact: bytes
+) -> _PersistedJUnitTiming | None:
+    """Summarize safe per-test time from one already bounded JUnit artifact."""
+    try:
+        root = ElementTree.fromstring(artifact)
+    except ElementTree.ParseError:
+        return None
+    total = 0.0
+    seen = 0
+    slowest: list[_PersistedSlowCase] = []
+    for case in root.iter():
+        if case.tag.rsplit("}", 1)[-1] != "testcase":
+            continue
+        raw_seconds = case.get("time", "")
+        if _SECONDS.fullmatch(raw_seconds) is None:
+            continue
+        seconds = float(raw_seconds)
+        if not math.isfinite(seconds) or seconds > 1_000_000:
+            continue
+        seen += 1
+        total += seconds
+        if total > 1_000_000:
+            return None
+        raw_name = case.get("name", "")
+        raw_class = case.get("classname", "")
+        name = f"{raw_class}::{raw_name}" if raw_class else raw_name
+        if is_safe_junit_test_name(name):
+            slowest.append(_PersistedSlowCase(name=name, seconds=round(seconds, 3)))
+    if not seen:
+        return None
+    return _PersistedJUnitTiming(
+        environment=environment,
+        total_seconds=round(total, 3),
+        slowest_cases=tuple(
+            sorted(slowest, key=lambda item: (-item.seconds, item.name))[:3]
+        ),
+    )
+
+
 def _junit_summaries(read_artifact: Callable[[Path], bytes | None]) -> tuple[str, ...]:
     """Read each fixed artifact once and return safe aggregate summaries."""
     summaries: list[str] = []
@@ -435,6 +553,44 @@ def _junit_summaries(read_artifact: Callable[[Path], bytes | None]) -> tuple[str
         if counts is not None:
             summaries.append(f"{label} failures={counts[0]} errors={counts[1]}")
     return tuple(summaries)
+
+
+def _failed_junit_evidence(
+    read_artifact: Callable[[Path], bytes | None],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Return bounded counts, names, and digests before failed artifacts are removed."""
+    summaries: list[str] = []
+    names: list[str] = []
+    digests: list[str] = []
+    for label, path in _JUNIT_ARTIFACTS:
+        try:
+            artifact = read_artifact(path)
+        except OSError:
+            continue
+        if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+            continue
+        counts = _junit_failure_counts(artifact)
+        if counts is None:
+            continue
+        summaries.append(f"{label} failures={counts[0]} errors={counts[1]}")
+        digests.append(hashlib.sha256(artifact).hexdigest())
+        try:
+            root = ElementTree.fromstring(artifact)
+        except ElementTree.ParseError:
+            continue
+        for case in root.iter():
+            if case.tag.rsplit("}", 1)[-1] != "testcase" or not any(
+                child.tag.rsplit("}", 1)[-1] in {"failure", "error"} for child in case
+            ):
+                continue
+            raw_name = case.get("name", "")
+            raw_class = case.get("classname", "")
+            name = f"{raw_class}::{raw_name}" if raw_class else raw_name
+            if is_safe_junit_test_name(name) and name not in names:
+                names.append(name)
+            if len(names) >= 16:
+                break
+    return tuple(summaries), tuple(names), tuple(digests)
 
 
 def _failure_diagnostic(returncode: int, summaries: tuple[str, ...]) -> str:
@@ -626,16 +782,34 @@ def _report(
         )
         if record.state == "terminal-success"
         else (),
+        record.failed_tests if record.state == "terminal-failure" else (),
+        record.failed_junit_digests if record.state == "terminal-failure" else (),
+        record.elapsed_seconds,
+        tuple(
+            JUnitTiming(
+                item.environment,
+                item.total_seconds,
+                tuple(
+                    SlowTestCase(case.name, case.seconds) for case in item.slowest_cases
+                ),
+            )
+            for item in record.junit_timings
+        )
+        if record.state == "terminal-success"
+        else (),
     )
 
 
-def _artifact_failure_record(candidate_tree: str, returncode: int | None) -> _Record:
+def _artifact_failure_record(
+    candidate_tree: str, returncode: int | None, elapsed_seconds: float | None = None
+) -> _Record:
     """Create a redacted terminal state for unusable or unpublishable evidence."""
     return _Record(
         candidate_tree=candidate_tree,
         schema_version=2,
         state="terminal-artifact-failure",
         returncode=returncode,
+        elapsed_seconds=elapsed_seconds,
     )
 
 
@@ -684,10 +858,16 @@ def run_judge_validation(
                 _artifact_failure_record(candidate_tree, None),
                 dependencies,
             )
+        started = dependencies.monotonic_clock()
         result = dependencies.run_command(("git", "hook", "run", "pre-commit"))
+        elapsed = round(
+            min(10_800.0, max(0.0, dependencies.monotonic_clock() - started)), 3
+        )
         if result.returncode != 0:
             try:
-                summaries = _junit_summaries(dependencies.read_artifact)
+                summaries, failed_tests, failed_digests = _failed_junit_evidence(
+                    dependencies.read_artifact
+                )
                 hook_failures = _canonical_hook_failures(
                     result.stdout, result.stderr, summaries
                 )
@@ -696,7 +876,9 @@ def run_judge_validation(
             except OSError:
                 return _write_terminal(
                     candidate_tree,
-                    _artifact_failure_record(candidate_tree, result.returncode),
+                    _artifact_failure_record(
+                        candidate_tree, result.returncode, elapsed
+                    ),
                     dependencies,
                 )
             return _write_terminal(
@@ -707,6 +889,9 @@ def run_judge_validation(
                     state="terminal-failure",
                     returncode=result.returncode,
                     diagnostic=_failure_diagnostic(result.returncode, summaries),
+                    failed_tests=failed_tests,
+                    failed_junit_digests=failed_digests,
+                    elapsed_seconds=elapsed,
                     hook_failures=tuple(
                         _PersistedHookFailure(
                             hook_id=item.hook_id, diagnostic_lines=item.diagnostic_lines
@@ -737,7 +922,7 @@ def run_judge_validation(
         if artifact_error:
             return _write_terminal(
                 candidate_tree,
-                _artifact_failure_record(candidate_tree, result.returncode),
+                _artifact_failure_record(candidate_tree, result.returncode, elapsed),
                 dependencies,
             )
         try:
@@ -760,7 +945,7 @@ def run_judge_validation(
         except (JudgeValidationError, OSError):
             return _write_terminal(
                 candidate_tree,
-                _artifact_failure_record(candidate_tree, result.returncode),
+                _artifact_failure_record(candidate_tree, result.returncode, elapsed),
                 dependencies,
             )
         return _write_terminal(
@@ -771,6 +956,17 @@ def run_judge_validation(
                 state="terminal-success",
                 returncode=0,
                 junit_artifacts=persisted,
+                elapsed_seconds=elapsed,
+                junit_timings=tuple(
+                    summary
+                    for environment, artifact, _count in captured
+                    if (
+                        summary := _junit_timing_summary(
+                            cast(Literal["py311", "py314"], environment), artifact
+                        )
+                    )
+                    is not None
+                ),
             ),
             dependencies,
         )

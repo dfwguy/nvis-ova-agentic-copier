@@ -25,26 +25,31 @@ Green owns production and test edits. Diátaxis Writer concurrently owns
 
 ## Model selection
 
-The live Architect delegates this work after policy preparation and the
-accepted mode-specific Red checkpoint, beside the Diátaxis Writer. It waits
-while Green coordinates review feedback. Use this skill's
-`metadata.model-tier`. The Architect router picks the mapping.
+The live Architect delegates this work after each needed preparation receipt
+or N/A and the accepted mode-specific Red checkpoint, beside the Diátaxis
+Writer. It stays live while Green coordinates review feedback. Use this
+skill's `metadata.model-tier`. The Architect router picks the mapping.
 
-For reconciliation, Green receives the mechanically re-proved retained Red
-checkpoint as the Red preparation receipt. It also receives exact source,
-target, and conflict manifest. It records fresh three-way evidence apart from
-historical Red-to-source provenance. Finalization directly commits the approved
-staged tree from the pending merge state. Do not compact a passing commit.
+For reconciliation, Green gets the rechecked Red proof, source, target, and
+conflict list. Keep new merge proof apart from the saved Red to source proof.
+Finalizer commits the passed staged tree from the pending merge. Do not fold
+another commit into it.
 
-Main stages the combined candidate tree only after Green and Diátaxis Writer
-stop editing. Green receives that tree before it delegates the serial
-validation Judge. Specialist review needs the Judge's
-validation-session receipt. That receipt has the unchanged tree OID, fixed
-version JUnit snapshots, SHA-256 digests, counts, and the
-`$nonfunctional-review` child receipt.
+The workflow owner waits for Green and Diátaxis Writer to stop editing. In interactive work, Main
+stages their combined candidate and returns the tree ID. In serial work,
+Green asks the trusted boundary to stage while still live. The controller
+scans the worktree, normalizes changed paths, stages only allowed files, and
+returns the tree ID. Green's path list cannot grant access. Green and Judge
+do not stage with Git or call the old validation CLI in a serial worker.
+Judge asks the trusted boundary to validate that exact tree and read its
+saved status. The result binds the unchanged tree to trusted JUnit counts,
+hashes, time data, and the `$nonfunctional-review` child result through an
+opaque proof ID. It does not give private JUnit paths to the worker.
+Interactive Judge evidence includes immutable supported-version JUnit
+snapshots, SHA-256 digests, counts, and the child receipt.
 
-After a change, Main waits for both writers to stop. It stages the new tree.
-Green gets a fresh Judge
-receipt before review or finalization. Each coding candidate needs the full
-hook. Green uses fast format, lint, and type commands for repair. The validation
-session owns one costly tox or full-suite check. It runs one hook.
+After a change, use the applicable staging boundary for a new tree. Get a
+fresh Judge receipt before review or finalization. Each coding candidate needs
+the full hook. Green uses fast format, lint, and type commands for repair.
+The trusted validation session owns one costly tox or full-suite check. It
+runs one hook.

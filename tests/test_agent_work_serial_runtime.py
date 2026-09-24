@@ -821,6 +821,28 @@ class FakeRepository:
         del worktree, base_sha, paths
         return self.candidate_tree
 
+    def stage_candidate(self, worktree: Path, base_sha: str) -> str:
+        del worktree
+        assert base_sha == self.current_head
+        return self.candidate_tree
+
+    def judge_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        changed_paths: tuple[str, ...],
+        action: str,
+        timeout_seconds: int,
+    ) -> dict[str, object]:
+        del worktree, timeout_seconds
+        assert action in {"validate", "status"}
+        assert candidate_tree == self.candidate_tree
+        assert base_sha == self.current_head
+        assert changed_paths == tuple(sorted(set(self.paths)))
+        return {"candidate_tree": candidate_tree, "state": "terminal-success"}
+
     def observe_legacy_publication_candidate(
         self, worktree: Path
     ) -> LegacyPublicationCandidate:
@@ -1066,6 +1088,7 @@ def _broker_invocation_from_intent(
     *,
     broker_request: WorkerResultBrokerRequest | None,
     build_artifact: Callable[[bytes], bytes] | None,
+    candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     returncode: int | None = 0,
 ) -> WorkerInvocation:
     """Model a producer submitting intent through the trusted live callback."""
@@ -1085,7 +1108,25 @@ def _broker_invocation_from_intent(
         artifact = build_artifact(json.dumps(intent).encode())
     except (TypeError, ValueError, WorkerProtocolError) as error:
         return WorkerInvocation(0, "untrusted stdout", str(error), worker_result=None)
-    return WorkerInvocation(0, "untrusted stdout", "", worker_result=artifact)
+    candidate = None
+    if (
+        candidate_action is not None
+        and payload.get("workflow_lane") == "coding"
+        and payload.get("result_kind") == "ready_to_publish"
+    ):
+        staged = candidate_action("stage", None)
+        tree = staged["candidate_tree"]
+        assert isinstance(tree, str)
+        validated = candidate_action("validate", tree)
+        if validated["state"] == "terminal-success":
+            candidate = tree
+    return WorkerInvocation(
+        0,
+        "untrusted stdout",
+        "",
+        worker_result=artifact,
+        validated_candidate=candidate,
+    )
 
 
 class FakeInvoker:
@@ -1109,6 +1150,7 @@ class FakeInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
@@ -1141,6 +1183,7 @@ class ProtocolFailureInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout, prompt, timeout, broker_request, build_artifact
         return WorkerInvocation(
@@ -1193,6 +1236,7 @@ class ArtifactInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout, build_artifact
         assert broker_request is not None
@@ -1295,6 +1339,7 @@ class BatchingInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
@@ -1372,6 +1417,7 @@ class BatchingInvoker:
             json.dumps(payload),
             broker_request=broker_request,
             build_artifact=build_artifact,
+            candidate_action=candidate_action,
         )
 
 
@@ -1380,9 +1426,16 @@ class SingleSessionInvoker:
 
     supports_worker_result_broker = True
 
-    def __init__(self, *, lane: str = "coding", needs_human: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        lane: str = "coding",
+        needs_human: bool = False,
+        validate_candidate: bool = True,
+    ) -> None:
         self.lane = lane
         self.needs_human = needs_human
+        self.validate_candidate = validate_candidate
         self.changed_paths: tuple[str, ...] = ()
         self.phases: list[str] = []
         self.checkouts: list[Path] = []
@@ -1399,6 +1452,7 @@ class SingleSessionInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del timeout
         self.checkouts.append(checkout)
@@ -1505,6 +1559,7 @@ class SingleSessionInvoker:
             json.dumps(payload),
             broker_request=broker_request,
             build_artifact=build_artifact,
+            candidate_action=(candidate_action if self.validate_candidate else None),
         )
 
 
@@ -1885,6 +1940,7 @@ class RedThenGreenInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
@@ -1918,6 +1974,7 @@ class RedThenGreenInvoker:
             timeout,
             broker_request=broker_request,
             build_artifact=build_artifact,
+            candidate_action=candidate_action,
         )
 
 
@@ -1942,6 +1999,7 @@ class RedThenGreenArtifactInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         assert broker_request is not None
         self.requests.append(broker_request)
@@ -1951,6 +2009,7 @@ class RedThenGreenArtifactInvoker:
             timeout,
             broker_request=broker_request,
             build_artifact=build_artifact,
+            candidate_action=candidate_action,
         )
 
 
@@ -1977,6 +2036,7 @@ class ProducerOwnedRedThenGreenInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
@@ -2016,6 +2076,7 @@ class ProducerOwnedRedThenGreenInvoker:
             timeout,
             broker_request=broker_request,
             build_artifact=build_artifact,
+            candidate_action=candidate_action,
         )
 
 
@@ -2064,6 +2125,37 @@ def test_red_checkpoint_is_persisted_while_the_producing_worker_is_active(
     assert result is not None and result.state is RunnerState.PUBLISHING
 
 
+def test_coding_publication_requires_controller_validated_candidate(
+    tmp_path: Path,
+) -> None:
+    """A model result alone cannot authorize publication of a coding tree."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/example.py", "tests/test_agent_work_serial_runtime.py")
+    invoker = SingleSessionInvoker(validate_candidate=False)
+    invoker.changed_paths = repository.paths
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    persisted = ledger.load_read_only(record.issue_iid)
+    assert outcome is not None and persisted is not None
+    assert outcome.state is not RunnerState.PUBLISHING
+    assert persisted.state is not RunnerState.PUBLISHING
+
+
 @pytest.mark.parametrize(
     "boundary_failure",
     (
@@ -2107,6 +2199,8 @@ def test_atomic_red_boundary_failure_leaves_no_coding_lane_or_checkpoint(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
         ) -> WorkerInvocation:
             del checkout, prompt, timeout
             assert broker_request is not None and build_artifact is not None
@@ -2180,6 +2274,7 @@ class CorrectionDriftInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout
         assert broker_request is not None and build_artifact is not None
@@ -7436,6 +7531,41 @@ def test_identity_artifact_defects_share_stable_repeat_retry_classification(
     assert (
         second.condition_history[-1].detail == "worker_result_broker: identity mismatch"
     )
+
+
+def test_worker_prompt_omits_controller_private_paths_in_workflow_and_recovery(
+    tmp_path: Path,
+) -> None:
+    """The model gets identity fields but no ledger or retained worktree path."""
+    private_root = tmp_path / "state" / "projects" / "project-id"
+    worktree = private_root / "worktrees" / "196"
+    base_record: dict[str, object] = {
+        "state": "executing",
+        "phase": "workflow",
+        "work_kind": "ordinary",
+        "worktree": str(worktree),
+        "summary": f"Review {private_root}/ledger.json",
+    }
+    recovery = base_record | {
+        "red_checkpoint": {
+            "tree_oid": "b" * 40,
+            "ref": "refs/agent-work/red/issue196",
+            "test_paths": ["tests/test_candidate.py"],
+        },
+        "next_action": f"Resume {worktree}",
+    }
+    for record in (base_record, recovery):
+        prompt = build_worker_prompt(
+            record,
+            project_id=310967,
+            issue_iid=196,
+            effective_worker_budget_seconds=1800,
+        )
+        assert str(private_root) not in prompt
+        assert str(worktree) not in prompt
+        assert "[controller-private]" in prompt
+        if record is recovery:
+            assert "refs/agent-work/red/issue196" in prompt
 
 
 def test_agent_invoker_worker_exit_redacts_prompt_credentials_and_controls(
@@ -16400,6 +16530,8 @@ def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> N
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
         ) -> WorkerInvocation:
             self.invocations += 1
             if self.invocations == 1:

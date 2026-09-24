@@ -138,14 +138,24 @@ intended_branch="clanker/<slug>"
 
 Only the serial `work-item-runner` may use `agent/issue-<iid>`. It uses that
 form in its configured dedicated checkout. It starts from the configured
-default branch. A runner child must mechanically check that checkout. It then
-continues its selected flow. Do not call `agent-work` again or create a branch.
+default branch. The controller mechanically checks that checkout before launch
+and after the worker exits. The worker consumes the controller's checked
+identity. Do not call `agent-work` recursively or create a branch.
 
-The coding agent in that runner is not the main agent for this lifecycle. Its
-runner-owned worker exception overrides this document's publication rules. It
-may edit and validate uncommitted work-tree changes only. Then it returns one
-delimited MR draft. Do not commit, push, create an MR, approve, or merge. The
-trusted runner checks that draft. It performs publication.
+The runner's coding agent does not own this Git lifecycle. The serial worker
+rule takes over this skill's publish steps. The worker may edit the worktree
+and ask the trusted controller to run tests. It sends one final result through
+the controller's broker. Do not commit, push, make an MR, approve, or merge.
+The trusted runner checks that result and posts the MR.
+
+The Git checks below belong to the controller. The serial worker does not
+fetch, pull, make a branch, or stage with Git. The controller gives it the
+checked checkout ID. For read-only GitLab access, the worker still checks the
+host and numeric project with the GitLab API step above. For Red capture,
+candidate staging, and tests, it uses the trusted identity-bound boundary.
+It cannot read controller state-root paths.
+
+The trusted controller performs these checks outside the worker:
 
 ```bash
 git rev-parse --abbrev-ref HEAD | grep -E '^agent/issue-[1-9][0-9]*$'
@@ -163,15 +173,16 @@ Only the serial runner uses this checked path. A normal checkout that finds an
 reserved form. The branch and its MR stay available at `awaiting_human`. GitLab
 is the durable handoff record.
 
-Run from the main thread with Bash:
+For ordinary interactive work, run from the main thread with Bash. In serial
+work, the controller supplies the checked branch identity:
 
 ```bash
 git rev-parse --abbrev-ref HEAD
 ```
 
-- **On a mechanically verified runner `agent/issue-<iid>` branch** → use the
-  checks above. They prove the durable Git worktree, configured project origin,
-  and configured default branch. Then continue the runner-selected phase on
+- **On a mechanically verified runner `agent/issue-<iid>` branch** → the
+  controller's checks prove the durable Git worktree, configured project origin,
+  and configured default branch. Continue the runner-selected phase on
   this branch. `agent-work loop run --apply` selected it. Never call
   `agent-work` recursively.
 
@@ -427,8 +438,8 @@ AI must never approve or merge the MR itself, so human review and merge
 determine whether the change lands. They do not prevent unrelated work.
 
 1. **Release the active checkout at the correct session boundary.** A serial-runner worker on an
-   `agent/issue-<IID>` branch ends immediately after returning its merge-request
-   draft; the trusted runner owns publication and preserves that branch for the
+   `agent/issue-<IID>` branch ends immediately after its accepted result;
+   the trusted runner owns publication and preserves that branch for the
    human handoff. In a normal user session, query the branch-specific MR first.
    Only after GitLab confirms that it is `merged` may a clean checkout return to
    an up-to-date `main`:

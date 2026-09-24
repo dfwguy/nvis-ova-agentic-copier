@@ -37,6 +37,7 @@ from agent_work.models import (
 )
 from agent_work.repository import CommandResult
 from agent_work.upstream_finding import UpstreamFindingPreview
+from agent_work.worker import WorkerResultBrokerClientRequest
 
 
 def test_human_status_renders_one_concise_answer_line_for_each_item() -> None:
@@ -278,6 +279,10 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
             diagnostic=None,
             hook_failures=(),
             junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
         )
 
     output: list[str] = []
@@ -300,7 +305,94 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
         "diagnostic": None,
         "hook_failures": [],
         "junit_artifacts": [],
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "elapsed_seconds": None,
+        "junit_timings": [],
     }
+
+
+def test_candidate_cli_previews_and_forwards_live_identity(
+    tmp_path: Path,
+) -> None:
+    """Preview is read-only; apply forwards identity and reports Judge failure."""
+    calls: list[tuple[Path, str, int, str, str | None]] = []
+    tree = "b" * 40
+    nonce = "0123456789abcdef" * 2
+    socket_path = tmp_path / "candidate.sock"
+
+    def request(
+        path: Path,
+        identity: WorkerResultBrokerClientRequest,
+        *,
+        action: str,
+        candidate_tree: str | None,
+    ) -> dict[str, object]:
+        calls.append(
+            (
+                path,
+                identity.nonce,
+                identity.issue_iid,
+                action,
+                candidate_tree,
+            )
+        )
+        return {
+            "candidate_tree": tree,
+            "state": "staged" if action == "stage" else "terminal-failure",
+            "failed_tests": ["tests.test_example::test_failure"],
+        }
+
+    output: list[str] = []
+    assert (
+        main(
+            ["candidate", "stage", "--issue-iid", "81", "--json"],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output.pop()) == {
+        "action": "stage",
+        "applied": False,
+        "candidate_tree": None,
+        "issue_iid": 81,
+        "state": "preview",
+    }
+    assert calls == []
+    common = [
+        "--issue-iid",
+        "81",
+        "--candidate-socket",
+        str(socket_path),
+        "--broker-nonce",
+        nonce,
+        "--apply",
+    ]
+    assert (
+        main(
+            ["candidate", "stage", *common],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert output.pop().startswith(f"candidate_tree={tree} state=staged")
+    assert (
+        main(
+            ["candidate", "validate", *common, "--candidate-tree", tree, "--json"],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 1
+    )
+    assert json.loads(output.pop())["failed_tests"] == [
+        "tests.test_example::test_failure"
+    ]
+    assert calls == [
+        (socket_path, nonce, 81, "stage", None),
+        (socket_path, nonce, 81, "validate", tree),
+    ]
 
 
 def test_validation_status_cli_never_treats_running_as_success() -> None:
@@ -320,6 +412,10 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
             diagnostic=None,
             hook_failures=(),
             junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
         )
 
     output: list[str] = []
@@ -362,6 +458,10 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
             exit_code=0,
             diagnostic=None,
             hook_failures=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=1.0,
+            junit_timings=(),
             junit_artifacts=(
                 SimpleNamespace(
                     environment="py311",
@@ -456,6 +556,10 @@ def test_validation_cli_projects_terminal_failure_diagnostic(
                 ),
             ),
             junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
         )
 
     output: list[str] = []
@@ -504,6 +608,10 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             diagnostic=None,
             hook_failures=(),
             junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
         )
 
     def validation_status(
@@ -520,6 +628,10 @@ def test_validation_cli_injects_distinct_typed_run_and_status_actions() -> None:
             diagnostic=None,
             hook_failures=(),
             junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=None,
+            junit_timings=(),
         )
 
     assert (

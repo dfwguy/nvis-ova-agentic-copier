@@ -62,32 +62,36 @@ not add untested functionality.
    Do not delegate another worktree mutator. Never edit root/template
    `AGENTS.md` or `.agents`. Send any policy need found in implementation to
    Architect.
-4. **Prepare one exact candidate.** Before the Judge candidate, run
-   `uv run python -m agent_work.readability --root . --scope files --paths`
-   with each changed Markdown file you own. Repair failures in owned files.
-   Record the command and result in your receipt. If you changed no Markdown
-   files, report readability as N/A. Run `uv run ruff check --fix`, `uv run
-   ruff format`, and `uv run ty check`. Run focused behavior tests. Wait for the
-   Diátaxis Writer to stop editing and return its receipt. Main stages the
-   combined exact candidate only after you also stop editing. Require no
-   unstaged or untracked maintained files. Get Main's `git write-tree` OID.
-   These fast commands repair the
-   candidate. The Judge checks it independently. Delegate only the validation
-   Judge. It starts exactly one durable `agent-work validation run
-   --candidate-tree TREE --apply`. Its guarded session runs the fixed internal
-   hook. It runs once. Green does not run a direct hook or full suite. Judge
-   does not run either. The Judge owns costly validation. It captures immutable
-   JUnit snapshots. It
-   delegates `$nonfunctional-review` as its read-only child. It must return the
-   same tree OID, snapshots, SHA-256 digests, test counts, and the
-   non-functional receipt.
+4. **Prepare one exact candidate.** Run `uv run ruff check --fix`, `uv run
+   ruff format`, and `uv run ty check`. Run focused behavior tests. Before
+   the Judge candidate, run `uv run python -m agent_work.readability --root .
+   --scope files --paths` with each changed Markdown file you own. Repair
+   failures in owned files and record the command and result. If you changed
+   no Markdown files, report readability as N/A. Wait for the Diátaxis Writer
+   to stop editing and return its receipt. In interactive work, stop editing
+   so Main can stage the combined exact candidate, require no unstaged or
+   untracked maintained files, and return its `git write-tree` OID. In serial
+   work, request staging through the controller-owned boundary while active.
+   The controller checks changed paths, stages only allowed files, and
+   returns the tree ID. Green's path list cannot grant access. The serial
+   worker must not stage with Git or run `git write-tree`. A rejection returns
+   to Green while live for one corrected request. These fast commands repair
+   the candidate. Delegate only Judge for the exact tree. In serial work,
+   Judge uses the trusted validation and status boundary, never the old
+   validation CLI. The trusted session runs the fixed hook once. Green and
+   Judge do not run a direct hook or full suite. Judge returns the same tree
+   ID. Interactive work keeps fixed JUnit snapshots and SHA-256 digests.
+   Serial work gets an opaque proof ID with bounded counts, hashes, and time
+   data from trusted code, never private JUnit paths. In either mode, Judge
+   delegates `$nonfunctional-review` and returns its receipt.
    Fan out the
    remaining read-only reviewers only after that combined approval. Do not fan
    out sooner. Do not continue sooner. Include every reviewer that applies.
 5. **Fan out review.** Start all remaining applicable reviewers in `AGENTS.md`
    at once when slots allow. Include `$license-checker`. Give
    each its related diff. Give each its instructions. Give each current
-   test/JUnit evidence. Reviewers are read-only. Wait for every result. Wait
+   test/JUnit evidence from the applicable mode. Reviewers are read-only.
+   Wait for every result. Wait
    even when one rejects. Keep each complete reviewer receipt as a direct
    AI-to-AI handoff. Do not ask reviewers to write files or call the ledger
    store. The first Quality Judge review must be independent.
@@ -109,11 +113,13 @@ not add untested functionality.
    Fix resolvable production and test findings. Use one pass. Send documentation
    and README findings through Architect to the Diátaxis Writer. Send policy
    findings through Architect to the Policy Writer. Never repair their files.
-   After both writers stop editing, Main stages the combined tree again. After correction,
+   After both writers stop editing, interactive Main stages the combined tree
+   again; serial Green requests controller-owned staging while live. After correction,
    rerun only reviewers whose finding was addressed. Rerun only reviewers whose
    owned domain/evidence changed. Rerun license review only when maintained in-scope
-   files changed after its approval. Each candidate-tree change needs a new staged
-   tree. It needs a fresh validation Judge receipt. Get it before dependent review.
+   files changed after its approval. Each candidate change needs a new tree
+   through the applicable staging boundary and a fresh validation Judge
+   receipt. Get it before dependent review.
    Get it before a Finalizer check. If behavior changes, rerun focused behavior
    tests. Do the same if tests change. Require the full installed hook from the
    validation session. Each coding candidate needs it. Before changing a
