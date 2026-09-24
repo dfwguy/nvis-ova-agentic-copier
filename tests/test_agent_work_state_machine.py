@@ -29,22 +29,14 @@ from agent_work.domain import (
     WorkKind,
 )
 from agent_work.models import (
-    AuditCapacity,
-    AuditReceiptSummary,
     DecisionReviewSignal,
     LedgerRecord,
     MergeRequestDraft,
     WorkerResultEnvelope,
+    WorkflowReceiptRecord,
     render_decision_review_notice,
 )
-from agent_work.state_machine import (
-    WORKFLOW_RECEIPTS,
-    WORKFLOW_REVIEWER_SKILLS,
-    apply_worker_result,
-    has_complete_workflow_receipt,
-    plan_retry,
-)
-from agent_work.worker import WorkerProtocolError, parse_worker_result
+from agent_work.state_machine import apply_worker_result, plan_retry
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
 
@@ -60,24 +52,6 @@ def _record(*, retry_count: int = 0) -> LedgerRecord:
         source_branch="agent/issue-12",
         worktree=Path("/state/worktrees/12"),
         retry_count=retry_count,
-    )
-
-
-def _coding_audit(receipts: tuple[str, ...]) -> AuditReceiptSummary:
-    """Build coherent protocol-v2 audit evidence for complete coding receipts."""
-    return AuditReceiptSummary(
-        lane="coding",
-        capacity=AuditCapacity(required=12, available=16, shortfall=0, decision="run"),
-        role_receipts=receipts,
-        changed_paths=("src/agent_work/state_machine.py",),
-        tests=("uv run pytest tests/test_agent_work_state_machine.py",),
-        reviewers=tuple(
-            receipt
-            for receipt in receipts
-            if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
-        ),
-        findings=(),
-        corrections=(),
     )
 
 
@@ -308,7 +282,6 @@ def _result(
         result_kind=kind,
         phase_status="complete",
         completed_phase=WorkflowPhase.CODING_GREEN,
-        receipts=("$tdd-green: green suite",),
         change_summary="Done.",
         next_action="Continue.",
     )
@@ -321,204 +294,44 @@ def test_ready_to_publish_advances_a_completed_green_phase() -> None:
     assert outcome.record.phase is WorkflowPhase.CODING_NONFUNCTIONAL
 
 
-def test_complete_coding_workflow_advances_directly_to_publication() -> None:
-    workflow = WorkflowPhase("workflow")
-    record = _record().model_copy(
+def test_complete_coding_workflow_uses_controller_state_not_historical_prose() -> None:
+    workflow = WorkflowPhase.WORKFLOW
+    base = _record().model_copy(
         update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
+    )
+    historical_receipt = WorkflowReceiptRecord(
+        phase=WorkflowPhase.WORKFLOW,
+        verdict="complete",
+        detail="$architect: model-authored historical prose",
+    )
+    records = (
+        base,
+        base.model_copy(
+            update={
+                "receipts": (historical_receipt,),
+                "audit_evidence": "unknown",
+            }
+        ),
     )
     result = _result("ready_to_publish").model_copy(
         update={
             "expected_phase": workflow,
             "completed_phase": workflow,
             "workflow_lane": WorkflowLane.CODING,
-            "protocol_version": 2,
-            "receipts": (
-                "$architect: approved",
-                "$tdd-red: red confirmed",
-                "$diataxis-writer: documentation reconciled",
-                "$agent-policy-writer: policy reconciled",
-                "$tdd-green: green confirmed and findings repaired",
-                "$tdd-judge: approved",
-                "$nonfunctional-review: approved",
-                "$diataxis-judge: approved",
-                "$judge-quality: approved",
-                "$judge-test: approved",
-                "$judge-cicd: approved",
-                "$tdd-document: approved",
-                "$cli-syntax-judge: not applicable — no CLI change",
-                "$filesystem-structure-judge: approved",
-                "$agent-policy-judge: not applicable — no agent policy change",
-                "$license-checker: approved",
-                "$tdd-finalizer: approved",
-            ),
             "merge_request_draft": MergeRequestDraft(
                 title="Complete issue 12", description="Validated.\n\nCloses #12"
             ),
-            "audit_summary": {
-                "lane": "coding",
-                "capacity": {
-                    "required": 12,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                "role_receipts": (
-                    "$architect: approved",
-                    "$tdd-red: red confirmed",
-                    "$diataxis-writer: documentation reconciled",
-                    "$agent-policy-writer: policy reconciled",
-                    "$tdd-green: green confirmed and findings repaired",
-                    "$tdd-judge: approved",
-                    "$nonfunctional-review: approved",
-                    "$diataxis-judge: approved",
-                    "$judge-quality: approved",
-                    "$judge-test: approved",
-                    "$judge-cicd: approved",
-                    "$tdd-document: approved",
-                    "$cli-syntax-judge: not applicable — no CLI change",
-                    "$filesystem-structure-judge: approved",
-                    "$agent-policy-judge: not applicable — no agent policy change",
-                    "$license-checker: approved",
-                    "$tdd-finalizer: approved",
-                ),
-                "changed_paths": ("src/agent_work/runtime.py",),
-                "tests": ("uv run tox",),
-                "reviewers": (
-                    "$tdd-judge: approved",
-                    "$nonfunctional-review: approved",
-                    "$diataxis-judge: approved",
-                    "$judge-quality: approved",
-                    "$judge-test: approved",
-                    "$judge-cicd: approved",
-                    "$tdd-document: approved",
-                    "$cli-syntax-judge: not applicable — no CLI change",
-                    "$filesystem-structure-judge: approved",
-                    "$agent-policy-judge: not applicable — no agent policy change",
-                ),
-                "findings": (),
-                "corrections": (),
-            },
         }
     )
 
-    outcome = apply_worker_result(record, result, now=NOW)
-
-    assert outcome.record.state is RunnerState.PUBLISHING
-    assert outcome.record.phase is WorkflowPhase.READY_TO_PUBLISH
-    assert outcome.record.audit_evidence is not None
-    assert outcome.record.audit_evidence != "unknown"
-    assert isinstance(result.audit_summary, dict)
-    incomplete_reviewers = dict(result.audit_summary)
-    incomplete_reviewers["reviewers"] = incomplete_reviewers["reviewers"][:-1]
-    with pytest.raises(ValueError, match="workflow audit is not coherent"):
-        apply_worker_result(
-            record,
-            result.model_copy(update={"audit_summary": incomplete_reviewers}),
-            now=NOW,
-        )
-
-    forged_reviewers = dict(result.audit_summary)
-    forged_reviewers["reviewers"] = tuple(
-        "$judge-test:" if reviewer.startswith("$judge-test:") else reviewer
-        for reviewer in forged_reviewers["reviewers"]
-    )
-    with pytest.raises(ValueError, match="workflow audit is not coherent"):
-        apply_worker_result(
-            record,
-            result.model_copy(update={"audit_summary": forged_reviewers}),
-            now=NOW,
-        )
-
-
-def test_reordered_complete_coding_receipts_do_not_authorize_publication() -> None:
-    """Durable coding receipts must retain the workflow's exact order."""
-    workflow = WorkflowPhase("workflow")
-    record = _record().model_copy(
-        update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
-    )
-    receipts = tuple(
-        f"{skill}: approved"
-        for skill in reversed(WORKFLOW_RECEIPTS[WorkflowLane.CODING])
-    )
-    result = _result("ready_to_publish").model_copy(
-        update={
-            "expected_phase": workflow,
-            "completed_phase": workflow,
-            "workflow_lane": WorkflowLane.CODING,
-            "protocol_version": 2,
-            "receipts": receipts,
-            "merge_request_draft": MergeRequestDraft(
-                title="Complete issue 12", description="Validated.\n\nCloses #12"
-            ),
-            "audit_summary": _coding_audit(receipts),
-        }
+    outcomes = tuple(
+        apply_worker_result(record, result, now=NOW).record for record in records
     )
 
-    with pytest.raises(ValueError, match="receipt is not coherent"):
-        apply_worker_result(record, result, now=NOW)
-
-
-def test_non_policy_coding_receipt_allows_policy_writer_not_applicable() -> None:
-    """A conditional Policy Writer records N/A without blocking ordinary coding."""
-    receipts = tuple(
-        f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
-
-    assert has_complete_workflow_receipt(record)
-
-
-def test_protected_policy_receipt_status_ignores_continuation_na() -> None:
-    """Only an exact policy receipt's header determines protected applicability."""
-    receipts = tuple(
-        (
-            f"{skill}: approved\nsub-check: not applicable — unrelated path"
-            if skill == "$agent-policy-writer"
-            else f"{skill}: approved"
-        )
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
-
-    assert has_complete_workflow_receipt(record, requires_policy_review=True)
-
-
-def test_protected_policy_receipt_rejects_not_applicable_header() -> None:
-    """Protected policy publication requires both policy-role receipts to apply."""
-    receipts = tuple(
-        f"{skill}: {'not applicable — no policy change' if skill == '$agent-policy-writer' else 'approved'}"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    record = _record().model_copy(update={"audit_evidence": _coding_audit(receipts)})
-
-    assert not has_complete_workflow_receipt(record, requires_policy_review=True)
-
-
-def test_nonworkflow_audit_evidence_cannot_replace_final_audit() -> None:
-    result = _result("ready_to_publish").model_copy(
-        update={
-            "protocol_version": 2,
-            "audit_summary": {
-                "lane": "coding",
-                "capacity": {
-                    "required": 12,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                "role_receipts": (),
-                "changed_paths": (),
-                "tests": (),
-                "reviewers": (),
-                "findings": (),
-                "corrections": (),
-            },
-        }
-    )
-
-    with pytest.raises(ValueError, match="audit summary"):
-        apply_worker_result(_record(), result, now=NOW)
+    assert {outcome.state for outcome in outcomes} == {RunnerState.PUBLISHING}
+    assert {outcome.phase for outcome in outcomes} == {WorkflowPhase.READY_TO_PUBLISH}
+    assert outcomes[0].receipts == ()
+    assert outcomes[1].receipts == (historical_receipt,)
 
 
 def test_ready_to_publish_clears_stale_publication_sha() -> None:
@@ -540,45 +353,6 @@ def test_ready_to_publish_clears_stale_publication_sha() -> None:
     )
     outcome = apply_worker_result(record, result, now=NOW)
     assert outcome.record.publication_sha is None
-
-
-@pytest.mark.parametrize(
-    "receipts",
-    [
-        ("$architect: approved",),
-        (
-            "$architect: approved",
-            "$architect: duplicate",
-            "$tdd-red: red confirmed",
-        ),
-        (
-            "$architect: approved",
-            "$documentation-writer: complete",
-            "$documentation-finalizer: approved",
-        ),
-    ],
-)
-def test_incomplete_duplicate_or_wrong_lane_workflow_receipts_fail_closed(
-    receipts: tuple[str, ...],
-) -> None:
-    workflow = WorkflowPhase("workflow")
-    record = _record().model_copy(
-        update={"phase": workflow, "workflow_lane": WorkflowLane.UNKNOWN}
-    )
-    result = _result("ready_to_publish").model_copy(
-        update={
-            "expected_phase": workflow,
-            "completed_phase": workflow,
-            "workflow_lane": WorkflowLane.CODING,
-            "receipts": receipts,
-            "merge_request_draft": MergeRequestDraft(
-                title="Complete issue 12", description="Validated.\n\nCloses #12"
-            ),
-        }
-    )
-
-    with pytest.raises(ValueError, match="receipt"):
-        apply_worker_result(record, result, now=NOW)
 
 
 def test_retryable_worker_result_is_immediately_due() -> None:
@@ -660,12 +434,7 @@ def test_split_required_workflow_result_requires_executor_fulfillment() -> None:
         "next_action": "Obtain human direction on the proposed ordered slices.",
     }
 
-    result = parse_worker_result(
-        f"<agent-work-result>{json.dumps(payload)}</agent-work-result>",
-        expected_project_id=310967,
-        expected_issue_iid=12,
-        expected_revision=0,
-    )
+    result = WorkerResultEnvelope.model_validate(payload)
     assert result.protocol_version == 2
     with pytest.raises(ValueError, match="fulfilled by the executor"):
         apply_worker_result(record, result, now=NOW)
@@ -868,16 +637,13 @@ def test_split_required_protocol_rejects_malformed_or_non_topological_plans(
         "result_kind": "split_required",
         "phase_status": "complete",
         "completed_phase": "workflow",
-        "receipts": [],
         "split_plan": split_plan,
         "change_summary": "The issue needs independently mergeable slices.",
         "next_action": "Create the planned child issues.",
     }
 
-    with pytest.raises(WorkerProtocolError):
-        parse_worker_result(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        )
+    with pytest.raises(ValidationError):
+        WorkerResultEnvelope.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -887,7 +653,6 @@ def test_split_required_protocol_rejects_malformed_or_non_topological_plans(
         {"expected_phase": "coding-green", "completed_phase": "coding-green"},
         {"workflow_lane": "coding"},
         {"phase_status": "rejected"},
-        {"receipts": ["$architect: not allowed"]},
         {
             "merge_request_draft": {
                 "title": "Forbidden",
@@ -911,7 +676,6 @@ def test_split_protocol_rejects_contextual_ambiguity(
         "result_kind": "split_required",
         "phase_status": "complete",
         "completed_phase": "workflow",
-        "receipts": [],
         "split_plan": {
             "slices": [
                 {
@@ -935,10 +699,8 @@ def test_split_protocol_rejects_contextual_ambiguity(
     }
     payload.update(overrides)
 
-    with pytest.raises(WorkerProtocolError):
-        parse_worker_result(
-            f"<agent-work-result>{json.dumps(payload)}</agent-work-result>"
-        )
+    with pytest.raises(ValidationError):
+        WorkerResultEnvelope.model_validate(payload)
 
 
 def test_successful_postpublication_repair_reenters_downstream_validation() -> None:
@@ -999,30 +761,12 @@ def test_decision_bearing_draft_metadata_cannot_be_downgraded_by_a_later_result(
         _result("ready_to_publish").model_copy(
             update={"workflow_lane": WorkflowLane.CONTENT}
         ),
-        _result("ready_to_publish").model_copy(update={"receipts": ()}),
     ],
 )
 def test_incoherent_successful_worker_results_fail_closed(
     result: WorkerResultEnvelope,
 ) -> None:
     with pytest.raises(ValueError):
-        apply_worker_result(_record(), result, now=NOW)
-
-
-@pytest.mark.parametrize(
-    "receipts",
-    [
-        ("looks green",),
-        ("$tdd-green: green", "unrelated receipt"),
-        ("$tdd-green: green", "$tdd-green: duplicate"),
-    ],
-)
-def test_only_one_exact_receipt_per_required_skill_can_advance_a_phase(
-    receipts: tuple[str, ...],
-) -> None:
-    result = _result("ready_to_publish").model_copy(update={"receipts": receipts})
-
-    with pytest.raises(ValueError, match="receipt"):
         apply_worker_result(_record(), result, now=NOW)
 
 
@@ -1119,7 +863,7 @@ def test_discovery_must_establish_a_known_workflow_lane() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="receipt"):
+    with pytest.raises(ValueError, match="coherent"):
         apply_worker_result(record, result, now=NOW)
 
 

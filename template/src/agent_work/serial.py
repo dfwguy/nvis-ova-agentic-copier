@@ -22,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import cast
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
@@ -46,7 +45,6 @@ from .domain import (
 )
 from .gitlab import GitLabError, GitLabIdentityError
 from .models import (
-    AuditReceiptSummary,
     ConditionEvidence,
     GitLabIssue,
     LedgerRecord,
@@ -76,20 +74,20 @@ from .repository import (
 )
 from .state_machine import (
     apply_worker_result,
-    has_complete_workflow_receipt,
     plan_retry,
     retained_ordinary_is_untouched,
     transition_record,
 )
 from .timing import append_phase_timing
 from .worker import (
-    WorkerInvocation,
     WorkerProtocolError,
-    WorkerResultHandoffRequest,
+    WorkerResultBrokerRequest,
     build_worker_prompt,
+    build_worker_result,
+    build_worker_result_artifact,
     format_worker_result_diagnostic,
-    parse_worker_result,
-    parse_worker_result_handoff,
+    parse_worker_result_artifact,
+    parse_worker_result_build_input,
     validate_worker_result,
     worker_exit_evidence,
 )
@@ -97,6 +95,50 @@ from .worker import (
 
 class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
+
+
+def _broker_artifact_builder(
+    record: LedgerRecord,
+    request: WorkerResultBrokerRequest,
+    *,
+    repository: RepositoryPort,
+    red_checkpoint: RedCheckpointEvidence | None,
+) -> Callable[[bytes], bytes]:
+    """Bind one live broker to the controller's exact current observations."""
+    if (
+        record.project_id != request.project_id
+        or record.issue_iid != request.issue_iid
+        or record.revision != request.ledger_revision
+        or record.state is not request.expected_state
+        or record.phase is not request.expected_phase
+        or record.source_branch != request.source_branch
+        or record.source_sha != request.source_sha
+    ):
+        raise WorkerProtocolError("worker_result_broker", "identity mismatch")
+
+    def build(input_bytes: bytes) -> bytes:
+        try:
+            changed_paths = tuple(
+                sorted(set(repository.changed_paths(record.worktree)))
+            )
+        except RepositoryError as error:
+            raise WorkerProtocolError(
+                "controller_invariant.changed_paths", "could not be observed"
+            ) from error
+        result = build_worker_result(
+            record,
+            parse_worker_result_build_input(input_bytes),
+            changed_paths=changed_paths,
+            red_checkpoint=red_checkpoint,
+        )
+        return build_worker_result_artifact(
+            record,
+            result,
+            nonce=request.nonce,
+            changed_paths=changed_paths,
+        )
+
+    return build
 
 
 def build_publication_correction_identity(
@@ -696,10 +738,6 @@ def _record_repair_failure(
     )
     gitlab.transition_labels(failed.issue_iid, label_for_state(failed.state))
     return failed
-
-
-def _has_workflow_receipt(record: LedgerRecord) -> bool:
-    return any(receipt.phase is WorkflowPhase.WORKFLOW for receipt in record.receipts)
 
 
 def _split_description(
@@ -1922,68 +1960,29 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
 
 def _feedback_validated_paths(record: LedgerRecord) -> tuple[str, ...] | None:
     """Return the canonical controller-validated feedback commit set."""
-    audit = record.audit_evidence
-    if not isinstance(audit, AuditReceiptSummary):
-        return None
-    paths = tuple(sorted(set(audit.changed_paths)))
-    return paths if paths and len(paths) == len(audit.changed_paths) else None
-
-
-def _recover_legacy_preparing_feedback_publication(
-    record: LedgerRecord,
-    *,
-    ledger: LedgerPort,
-    gitlab: GitLabPort,
-    repository: RepositoryPort,
-    now: datetime,
-) -> LedgerRecord | None:
-    """Route one exact legacy dirty feedback retry through publication first."""
-    pending = record.pending_feedback
-    validated_paths = _feedback_validated_paths(record)
-    if (
-        record.state is not RunnerState.PREPARING
-        or record.phase is not WorkflowPhase.POST_PUBLICATION
-        or record.summary != "Human-directed retry requested."
-        or pending is None
-        or pending.outcome is None
-        or not pending.acknowledgement_ready
-        or validated_paths is None
-    ):
+    intent = record.intent
+    if intent is None:
         return None
     try:
-        retained_paths = tuple(sorted(set(repository.changed_paths(record.worktree))))
-    except RepositoryTransientError:
-        return _record_retry(
-            record,
-            ledger=ledger,
-            gitlab=gitlab,
-            now=now,
-            error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
-        )
-    except RepositoryError as error:
-        return _block_publication_identity(
-            record, ledger=ledger, gitlab=gitlab, summary=str(error)
-        )
-    if retained_paths != validated_paths:
-        return _block_feedback_path_mismatch(record, ledger=ledger, gitlab=gitlab)
-    return ledger.persist(
-        transition_record(
-            record,
-            RunnerState.PUBLISHING,
-            phase=WorkflowPhase.READY_TO_PUBLISH,
-            pending_feedback=pending.model_copy(
-                update={"acknowledgement_ready": False}
-            ),
-            intent=None,
-            publication_sha=None,
-            summary="Validated legacy feedback changes require publication.",
-            next_action=(
-                "Bind and publish the exact validated feedback paths, then observe "
-                "the exact source-SHA pipeline."
-            ),
-            error_code=None,
-        )
-    )
+        raw_paths = intent.expected_evidence.get("validated_paths")
+        decoded = json.loads(raw_paths) if isinstance(raw_paths, str) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(decoded, list)
+        or not decoded
+        or not all(isinstance(path, str) and path for path in decoded)
+    ):
+        return None
+    paths = tuple(decoded)
+    if paths != tuple(sorted(set(paths))):
+        return None
+    expected = _validated_path_evidence(paths)
+    if not all(
+        intent.expected_evidence.get(key) == value for key, value in expected.items()
+    ):
+        return None
+    return paths
 
 
 def _validated_path_evidence(paths: tuple[str, ...]) -> dict[str, str | int | None]:
@@ -1993,6 +1992,7 @@ def _validated_path_evidence(paths: tuple[str, ...]) -> dict[str, str | int | No
         "validated_paths_fingerprint": hashlib.sha256(
             "".join(f"{path}\0" for path in paths).encode()
         ).hexdigest(),
+        "validated_paths": json.dumps(paths, separators=(",", ":")),
     }
 
 
@@ -2004,9 +2004,9 @@ def _block_feedback_path_mismatch(
         transition_record(
             record,
             RunnerState.BLOCKED,
-            error_code=ErrorCode.WORKER_RECEIPT_INVALID,
-            summary="Feedback publication paths no longer match validated receipt evidence.",
-            next_action="Re-run the feedback workflow and validate its exact changed-path receipt.",
+            error_code=ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+            summary="Feedback publication paths no longer match controller evidence.",
+            next_action="Re-run the feedback workflow against the exact changed paths.",
         )
     )
     gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
@@ -2461,6 +2461,8 @@ def _execute(
         Callable[[int, RedCheckpointRequest], RedCheckpointEvidence] | None
     ) = None,
 ) -> LedgerRecord | None:
+    if not invoke.supports_worker_result_broker:
+        raise SegmentError("worker invoker does not support the live result broker")
     try:
         _verify_authenticated_user(gitlab)
         issue_notes = gitlab.fetch_issue_notes(record.issue_iid)
@@ -2590,19 +2592,18 @@ def _execute(
             prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
                 mode="json"
             )
-        handoff_request = None
-        if getattr(invoke, "supports_worker_result_handoff", False):
-            source_sha = record.source_sha or repository.head(record.worktree)
-            nonce = secrets.token_hex(16)
-            handoff_request = WorkerResultHandoffRequest(
-                path=ledger.state_root / f".agent-work-result-{nonce}.json",
-                nonce=nonce,
-                project_id=record.project_id,
-                issue_iid=record.issue_iid,
-                ledger_revision=record.revision,
-                source_branch=record.source_branch,
-                source_sha=source_sha,
-            )
+        source_sha = record.source_sha or repository.head(record.worktree)
+        nonce = secrets.token_hex(16)
+        broker_request = WorkerResultBrokerRequest(
+            nonce=nonce,
+            project_id=record.project_id,
+            issue_iid=record.issue_iid,
+            ledger_revision=record.revision,
+            expected_state=record.state,
+            expected_phase=record.phase,
+            source_branch=record.source_branch,
+            source_sha=source_sha,
+        )
         prompt = build_worker_prompt(
             prompt_record,
             project_id=record.project_id,
@@ -2624,7 +2625,7 @@ def _execute(
                 for note in feedback
                 if _feedback_is_qualifying(note, repository.config.factory_username)
             ),
-            worker_result_handoff=handoff_request,
+            worker_result_broker=broker_request,
             worker_result_builder=(
                 repository.config.checkout / "bin" / "agent-work-from-checkout"
             ),
@@ -2655,15 +2656,28 @@ def _execute(
         and retained_checkpoint is None
     ):
         with lock_factory(record.issue_iid):
-            red_invocation = (
-                cast(Callable[..., WorkerInvocation], invoke.invoke)(
-                    record.worktree,
-                    prompt,
-                    worker_timeout,
-                    handoff=handoff_request,
-                )
-                if handoff_request is not None
-                else invoke.invoke(record.worktree, prompt, worker_timeout)
+            red_invocation = invoke.invoke(
+                record.worktree,
+                prompt,
+                worker_timeout,
+                broker_request=broker_request,
+                build_artifact=_broker_artifact_builder(
+                    record,
+                    broker_request,
+                    repository=repository,
+                    red_checkpoint=retained_checkpoint,
+                ),
+            )
+        if red_invocation.protocol_error is not None:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+                retry_delay=timedelta(),
+                detail=format_worker_result_diagnostic(red_invocation.protocol_error),
+                stop_on_unchanged_condition=True,
             )
         if red_invocation.returncode != 0:
             worker_exit = (
@@ -2686,25 +2700,13 @@ def _execute(
                 retry_delay=timedelta(),
             )
         try:
-            red_changed_paths = (
-                tuple(sorted(set(repository.changed_paths(record.worktree))))
-                if handoff_request is not None
-                else None
+            red_changed_paths = tuple(
+                sorted(set(repository.changed_paths(record.worktree)))
             )
-            red_result = (
-                parse_worker_result_handoff(
-                    red_invocation.handoff,
-                    request=handoff_request,
-                    changed_paths=red_changed_paths or (),
-                    capture=red_invocation.handoff_capture,
-                )
-                if handoff_request is not None
-                else parse_worker_result(
-                    red_invocation.stdout,
-                    expected_project_id=record.project_id,
-                    expected_issue_iid=record.issue_iid,
-                    expected_revision=record.revision,
-                )
+            red_result = parse_worker_result_artifact(
+                red_invocation.worker_result,
+                request=broker_request,
+                changed_paths=red_changed_paths,
             )
         except WorkerProtocolError as error:
             return _record_retry(
@@ -2733,12 +2735,7 @@ def _execute(
             elif (
                 red_result.result_kind != "red_checkpoint_ready"
                 or checkpoint_request is None
-                or (
-                    red_changed_paths
-                    if red_changed_paths is not None
-                    else tuple(sorted(repository.changed_paths(record.worktree)))
-                )
-                != checkpoint_request.test_paths
+                or (red_changed_paths) != checkpoint_request.test_paths
             ):
                 raise RedCheckpointError("red checkpoint handoff is not exact")
             if invocation is None:
@@ -2796,24 +2793,21 @@ def _execute(
                 prompt_record["red_checkpoint"] = retained_checkpoint.model_dump(
                     mode="json"
                 )
-                previous_nonce = (
-                    handoff_request.nonce if handoff_request is not None else None
-                )
-                handoff_request = None
-                if getattr(invoke, "supports_worker_result_handoff", False):
-                    source_sha = record.source_sha or repository.head(record.worktree)
+                previous_nonce = broker_request.nonce
+                source_sha = record.source_sha or repository.head(record.worktree)
+                nonce = secrets.token_hex(16)
+                while nonce == previous_nonce:
                     nonce = secrets.token_hex(16)
-                    while nonce == previous_nonce:
-                        nonce = secrets.token_hex(16)
-                    handoff_request = WorkerResultHandoffRequest(
-                        path=ledger.state_root / f".agent-work-result-{nonce}.json",
-                        nonce=nonce,
-                        project_id=record.project_id,
-                        issue_iid=record.issue_iid,
-                        ledger_revision=record.revision,
-                        source_branch=record.source_branch,
-                        source_sha=source_sha,
-                    )
+                broker_request = WorkerResultBrokerRequest(
+                    nonce=nonce,
+                    project_id=record.project_id,
+                    issue_iid=record.issue_iid,
+                    ledger_revision=record.revision,
+                    expected_state=record.state,
+                    expected_phase=record.phase,
+                    source_branch=record.source_branch,
+                    source_sha=source_sha,
+                )
                 prompt = build_worker_prompt(
                     prompt_record,
                     project_id=record.project_id,
@@ -2837,7 +2831,7 @@ def _execute(
                             note, repository.config.factory_username
                         )
                     ),
-                    worker_result_handoff=handoff_request,
+                    worker_result_broker=broker_request,
                     worker_result_builder=(
                         repository.config.checkout / "bin" / "agent-work-from-checkout"
                     ),
@@ -2852,15 +2846,17 @@ def _execute(
             )
     if invocation is None:
         with lock_factory(record.issue_iid):
-            invocation = (
-                cast(Callable[..., WorkerInvocation], invoke.invoke)(
-                    record.worktree,
-                    prompt,
-                    worker_timeout,
-                    handoff=handoff_request,
-                )
-                if handoff_request is not None
-                else invoke.invoke(record.worktree, prompt, worker_timeout)
+            invocation = invoke.invoke(
+                record.worktree,
+                prompt,
+                worker_timeout,
+                broker_request=broker_request,
+                build_artifact=_broker_artifact_builder(
+                    record,
+                    broker_request,
+                    repository=repository,
+                    red_checkpoint=retained_checkpoint,
+                ),
             )
     refreshed_correction = refresh_publication_correction_identity(
         record, repository=repository, load_red_checkpoint=load_red_checkpoint
@@ -2873,6 +2869,26 @@ def _execute(
             summary="Publication correction identity changed after worker invocation.",
         )
     record = refreshed_correction
+    if invocation.protocol_error is not None:
+        if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
+            return _record_repair_failure(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                evidence_delta={"worker_protocol": "invalid"},
+                failure_reason="repair worker returned an invalid result",
+            )
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+            retry_delay=timedelta(),
+            detail=format_worker_result_diagnostic(invocation.protocol_error),
+            stop_on_unchanged_condition=True,
+        )
     if invocation.returncode != 0:
         worker_exit = (
             worker_exit_evidence(
@@ -2904,25 +2920,13 @@ def _execute(
         )
     else:
         try:
-            final_changed_paths = (
-                tuple(sorted(set(repository.changed_paths(record.worktree))))
-                if handoff_request is not None
-                else None
+            final_changed_paths = tuple(
+                sorted(set(repository.changed_paths(record.worktree)))
             )
-            result = (
-                parse_worker_result_handoff(
-                    invocation.handoff,
-                    request=handoff_request,
-                    changed_paths=final_changed_paths or (),
-                    capture=invocation.handoff_capture,
-                )
-                if handoff_request is not None
-                else parse_worker_result(
-                    invocation.stdout,
-                    expected_project_id=record.project_id,
-                    expected_issue_iid=record.issue_iid,
-                    expected_revision=record.revision,
-                )
+            result = parse_worker_result_artifact(
+                invocation.worker_result,
+                request=broker_request,
+                changed_paths=final_changed_paths,
             )
         except RepositoryTransientError:
             if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
@@ -3025,22 +3029,14 @@ def _execute(
                     validate_worker_result(
                         record,
                         result,
-                        changed_paths=(
-                            final_changed_paths
-                            if final_changed_paths is not None
-                            else repository.changed_paths(record.worktree)
-                        ),
+                        changed_paths=(final_changed_paths),
                         red_checkpoint=retained_checkpoint,
                     )
                 else:
                     validate_worker_result(
                         record,
                         result,
-                        changed_paths=(
-                            final_changed_paths
-                            if final_changed_paths is not None
-                            else repository.changed_paths(record.worktree)
-                        ),
+                        changed_paths=(final_changed_paths),
                         red_checkpoint=None,
                     )
                 if result.result_kind == "split_required":
@@ -3116,20 +3112,20 @@ def _execute(
                         ledger=ledger,
                         gitlab=gitlab,
                         now=now,
-                        evidence_delta={"validation": "receipt_or_protocol_invalid"},
-                        failure_reason="repair receipts or validation were not coherent",
+                        evidence_delta={"validation": "protocol_invalid"},
+                        failure_reason="repair result validation was not coherent",
                     )
                 return _record_retry(
                     record,
                     ledger=ledger,
                     gitlab=gitlab,
                     now=now,
-                    error_code=ErrorCode.WORKER_RECEIPT_INVALID,
+                    error_code=ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
                     retry_delay=timedelta(),
                     detail=(
                         format_worker_result_diagnostic(error)
                         if isinstance(error, WorkerProtocolError)
-                        else "controller_invariant.receipts: required receipts are not coherent"
+                        else "controller_invariant.transition: is not coherent with recorded state"
                     ),
                     stop_on_unchanged_condition=True,
                 )
@@ -3144,6 +3140,31 @@ def _execute(
                         ),
                     }
                 )
+    if (
+        outcome.state is RunnerState.PUBLISHING
+        and record.pending_feedback is not None
+        and bool(final_changed_paths)
+    ):
+        validated_paths = tuple(sorted(set(final_changed_paths)))
+        if (
+            not validated_paths
+            or validated_paths != final_changed_paths
+            or record.source_sha is None
+        ):
+            return _block_feedback_path_mismatch(record, ledger=ledger, gitlab=gitlab)
+        outcome = outcome.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=f"{record.issue_iid}:publish:{record.revision}",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": record.source_branch,
+                        "baseline_sha": record.source_sha,
+                    }
+                    | _validated_path_evidence(validated_paths),
+                )
+            }
+        )
     if (
         record.state is RunnerState.REPAIR
         and record.pending_feedback is not None
@@ -3166,7 +3187,6 @@ def _execute(
                 record.model_copy(
                     update={
                         "pending_feedback": pending,
-                        "receipts": outcome.receipts,
                         "workflow_lane": outcome.workflow_lane,
                         "worker_exit": None,
                         "summary": "Feedback acknowledgement is pending retry.",
@@ -3209,16 +3229,36 @@ def _execute(
                 record, ledger=ledger, gitlab=gitlab, summary=str(error)
             )
         if retained_changes:
+            validated_paths = tuple(sorted(set(final_changed_paths)))
+            if not validated_paths or validated_paths != final_changed_paths:
+                return _block_feedback_path_mismatch(
+                    record, ledger=ledger, gitlab=gitlab
+                )
+            if record.source_sha is None:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Feedback publication has no exact baseline SHA.",
+                )
             return ledger.persist(
                 transition_record(
                     record,
                     RunnerState.PUBLISHING,
                     phase=WorkflowPhase.READY_TO_PUBLISH,
                     workflow_lane=outcome.workflow_lane,
-                    receipts=outcome.receipts,
                     merge_request_draft=outcome.merge_request_draft,
                     pending_feedback=outcome.pending_feedback.model_copy(
                         update={"acknowledgement_ready": False}
+                    ),
+                    intent=TransitionIntentRecord(
+                        operation_id=f"{record.issue_iid}:publish:{record.revision}",
+                        kind="publish_merge_request",
+                        expected_evidence={
+                            "branch": record.source_branch,
+                            "baseline_sha": record.source_sha,
+                        }
+                        | _validated_path_evidence(validated_paths),
                     ),
                     publication_sha=None,
                     summary="Validated feedback changes require publication.",
@@ -3331,6 +3371,8 @@ def _publish(
     gitlab: GitLabPort,
     repository: RepositoryPort,
     now: datetime,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> LedgerRecord:
     try:
         _verify_authenticated_user(gitlab)
@@ -3357,14 +3399,10 @@ def _publish(
     if not remediation and draft is None:
         if record.intent is not None:
             raise SegmentError("worker did not provide exact publication metadata")
-        replay_phase = (
-            WorkflowPhase.WORKFLOW
-            if _has_workflow_receipt(record)
-            else {
-                WorkflowLane.CODING: WorkflowPhase.CODING_FINALIZE,
-                WorkflowLane.CONTENT: WorkflowPhase.CONTENT_FINALIZE,
-            }.get(record.workflow_lane)
-        )
+        replay_phase = {
+            WorkflowLane.CODING: WorkflowPhase.CODING_FINALIZE,
+            WorkflowLane.CONTENT: WorkflowPhase.CONTENT_FINALIZE,
+        }.get(record.workflow_lane)
         if replay_phase is None:
             raise SegmentError("worker did not provide exact publication metadata")
         return ledger.persist(
@@ -3386,6 +3424,22 @@ def _publish(
             gitlab=gitlab,
             summary="Durable publication intent is not exact.",
         )
+    if replaying and record.pending_feedback is not None:
+        feedback_paths = _feedback_validated_paths(record)
+        if feedback_paths is None:
+            return _block_feedback_path_mismatch(record, ledger=ledger, gitlab=gitlab)
+        feedback_protected = tuple(
+            path for path in feedback_paths if is_protected_policy_path(path)
+        )
+        if feedback_protected and (
+            draft is not None and not _draft_handoff_is_valid(draft)
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Protected agent-policy merge-request metadata is incomplete.",
+            )
     if not replaying:
         target_sha = record.main_sha or baseline_sha
         try:
@@ -3407,19 +3461,15 @@ def _publish(
         protected = tuple(
             path for path in prospective_paths if is_protected_policy_path(path)
         )
-        if protected and (
-            not has_complete_workflow_receipt(record, requires_policy_review=True)
-            or (draft is not None and not _draft_handoff_is_valid(draft))
-        ):
+        if protected and (draft is not None and not _draft_handoff_is_valid(draft)):
             blocked = ledger.persist(
                 transition_record(
                     record,
                     RunnerState.BLOCKED,
-                    error_code=ErrorCode.WORKER_RECEIPT_INVALID,
-                    summary="Protected agent-policy publication evidence is incomplete.",
+                    error_code=ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+                    summary="Protected agent-policy merge-request metadata is incomplete.",
                     next_action=(
-                        "Resume the workflow and return complete applicable receipts "
-                        "and coherent merge request metadata."
+                        "Resume the workflow and return coherent merge request metadata."
                     ),
                 )
             )
@@ -3687,9 +3737,11 @@ def _publish(
             else RunnerState.EXECUTING
         )
         checkpoint = (
-            record.audit_evidence.red_checkpoint
-            if isinstance(record.audit_evidence, AuditReceiptSummary)
-            and record.workflow_lane is WorkflowLane.CODING
+            load_red_checkpoint(
+                record.project_id, record.issue_iid, record.source_sha or ""
+            )
+            if record.workflow_lane is WorkflowLane.CODING
+            and load_red_checkpoint is not None
             else None
         )
         try:
@@ -3713,8 +3765,6 @@ def _publish(
                 intent=None,
                 publication_sha=None,
                 merge_request_draft=None,
-                receipts=(),
-                audit_evidence=None,
                 worker_exit=None,
                 correction_identity=correction_identity,
                 retry_at=None,
@@ -3967,16 +4017,11 @@ def _observe(
         if exact and closes_issue and record.intent is not None:
             record = ledger.persist(record.model_copy(update={"intent": None}))
         if exact and closes_issue and mr.has_conflicts:
-            repair_phase = (
-                WorkflowPhase.WORKFLOW
-                if _has_workflow_receipt(record)
-                else WorkflowPhase.CODING_GREEN
-            )
             return ledger.persist(
                 transition_record(
                     record,
                     RunnerState.REPAIR,
-                    phase=repair_phase,
+                    phase=WorkflowPhase.CODING_GREEN,
                     work_kind=WorkKind.MERGE_CONFLICT_REPAIR,
                     error_code=ErrorCode.MERGE_CONFLICT,
                     summary="The exact merge request has conflicts.",
@@ -4132,11 +4177,6 @@ def run_segment(
             error_code=ErrorCode.GITLAB_RETRYABLE,
             allow_remote_exhaustion_side_effects=False,
         )
-    legacy_publication = _recover_legacy_preparing_feedback_publication(
-        record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
-    )
-    if legacy_publication is not None:
-        return legacy_publication
     if (
         record.pending_feedback is not None
         and record.pending_feedback.acknowledgement_ready
@@ -4377,6 +4417,7 @@ def run_segment(
             gitlab=gitlab,
             repository=repository,
             now=now,
+            load_red_checkpoint=load_red_checkpoint,
         )
         finished_at = boundary_clock()
         timing_outcome = (

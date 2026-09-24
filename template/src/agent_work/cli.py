@@ -20,6 +20,7 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
@@ -47,7 +48,13 @@ from .gitlab import (
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
 from .ledger import JsonLedger, LedgerCorrupt, LockBusy, state_home
-from .models import AgentWorkConfig, CommandReport, LedgerRecord, MergeRequestEvidence
+from .models import (
+    AgentWorkConfig,
+    CommandReport,
+    LedgerRecord,
+    MergeRequestEvidence,
+    WorkerResultEnvelope,
+)
 from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointDependencies,
@@ -96,10 +103,11 @@ from .validation import (
 from .worker import (
     AgentInvoker,
     WorkerProtocolError,
+    WorkerResultBrokerClientRequest,
     build_worker_result,
-    build_worker_result_handoff,
     format_worker_result_diagnostic,
     parse_worker_result_build_input,
+    submit_worker_result_to_broker,
 )
 
 
@@ -469,9 +477,9 @@ class _AgentWorkParser(argparse.ArgumentParser):
             (getattr(parsed, "resource", None), getattr(parsed, "action", None))
             == ("worker-result", "build")
             and parsed.apply
-            and (parsed.handoff_file is None or parsed.handoff_nonce is None)
+            and (parsed.broker_socket is None or parsed.broker_nonce is None)
         ):
-            self.error("--apply requires --handoff-file and --handoff-nonce")
+            self.error("--apply requires --broker-socket and --broker-nonce")
         return parsed
 
 
@@ -484,11 +492,11 @@ def _candidate_tree(value: str) -> str:
     return value
 
 
-def _handoff_nonce(value: str) -> str:
+def _broker_nonce(value: str) -> str:
     """Require one bounded lowercase nonce at the CLI boundary."""
     if re.fullmatch(r"[0-9a-f]{32}", value) is None:
         raise argparse.ArgumentTypeError(
-            "handoff nonce must be 32 lowercase hexadecimal characters"
+            "broker nonce must be 32 lowercase hexadecimal characters"
         )
     return value
 
@@ -682,35 +690,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker_result = resources.add_parser(
         "worker-result",
-        help="preview or hand off a validated worker result",
-        description="Preview or hand off a validated worker result.",
+        help="preview or submit a validated worker result",
+        description="Preview or submit a validated worker result.",
     )
     worker_result_actions = worker_result.add_subparsers(dest="action", required=True)
     worker_build = worker_result_actions.add_parser(
         "build",
-        help="preview or hand off one protocol-v2 worker result",
-        description=(
-            "Preview one validated worker result without mutation, or use --apply "
-            "with the controller-owned handoff file and nonce to write it atomically."
-        ),
+        help="submit one protocol-v2 worker result to its live broker",
+        description=("Submit bounded worker intent to a controller-owned live broker."),
     )
     worker_build.add_argument("--issue-iid", type=_positive_integer, required=True)
     worker_build.add_argument("--input-file", type=Path, required=True)
     worker_build.add_argument(
-        "--handoff-file",
+        "--broker-socket",
         type=Path,
-        help="controller-owned output path; required with --apply",
+        help="private live controller broker socket; required with --apply",
     )
     worker_build.add_argument(
-        "--handoff-nonce",
-        type=_handoff_nonce,
-        help="controller-owned 32-hex nonce; required with --apply",
+        "--broker-nonce",
+        type=_broker_nonce,
+        help="broker 32-hex nonce; required with --apply",
     )
     _common(
         worker_build,
-        apply_help="atomically write one controller-owned worker-result handoff",
+        apply_help="submit one worker result through the live broker",
         debug_help="retain bounded diagnostics on failure",
-        json_help="emit the preview envelope or applied handoff receipt as stable JSON",
+        json_help="emit the preview envelope or applied broker receipt as stable JSON",
     )
     red_checkpoint = resources.add_parser(
         "red-checkpoint", help="verify and retain one failing-test checkpoint"
@@ -821,9 +826,39 @@ def _remove_validation_artifact(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+_TERMINAL_SEQUENCE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+    r"|\x1b[PX^_][^\x1b\x9c]*(?:\x1b\\|\x9c)"
+    r"|\x1b[ -/][0-~]?|\x1b[0-9=><])"
+)
+
+
 def _sanitize_human_value(value: object) -> str:
     """Render one bounded value on a single human-readable line."""
-    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    without_terminal_sequences = _TERMINAL_SEQUENCE.sub("", str(value))
+    safe = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in without_terminal_sequences
+    )
+    return " ".join(safe.split())
+
+
+def _render_worker_result(result: WorkerResultEnvelope, *, as_json: bool) -> str:
+    """Render a worker-result preview for a human or a machine consumer."""
+    if as_json:
+        return result.model_dump_json(exclude_none=True)
+    safe = _sanitize_human_value
+    return " ".join(
+        (
+            "valid",
+            f"issue=#{result.issue_iid}",
+            f"lane={result.workflow_lane.value}",
+            f"result={result.result_kind}",
+            f"summary={safe(result.change_summary)}",
+            f"next_action={safe(result.next_action)}",
+        )
+    )
 
 
 def _inspect_path(path: Path) -> PathEvidence:
@@ -1674,6 +1709,30 @@ def main(
         except OSError:
             write_stderr("worker_result_capture: input artifact missing or unreadable")
             return 1
+        if parsed.apply:
+            try:
+                submit_worker_result_to_broker(
+                    cast(Path, parsed.broker_socket),
+                    WorkerResultBrokerClientRequest(
+                        nonce=cast(str, parsed.broker_nonce),
+                        issue_iid=parsed.issue_iid,
+                    ),
+                    input_bytes,
+                    timeout_seconds=30,
+                )
+            except WorkerProtocolError as error:
+                write_stderr(format_worker_result_diagnostic(error))
+                return 1
+            write_stderr("worker result submitted to live broker")
+            if parsed.json:
+                write_stdout(
+                    json.dumps(
+                        {"accepted": True, "nonce": parsed.broker_nonce},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+            return 0
         try:
             if load_record is None or changed_paths is None:
                 from .runtime import build_worker_result_dependencies
@@ -1721,43 +1780,8 @@ def main(
         except (OSError, RuntimeError, ValueError):
             write_stderr("worker_result_validation: unexpected internal failure")
             return 1
-        if parsed.apply:
-            handoff_file = cast(Path, parsed.handoff_file)
-            handoff_nonce = cast(str, parsed.handoff_nonce)
-            try:
-                payload = build_worker_result_handoff(
-                    record,
-                    result,
-                    nonce=handoff_nonce,
-                    changed_paths=observed_paths,
-                )
-                atomic_write(handoff_file, payload)
-            except (OSError, WorkerProtocolError):
-                write_stderr("worker_result_handoff: could not be written")
-                return 1
-            if parsed.json:
-                write_stdout(
-                    json.dumps(
-                        {
-                            "action": "worker-result-handoff",
-                            "applied": True,
-                            "issue_iid": record.issue_iid,
-                        },
-                        separators=(",", ":"),
-                    )
-                )
-            else:
-                write_stdout(
-                    f"worker result handoff written for issue #{record.issue_iid}"
-                )
-        else:
-            rendered_result = result.model_dump_json(exclude_none=True)
-            write_stdout(
-                rendered_result
-                if parsed.json
-                else f"<agent-work-result>{rendered_result}</agent-work-result>"
-            )
-            write_stderr("worker result validated; no changes were made")
+        write_stdout(_render_worker_result(result, as_json=parsed.json))
+        write_stderr("worker result validated; no changes were made")
         return 0
     if parsed.resource == "upstream-finding" and parsed.action == "preview":
         try:

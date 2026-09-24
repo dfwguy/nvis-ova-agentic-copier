@@ -31,7 +31,7 @@ from .models import (
 
 if TYPE_CHECKING:
     from .repository import LegacyPublicationCandidate
-    from .worker import WorkerInvocation
+    from .worker import WorkerInvocation, WorkerResultBrokerRequest
 
 
 class CommandResult(Protocol):
@@ -272,9 +272,19 @@ class RepositoryPort(Protocol):
 class InvokerPort(Protocol):
     """One bounded worker process."""
 
+    supports_worker_result_broker: bool
+
     def preflight(self) -> None: ...
 
-    def invoke(self, checkout: Path, prompt: str, timeout: int) -> WorkerInvocation: ...
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest,
+        build_artifact: Callable[[bytes], bytes],
+    ) -> WorkerInvocation: ...
 
 
 ProjectLockFactory = Callable[[], AbstractContextManager[None]]

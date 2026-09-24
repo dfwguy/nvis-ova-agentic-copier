@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-23
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -87,7 +87,7 @@ stateDiagram-v2
     Observing --> Complete: human merge has fresh exact-success evidence
     Observing --> Executing: terminal exact-SHA pipeline starts fresh assessment
     Repair --> Publishing: repair result is ready_to_publish
-    Executing --> AwaitingHuman: Pipeline Performance Judge receipt is complete
+    Executing --> AwaitingHuman: Exact source pipeline and handoff are verified
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
     Repair --> Blocked: retained owner or pipeline evidence is ambiguous or unsafe
@@ -98,8 +98,8 @@ stateDiagram-v2
 GitLab labels stay broad:
 
 - `agent::running`: active or self-resuming work.
-- `agent::awaiting-human`: exact MR, named source commit, receipts, and
-  factory-authored actionable issue handoff await human review.
+- `agent::awaiting-human`: exact MR, named source commit, and factory-authored
+  actionable issue handoff await human review.
 - `agent::blocked`: documented human action is needed.
 - `agent::failed`: a rare, fatal state prevented safe checking or recording.
 - `agent::needs_repair`: legacy or manually checkpointed repair awaits exact
@@ -258,7 +258,7 @@ and one record. The record tells recovery what to do, in order.
 | Base, source, and target branches with observed commit IDs | Keep branch identity and the commit IDs used to check it. |
 | Verified reconciliation target commit | Keep the exact SHA used to merge the worktree with the target branch before replay. |
 | Merge-request identity and verified publication evidence | Keep the MR IID, project identities, branches, exact source SHA, and publication marker. |
-| Worker protocol version, latest result kind, and required receipts | Keep the protocol, result, receipts, evidence markers, and human-handoff marker. |
+| Worker protocol version, latest result kind, and historical receipts | Keep them readable for legacy records. Treat receipt prose as non-authoritative. Keep controller evidence markers and the human-handoff marker. |
 | Stable error code, redacted summary, and explicit next action | Keep a stable error identity and next action. Redact detail. |
 | Transition intent | Write an external-change intent first, so it can be replayed safely. |
 
@@ -293,20 +293,27 @@ The table maps each invariant to the required control or evidence.
 | Systemd outcomes | Expected durable outcomes do not fail the systemd unit. |
 | Authority boundary | The runner never approves or merges. It never widens authority from issue text, labels, comments, or worker output. |
 
-## Workflow protocol and receipts
+## Workflow protocol and specialist context
+
+The producer sends bounded intent while the worker is live. It uses private
+scratch and a private Unix socket. The controller builds the result. A rejected
+request gets one correction. The broker adds current controller facts. It keeps
+the accepted result in memory. After exit, the controller checks identity,
+state, phase, envelope, and paths. It then makes the normal ledger transition.
+That transition is the durable evidence. Discussion, receipts, audit prose,
+standard output, and raw input cannot authorize it.
 
 The workflow session returns a versioned envelope. It names the issue, expected
-ledger transition, completed coarse state, receipts, result kind, redacted
-diagnostic, and proposed next action. Before changing state, the trusted runner
-checks it against the current record and Git evidence. A deliberate stop is not
-a failure.
+ledger transition, completed coarse state, result kind, redacted diagnostic,
+and proposed next action. Before changing state, the trusted runner checks it
+against the current record and Git evidence. A deliberate stop is not a failure.
 
 | Phase or result | Owner and required input | Receipt, transition, or stop |
 | --- | --- | --- |
 | `ready_to_publish` | Coding or content finalizer; validated change or repair | May proceed. New-MR work needs a returned or ledger-retained `merge_request_draft`; existing-MR remediation uses its verified MR. |
 | `retryable` | Runner; current retry evidence | Retry now, or retain a future deadline for an external transient. An explicit retry of the exact issue resets the automatic budget after a human fix. |
 | `needs_human` | Runner; block and concrete action | Block publication. |
-| Malformed protocol or receipt | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. |
+| Malformed protocol or legacy receipt condition | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. Historical receipt prose cannot authorize the retry. |
 | Architecture through Green | Architect gives the approved design concurrently to Red and the Diátaxis Writer | Green starts only after both receipts, receives test evidence and the documentation draft or no-doc rationale, becomes sole mutable owner, and reconciles docs with implemented interfaces. |
 | Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out, corrects from evidence, consolidates feedback, and returns it to Architect. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
 | Publication and assessment | Architect, finalizer, then runner; complete finalizer evidence | `observing`, exact-MR-conflict `repair`, and fresh `post-publication` assessment are durable. Publication does not end assessment. |
@@ -317,22 +324,24 @@ hook and the issue, branch, commit, pending merge, staged Git tree, and retained
 changes still match.
 
 The runner keeps the staged files and worktree changes. It drops the old
-result, merge request draft, receipts, and final audit because the code must be
+result, merge request draft, historical receipts, and final audit because the code must be
 checked again. It returns to a fresh complete workflow for correction and
 validation. A coding correction must reuse the exact retained Red checkpoint.
-A content correction does not load Red evidence; it must return fresh content
-receipts and audit evidence. Both lanes must produce a fresh merge request
-draft. An unknown lane, or missing or mismatched coding Red evidence, blocks
-the correction. The rejection route does not push or change a merge request.
+A content correction does not load Red evidence. Both lanes return fresh
+bounded worker intent and a fresh merge request draft. The controller verifies
+their current program state and changed paths. An unknown lane, or missing or
+mismatched coding Red evidence, blocks the correction. The rejection route does
+not push or change a merge request.
 
 Current detection needs clear failed-hook output. It does not reinterpret other
 publication failures. A reviewed retry has one narrow route for an old dirty
 candidate blocked as `publication_identity_mismatch`.
 
-Preview and apply read the same trusted record, audit, lane, intent, and
-baseline. They check the branch, `HEAD`, a read-only staged-index fingerprint, staged paths, and
-unstaged paths. Unstaged paths must be non-empty and stay within the staged,
-audited paths. Drift fails before a ledger, Git, label, or remote change.
+Preview and apply read the same controller-owned ledger revision, lane, intent,
+and baseline. They check the branch, `HEAD`, a read-only staged-index
+fingerprint, staged paths, and unstaged paths. Unstaged paths must be non-empty
+and stay within the controller-observed staged paths. Historical audit prose is
+readable context only. Drift fails before a ledger, Git, label, or remote change.
 Unknown lanes, generic Git failures, and unclear, untracked, unmerged, or
 changed evidence stay blocked.
 
@@ -348,14 +357,14 @@ identity, configuration, lock, file-system, object-database, and unknown commit
 failures keep their fail-closed handling. Missing, ambiguous, or changed
 publication identity remains `publication_identity_mismatch` and fails closed.
 
-Protected policy also needs all applicable receipts, a complete verdict, and
-typed, non-empty metadata. A safe disputed result starts `Draft:`. It includes
-open findings and evidence, exact human decisions, tests, the cycle ledger, and
-unchanged project-owned values. Missing evidence, an unsafe worktree identity,
-expanded authority, project-owned value changes, `needs_human`, or finalizer
-rejection blocks publication. The runner never builds a publication request
-from issue text. The worker never commits, pushes, or opens an MR. Only a human
-reviews, approves, or merges the exact MR.
+Protected policy also needs the exact proposed tree, target, controller-observed
+paths, lane, and applicable program-owned checkpoints. A safe disputed result
+starts `Draft:` and explains the human decision. That prose cannot authorize
+publication. Missing controller evidence, an unsafe worktree identity, expanded
+authority, project-owned value changes, `needs_human`, or finalizer rejection
+blocks publication. The runner never builds a publication request from issue
+text. The worker never commits, pushes, or opens an MR. Only a human reviews,
+approves, or merges the exact MR.
 
 ## Failure taxonomy and process exits
 
@@ -366,7 +375,7 @@ Classify a failure before choosing its label or exit code.
 | Idle | No resumable record or eligible issue. | `idle` | Exit successfully. |
 | Retryable | A timeout, temporary API failure, or transient runner contention. | `retry-wait` | Make at most three automatic attempts. |
 | Human-blocked | An ambiguous request, unmet dependency, or unsafe policy or recovery evidence. | `agent::blocked` | Record the exact next action. |
-| Awaiting review | The exact MR and required receipts are verified. | `agent::awaiting-human` | Wait for human review. |
+| Awaiting review | The exact MR, source commit, pipeline, and handoff are verified. | `agent::awaiting-human` | Wait for human review. |
 | Unrecoverable | The ledger cannot be read or written safely, or identity conflicts cannot be reconciled. | `agent::failed`, when safe to record | Stop safely. |
 
 Systemd treats idle, scheduled retry, blocked, and awaiting review as successful
@@ -469,6 +478,6 @@ the proof does not match. It does not send or save a secret.
 | Credential source and Git readiness | A regular checkout-local `.envrc`, executable absolute `AGENT_WORK_DIRENV`, directory-scoped Developer `GITLAB_TOKEN`, captured project identity, repository-owned credential-protocol helper, prompts disabled, and a dry-run push. | Use the token for the API, Git transport, readiness, controller, workflow, and nested agents; do not use or retain ambient, interactive, or saved helpers. |
 | New or existing-MR publication | A durable publication intent and either a nonempty `merge_request_draft` or the verified existing MR. | Publish idempotently; retry or reuse the recorded intent and MR rather than duplicate a commit or MR. |
 | MR and source verification | The configured project, MR IID and both project identities, source and target branches, closing issue, and recorded exact source SHA agree. | Observe only the exact source pipeline. Missing, mismatched, ambiguous, unrelated, or non-successful evidence fails closed. |
-| Exact-source success | The exact SHA's successful pipeline and required receipts are fresh and corroborated. | Write or reuse the factory-authored handoff before projecting `agent::awaiting-human`. |
+| Exact-source success | The exact SHA's successful pipeline and controller-owned publication evidence are fresh and corroborated. | Write or reuse the factory-authored handoff before projecting `agent::awaiting-human`. |
 | Human handoff | The handoff links the verified MR and names its exact source commit. | A human may review, approve, and merge; the worker never assigns a reviewer, approves, or merges. |
 | Permanent or transient failure | The retained ledger, worktree, publication intent, and observed failure distinguish authentication, authorization, policy, or configuration from a known short-lived transport failure. | Preserve evidence. Block permanent or unsafe cases; retain retry state for a transient. After the recorded action or retry, resume `publishing`, not implementation. |

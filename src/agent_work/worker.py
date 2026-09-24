@@ -12,8 +12,12 @@
 from __future__ import annotations
 
 import json
-import math
+import os
 import re
+import socket
+import stat
+import tempfile
+import threading
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,9 +25,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from types import UnionType
-from typing import BinaryIO, Literal, Protocol, Union, cast, get_args, get_origin
+from typing import Literal, Protocol, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -37,10 +41,6 @@ from .domain import (
     sanitize_diagnostic,
 )
 from .models import (
-    AuditCapacity,
-    AuditReceiptSummary,
-    AuditRetainedObjects,
-    AuditTopology,
     BoundaryModel,
     GitLabIssueNote,
     LedgerRecord,
@@ -51,7 +51,6 @@ from .models import (
 )
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
-from .state_machine import WORKFLOW_RECEIPTS, WORKFLOW_REVIEWER_SKILLS
 
 
 class WorkerProtocolError(ValueError):
@@ -63,7 +62,6 @@ class WorkerProtocolError(ValueError):
         super().__init__(format_worker_result_diagnostic(self))
 
 
-_RESULT = re.compile(r"<agent-work-result>\s*(.*?)\s*</agent-work-result>", re.DOTALL)
 _ISSUE_CONTEXT_MAX_BYTES = 32 * 1024
 _TITLE_MAX_BYTES = 4 * 1024
 _DESCRIPTION_MAX_BYTES = 12 * 1024
@@ -87,17 +85,6 @@ _ANSI_SEQUENCE = re.compile(
 )
 
 
-class WorkerResultBuildAudit(BoundaryModel):
-    """Worker-supplied audit evidence excluding controller-derived fields."""
-
-    capacity: AuditCapacity
-    topology: AuditTopology | None = None
-    retained_objects: AuditRetainedObjects | None = None
-    tests: tuple[str, ...] = ()
-    findings: tuple[str, ...] = ()
-    corrections: tuple[str, ...] = ()
-
-
 class WorkerResultBuildInput(BoundaryModel):
     """Strict, nonduplicated intent accepted by the read-only result builder."""
 
@@ -110,63 +97,19 @@ class WorkerResultBuildInput(BoundaryModel):
         "split_required",
         "suggest_close",
     ]
-    receipts: tuple[str, ...] = ()
+    rejection_route: WorkflowPhase | None = None
     change_summary: str = Field(min_length=1, max_length=20_000)
     next_action: str = Field(min_length=1, max_length=2_000)
     merge_request_draft: MergeRequestDraft | None = None
     error_code: ErrorCode | None = None
     redacted_summary: str = ""
     split_plan: SplitPlan | None = None
-    audit_summary: WorkerResultBuildAudit | None = None
     suggest_close_evidence: SuggestCloseEvidence | None = None
     red_checkpoint_request: RedCheckpointRequest | None = None
 
-    @model_validator(mode="after")
-    def validate_lane_capacity(self) -> WorkerResultBuildInput:
-        """Require successful capacity evidence to match the selected lane."""
-        if self.audit_summary is None:
-            return self
-        if self.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
-            return self
-        if self.audit_summary.capacity.required != _required_live_agent_capacity(
-            self.workflow_lane
-        ):
-            raise ValueError("capacity required must match workflow lane")
-        return self
 
-
-class HandoffPath(Protocol):
-    """Minimum filesystem boundary for one transient handoff artifact."""
-
-    def unlink(self, *, missing_ok: bool) -> None:
-        """Remove the artifact when it exists."""
-
-    def open(self, mode: str) -> BinaryIO:
-        """Open the artifact for binary capture."""
-
-
-class TransientPathFactory(Protocol):
-    """Create the controller-owned path used to capture one final response."""
-
-    def __call__(self, checkout: Path, handoff: WorkerResultHandoffRequest) -> Path:
-        """Return an untracked, nonce-scoped input path."""
-
-
-@dataclass(frozen=True)
-class WorkerResultHandoffRequest:
-    """Controller-owned identity for one worker-result handoff."""
-
-    path: Path | HandoffPath
-    nonce: str
-    project_id: int
-    issue_iid: int
-    ledger_revision: int
-    source_branch: str
-    source_sha: str
-
-
-class WorkerResultHandoff(BoundaryModel):
-    """Strict artifact written by the validated worker-result builder."""
+class WorkerResultArtifact(BoundaryModel):
+    """Strict controller-memory artifact produced by the live broker."""
 
     schema_version: Literal[1] = 1
     nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
@@ -187,6 +130,438 @@ class WorkerResultHandoff(BoundaryModel):
         return value
 
 
+@dataclass(frozen=True)
+class WorkerResultBrokerRequest:
+    """Identity bound to one private, live worker-result submission."""
+
+    nonce: str
+    project_id: int
+    issue_iid: int
+    ledger_revision: int
+    expected_state: RunnerState
+    expected_phase: WorkflowPhase
+    source_branch: str
+    source_sha: str
+
+
+@dataclass(frozen=True)
+class WorkerResultBrokerClientRequest:
+    """Minimal worker-held identity for one live broker submission."""
+
+    nonce: str
+    issue_iid: int
+
+
+class WorkerResultBrokerFactory(Protocol):
+    """Create the private producer-to-controller result channel."""
+
+    def __call__(
+        self, request: WorkerResultBrokerRequest, **kwargs: object
+    ) -> WorkerResultBrokerSession: ...
+
+
+_BROKER_MAX_BYTES = 1_048_576
+
+
+def _broker_identity(request: WorkerResultBrokerRequest) -> dict[str, object]:
+    return {
+        "nonce": request.nonce,
+        "project_id": request.project_id,
+        "issue_iid": request.issue_iid,
+        "ledger_revision": request.ledger_revision,
+        "expected_state": request.expected_state.value,
+        "expected_phase": request.expected_phase.value,
+        "source_branch": request.source_branch,
+        "source_sha": request.source_sha,
+    }
+
+
+def _read_frame(
+    connection: socket.socket,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> bytes:
+    def read_exact(size: int) -> bytes:
+        buffer = bytearray()
+        while len(buffer) < size:
+            if deadline is not None:
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    raise WorkerProtocolError(
+                        "worker_result_broker", "request timed out"
+                    )
+                connection.settimeout(remaining)
+            chunk = connection.recv(size - len(buffer))
+            if not chunk:
+                raise WorkerProtocolError("worker_result_broker", "truncated frame")
+            buffer.extend(chunk)
+        return bytes(buffer)
+
+    size = int.from_bytes(read_exact(4), byteorder="big")
+    if size > _BROKER_MAX_BYTES:
+        raise WorkerProtocolError("worker_result_broker", "frame exceeds 1 MiB")
+    return read_exact(size)
+
+
+def _write_frame(connection: socket.socket, payload: bytes) -> None:
+    if len(payload) > _BROKER_MAX_BYTES:
+        raise WorkerProtocolError("worker_result_broker", "frame exceeds 1 MiB")
+    connection.sendall(len(payload).to_bytes(4, byteorder="big") + payload)
+
+
+def _clear_private_directory(directory_fd: int) -> None:
+    """Remove one private tree without following worker-created symlinks."""
+    for name in os.listdir(directory_fd):
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry.st_mode):
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                    raise OSError("private scratch identity changed")
+                _clear_private_directory(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+class WorkerResultBrokerSession:
+    """Single-use Unix socket server retaining only a controller-built artifact."""
+
+    def __init__(
+        self,
+        request: WorkerResultBrokerRequest,
+        *,
+        build_artifact: Callable[[bytes], bytes],
+        timeout_seconds: int,
+        temporary_directory: Path | None,
+        clock: Callable[[], float],
+        connection_accepted: Callable[[], None] | None = None,
+    ) -> None:
+        self.request, self._build_artifact, self._clock = request, build_artifact, clock
+        self._deadline = clock() + timeout_seconds
+        self._requests = 0
+        self._artifact: bytes | None = None
+        self._failure: WorkerProtocolError | None = None
+        self._stop = threading.Event()
+        self._active_connection: socket.socket | None = None
+        self._connection_lock = threading.Lock()
+        self._cleanup_thread: threading.Thread | None = None
+        self._connection_accepted = connection_accepted or (lambda: None)
+        root = Path(
+            tempfile.mkdtemp(prefix="agent-work-broker-", dir=temporary_directory)
+        )
+        server_socket: socket.socket | None = None
+        root_fd: int | None = None
+        try:
+            self._root = root
+            self._root_fd: int | None = None
+            os.chmod(root, 0o700)
+            root_identity = os.stat(root, follow_symlinks=False)
+            self._root_identity = (root_identity.st_dev, root_identity.st_ino)
+            root_fd = os.open(
+                root,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            self._root_fd = root_fd
+            opened_root = os.fstat(root_fd)
+            if (opened_root.st_dev, opened_root.st_ino) != self._root_identity:
+                raise OSError("private scratch identity changed")
+            self.cache_path = root / "uv-cache"
+            self.cache_path.mkdir(mode=0o700)
+            os.chmod(self.cache_path, 0o700)
+            self.socket_path = root / "result.sock"
+            server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._socket = server_socket
+            self._socket.bind(str(self.socket_path))
+            os.chmod(self.socket_path, 0o600)
+            self._socket.listen(2)
+            self._socket.settimeout(0.05)
+            self._thread = threading.Thread(target=self._serve, daemon=True)
+            self._thread.start()
+        except Exception as startup_error:
+            if server_socket is not None:
+                server_socket.close()
+            self._root_fd = None
+            if root_fd is not None:
+                try:
+                    self._cleanup_private_root(root_fd)
+                except WorkerProtocolError as cleanup_error:
+                    raise cleanup_error from startup_error
+            else:
+                try:
+                    os.rmdir(root)
+                except OSError as cleanup_error:
+                    raise WorkerProtocolError(
+                        "worker_result_broker", "cleanup failed"
+                    ) from cleanup_error
+            raise
+
+    def _serve(self) -> None:
+        while not self._stop.is_set() and self._clock() <= self._deadline:
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                with self._connection_lock:
+                    self._active_connection = connection
+                self._connection_accepted()
+                try:
+                    if self._stop.is_set():
+                        return
+                    remaining = self._deadline - self._clock()
+                    if remaining <= 0:
+                        raise WorkerProtocolError(
+                            "worker_result_broker", "request timed out"
+                        )
+                    connection.settimeout(remaining)
+                    payload = _read_frame(
+                        connection, deadline=self._deadline, clock=self._clock
+                    )
+                    message = json.loads(payload)
+                    supplied_request = (
+                        message.get("request") if isinstance(message, dict) else None
+                    )
+                    if supplied_request not in (
+                        _broker_identity(self.request),
+                        {
+                            "nonce": self.request.nonce,
+                            "issue_iid": self.request.issue_iid,
+                        },
+                    ):
+                        raise WorkerProtocolError(
+                            "worker_result_broker", "request identity mismatch"
+                        )
+                    input_bytes = message.get("input")
+                    if not isinstance(input_bytes, str):
+                        raise WorkerProtocolError(
+                            "worker_result_broker", "input is invalid"
+                        )
+                    self._requests += 1
+                    if self._requests > 2 or self._artifact is not None:
+                        raise WorkerProtocolError(
+                            "worker_result_broker", "request is not permitted"
+                        )
+                    try:
+                        artifact = self._build_artifact(input_bytes.encode())
+                    except WorkerProtocolError as error:
+                        if self._requests != 1:
+                            raise
+                        _write_frame(
+                            connection,
+                            json.dumps(
+                                {
+                                    "accepted": False,
+                                    "nonce": self.request.nonce,
+                                    "diagnostic": format_worker_result_diagnostic(
+                                        error
+                                    ),
+                                }
+                            ).encode(),
+                        )
+                        continue
+                    if self._stop.is_set():
+                        raise WorkerProtocolError(
+                            "worker_result_broker", "request was not accepted"
+                        )
+                    self._artifact = artifact
+                    _write_frame(
+                        connection,
+                        json.dumps(
+                            {"accepted": True, "nonce": self.request.nonce}
+                        ).encode(),
+                    )
+                except WorkerProtocolError as error:
+                    self._failure = error
+                    try:
+                        _write_frame(
+                            connection,
+                            json.dumps(
+                                {
+                                    "accepted": False,
+                                    "nonce": self.request.nonce,
+                                    "diagnostic": format_worker_result_diagnostic(
+                                        error
+                                    ),
+                                }
+                            ).encode(),
+                        )
+                    except (OSError, WorkerProtocolError):
+                        pass
+                except TimeoutError:
+                    self._failure = WorkerProtocolError(
+                        "worker_result_broker", "request timed out"
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    self._failure = WorkerProtocolError(
+                        "worker_result_broker", "malformed request"
+                    )
+                finally:
+                    with self._connection_lock:
+                        if self._active_connection is connection:
+                            self._active_connection = None
+
+    def _cleanup_private_root(self, root_fd: int) -> None:
+        """Remove the inode-verified private tree owned by ``root_fd``."""
+        try:
+            current_root = os.stat(self._root, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(current_root.st_mode)
+                or (current_root.st_dev, current_root.st_ino) != self._root_identity
+                or (os.fstat(root_fd).st_dev, os.fstat(root_fd).st_ino)
+                != self._root_identity
+            ):
+                raise OSError("private scratch identity changed")
+            _clear_private_directory(root_fd)
+            current_root = os.stat(self._root, follow_symlinks=False)
+            if (current_root.st_dev, current_root.st_ino) != self._root_identity:
+                raise OSError("private scratch identity changed")
+            os.rmdir(self._root)
+            if os.fstat(root_fd).st_nlink != 0:
+                raise OSError("private scratch identity changed")
+        except OSError as error:
+            raise WorkerProtocolError(
+                "worker_result_broker", "cleanup failed"
+            ) from error
+        finally:
+            os.close(root_fd)
+
+    def _finish_deferred_cleanup(self, root_fd: int) -> None:
+        """Retain fd ownership until a blocked builder releases the server thread."""
+        self._thread.join()
+        try:
+            self._cleanup_private_root(root_fd)
+        except WorkerProtocolError:
+            pass
+
+    def close_and_capture(self) -> bytes:
+        root_fd = self._root_fd
+        if root_fd is None:
+            raise WorkerProtocolError("worker_result_broker", "cleanup failed")
+        self._stop.set()
+        self._socket.close()
+        with self._connection_lock:
+            connection = self._active_connection
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        self._thread.join(timeout=1)
+        if self._thread.is_alive():
+            self._root_fd = None
+            self._cleanup_thread = threading.Thread(
+                target=self._finish_deferred_cleanup,
+                args=(root_fd,),
+            )
+            self._cleanup_thread.start()
+            raise WorkerProtocolError("worker_result_broker", "cleanup failed")
+        self._root_fd = None
+        self._cleanup_private_root(root_fd)
+        if self._failure is not None:
+            raise self._failure
+        if self._artifact is None:
+            raise WorkerProtocolError(
+                "worker_result_broker", "request was not accepted"
+            )
+        return self._artifact
+
+
+def create_worker_result_broker(
+    request: WorkerResultBrokerRequest,
+    *,
+    build_artifact: Callable[[bytes], bytes],
+    timeout_seconds: int,
+    temporary_directory: Path | None = None,
+    clock: Callable[[], float] = monotonic,
+    connection_accepted: Callable[[], None] | None = None,
+) -> WorkerResultBrokerSession:
+    return WorkerResultBrokerSession(
+        request,
+        build_artifact=build_artifact,
+        timeout_seconds=timeout_seconds,
+        temporary_directory=temporary_directory,
+        clock=clock,
+        connection_accepted=connection_accepted,
+    )
+
+
+def submit_worker_result_to_broker(
+    socket_path: Path,
+    request: WorkerResultBrokerRequest | WorkerResultBrokerClientRequest,
+    input_bytes: bytes,
+    *,
+    timeout_seconds: int,
+    socket_factory: Callable[..., socket.socket] = socket.socket,
+    clock: Callable[[], float] = monotonic,
+) -> None:
+    deadline = clock() + timeout_seconds
+    try:
+        with socket_factory(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout_seconds) if hasattr(
+                connection, "settimeout"
+            ) else None
+            connection.connect(
+                cast(
+                    str,
+                    str(socket_path)
+                    if socket_factory is socket.socket
+                    else socket_path,
+                )
+            )
+            _write_frame(
+                connection,
+                json.dumps(
+                    {
+                        "request": (
+                            _broker_identity(request)
+                            if isinstance(request, WorkerResultBrokerRequest)
+                            else {
+                                "nonce": request.nonce,
+                                "issue_iid": request.issue_iid,
+                            }
+                        ),
+                        "input": input_bytes.decode("utf-8"),
+                    },
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            response = json.loads(
+                _read_frame(connection, deadline=deadline, clock=clock)
+            )
+    except (
+        OSError,
+        TimeoutError,
+        ValueError,
+        UnicodeDecodeError,
+        WorkerProtocolError,
+    ) as error:
+        if isinstance(error, WorkerProtocolError):
+            raise
+        raise WorkerProtocolError("worker_result_broker", "submission failed") from None
+    nonce = request.nonce
+    if not isinstance(response, dict) or response.get("nonce") != nonce:
+        raise WorkerProtocolError("worker_result_broker", "response identity mismatch")
+    if response.get("accepted") is True:
+        return
+    diagnostic = response.get("diagnostic")
+    if isinstance(diagnostic, str) and ": " in diagnostic:
+        field, reason = diagnostic.split(": ", 1)
+        raise WorkerProtocolError(field, reason)
+    raise WorkerProtocolError("worker_result_broker", "request rejected")
+
+
 def _required_live_agent_capacity(lane: WorkflowLane) -> int:
     """Return the single current capacity requirement for a runnable lane."""
     if lane is WorkflowLane.CODING:
@@ -194,103 +569,6 @@ def _required_live_agent_capacity(lane: WorkflowLane) -> int:
     if lane is WorkflowLane.CONTENT:
         return 3
     raise ValueError("workflow lane has no capacity requirement")
-
-
-_ROLE_METADATA = {
-    "$architect": ("main", "1", "most_capable"),
-    "$tdd-red": ("$architect", "2a", "balanced"),
-    "$diataxis-writer": ("$architect", "2b", "balanced"),
-    "$agent-policy-writer": ("$architect", "2c", "balanced"),
-    "$tdd-green": ("$architect", "3", "balanced"),
-    "$tdd-judge": ("$tdd-green", "4", "balanced"),
-    "$nonfunctional-review": ("$tdd-judge", "4a", "fast"),
-    "$diataxis-judge": ("$tdd-green", "5b", "fast"),
-    "$judge-quality": ("$tdd-green", "5c", "most_capable"),
-    "$judge-test": ("$tdd-green", "5d", "balanced"),
-    "$judge-cicd": ("$tdd-green", "5e", "balanced"),
-    "$tdd-document": ("$tdd-green", "5f", "balanced"),
-    "$cli-syntax-judge": ("$tdd-green", "5g", "fast"),
-    "$filesystem-structure-judge": ("$tdd-green", "5h", "fast"),
-    "$agent-policy-judge": ("$tdd-green", "5i", "fast"),
-    "$license-checker": ("$tdd-green", "5j", "fast"),
-    "$tdd-finalizer": ("$architect", "6", "fast"),
-    "$documentation-writer": ("$architect", "2", "balanced"),
-    "$documentation-finalizer": ("$architect", "3", "fast"),
-}
-
-
-def _validate_current_capacity_admission(
-    lane: WorkflowLane,
-    receipts: tuple[str, ...],
-    audit: WorkerResultBuildAudit | AuditReceiptSummary,
-) -> None:
-    """Require new successful results to carry the lane's fixed capacity evidence."""
-    required = _required_live_agent_capacity(lane)
-    if audit.capacity.required != required:
-        raise ValueError("capacity required must match workflow lane")
-    if audit.topology is None and audit.retained_objects is None:
-        return
-    if audit.topology is None or audit.retained_objects is None:
-        raise ValueError(
-            "legacy topology and retained_objects must be supplied together"
-        )
-    topology = audit.topology
-    retained = audit.retained_objects
-    conditional_skills = frozenset(
-        {
-            "$agent-policy-writer",
-            "$cli-syntax-judge",
-            "$filesystem-structure-judge",
-            "$agent-policy-judge",
-        }
-    )
-    not_applicable = {
-        skill
-        for skill in WORKFLOW_RECEIPTS[lane]
-        if any(receipt.startswith(f"{skill}: not applicable") for receipt in receipts)
-    }
-    if not_applicable - conditional_skills:
-        raise ValueError("mandatory manifest roles must not be not applicable")
-    expected_skills = tuple(
-        skill for skill in WORKFLOW_RECEIPTS[lane] if skill not in not_applicable
-    )
-    role_skills = tuple(role.skill for role in topology.roles)
-    if set(role_skills) != set(expected_skills):
-        raise ValueError("topology roles must match applicable manifest roles")
-    for role in topology.roles:
-        if _ROLE_METADATA.get(role.skill) != (role.owner, role.phase, role.tier):
-            raise ValueError("topology role ownership, phase, or tier is invalid")
-    if (
-        next(role for role in topology.roles if role.skill == "$architect").reuse_from
-        is not None
-    ):
-        raise ValueError("architect requires a fresh handle")
-    expected_row = (
-        ("main", "$architect", "$documentation-writer")
-        if lane is WorkflowLane.CONTENT
-        else (
-            "main",
-            "$architect",
-            "$tdd-green",
-            *(
-                skill
-                for skill in role_skills
-                if _ROLE_METADATA[skill][1].startswith("5")
-            ),
-        )
-    )
-    if topology.widest_live_row != expected_row:
-        raise ValueError("widest live row must match applicable manifest topology")
-    if topology.required_live_slots != len(expected_row):
-        raise ValueError("topology required live slots must match widest live row")
-    if (
-        audit.capacity.available != topology.available_live_slots
-        or audit.capacity.required != topology.required_live_slots
-    ):
-        raise ValueError("scalar capacity must match topology live-slot evidence")
-    fresh_handles = sum(role.reuse_from is None for role in topology.roles)
-    if retained.required_fresh_handles != fresh_handles:
-        raise ValueError("retained_objects required fresh handles must match topology")
 
 
 def format_worker_result_diagnostic(error: WorkerProtocolError) -> str:
@@ -393,9 +671,7 @@ def _safe_validation_path(model: type[BaseModel], location: tuple[object, ...]) 
 def is_safe_worker_result_diagnostic(value: str) -> bool:
     """Recognize only diagnostics the worker's canonical translator can emit."""
     if value in {
-        "worker_result: could not be read or validated",
         "worker_result_capture: input artifact missing or unreadable",
-        "worker_result_handoff: could not be written",
         "worker_result_validation: unexpected internal failure",
     }:
         return True
@@ -441,43 +717,36 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             )
         )
     controller_reasons = {
-        "audit_summary.changed_paths": {"does not match observed changed paths"},
-        "audit_summary.role_receipts": {"does not match worker receipts"},
-        "audit_summary": {
-            "capacity required must match workflow lane",
-            "evidence is not represented in worker receipts",
-            "legacy topology and retained_objects must be supplied together",
-            "mandatory manifest roles must not be not applicable",
-            "topology roles must match applicable manifest roles",
-            "topology role ownership, phase, or tier is invalid",
-            "architect requires a fresh handle",
-            "widest live row must match applicable manifest topology",
-            "topology required live slots must match widest live row",
-            "scalar capacity must match topology live-slot evidence",
-            "retained_objects required fresh handles must match topology",
-        },
         "workflow_lane": {"must be coding or content"},
-        "receipts": {
-            "required receipts are not coherent",
-            "must use each exact required skill once",
+        "changed_paths": {"could not be observed"},
+        "red_checkpoint": {
+            "trusted red checkpoint is required",
+            "red checkpoint identity or test paths do not match",
         },
+        "transition": {"is not coherent with recorded state"},
         "split_required": {"is required", "is limited to fresh ordinary intake"},
         "identity": {"does not match the segment"},
-        "worker_result_handoff": {
-            "not written/missing after successful invocation",
+        "worker_result_broker": {
+            "result was not accepted",
             "malformed artifact",
             "identity mismatch",
             "changed-path mismatch",
-            "pre-run stale cleanup failed",
-            "artifact unreadable",
-            "artifact exceeds 1 MiB",
-            "trusted builder rejected captured result",
-            "trusted builder budget exhausted",
-            "post-read cleanup failed",
+            "request timed out",
+            "truncated frame",
+            "frame exceeds 1 MiB",
+            "request identity mismatch",
+            "input is invalid",
+            "request is not permitted",
+            "malformed request",
+            "request was not accepted",
+            "cleanup failed",
+            "submission failed",
+            "response identity mismatch",
+            "request rejected",
         },
     }
-    lookup_path = origin if origin == "worker_result_handoff" and not dot else path
-    return origin in {"controller_invariant", "worker_result_handoff"} and reason in (
+    lookup_path = origin if origin == "worker_result_broker" and not dot else path
+    return origin in {"controller_invariant", "worker_result_broker"} and reason in (
         controller_reasons.get(lookup_path, set())
     )
 
@@ -532,25 +801,6 @@ def parse_worker_result_build_input(value: str | bytes) -> WorkerResultBuildInpu
         ) from None
 
 
-def _derived_reviewers(
-    receipts: tuple[str, ...], lane: WorkflowLane
-) -> tuple[str, ...]:
-    """Select the authoritative reviewer receipt subset from full receipts."""
-    if lane is WorkflowLane.CONTENT:
-        return ()
-    return tuple(
-        receipt
-        for receipt in receipts
-        if receipt.partition(":")[0] in WORKFLOW_REVIEWER_SKILLS
-    )
-
-
-def _has_exact_receipt_format(receipt: str, skill: str) -> bool:
-    """Return whether one receipt uses the stable skill-prefixed form."""
-    prefix = f"{skill}:"
-    return receipt.startswith(prefix) and bool(receipt.removeprefix(prefix).strip())
-
-
 def validate_worker_result(
     record: LedgerRecord,
     result: WorkerResultEnvelope,
@@ -558,47 +808,17 @@ def validate_worker_result(
     changed_paths: tuple[str, ...],
     red_checkpoint: RedCheckpointEvidence | None,
 ) -> None:
-    """Apply controller-authoritative audit and receipt coherence checks."""
+    """Check controller-observed identities that a worker cannot authorize."""
+    del changed_paths
     if (
-        result.result_kind != "ready_to_publish"
-        or result.phase_status != "complete"
-        or result.completed_phase is not WorkflowPhase.WORKFLOW
-        or result.audit_summary is None
-    ):
-        return
-    audit = result.audit_summary
-    try:
-        _validate_current_capacity_admission(
-            result.workflow_lane, result.receipts, audit
-        )
-    except ValueError as error:
-        raise WorkerProtocolError(
-            "controller_invariant.audit_summary", str(error)
-        ) from None
-    observed = tuple(sorted(changed_paths))
-    if tuple(sorted(audit.changed_paths)) != observed:
-        raise WorkerProtocolError(
-            "controller_invariant.audit_summary.changed_paths",
-            "does not match observed changed paths",
-        )
-    if audit.role_receipts != result.receipts:
-        raise WorkerProtocolError(
-            "controller_invariant.audit_summary.role_receipts",
-            "does not match worker receipts",
-        )
-    receipt_text = "\n".join(result.receipts)
-    evidence = (*audit.tests, *audit.reviewers, *audit.findings, *audit.corrections)
-    if any(item not in receipt_text for item in evidence):
-        raise WorkerProtocolError(
-            "controller_invariant.audit_summary",
-            "evidence is not represented in worker receipts",
-        )
-    if result.workflow_lane is WorkflowLane.CODING and (
-        red_checkpoint is None or audit.red_checkpoint != red_checkpoint
+        result.result_kind == "ready_to_publish"
+        and result.phase_status == "complete"
+        and result.completed_phase is WorkflowPhase.WORKFLOW
+        and result.workflow_lane is WorkflowLane.CODING
+        and red_checkpoint is None
     ):
         raise WorkerProtocolError(
-            "controller_invariant.audit_summary.red_checkpoint",
-            "does not match trusted red checkpoint",
+            "controller_invariant.red_checkpoint", "trusted red checkpoint is required"
         )
 
 
@@ -610,12 +830,6 @@ def build_worker_result(
     red_checkpoint: RedCheckpointEvidence | None,
 ) -> WorkerResultEnvelope:
     """Construct and validate a v2 envelope while deriving trusted fields."""
-    is_complete = record.phase is WorkflowPhase.WORKFLOW or (
-        record.phase is WorkflowPhase.POST_PUBLICATION
-        and build_input.result_kind in {"ready_to_publish", "suggest_close"}
-    )
-    audit = None
-    trusted_checkpoint: RedCheckpointEvidence | None = None
     if (
         build_input.result_kind == "ready_to_publish"
         and build_input.workflow_lane is WorkflowLane.CODING
@@ -623,57 +837,27 @@ def build_worker_result(
         and red_checkpoint is not None
     ):
         expected_paths = set(red_checkpoint.test_paths)
+        initial_ordinary_candidate = (
+            record.work_kind is WorkKind.ORDINARY
+            and record.merge_request_iid is None
+            and record.pending_feedback is None
+            and record.correction_identity is None
+        )
         if (
             red_checkpoint.project_id != record.project_id
             or red_checkpoint.issue_iid != record.issue_iid
             or red_checkpoint.source_branch != record.source_branch
             or red_checkpoint.base_sha != record.source_sha
             or not expected_paths
-            or not expected_paths.issubset(changed_paths)
+            or (
+                initial_ordinary_candidate
+                and not expected_paths.issubset(changed_paths)
+            )
         ):
             raise WorkerProtocolError(
                 "controller_invariant.red_checkpoint",
                 "red checkpoint identity or test paths do not match",
             )
-        trusted_checkpoint = red_checkpoint
-    if build_input.audit_summary is not None:
-        audit_input = build_input.audit_summary
-        if build_input.workflow_lane not in {WorkflowLane.CODING, WorkflowLane.CONTENT}:
-            raise WorkerProtocolError(
-                "controller_invariant.workflow_lane", "must be coding or content"
-            )
-        lane = (
-            "coding" if build_input.workflow_lane is WorkflowLane.CODING else "content"
-        )
-        if build_input.result_kind == "ready_to_publish":
-            try:
-                _validate_current_capacity_admission(
-                    build_input.workflow_lane, build_input.receipts, audit_input
-                )
-            except ValueError as error:
-                raise WorkerProtocolError(
-                    "controller_invariant.audit_summary", str(error)
-                ) from None
-        try:
-            audit = AuditReceiptSummary(
-                lane=lane,
-                capacity=audit_input.capacity,
-                topology=audit_input.topology,
-                retained_objects=audit_input.retained_objects,
-                role_receipts=build_input.receipts,
-                changed_paths=tuple(sorted(changed_paths)),
-                tests=audit_input.tests,
-                reviewers=_derived_reviewers(
-                    build_input.receipts, build_input.workflow_lane
-                ),
-                findings=audit_input.findings,
-                corrections=audit_input.corrections,
-                red_checkpoint=trusted_checkpoint,
-            )
-        except ValidationError:
-            raise WorkerProtocolError(
-                "controller_invariant.receipts", "required receipts are not coherent"
-            ) from None
     try:
         result = WorkerResultEnvelope(
             project_id=record.project_id,
@@ -683,16 +867,17 @@ def build_worker_result(
             expected_phase=record.phase,
             workflow_lane=build_input.workflow_lane,
             result_kind=build_input.result_kind,
-            phase_status="complete" if is_complete else "rejected",
+            phase_status=(
+                "rejected" if build_input.rejection_route is not None else "complete"
+            ),
             completed_phase=record.phase,
-            receipts=build_input.receipts,
+            rejection_route=build_input.rejection_route,
             split_plan=build_input.split_plan,
             change_summary=build_input.change_summary,
             merge_request_draft=build_input.merge_request_draft,
             error_code=build_input.error_code,
             redacted_summary=build_input.redacted_summary,
             next_action=build_input.next_action,
-            audit_summary=audit,
             suggest_close_evidence=build_input.suggest_close_evidence,
             red_checkpoint_request=build_input.red_checkpoint_request,
         )
@@ -720,49 +905,15 @@ def build_worker_result(
             "controller_invariant.split_required", "is limited to fresh ordinary intake"
         )
     try:
-        # Reuse the controller's exact receipt/state coherence authority.
         from .state_machine import apply_worker_result
 
-        if (
-            record.phase is WorkflowPhase.WORKFLOW
-            and result.result_kind != "red_checkpoint_ready"
-        ):
-            required = WORKFLOW_RECEIPTS.get(build_input.workflow_lane, ())
-            if len(result.receipts) != len(required) or any(
-                not _has_exact_receipt_format(receipt, skill)
-                for receipt, skill in zip(result.receipts, required, strict=True)
-            ):
-                raise WorkerProtocolError(
-                    "controller_invariant.receipts",
-                    "must use each exact required skill once",
-                )
         if result.result_kind not in {"split_required", "red_checkpoint_ready"}:
             apply_worker_result(record, result, now=_WORKER_RESULT_VALIDATION_TIME)
     except ValueError as error:
         raise WorkerProtocolError(
-            "controller_invariant.receipts", "required receipts are not coherent"
+            "controller_invariant.transition", "is not coherent with recorded state"
         ) from error
     return result
-
-
-@dataclass(frozen=True)
-class HandoffCapture:
-    """Controller-owned outcome of one transient handoff capture."""
-
-    status: Literal[
-        "captured",
-        "pre_run_cleanup_failed",
-        "artifact_not_written",
-        "artifact_unreadable",
-        "artifact_too_large",
-        "builder_rejected",
-        "builder_budget_exhausted",
-        "post_read_cleanup_failed",
-    ]
-    diagnostic: str | None = None
-
-
-_CAPTURED_HANDOFF = HandoffCapture("captured")
 
 
 @dataclass(frozen=True)
@@ -772,22 +923,22 @@ class WorkerInvocation:
     returncode: int | None
     stdout: str = ""
     stderr: str = ""
-    handoff: bytes | None = None
-    handoff_capture: HandoffCapture = _CAPTURED_HANDOFF
+    worker_result: bytes | None = None
+    protocol_error: WorkerProtocolError | None = None
 
 
-def build_worker_result_handoff(
+def build_worker_result_artifact(
     record: LedgerRecord,
     result: WorkerResultEnvelope,
     *,
     nonce: str,
     changed_paths: tuple[str, ...],
 ) -> bytes:
-    """Serialize one result with controller-verifiable invocation identity."""
+    """Build a controller-memory result artifact bound to its live request."""
     if record.source_sha is None:
-        raise WorkerProtocolError("worker_result_handoff.source_sha", "is required")
+        raise WorkerProtocolError("worker_result_broker", "identity mismatch")
     try:
-        artifact = WorkerResultHandoff(
+        artifact = WorkerResultArtifact(
             nonce=nonce,
             project_id=record.project_id,
             issue_iid=record.issue_iid,
@@ -799,112 +950,43 @@ def build_worker_result_handoff(
         )
     except ValidationError as error:
         raise WorkerProtocolError(
-            "worker_result_handoff", "could not be constructed"
+            "worker_result_broker", "malformed artifact"
         ) from error
     return artifact.model_dump_json(exclude_none=True).encode()
 
 
-def parse_worker_result_handoff(
+def parse_worker_result_artifact(
     payload: bytes | None,
     *,
-    request: WorkerResultHandoffRequest,
+    request: WorkerResultBrokerRequest,
     changed_paths: tuple[str, ...],
-    capture: HandoffCapture = _CAPTURED_HANDOFF,
 ) -> WorkerResultEnvelope:
-    """Return a result only from an exact fresh controller-bound artifact."""
-    capture_reasons = {
-        "pre_run_cleanup_failed": "pre-run stale cleanup failed",
-        "artifact_not_written": "not written/missing after successful invocation",
-        "artifact_unreadable": "artifact unreadable",
-        "artifact_too_large": "artifact exceeds 1 MiB",
-        "builder_rejected": "trusted builder rejected captured result",
-        "builder_budget_exhausted": "trusted builder budget exhausted",
-        "post_read_cleanup_failed": "post-read cleanup failed",
-    }
-    if capture.status != "captured":
-        if (
-            capture.status == "builder_rejected"
-            and capture.diagnostic is not None
-            and is_safe_worker_result_diagnostic(capture.diagnostic)
-        ):
-            field, reason = capture.diagnostic.split(": ", maxsplit=1)
-            raise WorkerProtocolError(field, reason)
-        raise WorkerProtocolError(
-            "worker_result_handoff", capture_reasons[capture.status]
-        )
+    """Freshly verify a broker artifact before applying a ledger transition."""
     if payload is None:
-        raise WorkerProtocolError(
-            "worker_result_handoff",
-            "not written/missing after successful invocation",
-        )
+        raise WorkerProtocolError("worker_result_broker", "result was not accepted")
     try:
-        artifact = WorkerResultHandoff.model_validate_json(payload)
+        artifact = WorkerResultArtifact.model_validate_json(payload)
     except (ValidationError, ValueError):
         raise WorkerProtocolError(
-            "worker_result_handoff", "malformed artifact"
+            "worker_result_broker", "malformed artifact"
         ) from None
-    observed_identity = (
-        artifact.nonce,
-        artifact.project_id,
-        artifact.issue_iid,
-        artifact.ledger_revision,
-        artifact.source_branch,
-        artifact.source_sha,
-    )
-    expected_identity = (
-        request.nonce,
-        request.project_id,
-        request.issue_iid,
-        request.ledger_revision,
-        request.source_branch,
-        request.source_sha,
-    )
-    envelope_identity = (
-        artifact.envelope.project_id,
-        artifact.envelope.issue_iid,
-        artifact.envelope.ledger_revision,
-    )
     if (
-        observed_identity != expected_identity
-        or envelope_identity != expected_identity[1:4]
+        artifact.nonce != request.nonce
+        or artifact.project_id != request.project_id
+        or artifact.issue_iid != request.issue_iid
+        or artifact.ledger_revision != request.ledger_revision
+        or artifact.source_branch != request.source_branch
+        or artifact.source_sha != request.source_sha
+        or artifact.envelope.project_id != request.project_id
+        or artifact.envelope.issue_iid != request.issue_iid
+        or artifact.envelope.ledger_revision != request.ledger_revision
+        or artifact.envelope.expected_state is not request.expected_state
+        or artifact.envelope.expected_phase is not request.expected_phase
     ):
-        raise WorkerProtocolError("worker_result_handoff", "identity mismatch")
+        raise WorkerProtocolError("worker_result_broker", "identity mismatch")
     if artifact.changed_paths != tuple(sorted(set(changed_paths))):
-        raise WorkerProtocolError("worker_result_handoff", "changed-path mismatch")
+        raise WorkerProtocolError("worker_result_broker", "changed-path mismatch")
     return artifact.envelope
-
-
-def parse_worker_result(
-    output: str,
-    *,
-    expected_project_id: int | None = None,
-    expected_issue_iid: int | None = None,
-    expected_revision: int | None = None,
-) -> WorkerResultEnvelope:
-    """Parse and optionally identity-check exactly one result envelope."""
-    matches = _RESULT.findall(output)
-    if len(matches) != 1:
-        raise WorkerProtocolError(
-            "final_envelope", "must contain exactly one result envelope"
-        )
-    try:
-        result = WorkerResultEnvelope.model_validate(json.loads(matches[0]))
-    except (json.JSONDecodeError, ValidationError) as error:
-        if isinstance(error, ValidationError):
-            raise _validation_error(
-                error, origin="final_envelope", model=WorkerResultEnvelope
-            ) from None
-        raise WorkerProtocolError("final_envelope", "is not valid JSON") from None
-    identity = (result.project_id, result.issue_iid, result.ledger_revision)
-    expected = (expected_project_id, expected_issue_iid, expected_revision)
-    if any(
-        value is not None and value != actual
-        for actual, value in zip(identity, expected, strict=True)
-    ):
-        raise WorkerProtocolError(
-            "controller_invariant.identity", "does not match the segment"
-        )
-    return result
 
 
 def _json_size(value: object) -> int:
@@ -1156,7 +1238,7 @@ def build_worker_prompt(
     issue_description: str = "",
     issue_notes: tuple[GitLabIssueNote, ...] = (),
     merge_request_feedback: tuple[object, ...] = (),
-    worker_result_handoff: WorkerResultHandoffRequest | None = None,
+    worker_result_broker: WorkerResultBrokerRequest | None = None,
     worker_result_builder: Path | None = None,
 ) -> str:
     """Build the trusted protocol instructions for one bounded phase."""
@@ -1208,8 +1290,8 @@ def build_worker_prompt(
             "For the coding lane, delegate only Architect and Red in this segment. "
             "Stop immediately after the approved failing tests exist. Do not delegate "
             "a writer or Green and do not make a production, documentation, or policy "
-            "change. Return result_kind=red_checkpoint_ready with exactly the Architect "
-            "and Red receipts plus red_checkpoint_request containing the exact shell-free "
+            "change. Return result_kind=red_checkpoint_ready with red_checkpoint_request "
+            "containing the exact shell-free "
             "pytest argv, expected failure marker, and sorted changed test paths. The "
             "trusted controller creates and reloads the checkpoint before another worker "
             "may continue. "
@@ -1252,9 +1334,7 @@ def build_worker_prompt(
             "are never capacity evidence. Apply this gate on every new worker launch, including "
             "ordinary, retained-worktree retry, and systemd launches; never reuse evidence "
             "from an earlier session. When current evidence changes before work begins, the "
-            "current launch governs. A successful audit_summary.capacity records the lane's fixed "
-            "required value and decision=run. Include coherent available and zero-shortfall values "
-            "only when a current trusted global report supplies them. "
+            "current launch governs. The controller records its own admission decision. "
             "Delegate Architect with the issue context and repository instructions. "
             "Architect then makes one semantic intake sizing decision before it "
             "delegates Red or a Documentation Writer and before any worktree mutation. "
@@ -1270,7 +1350,7 @@ def build_worker_prompt(
             "phase_status=complete, completed_phase=workflow, workflow_lane=unknown, and a "
             "structured split_plan containing 2..25 ordered slices. Each slice supplies ordinal, "
             "a stable ASCII slug key, title, description, and depends_on lower ordinals. "
-            "No receipts, merge-request draft, or error_code are allowed for this route. "
+            "No merge-request draft or error_code is allowed for this route. "
             "The trusted runner, not worker, files and queues the child issues: no human approval step. "
             "Do not create or update child issues, do not execute proposed slices "
             "in this worker, and do not automatically retry. "
@@ -1314,21 +1394,21 @@ def build_worker_prompt(
             "approved consolidated result. Content-only work uses Architect, one sole-mutator "
             "Documentation Writer, and Documentation Finalizer without Red or code judges. "
         )
-    if worker_result_handoff is not None and worker_result_builder is None:
-        raise ValueError("worker result builder is required for a handoff")
-    result_contract = (
-        "Return exactly one strict WorkerResultBuildInput JSON object as your final response. "
-        "The trusted controller invokes the checkout-owned builder, derives controller fields, "
-        "and reads only its produced artifact. Do not invoke the helper, return its output, "
-        "handcraft envelope or controller fields, or emit explanatory prose. "
-        if worker_result_handoff is not None
-        else "Use `agent-work worker-result build --issue-iid "
-        f"{issue_iid} --input-file PATH [--json] [--apply]` to derive trusted fields and "
-        "validate the envelope before returning it; omit --json when returning the helper output so it remains delimited. "
-        "Return the builder output unchanged. Do not return exactly one protocol_version=1 JSON object; "
-        "return exactly one protocol_version=2 JSON object inside <agent-work-result>...</agent-work-result>. "
+    if worker_result_broker is not None and worker_result_builder is None:
+        raise ValueError("worker result builder is required for a broker")
+    worker_command = (
+        str(worker_result_builder)
+        if worker_result_builder is not None
+        else "agent-work"
     )
-    return (
+    result_contract = (
+        "Store exactly one strict WorkerResultBuildInput JSON object in private scratch and invoke "
+        f"`{worker_command} worker-result build --issue-iid "
+        f"{issue_iid} --input-file PATH --broker-socket PATH --broker-nonce "
+        f"{worker_result_broker.nonce if worker_result_broker is not None else 'NONCE'} --apply`. The live broker returns one canonical rejection "
+        "for one corrected request and keeps acceptance in controller memory. "
+    )
+    prompt = (
         f"Continue one bounded agent-work segment for project {project_id}, issue #{issue_iid}.\n"
         "The effective bounded worker budget for this session is "
         f"{effective_worker_budget_seconds} seconds.\n"
@@ -1365,13 +1445,14 @@ def build_worker_prompt(
         "unchanged_project_owned_values. Use needs_human only for unsafe actions, missing "
         "authority or credentials, irreconcilable requirements, or exact unapproved "
         "project-owned values. "
-        "For a completed whole workflow, return protocol_version=2 and a typed, bounded "
-        "audit_summary with lane, fixed capacity requirement, receipts, changed paths, tests, reviewers, findings, and corrections. "
         f"{result_contract}"
-        "Do not handcraft identity, ledger, state, phase, audit lane, role_receipts, changed_paths, or reviewers; the helper derives them. "
-        "WORKFLOW_RECEIPTS is the exact required receipt set for the recorded lane. Each applicable "
-        "receipt must use its exact skill name; an inapplicable role must be `$skill: not applicable — reason`. "
+        "Do not handcraft controller identity, ledger state, phase, changed paths, or authorization evidence; the controller derives and verifies them. "
     )
+    if worker_result_broker is not None:
+        return prompt.replace("final response", "terminal output").replace(
+            "raw envelope", "model output"
+        )
+    return prompt
 
 
 def _agent_command(
@@ -1380,7 +1461,7 @@ def _agent_command(
     checkout: Path,
     prompt: str,
     *,
-    output_last_message: Path | None = None,
+    broker_directory: Path | None = None,
 ) -> tuple[tuple[str, ...], str | None]:
     _validate_agent(agent)
     if agent == "codex":
@@ -1398,11 +1479,7 @@ def _agent_command(
                 str(checkout / ".agents"),
                 "--add-dir",
                 str(checkout / "template" / ".agents"),
-                *(
-                    ("--output-last-message", str(output_last_message))
-                    if output_last_message is not None
-                    else ()
-                ),
+                *(("--add-dir", str(broker_directory)) if broker_directory else ()),
                 "--ephemeral",
                 "--color",
                 "never",
@@ -1420,6 +1497,7 @@ def _agent_command(
                 "--no-session-persistence",
                 "--permission-mode",
                 "acceptEdits",
+                *(("--add-dir", str(broker_directory)) if broker_directory else ()),
                 "--",
                 prompt,
             ),
@@ -1495,57 +1573,15 @@ class AgentInvoker:
         run_command: CommandRunner,
         *,
         environment: Mapping[str, str],
-        transient_path_factory: TransientPathFactory | None = None,
-        trusted_builder: Path | None = None,
+        broker_factory: WorkerResultBrokerFactory | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
-        self._transient_path_factory = (
-            transient_path_factory or self._default_transient_path
-        )
-        self._trusted_builder = trusted_builder
+        self._broker_factory = broker_factory or create_worker_result_broker
         self._clock = clock
 
-    supports_worker_result_handoff = True
-
-    @staticmethod
-    def _default_transient_path(
-        checkout: Path, handoff: WorkerResultHandoffRequest
-    ) -> Path:
-        """Return a nonce-scoped capture path outside the retained checkout."""
-        if isinstance(handoff.path, Path):
-            return handoff.path.with_name(f".agent-work-input-{handoff.nonce}.json")
-        return checkout.parent / f".agent-work-input-{handoff.nonce}.json"
-
-    @staticmethod
-    def _remove_handoff(path: Path | HandoffPath) -> bool:
-        """Remove one handoff path and report whether replay is impossible."""
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            return False
-        return True
-
-    @classmethod
-    def _clear_transport_paths(
-        cls, input_path: Path, handoff_path: Path | HandoffPath
-    ) -> bool:
-        """Attempt both transport cleanups and report whether both succeeded."""
-        input_removed = cls._remove_handoff(input_path)
-        handoff_removed = cls._remove_handoff(handoff_path)
-        return input_removed and handoff_removed
-
-    def _has_trusted_builder(self, checkout: Path) -> bool:
-        """Require a controller-owned builder outside the worker checkout."""
-        if self._trusted_builder is None:
-            return False
-        try:
-            return not self._trusted_builder.resolve().is_relative_to(
-                checkout.resolve()
-            )
-        except OSError:
-            return False
+    supports_worker_result_broker = True
 
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""
@@ -1561,11 +1597,8 @@ class AgentInvoker:
         if (
             result.returncode != 0
             or re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout) is None
-            or re.search(r"(?<!\S)--output-last-message(?:\s|$)", result.stdout) is None
         ):
-            raise WorkerProtocolError(
-                "codex exec does not support --add-dir and --output-last-message"
-            )
+            raise WorkerProtocolError("codex exec does not support --add-dir")
 
     def invoke(
         self,
@@ -1573,35 +1606,62 @@ class AgentInvoker:
         prompt: str,
         timeout: int,
         *,
-        handoff: WorkerResultHandoffRequest | None = None,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
         agent, executable = _agent_profile(self._environment)
-        input_path = (
-            self._transient_path_factory(checkout, handoff)
-            if handoff is not None
-            else None
-        )
-        command, stdin = _agent_command(
-            agent,
-            executable,
-            checkout,
-            prompt,
-            output_last_message=input_path if agent == "codex" else None,
-        )
-        if handoff is not None:
-            assert input_path is not None
-            if not self._clear_transport_paths(input_path, handoff.path):
-                return WorkerInvocation(
-                    0,
-                    handoff_capture=HandoffCapture("pre_run_cleanup_failed"),
+        if broker_request is not None:
+            if build_artifact is None:
+                raise ValueError("broker result builder is required")
+            session = self._broker_factory(
+                broker_request,
+                build_artifact=build_artifact,
+                timeout_seconds=timeout,
+                temporary_directory=None,
+                clock=self._clock,
+            )
+            command, stdin = _agent_command(
+                agent,
+                executable,
+                checkout,
+                prompt.replace(
+                    "--broker-socket PATH", f"--broker-socket {session.socket_path}"
+                ),
+                broker_directory=session.socket_path.parent,
+            )
+            worker_environment = _worker_environment(self._environment)
+            worker_environment["UV_CACHE_DIR"] = str(session.cache_path)
+            try:
+                result = self._run_command(
+                    command,
+                    stdin=stdin,
+                    timeout_seconds=timeout,
+                    environment=worker_environment,
                 )
-            if not self._has_trusted_builder(checkout):
+            except RuntimeError as error:
+                try:
+                    session.close_and_capture()
+                except WorkerProtocolError:
+                    pass
+                return WorkerInvocation(None, stderr=str(error))
+            try:
+                artifact = session.close_and_capture()
+            except WorkerProtocolError as error:
                 return WorkerInvocation(
-                    0,
-                    handoff_capture=HandoffCapture("builder_rejected"),
+                    result.returncode,
+                    _redact(result.stdout, self._environment),
+                    _redact(result.stderr, self._environment),
+                    protocol_error=error,
                 )
-        started_at = self._clock()
+            diagnostic = _redact(result.stderr, self._environment)
+            return WorkerInvocation(
+                result.returncode,
+                _redact(result.stdout, self._environment),
+                diagnostic,
+                worker_result=artifact,
+            )
+        command, stdin = _agent_command(agent, executable, checkout, prompt)
         try:
             result = self._run_command(
                 command,
@@ -1610,79 +1670,7 @@ class AgentInvoker:
                 environment=_worker_environment(self._environment),
             )
         except RuntimeError as error:
-            if handoff is not None:
-                assert input_path is not None
-                cleanup_succeeded = self._clear_transport_paths(
-                    input_path, handoff.path
-                )
-                return WorkerInvocation(
-                    None,
-                    stderr=str(error),
-                    handoff_capture=HandoffCapture(
-                        "captured" if cleanup_succeeded else "post_read_cleanup_failed"
-                    ),
-                )
             return WorkerInvocation(None, stderr=str(error))
-        handoff_payload = None
-        handoff_capture = HandoffCapture("captured")
-        if handoff is not None and result.returncode == 0:
-            assert input_path is not None
-            try:
-                if agent != "codex":
-                    input_path.write_bytes(result.stdout.encode())
-                assert self._trusted_builder is not None
-                builder = self._trusted_builder
-                builder_timeout = math.floor(timeout - (self._clock() - started_at))
-                if builder_timeout <= 0:
-                    handoff_capture = HandoffCapture("builder_budget_exhausted")
-                else:
-                    builder_result = self._run_command(
-                        (
-                            str(builder),
-                            "worker-result",
-                            "build",
-                            "--issue-iid",
-                            str(handoff.issue_iid),
-                            "--input-file",
-                            str(input_path),
-                            "--handoff-file",
-                            str(handoff.path),
-                            "--handoff-nonce",
-                            handoff.nonce,
-                            "--apply",
-                        ),
-                        stdin=None,
-                        timeout_seconds=builder_timeout,
-                        environment=_worker_environment(self._environment),
-                    )
-                    if builder_result.returncode != 0:
-                        candidate = builder_result.stderr.strip()
-                        handoff_capture = HandoffCapture(
-                            "builder_rejected",
-                            candidate
-                            if is_safe_worker_result_diagnostic(candidate)
-                            else None,
-                        )
-                    elif not self._remove_handoff(input_path):
-                        handoff_capture = HandoffCapture("post_read_cleanup_failed")
-                    else:
-                        with handoff.path.open("rb") as stream:
-                            handoff_payload = stream.read(1_048_577)
-            except FileNotFoundError:
-                handoff_capture = HandoffCapture("artifact_not_written")
-            except OSError:
-                handoff_capture = HandoffCapture("artifact_unreadable")
-            else:
-                if handoff_payload is not None and len(handoff_payload) > 1_048_576:
-                    handoff_payload = None
-                    handoff_capture = HandoffCapture("artifact_too_large")
-            if not self._clear_transport_paths(input_path, handoff.path):
-                handoff_payload = None
-                handoff_capture = HandoffCapture("post_read_cleanup_failed")
-        elif handoff is not None:
-            assert input_path is not None
-            if not self._clear_transport_paths(input_path, handoff.path):
-                handoff_capture = HandoffCapture("post_read_cleanup_failed")
         diagnostic = (
             worker_exit_evidence(
                 result.returncode,
@@ -1697,6 +1685,4 @@ class AgentInvoker:
             result.returncode,
             _redact(result.stdout, self._environment),
             diagnostic,
-            handoff_payload,
-            handoff_capture,
         )

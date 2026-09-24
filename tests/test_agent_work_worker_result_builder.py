@@ -7,2187 +7,292 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
-"""Behavior contracts for the read-only worker-result builder."""
+"""Contracts for controller-built live worker results."""
 
 from __future__ import annotations
 
 import hashlib
-import importlib
-import json
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from agent_work.cli import main
-from agent_work.domain import (
-    RepairAttemptEvidence,
-    RunnerState,
-    WorkflowLane,
-    WorkflowPhase,
-    WorkKind,
-)
-from agent_work.ledger import LedgerCorrupt
-from agent_work.models import (
-    AgentWorkConfig,
-    AuditCapacity,
-    LedgerRecord,
-    MergeRequestDraft,
-    MergeRequestFeedbackCursor,
-    PendingMergeRequestFeedback,
-    WorkerResultEnvelope,
-)
-from agent_work.repository import CommandResult
-from agent_work.runtime import build_worker_result_dependencies
-from agent_work.state_machine import (
-    REQUIRED_RECEIPTS,
-    WORKFLOW_RECEIPTS,
-    apply_worker_result,
-    has_complete_workflow_receipt,
-    plan_retry,
-)
+from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
+from agent_work.models import LedgerRecord, MergeRequestDraft
+from agent_work.red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
+from agent_work.state_machine import apply_worker_result
 from agent_work.worker import (
     WorkerProtocolError,
+    WorkerResultBrokerRequest,
     WorkerResultBuildInput,
-    WorkerResultHandoffRequest,
     build_worker_prompt,
     build_worker_result,
-    format_worker_result_diagnostic,
-    is_safe_worker_result_diagnostic,
-    parse_worker_result_build_input,
-    validate_worker_result,
 )
 
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
-def _record(tmp_path: Path) -> LedgerRecord:
+
+def _record(tmp_path: Path, lane: WorkflowLane) -> LedgerRecord:
     return LedgerRecord(
         project_id=310967,
         issue_iid=81,
         revision=7,
         state=RunnerState.EXECUTING,
         phase=WorkflowPhase.WORKFLOW,
-        workflow_lane=WorkflowLane.CODING,
+        workflow_lane=lane,
         work_kind=WorkKind.ORDINARY,
         source_branch="agent/issue-81",
-        worktree=tmp_path / "retained-worktree",
+        worktree=tmp_path / "checkout",
         source_sha="a" * 40,
     )
 
 
-def _red_checkpoint_evidence(
-    test_path: str = "tests/test_agent_work_worker_result_builder.py",
-) -> Any:
-    """Return trusted checkpoint evidence bound to the ordinary test record."""
-    checkpoint = importlib.import_module("agent_work.red_checkpoint")
-    return checkpoint.RedCheckpointEvidence(
-        schema_version=1,
-        project_id=310967,
-        issue_iid=81,
-        source_branch="agent/issue-81",
-        base_sha="a" * 40,
+def _draft() -> MergeRequestDraft:
+    return MergeRequestDraft(
+        title="Complete issue 81",
+        description="Validated and ready for human review.",
+    )
+
+
+def _checkpoint(record: LedgerRecord) -> RedCheckpointEvidence:
+    test_path = "tests/test_agent_work_worker_result_builder.py"
+    assert record.source_sha is not None
+    return RedCheckpointEvidence(
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        source_branch=record.source_branch,
+        base_sha=record.source_sha,
         tree_oid="b" * 40,
-        ref=f"refs/agent-work/red-checkpoints/81/{'a' * 40}",
+        ref=(f"refs/agent-work/red-checkpoints/{record.issue_iid}/{record.source_sha}"),
         test_paths=(test_path,),
-        argv=(
-            "uv",
-            "run",
-            "pytest",
-            f"{test_path}::test_red",
-        ),
+        argv=("uv", "run", "pytest", test_path),
         exit_code=1,
-        expected_failure="assert expected failure",
-        output_sha256=hashlib.sha256(b"assert expected failure\n").hexdigest(),
+        expected_failure="expected Red failure",
+        output_sha256=hashlib.sha256(b"expected Red failure").hexdigest(),
     )
 
 
-def _completed_input() -> WorkerResultBuildInput:
-    receipts = tuple(
-        f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    return WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "coding",
-            "result_kind": "ready_to_publish",
-            "receipts": receipts,
-            "change_summary": "Added a read-only worker result builder.",
-            "next_action": "Publish the reviewed change.",
-            "merge_request_draft": {
-                "title": "Add worker result builder",
-                "description": "Summary and test evidence for human review.",
-            },
-            "audit_summary": {
-                "capacity": {
-                    "required": 12,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                **_topology_audit(),
-                "tests": [
-                    "uv run pytest tests/test_agent_work_worker_result_builder.py"
-                ],
-                "findings": [],
-                "corrections": [],
-            },
-        }
-    )
-
-
-def _completed_content_input() -> WorkerResultBuildInput:
-    """Return one complete content-lane builder input."""
-    receipts = tuple(
-        f"{skill}: approved" for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-    )
-    return WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "content",
-            "result_kind": "ready_to_publish",
-            "receipts": receipts,
-            "change_summary": "Updated the operator guide.",
-            "next_action": "Publish the reviewed documentation.",
-            "merge_request_draft": {
-                "title": "Update the operator guide",
-                "description": "Documentation ready for human review.",
-            },
-            "audit_summary": {
-                "capacity": {
-                    "required": 3,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                "tests": [],
-                "findings": [],
-                "corrections": [],
-            },
-        }
-    )
-
-
-_CODING_RECEIPTS_WITH_POLICY_WRITER = (
-    "$architect",
-    "$tdd-red",
-    "$diataxis-writer",
-    "$agent-policy-writer",
-    "$tdd-green",
-    "$tdd-judge",
-    "$nonfunctional-review",
-    "$diataxis-judge",
-    "$judge-quality",
-    "$judge-test",
-    "$judge-cicd",
-    "$tdd-document",
-    "$cli-syntax-judge",
-    "$filesystem-structure-judge",
-    "$agent-policy-judge",
-    "$license-checker",
-    "$tdd-finalizer",
-)
-
-
-def _completed_coding_input_with_policy_writer() -> WorkerResultBuildInput:
-    """Build the complete protocol-v2 coding receipt input."""
-    return _completed_input().model_copy(
-        update={
-            "receipts": tuple(
-                f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
-                for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
-            )
-        }
-    )
-
-
-def _topology_audit() -> dict[str, Any]:
-    """Build the complete current-launch topology evidence for coding work."""
-    role_details = {
-        "$architect": ("main", "1", "most_capable"),
-        "$tdd-red": ("$architect", "2a", "balanced"),
-        "$diataxis-writer": ("$architect", "2b", "balanced"),
-        "$agent-policy-writer": ("$architect", "2c", "balanced"),
-        "$tdd-green": ("$architect", "3", "balanced"),
-        "$tdd-judge": ("$tdd-green", "4", "balanced"),
-        "$nonfunctional-review": ("$tdd-judge", "4a", "fast"),
-        "$diataxis-judge": ("$tdd-green", "5b", "fast"),
-        "$judge-quality": ("$tdd-green", "5c", "most_capable"),
-        "$judge-test": ("$tdd-green", "5d", "balanced"),
-        "$judge-cicd": ("$tdd-green", "5e", "balanced"),
-        "$tdd-document": ("$tdd-green", "5f", "balanced"),
-        "$cli-syntax-judge": ("$tdd-green", "5g", "fast"),
-        "$filesystem-structure-judge": ("$tdd-green", "5h", "fast"),
-        "$agent-policy-judge": ("$tdd-green", "5i", "fast"),
-        "$license-checker": ("$tdd-green", "5j", "fast"),
-        "$tdd-finalizer": ("$architect", "6", "fast"),
-    }
-    return {
-        "topology": {
-            "widest_live_row": [
-                "main",
-                "$architect",
-                "$tdd-green",
-                "$diataxis-judge",
-                "$judge-quality",
-                "$judge-test",
-                "$judge-cicd",
-                "$tdd-document",
-                "$cli-syntax-judge",
-                "$filesystem-structure-judge",
-                "$agent-policy-judge",
-                "$license-checker",
-            ],
-            "required_live_slots": 12,
-            "available_live_slots": 16,
-            "roles": [
-                {
-                    "skill": skill,
-                    "owner": owner,
-                    "phase": phase,
-                    "tier": tier,
-                    **({"reuse_from": "$tdd-judge"} if skill == "$judge-test" else {}),
-                }
-                for skill, (owner, phase, tier) in role_details.items()
-            ],
-            "owner_headroom": [
-                {
-                    "owner": "main",
-                    "direct_children_required": 1,
-                    "direct_children_headroom": 16,
-                    "descendants_required": 16,
-                    "descendants_headroom": 16,
-                },
-                {
-                    "owner": "$architect",
-                    "direct_children_required": 5,
-                    "direct_children_headroom": 16,
-                    "descendants_required": 15,
-                    "descendants_headroom": 16,
-                },
-                {
-                    "owner": "$tdd-green",
-                    "direct_children_required": 9,
-                    "direct_children_headroom": 16,
-                    "descendants_required": 10,
-                    "descendants_headroom": 16,
-                },
-                {
-                    "owner": "$tdd-judge",
-                    "direct_children_required": 1,
-                    "direct_children_headroom": 16,
-                    "descendants_required": 1,
-                    "descendants_headroom": 16,
-                },
-            ],
-        },
-        "retained_objects": {
-            "ceiling": 16,
-            "current": 0,
-            "required_fresh_handles": 16,
-            "fresh_headroom": 0,
-        },
-    }
-
-
-def test_builder_preserves_legacy_topology_and_retained_object_evidence(
-    tmp_path: Path,
-) -> None:
-    """A successful workflow may retain coherent legacy admission details."""
-    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
-    audit = payload["audit_summary"]
-    assert isinstance(audit, dict)
-    audit.update(_topology_audit())
-    build_input = WorkerResultBuildInput.model_validate(payload)
-
-    result = build_worker_result(
-        _record(tmp_path),
-        build_input,
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-
-    assert result.audit_summary is not None
-    summary = result.audit_summary.model_dump(mode="json", exclude_none=True)
-    assert summary["topology"] == _topology_audit()["topology"]
-    assert summary["retained_objects"] == _topology_audit()["retained_objects"]
-
-
-def test_builder_accepts_new_success_with_fixed_scalar_capacity_audit(
-    tmp_path: Path,
-) -> None:
-    """The fixed lane requirement is sufficient without legacy topology details."""
-    completed = _completed_coding_input_with_policy_writer()
-    assert completed.audit_summary is not None
-    legacy = completed.model_copy(
-        update={
-            "audit_summary": completed.audit_summary.model_copy(
-                update={"topology": None, "retained_objects": None}
-            )
-        }
-    )
-    result = build_worker_result(
-        _record(tmp_path),
-        legacy,
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-
-    assert result.audit_summary is not None
-    assert result.audit_summary.capacity.required == 12
-    assert result.audit_summary.topology is None
-    assert result.audit_summary.retained_objects is None
-
-
-@pytest.mark.parametrize("missing_field", ("topology", "retained_objects"))
-def test_builder_rejects_one_sided_legacy_capacity_evidence(
-    tmp_path: Path, missing_field: str
-) -> None:
-    """Legacy topology and retained-object evidence remains an exact pair."""
-    completed = _completed_coding_input_with_policy_writer()
-    assert completed.audit_summary is not None
-    one_sided = completed.model_copy(
-        update={
-            "audit_summary": completed.audit_summary.model_copy(
-                update={missing_field: None}
-            )
-        }
-    )
-
-    with pytest.raises(
-        WorkerProtocolError,
-        match="legacy topology and retained_objects must be supplied together",
-    ):
-        build_worker_result(
-            _record(tmp_path),
-            one_sided,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    (
-        "controller_invariant.audit_summary: capacity required must match workflow lane",
-        "controller_invariant.audit_summary: legacy topology and retained_objects must be supplied together",
-    ),
-)
-def test_current_capacity_controller_diagnostics_are_safely_recognized(
-    diagnostic: str,
-) -> None:
-    """Current bounded capacity diagnostics are safe without allowing suffixes."""
-    assert is_safe_worker_result_diagnostic(diagnostic)
-    assert not is_safe_worker_result_diagnostic(f"{diagnostic} unsafe detail")
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    (
-        "worker_result: could not be read or validated",
-        "worker_result_handoff: could not be written",
-    ),
-)
-def test_fixed_builder_boundary_diagnostics_are_safely_recognized_exactly(
-    diagnostic: str,
-) -> None:
-    """Only the CLI's fixed boundary diagnostics may cross into the controller."""
-    assert is_safe_worker_result_diagnostic(diagnostic)
-    assert not is_safe_worker_result_diagnostic(f"{diagnostic} unsafe detail")
-    assert not is_safe_worker_result_diagnostic(f"{diagnostic}\n/private/input.json")
-    assert not is_safe_worker_result_diagnostic(diagnostic.replace(": ", "."))
-
-
-@pytest.mark.parametrize(
-    ("lane", "required"),
-    ((WorkflowLane.CODING, 12), (WorkflowLane.CONTENT, 3)),
-)
-def test_builder_accepts_fixed_lane_capacity_when_global_availability_is_unreported(
-    tmp_path: Path, lane: WorkflowLane, required: int
-) -> None:
-    """A new successful worker needs its fixed lane requirement, not invented counts."""
-    receipts = tuple(
-        f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
-        for skill in WORKFLOW_RECEIPTS[lane]
-    )
-    build_input = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": lane.value,
-            "result_kind": "ready_to_publish",
-            "receipts": receipts,
-            "change_summary": "Completed the bounded workflow.",
-            "next_action": "Publish the reviewed change.",
-            "merge_request_draft": {
-                "title": "Complete the bounded workflow",
-                "description": "Evidence for human review.",
-            },
-            "audit_summary": {
-                "capacity": {
-                    "required": required,
-                    "available": None,
-                    "shortfall": None,
-                    "decision": "run",
-                },
-                "tests": [
-                    "uv run pytest tests/test_agent_work_worker_result_builder.py"
-                ],
-                "findings": [],
-                "corrections": [],
-            },
-        }
-    )
-    record = _record(tmp_path).model_copy(update={"workflow_lane": lane})
-
+def test_receiptless_content_result_builds_and_applies(tmp_path: Path) -> None:
+    """The program moves a receiptless content workflow to publication."""
+    record = _record(tmp_path, WorkflowLane.CONTENT)
     result = build_worker_result(
         record,
-        build_input,
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence()
-        if lane is WorkflowLane.CODING
-        else None,
+        WorkerResultBuildInput.model_validate(
+            {
+                "workflow_lane": "content",
+                "result_kind": "ready_to_publish",
+                "change_summary": "Update the operator documentation.",
+                "next_action": "Publish the reviewed documentation.",
+                "merge_request_draft": _draft(),
+            }
+        ),
+        changed_paths=("docs/reference/serial-gitlab-agent-loop.md",),
+        red_checkpoint=None,
     )
 
-    assert result.audit_summary is not None
-    assert result.audit_summary.capacity.required == required
-    assert result.audit_summary.capacity.available is None
-    assert result.audit_summary.capacity.shortfall is None
-    assert result.audit_summary.topology is None
-    assert result.audit_summary.retained_objects is None
-    transitioned = apply_worker_result(
-        record, result, now=datetime(2026, 9, 22, tzinfo=UTC)
-    ).record
-    assert transitioned.state is RunnerState.PUBLISHING
+    outcome = apply_worker_result(record, result, now=NOW).record
+
+    assert result.model_dump(exclude_none=True).get("receipts") is None
+    assert result.model_dump(exclude_none=True).get("audit_summary") is None
+    assert outcome.state is RunnerState.PUBLISHING
+    assert outcome.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert outcome.receipts == ()
 
 
-def test_controller_reads_a_legacy_scalar_success_envelope_without_topology(
+def test_receiptless_coding_result_requires_and_applies_exact_red_checkpoint(
     tmp_path: Path,
 ) -> None:
-    """Older durable scalar envelopes remain readable after admission simplification."""
-    result = build_worker_result(
-        _record(tmp_path),
-        _completed_input(),
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-    assert result.audit_summary is not None
-    legacy = result.model_copy(
-        update={
-            "audit_summary": result.audit_summary.model_copy(
-                update={"topology": None, "retained_objects": None}
-            )
-        }
-    )
-    restored = WorkerResultEnvelope.model_validate_json(legacy.model_dump_json())
-
-    validate_worker_result(
-        _record(tmp_path),
-        restored,
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-
-
-@pytest.mark.parametrize(
-    ("audit_update", "expected_diagnostic"),
-    (
-        (
-            {
-                "retained_objects": {
-                    "ceiling": 16,
-                    "current": 1,
-                    "required_fresh_handles": 16,
-                    "fresh_headroom": 0,
-                }
-            },
-            "retained_objects",
-        ),
-        (
-            {
-                "topology": {
-                    **_topology_audit()["topology"],
-                    "owner_headroom": [
-                        {
-                            **_topology_audit()["topology"]["owner_headroom"][0],
-                            "descendants_headroom": 15,
-                        },
-                        *_topology_audit()["topology"]["owner_headroom"][1:],
-                    ],
-                }
-            },
-            "owner_headroom",
-        ),
-        (
-            {
-                "topology": {
-                    **_topology_audit()["topology"],
-                    "roles": [
-                        *(_topology_audit()["topology"]["roles"][:9]),
-                        {
-                            **_topology_audit()["topology"]["roles"][9],
-                            "reuse_from": "$tdd-red",
-                        },
-                        *(_topology_audit()["topology"]["roles"][10:]),
-                    ],
-                }
-            },
-            "reuse_from",
-        ),
-        (
-            {
-                "topology": {
-                    **_topology_audit()["topology"],
-                    "roles": [
-                        *(_topology_audit()["topology"]["roles"][:10]),
-                        {
-                            **_topology_audit()["topology"]["roles"][11],
-                            "reuse_from": "$tdd-judge",
-                        },
-                        *(_topology_audit()["topology"]["roles"][12:]),
-                    ],
-                }
-            },
-            "reuse_from",
-        ),
-    ),
-    ids=(
-        "global-object-shortfall",
-        "owner-headroom-shortfall",
-        "unsafe-cross-owner-reuse",
-        "unsafe-overlapping-reuse",
-    ),
-)
-def test_builder_rejects_incoherent_topology_admission_evidence(
-    audit_update: dict[str, object], expected_diagnostic: str
-) -> None:
-    """Live-slot success cannot mask global, owner, or reuse unsafety."""
-    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
-    audit = payload["audit_summary"]
-    assert isinstance(audit, dict)
-    audit.update(_topology_audit())
-    audit.update(audit_update)
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    assert expected_diagnostic in format_worker_result_diagnostic(captured.value)
-
-
-def test_builder_rejects_valid_global_arithmetic_with_too_few_fresh_handles(
-    tmp_path: Path,
-) -> None:
-    """Global arithmetic cannot replace the topology's fresh-handle requirement."""
-    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
-    audit = payload["audit_summary"]
-    assert isinstance(audit, dict)
-    audit["retained_objects"] = {
-        "ceiling": 16,
-        "current": 0,
-        "required_fresh_handles": 15,
-        "fresh_headroom": 1,
-    }
-
-    build_input = parse_worker_result_build_input(json.dumps(payload))
-
-    with pytest.raises(WorkerProtocolError, match="fresh handles"):
-        build_worker_result(
-            _record(tmp_path),
-            build_input,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-
-@pytest.mark.parametrize("owner", ("$missing-owner", "$tdd-green"))
-def test_builder_rejects_malformed_or_cyclic_topology_ownership(owner: str) -> None:
-    """Untrusted ownership chains fail closed before descendant traversal."""
-    payload = _completed_coding_input_with_policy_writer().model_dump(mode="json")
-    audit = payload["audit_summary"]
-    assert isinstance(audit, dict)
-    topology = audit["topology"]
-    assert isinstance(topology, dict)
-    roles = topology["roles"]
-    assert isinstance(roles, list)
-    roles[0] = {**roles[0], "owner": owner}
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    diagnostic = format_worker_result_diagnostic(captured.value)
-    assert (
-        diagnostic == "builder_input.audit_summary.topology: invalid type/shape/value"
-    )
-    assert len(diagnostic.encode()) <= 2048
-
-
-def test_builder_derives_trusted_identity_and_validates_completed_workflow(
-    tmp_path: Path,
-) -> None:
-    record = _record(tmp_path)
+    """Coding publication is bound to controller-retained Red evidence and paths."""
+    record = _record(tmp_path, WorkflowLane.CODING)
+    checkpoint = _checkpoint(record)
     result = build_worker_result(
         record,
-        _completed_input(),
-        changed_paths=("src/agent_work/worker.py", "tests/test_agent_work_worker.py"),
-        red_checkpoint=_red_checkpoint_evidence("tests/test_agent_work_worker.py"),
-    )
-
-    assert result.protocol_version == 2
-    assert (result.project_id, result.issue_iid, result.ledger_revision) == (
-        310967,
-        81,
-        7,
-    )
-    assert result.expected_state is RunnerState.EXECUTING
-    assert result.phase_status == "complete"
-    assert result.completed_phase is WorkflowPhase.WORKFLOW
-    assert result.audit_summary is not None
-    assert result.audit_summary.changed_paths == (
-        "src/agent_work/worker.py",
-        "tests/test_agent_work_worker.py",
-    )
-    assert result.audit_summary.role_receipts == result.receipts
-    assert "$tdd-judge: approved" in "\n".join(result.audit_summary.reviewers)
-    assert all(
-        reviewer in "\n".join(result.receipts)
-        for reviewer in result.audit_summary.reviewers
-    )
-    transitioned = apply_worker_result(
-        record, result, now=datetime(2026, 9, 14, tzinfo=UTC)
-    ).record
-    assert transitioned.state is RunnerState.PUBLISHING
-    assert transitioned.phase is WorkflowPhase.READY_TO_PUBLISH
-
-
-def test_builder_accepts_complete_coding_receipts_with_the_policy_writer(
-    tmp_path: Path,
-) -> None:
-    """Protocol-v2 accepts the complete ordered coding receipt contract."""
-    result = build_worker_result(
-        _record(tmp_path),
-        _completed_coding_input_with_policy_writer(),
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-
-    assert result.receipts == tuple(
-        f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
-        for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
-    )
-
-
-@pytest.mark.parametrize(
-    "receipts",
-    (
-        tuple(
-            skill
-            for skill in _CODING_RECEIPTS_WITH_POLICY_WRITER
-            if skill != "$agent-policy-writer"
+        WorkerResultBuildInput(
+            workflow_lane=WorkflowLane.CODING,
+            result_kind="ready_to_publish",
+            change_summary="Implement the broker boundary.",
+            next_action="Publish for human review.",
+            merge_request_draft=_draft(),
         ),
-        (
-            "$architect",
-            "$tdd-red",
-            "$diataxis-writer",
-            "$agent-policy-judge",
-            *_CODING_RECEIPTS_WITH_POLICY_WRITER[4:],
-        ),
-    ),
-    ids=("missing-policy-writer", "wrong-policy-writer"),
-)
-def test_builder_rejects_coding_receipts_without_the_policy_writer(
-    tmp_path: Path, receipts: tuple[str, ...]
-) -> None:
-    """Protocol-v2 rejects a missing or incorrect phase-two policy receipt."""
-    build_input = _completed_coding_input_with_policy_writer().model_copy(
-        update={
-            "receipts": tuple(
-                f"{skill}: approved; uv run pytest tests/test_agent_work_worker_result_builder.py"
-                for skill in receipts
-            )
-        }
-    )
-
-    with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
-        build_worker_result(
-            _record(tmp_path),
-            build_input,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-
-def test_legacy_coding_red_docs_receipts_exclude_the_policy_writer() -> None:
-    """Recorded legacy phase evidence retains its original completion contract."""
-    assert REQUIRED_RECEIPTS[WorkflowPhase.CODING_RED_DOCS] == (
-        "$tdd-red",
-        "$diataxis-writer",
-    )
-
-
-@pytest.mark.parametrize(
-    ("lane", "wrong_required"),
-    (("coding", 11), ("content", 4)),
-)
-def test_builder_rejects_capacity_required_that_disagrees_with_lane(
-    lane: str, wrong_required: int
-) -> None:
-    payload = {
-        "workflow_lane": lane,
-        "result_kind": "ready_to_publish",
-        "change_summary": "Completed the workflow.",
-        "next_action": "Publish for human review.",
-        "audit_summary": {
-            "capacity": {
-                "required": wrong_required,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-            },
-            "tests": ["uv run pytest"],
-            "findings": [],
-            "corrections": [],
-        },
-    }
-
-    with pytest.raises(WorkerProtocolError):
-        parse_worker_result_build_input(json.dumps(payload))
-
-
-def test_builder_produces_a_structured_human_only_close_suggestion(
-    tmp_path: Path,
-) -> None:
-    record = _record(tmp_path).model_copy(
-        update={"phase": WorkflowPhase.POST_PUBLICATION}
-    )
-    build_input = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "coding",
-            "result_kind": "suggest_close",
-            "change_summary": "The work is already satisfied by the exact merged change.",
-            "next_action": "A human may review the evidence and close the issue.",
-            "suggest_close_evidence": {
-                "reason": "already-satisfied",
-                "issue_iid": 81,
-                "evidence": [
-                    "https://gitlab.example.test/group/project/-/merge_requests/9"
-                ],
-            },
-        }
-    )
-
-    result = build_worker_result(
-        record, build_input, changed_paths=(), red_checkpoint=None
-    )
-    outcome = apply_worker_result(record, result, now=datetime(2026, 9, 16, tzinfo=UTC))
-
-    assert result.phase_status == "complete"
-    assert outcome.record.state is RunnerState.SUGGEST_CLOSE
-    assert outcome.record.suggest_close_evidence is not None
-    assert outcome.record.suggest_close_evidence.issue_iid == record.issue_iid
-
-
-def test_builder_rejects_a_close_suggestion_bound_to_another_issue(
-    tmp_path: Path,
-) -> None:
-    record = _record(tmp_path).model_copy(
-        update={"phase": WorkflowPhase.POST_PUBLICATION}
-    )
-    build_input = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "coding",
-            "result_kind": "suggest_close",
-            "change_summary": "The work is already satisfied.",
-            "next_action": "A human may review the evidence.",
-            "suggest_close_evidence": {
-                "reason": "already-satisfied",
-                "issue_iid": 82,
-                "evidence": [
-                    "https://gitlab.example.test/group/project/-/merge_requests/9"
-                ],
-            },
-        }
-    )
-
-    with pytest.raises(WorkerProtocolError):
-        build_worker_result(record, build_input, changed_paths=(), red_checkpoint=None)
-
-
-def test_builder_preserves_a_complete_multiline_coding_receipt_audit(
-    tmp_path: Path,
-) -> None:
-    """A realistic all-role result remains publishable after durable storage."""
-    record = _record(tmp_path)
-    receipts = tuple(
-        f"{skill}: approved\n"
-        f"evidence: {skill} checked the final diff\n"
-        + (
-            "not applicable — no CLI surface changed"
-            if skill == "$cli-syntax-judge"
-            else "command: uv run pytest tests/test_agent_work_worker_result_builder.py"
-        )
-        for skill in WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-    )
-    build_input = _completed_input().model_copy(update={"receipts": receipts})
-
-    result = build_worker_result(
-        record,
-        build_input,
         changed_paths=(
             "src/agent_work/worker.py",
             "tests/test_agent_work_worker_result_builder.py",
         ),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-    transitioned = apply_worker_result(
-        record, result, now=datetime(2026, 9, 14, tzinfo=UTC)
-    ).record
-
-    assert transitioned.state is RunnerState.PUBLISHING
-    assert transitioned.phase is WorkflowPhase.READY_TO_PUBLISH
-    assert has_complete_workflow_receipt(transitioned)
-
-
-def test_builder_completes_successful_post_publication_assessment_for_human_handoff(
-    tmp_path: Path,
-) -> None:
-    """A healthy exact-source assessment records its receipt before handoff."""
-    record = _record(tmp_path).model_copy(
-        update={"phase": WorkflowPhase.POST_PUBLICATION}
-    )
-    assessment = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "coding",
-            "result_kind": "ready_to_publish",
-            "receipts": ("$pipeline-performance-judge: exact source is healthy",),
-            "change_summary": "The exact-source pipeline is healthy.",
-            "next_action": "Await human review of the merge request.",
-        }
+        red_checkpoint=checkpoint,
     )
 
-    result = build_worker_result(
-        record, assessment, changed_paths=(), red_checkpoint=None
-    )
-    transitioned = apply_worker_result(
-        record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
-    ).record
+    outcome = apply_worker_result(record, result, now=NOW).record
 
-    assert result.phase_status == "complete"
-    assert transitioned.state is RunnerState.AWAITING_HUMAN
-    assert transitioned.phase is WorkflowPhase.POST_PUBLICATION
-    assert transitioned.receipts[-1].verdict == "complete"
-    assert "exact source is healthy" in transitioned.receipts[-1].detail
+    assert outcome.state is RunnerState.PUBLISHING
+    assert outcome.phase is WorkflowPhase.READY_TO_PUBLISH
+    assert outcome.receipts == ()
 
 
 @pytest.mark.parametrize(
-    ("result_kind", "error_code", "expected_state", "preserves_error_code"),
-    [
-        ("needs_human", "pipeline_rejected", RunnerState.BLOCKED, True),
-        ("retryable", "pipeline_pending", RunnerState.RETRY_WAIT, False),
-    ],
-)
-def test_builder_keeps_actionable_post_publication_assessments_rejected(
-    tmp_path: Path,
-    result_kind: str,
-    error_code: str,
-    expected_state: RunnerState,
-    preserves_error_code: bool,
-) -> None:
-    """Actionable assessments retain their judge evidence instead of handoff."""
-    record = _record(tmp_path).model_copy(
-        update={"phase": WorkflowPhase.POST_PUBLICATION}
-    )
-    assessment = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "coding",
-            "result_kind": result_kind,
-            "receipts": ("$pipeline-performance-judge: actionable evidence",),
-            "change_summary": "The exact-source pipeline needs follow-up.",
-            "next_action": "Resolve the recorded pipeline feedback.",
-            "error_code": error_code,
-        }
-    )
-
-    result = build_worker_result(
-        record, assessment, changed_paths=(), red_checkpoint=None
-    )
-    transitioned = apply_worker_result(
-        record, result, now=datetime(2026, 9, 15, tzinfo=UTC)
-    ).record
-
-    assert result.phase_status == "rejected"
-    assert result.receipts == assessment.receipts
-    assert transitioned.state is expected_state
-    if preserves_error_code:
-        assert transitioned.error_code is result.error_code
-
-
-@pytest.mark.parametrize(
-    "assessment",
-    [
-        {
-            "workflow_lane": "coding",
-            "result_kind": "ready_to_publish",
-            "receipts": ("$tdd-finalizer: unrelated receipt",),
-            "change_summary": "Malformed assessment.",
-            "next_action": "Do not hand off.",
-        },
-        {
-            "workflow_lane": "content",
-            "result_kind": "ready_to_publish",
-            "receipts": ("$pipeline-performance-judge: healthy",),
-            "change_summary": "Contradictory lane.",
-            "next_action": "Do not hand off.",
-        },
-    ],
-    ids=("malformed-receipt", "contradictory-lane"),
-)
-def test_builder_rejects_incoherent_successful_post_publication_assessments(
-    tmp_path: Path, assessment: dict[str, object]
-) -> None:
-    record = _record(tmp_path).model_copy(
-        update={"phase": WorkflowPhase.POST_PUBLICATION}
-    )
-
-    with pytest.raises(WorkerProtocolError, match=r"receipts:.*coherent"):
-        build_worker_result(
-            record,
-            WorkerResultBuildInput.model_validate(assessment),
-            changed_paths=(),
-            red_checkpoint=None,
-        )
-
-
-def test_builder_input_forbids_worker_control_of_derived_phase_status() -> None:
-    payload = {
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "receipts": ["$pipeline-performance-judge: healthy"],
-        "phase_status": "complete",
-        "change_summary": "Contradictory worker intent.",
-        "next_action": "Do not accept derived fields.",
-    }
-
-    with pytest.raises(WorkerProtocolError, match="builder_input: unsupported field"):
-        parse_worker_result_build_input(json.dumps(payload))
-
-
-@pytest.mark.parametrize(
-    ("field", "untrusted_value"),
-    [
-        ("protocol_version", "99: super-secret-token"),
-        ("unknown_secret_field", "x" * 10_000),
-    ],
-)
-def test_builder_diagnostic_is_field_specific_bounded_and_never_echoes_input(
-    field: str, untrusted_value: str
-) -> None:
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps({field: untrusted_value}).encode())
-
-    diagnostic = format_worker_result_diagnostic(captured.value)
-
-    expected = (
-        "builder_input.protocol_version: must be omitted"
-        if field == "protocol_version"
-        else "builder_input: unsupported field"
-    )
-    assert diagnostic == expected
-    assert len(diagnostic.encode("utf-8")) <= 2048
-    assert untrusted_value not in diagnostic
-
-
-def test_builder_diagnostic_keeps_known_nested_path_and_redacts_value() -> None:
-    secret = "builder-nested-secret"
-    payload = {
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "change_summary": "A valid summary.",
-        "next_action": "A valid next action.",
-        "audit_summary": {
-            "capacity": {
-                "required": secret,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-            }
-        },
-    }
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    diagnostic = format_worker_result_diagnostic(captured.value)
-
-    assert diagnostic == (
-        "builder_input.audit_summary.capacity.required: invalid type/shape/value"
-    )
-    assert secret not in diagnostic
-
-
-def test_builder_diagnostic_keeps_safe_numeric_position_for_known_list_field() -> None:
-    payload = {
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "change_summary": "A valid summary.",
-        "next_action": "A valid next action.",
-        "audit_summary": {
-            "capacity": {
-                "required": 12,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-            },
-            "tests": [42],
-        },
-    }
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    assert format_worker_result_diagnostic(captured.value) == (
-        "builder_input.audit_summary.tests.0: invalid type/shape/value"
-    )
-
-
-def test_builder_diagnostic_hides_nested_unknown_field() -> None:
-    secret_name = "nested_builder_secret"
-    secret_value = "nested-builder-value"
-    payload = {
-        "workflow_lane": "coding",
-        "result_kind": "ready_to_publish",
-        "change_summary": "A valid summary.",
-        "next_action": "A valid next action.",
-        "audit_summary": {
-            "capacity": {
-                "required": 12,
-                "available": 16,
-                "shortfall": 0,
-                "decision": "run",
-                secret_name: secret_value,
-            }
-        },
-    }
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    diagnostic = format_worker_result_diagnostic(captured.value)
-
-    assert diagnostic == "builder_input.audit_summary.capacity: unsupported field"
-    assert secret_name not in diagnostic and secret_value not in diagnostic
-
-
-def test_builder_protocol_version_outranks_an_earlier_validation_error() -> None:
-    payload = {
-        "workflow_lane": 42,
-        "protocol_version": 2,
-        "result_kind": "ready_to_publish",
-        "change_summary": "A valid summary.",
-        "next_action": "A valid next action.",
-    }
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        parse_worker_result_build_input(json.dumps(payload))
-
-    assert format_worker_result_diagnostic(captured.value) == (
-        "builder_input.protocol_version: must be omitted"
-    )
-
-
-def test_controller_invariant_diagnostic_keeps_exact_corrective_reason(
-    tmp_path: Path,
-) -> None:
-    record = _record(tmp_path)
-    result = build_worker_result(
-        record,
-        _completed_input(),
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-    assert result.audit_summary is not None
-    tampered_result = result.model_copy(
-        update={
-            "audit_summary": result.audit_summary.model_copy(
-                update={"changed_paths": ("src/changed.py",)}
-            )
-        }
-    )
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        validate_worker_result(
-            record,
-            tampered_result,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-    assert format_worker_result_diagnostic(captured.value) == (
-        "controller_invariant.audit_summary.changed_paths: "
-        "does not match observed changed paths"
-    )
-
-
-def test_controller_rejects_current_capacity_that_disagrees_with_lane(
-    tmp_path: Path,
-) -> None:
-    record = _record(tmp_path)
-    result = build_worker_result(
-        record,
-        _completed_input(),
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-    assert result.audit_summary is not None
-    prior_capacity = AuditCapacity(
-        required=13, available=16, shortfall=0, decision="run"
-    )
-    tampered_result = result.model_copy(
-        update={
-            "audit_summary": result.audit_summary.model_copy(
-                update={"capacity": prior_capacity}
-            )
-        }
-    )
-
-    with pytest.raises(WorkerProtocolError) as captured:
-        validate_worker_result(
-            record,
-            tampered_result,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-    assert format_worker_result_diagnostic(captured.value) == (
-        "controller_invariant.audit_summary: capacity required must match workflow lane"
-    )
-
-
-def test_controller_accepts_scalar_only_direct_workflow_result(tmp_path: Path) -> None:
-    """A direct envelope may publish with the fixed scalar lane requirement."""
-    record = _record(tmp_path)
-    result = build_worker_result(
-        record,
-        _completed_input(),
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-    assert result.audit_summary is not None
-    scalar_only = result.model_copy(
-        update={
-            "audit_summary": result.audit_summary.model_copy(
-                update={"topology": None, "retained_objects": None}
-            )
-        }
-    )
-
-    validate_worker_result(
-        record,
-        scalar_only,
-        changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-        red_checkpoint=_red_checkpoint_evidence(),
-    )
-
-
-@pytest.mark.parametrize(
-    "receipts",
-    [
-        ("$architect: approved",),
-        lambda complete: (*complete[:-1], complete[0]),
-        lambda complete: tuple(receipt.removeprefix("$") for receipt in complete),
-        lambda complete: ("$architect", *complete[1:]),
-    ],
-    ids=("incomplete", "duplicate", "malformed", "missing-detail"),
-)
-def test_builder_rejects_incomplete_duplicate_or_malformed_receipts(
-    tmp_path: Path,
-    receipts: tuple[str, ...] | Callable[[tuple[str, ...]], tuple[str, ...]],
-) -> None:
-    complete = _completed_input().receipts
-    resolved = receipts if isinstance(receipts, tuple) else receipts(complete)
-    invalid = _completed_input().model_copy(update={"receipts": resolved})
-
-    with pytest.raises(WorkerProtocolError, match=r"receipts:.*required"):
-        build_worker_result(
-            _record(tmp_path),
-            invalid,
-            changed_paths=("tests/test_agent_work_worker_result_builder.py",),
-            red_checkpoint=_red_checkpoint_evidence(),
-        )
-
-
-@pytest.mark.parametrize(
-    "record_updates",
-    [
-        {
-            "state": RunnerState.REPAIR,
-            "repair_attempt": RepairAttemptEvidence(
-                fingerprint="a" * 64, started_at="2026-09-10T00:00:00+00:00"
-            ),
-        },
-        {
-            "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
-            "merge_request_iid": 88,
-            "merge_request_url": "https://gitlab.example.test/mr/88",
-            "merge_request_draft": MergeRequestDraft(
-                title="Existing MR", description="Existing review evidence."
-            ),
-            "publication_sha": "b" * 40,
-        },
-        {"merge_request_iid": 88},
-        {"merge_request_url": "https://gitlab.example.test/mr/88"},
-        {
-            "merge_request_draft": MergeRequestDraft(
-                title="Existing MR", description="Existing review evidence."
-            )
-        },
-        {"publication_sha": "b" * 40},
-        {
-            "feedback_cursor": MergeRequestFeedbackCursor(
-                last_processed_general_note_id=1, feedback_source_sha="a" * 40
-            )
-        },
-        {
-            "pending_feedback": PendingMergeRequestFeedback(
-                target_cursor=MergeRequestFeedbackCursor(
-                    last_processed_general_note_id=1, feedback_source_sha="a" * 40
-                ),
-                source_sha="a" * 40,
-                publication_sha="b" * 40,
-                source="general",
-                note_id=1,
-            )
-        },
-    ],
-    ids=(
-        "repair",
-        "existing-mr",
-        "mr-iid",
-        "mr-url",
-        "mr-draft",
-        "publication-sha",
-        "feedback-cursor",
-        "pending-feedback",
+    ("checkpoint", "changed_paths"),
+    (
+        (None, ("tests/test_agent_work_worker_result_builder.py",)),
+        ("exact", ("src/agent_work/worker.py",)),
+        ("wrong-issue", ("tests/test_agent_work_worker_result_builder.py",)),
+        ("wrong-branch", ("tests/test_agent_work_worker_result_builder.py",)),
+        ("wrong-sha", ("tests/test_agent_work_worker_result_builder.py",)),
     ),
 )
-def test_builder_rejects_split_required_outside_fresh_ordinary_intake(
-    tmp_path: Path, record_updates: dict[str, object]
+def test_coding_result_rejects_missing_or_mismatched_controller_checkpoint(
+    tmp_path: Path,
+    checkpoint: str | None,
+    changed_paths: tuple[str, ...],
 ) -> None:
-    record = _record(tmp_path).model_copy(update=record_updates)
-    split = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "unknown",
-            "result_kind": "split_required",
-            "change_summary": "Split the oversized intake.",
-            "next_action": "Create ordinary children.",
-            "split_plan": {
-                "slices": [
-                    {
-                        "ordinal": 1,
-                        "key": "first",
-                        "title": "First",
-                        "description": "First slice.",
-                        "depends_on": [],
-                    },
-                    {
-                        "ordinal": 2,
-                        "key": "second",
-                        "title": "Second",
-                        "description": "Second slice.",
-                        "depends_on": [1],
-                    },
-                ]
-            },
-        }
-    )
+    record = _record(tmp_path, WorkflowLane.CODING)
+    evidence = _checkpoint(record)
+    if checkpoint == "wrong-issue":
+        evidence = evidence.model_copy(update={"issue_iid": 99})
+    elif checkpoint == "wrong-branch":
+        evidence = evidence.model_copy(update={"source_branch": "agent/issue-99"})
+    elif checkpoint == "wrong-sha":
+        evidence = evidence.model_copy(update={"base_sha": "f" * 40})
 
-    with pytest.raises(
-        WorkerProtocolError, match="split_required: is limited to fresh ordinary intake"
-    ):
-        build_worker_result(record, split, changed_paths=(), red_checkpoint=None)
-
-
-@pytest.mark.parametrize(
-    "issue_iid",
-    [
-        40,
-        78,
-    ],
-)
-def test_worker_validation_failures_keep_the_retained_worktree_retryable(
-    tmp_path: Path, issue_iid: int
-) -> None:
-    record = _record(tmp_path).model_copy(update={"issue_iid": issue_iid})
-
-    with pytest.raises(WorkerProtocolError):
+    with pytest.raises(WorkerProtocolError, match="red_checkpoint"):
         build_worker_result(
             record,
-            _completed_input().model_copy(update={"receipts": ("$architect",)}),
-            changed_paths=(),
+            WorkerResultBuildInput(
+                workflow_lane=WorkflowLane.CODING,
+                result_kind="ready_to_publish",
+                change_summary="Implementation complete.",
+                next_action="Publish for human review.",
+                merge_request_draft=_draft(),
+            ),
+            changed_paths=changed_paths,
+            red_checkpoint=None if checkpoint is None else evidence,
+        )
+
+
+def test_ready_to_publish_rejects_missing_controller_checked_draft(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, WorkflowLane.CONTENT)
+
+    with pytest.raises(WorkerProtocolError, match="transition"):
+        build_worker_result(
+            record,
+            WorkerResultBuildInput(
+                workflow_lane=WorkflowLane.CONTENT,
+                result_kind="ready_to_publish",
+                change_summary="Documentation complete.",
+                next_action="Publish for human review.",
+            ),
+            changed_paths=("docs/reference/serial-gitlab-agent-loop.md",),
             red_checkpoint=None,
         )
 
-    retry = plan_retry(record, now=datetime(2026, 9, 14, tzinfo=UTC)).record
 
-    assert retry.state is RunnerState.RETRY_WAIT
-    assert retry.prior_state is RunnerState.EXECUTING
-    assert retry.prior_phase is WorkflowPhase.WORKFLOW
-    assert retry.retry_count == record.retry_count + 1
-    assert retry.worktree == record.worktree
-
-
-def test_worker_prompt_requires_the_builder_and_v2_contract(tmp_path: Path) -> None:
-    prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
-        project_id=310967,
-        issue_iid=81,
-        effective_worker_budget_seconds=600,
-    )
-
-    assert "agent-work worker-result build" in prompt
-    assert "protocol_version=2" in prompt
-    assert "WORKFLOW_RECEIPTS" in prompt
-
-
-def test_worker_prompt_forbids_handcrafted_identity_or_ledger_fields(
+def test_red_checkpoint_ready_builds_without_model_authorization(
     tmp_path: Path,
 ) -> None:
-    """Workers return the builder's unchanged output instead of protocol fields."""
-    prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
-        project_id=310967,
-        issue_iid=81,
-        effective_worker_budget_seconds=600,
-    )
-
-    assert "Do not handcraft identity, ledger, state, phase" in prompt
-    assert "Return the builder output unchanged" in prompt
-    assert "topology-aware evidence" not in prompt
-
-
-def test_handoff_prompt_omits_the_legacy_stdout_return_contract(tmp_path: Path) -> None:
-    """A handoff-aware worker returns only strict builder input to its controller."""
-    prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
-        project_id=310967,
-        issue_iid=81,
-        effective_worker_budget_seconds=600,
-        worker_result_handoff=WorkerResultHandoffRequest(
-            path=tmp_path / "handoff.json",
-            nonce="0123456789abcdef" * 2,
-            project_id=310967,
-            issue_iid=81,
-            ledger_revision=7,
-            source_branch="agent/issue-81",
-            source_sha="a" * 40,
+    """The producer can request the existing trusted checkpoint transaction."""
+    record = _record(tmp_path, WorkflowLane.UNKNOWN)
+    request = RedCheckpointRequest(
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "tests/test_agent_work_worker_result_builder.py",
         ),
-        worker_result_builder=(
-            tmp_path / "active-checkout" / "bin/agent-work-from-checkout"
-        ).resolve(),
+        expected_failure="expected Red failure",
+        test_paths=("tests/test_agent_work_worker_result_builder.py",),
+    )
+    result = build_worker_result(
+        record,
+        WorkerResultBuildInput(
+            workflow_lane=WorkflowLane.CODING,
+            result_kind="red_checkpoint_ready",
+            change_summary="Red is ready for controller capture.",
+            next_action="Create the trusted checkpoint.",
+            red_checkpoint_request=request,
+        ),
+        changed_paths=request.test_paths,
+        red_checkpoint=None,
     )
 
-    assert (
-        "exactly one strict WorkerResultBuildInput JSON object as your final response"
-        in prompt
+    assert result.result_kind == "red_checkpoint_ready"
+    assert result.red_checkpoint_request == request
+    with pytest.raises(ValueError, match="fulfilled by the controller"):
+        apply_worker_result(record, result, now=NOW)
+
+
+@pytest.mark.parametrize("result_kind", ("ready_to_publish", "suggest_close"))
+def test_post_publication_results_apply_without_model_receipts(
+    tmp_path: Path, result_kind: str
+) -> None:
+    record = _record(tmp_path, WorkflowLane.CODING).model_copy(
+        update={"phase": WorkflowPhase.POST_PUBLICATION}
     )
-    assert "trusted controller invokes the checkout-owned builder" in prompt
-    assert "worker-result build" not in prompt
-    assert "--handoff-file" not in prompt and "--apply" not in prompt
-    assert "Return the builder output unchanged" not in prompt
-    assert "<agent-work-result>" not in prompt
+    values: dict[str, object] = {
+        "workflow_lane": WorkflowLane.CODING,
+        "result_kind": result_kind,
+        "change_summary": "The exact pipeline assessment is complete.",
+        "next_action": "Await human review.",
+    }
+    if result_kind == "suggest_close":
+        values["suggest_close_evidence"] = {
+            "reason": "already-satisfied",
+            "issue_iid": record.issue_iid,
+            "evidence": ("Exact merged source SHA contains the requested change.",),
+        }
+    result = build_worker_result(
+        record,
+        WorkerResultBuildInput.model_validate(values),
+        changed_paths=(),
+        red_checkpoint=None,
+    )
+
+    outcome = apply_worker_result(record, result, now=NOW).record
+
+    expected = (
+        RunnerState.SUGGEST_CLOSE
+        if result_kind == "suggest_close"
+        else RunnerState.AWAITING_HUMAN
+    )
+    assert outcome.state is expected
 
 
-def test_handoff_prompt_requires_an_explicit_result_builder(tmp_path: Path) -> None:
-    """A handoff prompt cannot render an absent checkout-owned builder."""
-    handoff = WorkerResultHandoffRequest(
-        path=tmp_path / "handoff.json",
+def test_builder_input_rejects_model_authored_receipts_and_audit_summary() -> None:
+    """Program authorization cannot accept model-authored workflow evidence."""
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        WorkerResultBuildInput.model_validate(
+            {
+                "workflow_lane": "coding",
+                "result_kind": "needs_human",
+                "change_summary": "A human decision is required.",
+                "next_action": "Await the reviewer decision.",
+                "receipts": ["$architect: approved"],
+                "audit_summary": {"capacity": {"required": 12}},
+            }
+        )
+
+
+def test_worker_prompt_routes_the_live_producer_through_the_private_broker() -> None:
+    """The producer invokes the trusted builder while its broker is still live."""
+    request = WorkerResultBrokerRequest(
         nonce="0123456789abcdef" * 2,
         project_id=310967,
         issue_iid=81,
         ledger_revision=7,
+        expected_state=RunnerState.EXECUTING,
+        expected_phase=WorkflowPhase.WORKFLOW,
         source_branch="agent/issue-81",
         source_sha="a" * 40,
     )
-
-    with pytest.raises(
-        ValueError, match="worker result builder is required for a handoff"
-    ):
-        build_worker_prompt(
-            _record(tmp_path).model_dump(mode="json"),
-            project_id=310967,
-            issue_iid=81,
-            effective_worker_budget_seconds=600,
-            worker_result_handoff=handoff,
-        )
-
-
-def test_worker_prompt_requires_the_serial_judge_before_phase_five_fanout(
-    tmp_path: Path,
-) -> None:
-    """The trusted worker prompt preserves the Judge-before-review protocol."""
     prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
+        {"phase": "workflow"},
         project_id=310967,
         issue_iid=81,
         effective_worker_budget_seconds=600,
+        worker_result_broker=request,
+        worker_result_builder=Path("/controller/bin/agent-work-from-checkout"),
     )
-
-    judge = prompt.index("delegates the serial Phase-4 $tdd-judge")
-    nonfunctional = prompt.index(
-        "delegates $nonfunctional-review as its read-only child"
-    )
-    fanout = prompt.index("Phase-5 reviewer")
-
-    assert judge < nonfunctional < fanout
-
-
-def test_worker_prompt_requires_all_applicable_phase_two_receipts(
-    tmp_path: Path,
-) -> None:
-    """Mixed coding work preserves the Policy Writer's separate ownership."""
-    prompt = build_worker_prompt(
-        _record(tmp_path).model_dump(mode="json"),
-        project_id=310967,
-        issue_iid=81,
-        effective_worker_budget_seconds=600,
-    )
-
-    assert "conditional $agent-policy-writer" in prompt
-    assert "Policy Writer exclusively owns policy paths" in prompt
-    assert "Green owns production, tests, and docs" in prompt
-
-
-def test_coding_ready_to_publish_requires_matching_trusted_red_checkpoint(
-    tmp_path: Path,
-) -> None:
-    """The builder derives Red identity and paths instead of trusting worker JSON."""
-    evidence = _red_checkpoint_evidence()
-    changed_paths = (
-        "src/agent_work/worker.py",
-        "tests/test_agent_work_worker_result_builder.py",
-    )
-
-    result = build_worker_result(
-        _record(tmp_path),
-        _completed_input(),
-        changed_paths=changed_paths,
-        red_checkpoint=evidence,
-    )
-
-    assert result.audit_summary is not None
-    assert result.audit_summary.red_checkpoint == evidence
-    assert result.audit_summary.red_checkpoint is not None
-    assert result.audit_summary.red_checkpoint.test_paths == (
-        "tests/test_agent_work_worker_result_builder.py",
-    )
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    (
-        None,
-        "wrong-project",
-        "wrong-issue",
-        "wrong-branch",
-        "wrong-base",
-        "missing-test-path",
-    ),
-)
-def test_coding_ready_to_publish_rejects_missing_or_stale_red_checkpoint(
-    tmp_path: Path, evidence: str | None
-) -> None:
-    checkpoint = None if evidence is None else _red_checkpoint_evidence()
-    if evidence == "wrong-project":
-        assert checkpoint is not None
-        checkpoint = checkpoint.model_copy(update={"project_id": 99})
-    elif evidence == "wrong-issue":
-        assert checkpoint is not None
-        checkpoint = checkpoint.model_copy(update={"issue_iid": 82})
-    elif evidence == "wrong-branch":
-        assert checkpoint is not None
-        checkpoint = checkpoint.model_copy(update={"source_branch": "other"})
-    elif evidence == "wrong-base":
-        assert checkpoint is not None
-        checkpoint = checkpoint.model_copy(update={"base_sha": "c" * 40})
-    elif evidence == "missing-test-path":
-        assert checkpoint is not None
-        checkpoint = checkpoint.model_copy(
-            update={"test_paths": ("tests/test_other.py",)}
-        )
-
-    with pytest.raises(WorkerProtocolError, match="red checkpoint"):
-        build_worker_result(
-            _record(tmp_path),
-            _completed_input(),
-            changed_paths=(
-                "src/agent_work/worker.py",
-                "tests/test_agent_work_worker_result_builder.py",
-            ),
-            red_checkpoint=checkpoint,
-        )
-
-
-def test_coding_receipts_put_the_judge_before_every_phase_five_reviewer() -> None:
-    """Whole-workflow receipt order matches the serial review dependency."""
-    receipts = WORKFLOW_RECEIPTS[WorkflowLane.CODING]
-
-    assert receipts.index("$nonfunctional-review") == receipts.index("$tdd-judge") + 1
-    assert receipts.index("$tdd-judge") < receipts.index("$diataxis-judge")
-
-
-def test_worker_result_build_cli_writes_only_one_envelope_to_stdout(
-    tmp_path: Path,
-) -> None:
-    input_path = tmp_path / "result.json"
-    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
-    stdout: list[str] = []
-    stderr: list[str] = []
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-        ],
-        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda worktree: (
-            "src/agent_work/worker.py",
-            "tests/test_agent_work_worker_result_builder.py",
-        ),
-        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
-            _red_checkpoint_evidence()
-            if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
-            else None
-        ),
-        read_bytes=Path.read_bytes,
-        write_stdout=stdout.append,
-        write_stderr=stderr.append,
-    )
-
-    assert exit_code == 0
-    assert stderr
-    assert len(stdout) == 1
-    assert stdout[0].startswith("<agent-work-result>{")
-    assert stdout[0].endswith("}</agent-work-result>")
-    assert "\n" not in stdout[0]
-
-
-def test_worker_result_build_json_writes_one_bare_compact_object(
-    tmp_path: Path,
-) -> None:
-    """The explicit JSON mode is directly consumable by JSON tooling."""
-    input_path = tmp_path / "result.json"
-    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
-    stdout: list[str] = []
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-            "--json",
-        ],
-        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda worktree: (
-            "src/agent_work/worker.py",
-            "tests/test_agent_work_worker_result_builder.py",
-        ),
-        load_red_checkpoint=lambda project_id, issue_iid, base_sha: (
-            _red_checkpoint_evidence()
-            if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
-            else None
-        ),
-        read_bytes=Path.read_bytes,
-        write_stdout=stdout.append,
-        write_stderr=lambda _message: None,
-    )
-
-    assert exit_code == 0
-    assert len(stdout) == 1
-    assert json.loads(stdout[0])["protocol_version"] == 2
-
-
-def test_worker_result_build_help_and_usage_follow_argparse_contract(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as parent_help_exit:
-        main(["worker-result", "--help"])
-
-    assert parent_help_exit.value.code == 0
-    parent_help = capsys.readouterr().out
-    assert "Preview or hand off a validated worker result" in parent_help
-
-    with pytest.raises(SystemExit) as help_exit:
-        main(["worker-result", "build", "--help"])
-
-    assert help_exit.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "agent-work worker-result build" in help_text
-    assert "--input-file" in help_text
-    assert "Preview one validated worker result without mutation" in help_text
-    assert "controller-owned output path; required with --apply" in help_text
-    assert "preview envelope or applied handoff receipt" in help_text
-    assert "retain bounded diagnostics on failure" in help_text
-
-    with pytest.raises(SystemExit) as usage_exit:
-        main(["worker-result", "build"])
-
-    assert usage_exit.value.code == 2
-    assert "required" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "partial_handoff",
-    [
-        ("--handoff-file", "/tmp/handoff.json"),
-        ("--handoff-nonce", "0123456789abcdef" * 2),
-    ],
-)
-def test_worker_result_build_apply_requires_complete_handoff_at_parse_boundary(
-    capsys: pytest.CaptureFixture[str], partial_handoff: tuple[str, str]
-) -> None:
-    """An incomplete mutating request is argparse usage failure, not runtime work."""
-    with pytest.raises(SystemExit) as usage_exit:
-        main(
-            [
-                "worker-result",
-                "build",
-                "--issue-iid",
-                "81",
-                "--input-file",
-                "/tmp/result.json",
-                *partial_handoff,
-                "--apply",
-            ]
-        )
-
-    assert usage_exit.value.code == 2
-    assert (
-        "--apply requires --handoff-file and --handoff-nonce" in capsys.readouterr().err
-    )
-
-
-@pytest.mark.parametrize(
-    ("case", "input_payload"),
-    [
-        ("invalid", {"raw-worker-prose-secret": "raw-worker-prose-secret"}),
-        ("missing", None),
-    ],
-)
-def test_worker_result_build_failure_is_bounded_and_emits_no_envelope(
-    tmp_path: Path,
-    case: str,
-    input_payload: dict[str, str] | None,
-) -> None:
-    """Invalid input and missing ledger evidence never produce a partial result."""
-    input_path = tmp_path / "result.json"
-    payload = _completed_input().model_dump(mode="json") if case == "invalid" else {}
-    if input_payload is not None:
-        payload.update(input_payload)
-    input_path.write_text(json.dumps(payload))
-    stdout: list[str] = []
-    stderr: list[str] = []
-
-    def load_record(issue_iid: int) -> LedgerRecord | None:
-        return _record(tmp_path) if case == "invalid" and issue_iid == 81 else None
-
-    def changed_paths(worktree: Path) -> tuple[str, ...]:
-        return ()
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-        ],
-        load_record=load_record,  # type: ignore[arg-type]
-        changed_paths=changed_paths,
-        read_bytes=Path.read_bytes,
-        write_stdout=stdout.append,
-        write_stderr=stderr.append,
-    )
-
-    assert exit_code == 1
-    assert stdout == []
-    assert len(stderr) == 1
-    assert "raw-worker-prose-secret" not in stderr[0]
-    assert len(stderr[0].encode("utf-8")) <= 2048
-
-
-def test_worker_result_build_unexpected_internal_failure_is_a_fixed_safe_category(
-    tmp_path: Path,
-) -> None:
-    """Default-safe diagnostics never expose a runtime boundary's detail."""
-    input_path = tmp_path / "result.json"
-    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
-    stderr: list[str] = []
-
-    def fail_load(issue_iid: int) -> LedgerRecord | None:
-        _ = issue_iid
-        raise RuntimeError("untrusted runtime detail")
-
-    def observe_paths(worktree: Path) -> tuple[str, ...]:
-        _ = worktree
-        return ()
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-            "--debug",
-        ],
-        load_record=fail_load,
-        changed_paths=observe_paths,
-        read_bytes=Path.read_bytes,
-        write_stdout=lambda _message: None,
-        write_stderr=stderr.append,
-    )
-
-    assert exit_code == 1
-    assert stderr == ["worker_result_validation: unexpected internal failure"]
-
-
-@pytest.mark.parametrize(
-    "error", (FileNotFoundError("raw missing path"), OSError("raw read failure"))
-)
-def test_worker_result_build_input_read_failures_are_a_fixed_safe_category(
-    tmp_path: Path, error: OSError
-) -> None:
-    """Missing and unreadable transient inputs have one non-leaking capture cause."""
-    stderr: list[str] = []
-
-    def fail_read(_path: Path) -> bytes:
-        raise error
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(tmp_path / "input.json"),
-        ],
-        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda _worktree: (),
-        read_bytes=fail_read,
-        write_stdout=lambda _message: pytest.fail(
-            "input failure must not emit an envelope"
-        ),
-        write_stderr=stderr.append,
-    )
-
-    assert exit_code == 1
-    assert stderr == ["worker_result_capture: input artifact missing or unreadable"]
-    assert all("raw" not in diagnostic for diagnostic in stderr)
-
-
-def test_builder_runtime_uses_read_only_ledger_loading(
-    tmp_path: Path,
-) -> None:
-    """The builder's default dependency composition never preserves corruption."""
-    config = AgentWorkConfig(
-        host="git.example.test",
-        project_id=310967,
-        checkout=tmp_path,
-        state_root=tmp_path / "state",
-        git_path=Path("/usr/bin/git"),
-        glab_path=Path("/usr/bin/glab"),
-        base_branch="agent/issue-81",
-    )
-    record_path = config.state_root / "records" / "81.json"
-    record_path.parent.mkdir(parents=True)
-    record_path.write_text("{")
-    dependencies = build_worker_result_dependencies(config=config)
-
-    with pytest.raises(LedgerCorrupt):
-        dependencies.load_record(81)
-
-    assert not (config.state_root / "recovery").exists()
-
-
-def test_builder_runtime_verifies_retained_checkpoint_against_local_ref(
-    tmp_path: Path,
-) -> None:
-    """Production composition rejects missing or mismatched local ref identity."""
-    checkpoint = importlib.import_module("agent_work.red_checkpoint")
-    config = AgentWorkConfig(
-        host="git.example.test",
-        project_id=310967,
-        checkout=tmp_path,
-        state_root=tmp_path / "state",
-        git_path=Path("/usr/bin/git"),
-        glab_path=Path("/usr/bin/glab"),
-        base_branch="agent/issue-81",
-    )
-    evidence = _red_checkpoint_evidence()
-    checkpoint.RedCheckpointStore(config.state_root).write(evidence)
-    observed_tree: str | None = evidence.tree_oid
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        if command[-4:-1] == ("rev-parse", "-q", "--verify"):
-            return (
-                CommandResult(1, "", "")
-                if observed_tree is None
-                else CommandResult(0, f"{observed_tree}\n", "")
-            )
-        return CommandResult(1, "", "")
-
-    dependencies = build_worker_result_dependencies(
-        config=config, run_command=run_command
-    )
-    assert dependencies.load_red_checkpoint(310967, 81, "a" * 40) == evidence
-
-    observed_tree = "c" * 40
-    with pytest.raises(RuntimeError, match="ref does not match"):
-        dependencies.load_red_checkpoint(310967, 81, "a" * 40)
-    observed_tree = None
-    with pytest.raises(RuntimeError, match="ref does not match"):
-        dependencies.load_red_checkpoint(310967, 81, "a" * 40)
-    assert dependencies.load_red_checkpoint(310967, 82, "a" * 40) is None
-
-
-def test_cli_default_builder_dependencies_do_not_preserve_corrupt_ledger(
-    tmp_path: Path,
-) -> None:
-    """Normal CLI wiring retains corrupt-ledger reads as a no-write failure."""
-    input_path = tmp_path / "result.json"
-    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
-    state_root = tmp_path / "state" / "agent-work" / "projects" / "310967-e80a65b3aa73"
-    record_path = state_root / "records" / "81.json"
-    record_path.parent.mkdir(parents=True)
-    record_path.write_text("{")
-    environment = {
-        "AGENT_WORK_BASE_BRANCH": "agent/issue-81",
-        "AGENT_WORK_FACTORY_USERNAME": "factory-bot",
-        "AGENT_WORK_GIT": "/usr/bin/git",
-        "AGENT_WORK_GLAB": "/usr/bin/glab",
-        "GITLAB_HOST": "git.example.test",
-        "GITLAB_PROJECT_ID": "310967",
-        "XDG_STATE_HOME": str(tmp_path / "state"),
-    }
-
-    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        if command[-3:] == ("rev-parse", "--show-toplevel"):
-            return CommandResult(0, f"{tmp_path}\n", "")
-        if command[-3:] == ("remote", "get-url", "origin"):
-            return CommandResult(0, "https://git.example.test/group/project.git\n", "")
-        return CommandResult(
-            0,
-            json.dumps(
-                {
-                    "id": 310967,
-                    "path_with_namespace": "group/project",
-                    "http_url_to_repo": "https://git.example.test/group/project.git",
-                }
-            ),
-            "",
-        )
-
-    stdout: list[str] = []
-    stderr: list[str] = []
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-        ],
-        environment=environment,
-        run_command=run_command,
-        write_stdout=stdout.append,
-        write_stderr=stderr.append,
-    )
-
-    assert exit_code == 1
-    assert stdout == []
-    assert stderr == ["worker_result: could not be read or validated"]
-    assert not (state_root / "recovery").exists()
-    assert not (state_root / "agent-work.log").exists()
-
-
-def test_builder_derives_no_content_reviewers(tmp_path: Path) -> None:
-    """Content audits retain no coding-reviewer receipts."""
-    record = _record(tmp_path).model_copy(
-        update={"workflow_lane": WorkflowLane.CONTENT}
-    )
-    receipts = tuple(
-        f"{skill}: approved" for skill in WORKFLOW_RECEIPTS[WorkflowLane.CONTENT]
-    )
-    build_input = WorkerResultBuildInput.model_validate(
-        {
-            "workflow_lane": "content",
-            "result_kind": "ready_to_publish",
-            "receipts": receipts,
-            "change_summary": "Completed content workflow.",
-            "next_action": "Publish after validation.",
-            "merge_request_draft": {"title": "Content", "description": "Ready."},
-            "audit_summary": {
-                "capacity": {
-                    "required": 3,
-                    "available": 16,
-                    "shortfall": 0,
-                    "decision": "run",
-                },
-                "topology": {
-                    "widest_live_row": [
-                        "main",
-                        "$architect",
-                        "$documentation-writer",
-                    ],
-                    "required_live_slots": 3,
-                    "available_live_slots": 16,
-                    "roles": [
-                        {
-                            "skill": "$architect",
-                            "owner": "main",
-                            "phase": "1",
-                            "tier": "most_capable",
-                        },
-                        {
-                            "skill": "$documentation-writer",
-                            "owner": "$architect",
-                            "phase": "2",
-                            "tier": "balanced",
-                        },
-                        {
-                            "skill": "$documentation-finalizer",
-                            "owner": "$architect",
-                            "phase": "3",
-                            "tier": "fast",
-                        },
-                    ],
-                    "owner_headroom": [
-                        {
-                            "owner": "main",
-                            "direct_children_required": 1,
-                            "direct_children_headroom": 3,
-                            "descendants_required": 3,
-                            "descendants_headroom": 3,
-                        },
-                        {
-                            "owner": "$architect",
-                            "direct_children_required": 2,
-                            "direct_children_headroom": 2,
-                            "descendants_required": 2,
-                            "descendants_headroom": 2,
-                        },
-                    ],
-                },
-                "retained_objects": {
-                    "ceiling": 3,
-                    "current": 0,
-                    "required_fresh_handles": 3,
-                    "fresh_headroom": 0,
-                },
-            },
-        }
-    )
-
-    result = build_worker_result(
-        record, build_input, changed_paths=(), red_checkpoint=None
-    )
-
-    assert result.audit_summary is not None
-    assert result.audit_summary.reviewers == ()
-
-
-@pytest.mark.parametrize(
-    ("lane", "build_input", "observed_paths"),
-    [
-        (
-            "coding",
-            _completed_input(),
-            (
-                "tests/test_agent_work_worker_result_builder.py",
-                "src/agent_work/worker.py",
-            ),
-        ),
-        (
-            "content",
-            _completed_content_input(),
-            ("docs/operator-guide.md", "README.md"),
-        ),
-    ],
-)
-def test_worker_result_build_apply_atomically_writes_identity_bound_handoff(
-    tmp_path: Path,
-    lane: str,
-    build_input: WorkerResultBuildInput,
-    observed_paths: tuple[str, ...],
-) -> None:
-    """Apply writes one controller-verifiable artifact for either workflow lane."""
-    input_path = tmp_path / f"{lane}-result.json"
-    handoff_path = tmp_path / f"{lane}-handoff.json"
-    nonce = "0123456789abcdef" * 2
-    input_path.write_text(json.dumps(build_input.model_dump(mode="json")))
-    record = _record(tmp_path).model_copy(update={"workflow_lane": WorkflowLane(lane)})
-    writes: list[tuple[Path, bytes]] = []
-    stdout: list[str] = []
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-            "--handoff-file",
-            str(handoff_path),
-            "--handoff-nonce",
-            nonce,
-            "--apply",
-        ],
-        load_record=lambda issue_iid: record if issue_iid == 81 else None,
-        changed_paths=lambda _worktree: observed_paths,
-        load_red_checkpoint=(
-            (
-                lambda project_id, issue_iid, base_sha: (
-                    _red_checkpoint_evidence()
-                    if (project_id, issue_iid, base_sha) == (310967, 81, "a" * 40)
-                    else None
-                )
-            )
-            if lane == "coding"
-            else None
-        ),
-        read_bytes=Path.read_bytes,
-        atomic_write=lambda path, payload: writes.append((path, payload)),
-        write_stdout=stdout.append,
-        write_stderr=lambda _message: None,
-    )
-
-    assert exit_code == 0
-    assert stdout == ["worker result handoff written for issue #81"]
-    assert "<agent-work-result>" not in stdout[0]
-    assert "envelope" not in stdout[0]
-    assert len(writes) == 1 and writes[0][0] == handoff_path
-    artifact = json.loads(writes[0][1])
-    assert artifact == {
-        "schema_version": 1,
-        "nonce": nonce,
-        "project_id": 310967,
-        "issue_iid": 81,
-        "ledger_revision": 7,
-        "source_branch": "agent/issue-81",
-        "source_sha": "a" * 40,
-        "changed_paths": sorted(observed_paths),
-        "envelope": json.loads(
-            build_worker_result(
-                record,
-                build_input,
-                changed_paths=observed_paths,
-                red_checkpoint=(
-                    _red_checkpoint_evidence() if lane == "coding" else None
-                ),
-            ).model_dump_json(exclude_none=True)
-        ),
-    }
-    project_root = Path(__file__).parents[1]
-    for relative_path in (
-        Path("src/agent_work/cli.py"),
-        Path("src/agent_work/serial.py"),
-        Path("src/agent_work/worker.py"),
-    ):
-        assert (project_root / relative_path).read_bytes() == (
-            project_root / "template" / relative_path
-        ).read_bytes()
-
-
-def test_worker_result_build_preview_never_writes_handoff(tmp_path: Path) -> None:
-    """A handoff destination remains untouched until the explicit apply boundary."""
-    input_path = tmp_path / "result.json"
-    handoff_path = tmp_path / "handoff.json"
-    input_path.write_text(json.dumps(_completed_input().model_dump(mode="json")))
-    writes: list[tuple[Path, bytes]] = []
-    stdout: list[str] = []
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-            "--handoff-file",
-            str(handoff_path),
-            "--handoff-nonce",
-            "fedcba9876543210" * 2,
-        ],
-        load_record=lambda issue_iid: _record(tmp_path) if issue_iid == 81 else None,
-        changed_paths=lambda _worktree: (
-            "src/agent_work/worker.py",
-            "tests/test_agent_work_worker_result_builder.py",
-        ),
-        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: (
-            _red_checkpoint_evidence()
-        ),
-        read_bytes=Path.read_bytes,
-        atomic_write=lambda path, payload: writes.append((path, payload)),
-        write_stdout=stdout.append,
-        write_stderr=lambda _message: None,
-    )
-
-    assert exit_code == 0
-    assert writes == [] and not handoff_path.exists()
-    assert len(stdout) == 1 and stdout[0].startswith("<agent-work-result>")
-
-
-def test_worker_result_build_apply_json_emits_only_bounded_handoff_receipt(
-    tmp_path: Path,
-) -> None:
-    """Applied JSON confirms the mutation without exposing the protected envelope."""
-    input_path = tmp_path / "result.json"
-    handoff_path = tmp_path / "handoff.json"
-    input_path.write_text(
-        json.dumps(_completed_content_input().model_dump(mode="json"))
-    )
-    stdout: list[str] = []
-
-    exit_code = main(
-        [
-            "worker-result",
-            "build",
-            "--issue-iid",
-            "81",
-            "--input-file",
-            str(input_path),
-            "--handoff-file",
-            str(handoff_path),
-            "--handoff-nonce",
-            "0123456789abcdef" * 2,
-            "--apply",
-            "--json",
-        ],
-        load_record=lambda issue_iid: (
-            _record(tmp_path).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
-            if issue_iid == 81
-            else None
-        ),
-        changed_paths=lambda _worktree: ("docs/operator-guide.md",),
-        read_bytes=Path.read_bytes,
-        atomic_write=lambda _path, _payload: None,
-        write_stdout=stdout.append,
-        write_stderr=lambda _message: None,
-    )
-
-    assert exit_code == 0
-    assert json.loads(stdout[0]) == {
-        "action": "worker-result-handoff",
-        "applied": True,
-        "issue_iid": 81,
-    }
-    assert "envelope" not in stdout[0]
+    assert "--broker-socket" in prompt and "--broker-nonce" in prompt
+    assert "/controller/bin/agent-work-from-checkout" in prompt
+    assert "private scratch" in prompt and "one corrected request" in prompt
+    for forbidden in ("audit_summary",):
+        assert forbidden not in prompt

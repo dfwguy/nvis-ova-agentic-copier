@@ -67,7 +67,6 @@ from .ledger import (
 from .migration import build_migration_plan
 from .models import (
     AgentWorkConfig,
-    AuditReceiptSummary,
     CommandItemReport,
     CommandReport,
     ConditionEvidence,
@@ -106,7 +105,6 @@ from .red_checkpoint import (
 )
 from .repository import (
     GitRepository,
-    LegacyPublicationCandidate,
     RepositoryError,
     RepositoryTransientError,
     discover_config,
@@ -124,11 +122,7 @@ from .serial import (
     resume_candidates,
     run_segment,
 )
-from .state_machine import (
-    has_complete_workflow_receipt,
-    retained_ordinary_is_untouched,
-    transition_record,
-)
+from .state_machine import retained_ordinary_is_untouched, transition_record
 from .status import project_status
 from .timing import is_bounded_timing_append
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
@@ -876,16 +870,10 @@ def _legacy_dirty_publication_evidence(
         record.error_code is not ErrorCode.PUBLICATION_IDENTITY_MISMATCH
         or record.state is not RunnerState.BLOCKED
         or record.phase is not WorkflowPhase.READY_TO_PUBLISH
+        or record.source_sha is None
     ):
         raise RuntimeError("legacy publication recovery evidence is ineligible")
-    if record.source_sha is None or not isinstance(
-        record.audit_evidence, AuditReceiptSummary
-    ):
-        raise RuntimeError("legacy publication recovery evidence is incomplete")
-    audit = record.audit_evidence
-    candidate: LegacyPublicationCandidate = (
-        repository.observe_legacy_publication_candidate(record.worktree)
-    )
+    candidate = repository.observe_legacy_publication_candidate(record.worktree)
     expected = record.intent.expected_evidence
     eligible = (
         record.work_kind is WorkKind.ORDINARY
@@ -899,33 +887,27 @@ def _legacy_dirty_publication_evidence(
         and candidate.merge_head is None
         and bool(candidate.staged_paths)
         and bool(candidate.unstaged_paths)
+        and set(candidate.unstaged_paths).issubset(set(candidate.staged_paths))
         and not candidate.has_untracked
         and not candidate.has_unmerged
         and not candidate.has_renames
-        and set(candidate.staged_paths) == set(audit.changed_paths)
-        and set(candidate.unstaged_paths).issubset(set(candidate.staged_paths))
-        and set(candidate.unstaged_paths).issubset(set(audit.changed_paths))
-        and audit.lane == record.workflow_lane.value
-        and has_complete_workflow_receipt(record)
     )
+    checkpoint = None
     if record.workflow_lane is WorkflowLane.CODING:
-        checkpoint = audit.red_checkpoint
-        loaded = (
+        checkpoint = (
             None
             if load_red_checkpoint is None
             else load_red_checkpoint(
                 record.project_id, record.issue_iid, record.source_sha
             )
         )
-        eligible = eligible and checkpoint is not None and loaded == checkpoint
-    elif record.workflow_lane is WorkflowLane.CONTENT:
-        eligible = eligible and audit.red_checkpoint is None
-    else:
+        eligible = eligible and checkpoint is not None
+    elif record.workflow_lane is not WorkflowLane.CONTENT:
         eligible = False
     if not eligible:
         raise RuntimeError("legacy publication recovery evidence is ineligible")
     identity = build_publication_correction_identity(
-        record, candidate, checkpoint=audit.red_checkpoint
+        record, candidate, checkpoint=checkpoint
     )
     return {
         "legacy_index_fingerprint": candidate.index_fingerprint,
@@ -934,9 +916,7 @@ def _legacy_dirty_publication_evidence(
         "legacy_branch": candidate.branch,
         "legacy_head": candidate.head,
         "legacy_red_checkpoint": (
-            ""
-            if audit.red_checkpoint is None
-            else audit.red_checkpoint.model_dump_json()
+            "" if checkpoint is None else checkpoint.model_dump_json()
         ),
         "correction_identity": identity.model_dump_json(),
     }
@@ -1698,7 +1678,6 @@ def build_runtime_dependencies(
         invoke: InvokerPort = AgentInvoker(
             run_subprocess,
             environment=os.environ,
-            trusted_builder=config.checkout / "bin" / "agent-work-from-checkout",
         )
         checkpoint_store: RuntimeCheckpointStore = RedCheckpointStore(config.state_root)
         create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
@@ -2606,8 +2585,6 @@ def dispatch(
                             intent=None,
                             publication_sha=None,
                             merge_request_draft=None,
-                            receipts=(),
-                            audit_evidence=None,
                             worker_exit=None,
                             retry_at=None,
                             retry_count=0,
