@@ -52,6 +52,16 @@ detail for direct role handoffs and final review. Short parent receipts do
 not replace required reads, checks, reviews, evidence, audit records, or
 trusted program boundaries. Role prose cannot authorize program mutations.
 
+In interactive code work, carry Green's accepted ledger ref, session ID, and
+saved manifest SHA-256 in the short handoff. Green sends the full ledger while
+live. Finalizer reads it after compaction. Keep full specialist reviews in
+direct AI-to-AI handoffs. A short note never replaces a full review. Stop if
+the saved hash is lost or changed. The store checks trusted project, branch,
+tree, and current validation state.
+A branch name may suggest an issue number. That does not prove GitLab issue
+ownership or grant authority. Model role and verdict text is AI review
+context. It cannot authorize a state change or waive a failed check.
+
 Use short, targeted queries for command output. Keep exact IDs and evidence
 links. Do not copy full logs into parent context. While waiting, report only
 state changes, blockers, and completed handoffs. After context compaction,
@@ -195,6 +205,14 @@ Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
 not be waived.
 
+After interactive Judge success, the workflow owner starts a ledger session
+from a separate trusted controller checkout with `bin/agent-work-from-checkout
+review-handoff begin --worktree PATH --issue-iid N --apply --json`. Green alone
+submits the full correction ledger through that session while live. A canonical
+rejection goes back to Green for at most one corrected request.
+Read-only specialists do not write scratch files or use this store. Serial
+handoffs stay as they are.
+
 Test Judge also receives the accepted mode-specific Red checkpoint and the
 ordinary Git diff from that identity to the Green candidate. Finalizer receives
 the same checkpoint identity and final Red-to-Green diff evidence.
@@ -238,10 +256,17 @@ controller also records compact, token-neutral scope metadata. Record:
 Agents do not narrate elapsed time. Use this data to compare review cost. It
 covers complete and focused review. It does not add timing persistence.
 
-Finalizer receives the final diff. It receives Judge evidence. It also receives
-the Red, policy, and documentation receipts. It receives the current license receipt. It receives
-applicable policy evidence and the repair ledger. It returns normal approval or a mechanically safe
-draft-safety verdict here.
+Finalizer receives the final diff and Judge evidence. It also gets the Red,
+policy, and documentation receipts, all complete specialist reviews, the
+current license receipt, and applicable policy evidence. In interactive work,
+it gets Green's accepted ledger ref, session ID, and saved manifest SHA-256.
+It reads the manifest with `review-handoff manifest --worktree PATH
+--session-id ID --expected-manifest-sha256 SHA --json`, then the full ledger
+with `review-handoff read --worktree PATH --session-id ID
+--expected-manifest-sha256 SHA --receipt-id ID --json`. A missing or changed
+hash stops finalization. The ledger is AI context, not program authority. In
+serial work, Finalizer gets the existing repair ledger. It returns normal
+approval or a mechanically safe draft-safety verdict here.
 
 Use CLI Judge for a changed CLI surface. Also use it for a changed CLI contract. Use Filesystem Judge for
 Python or Bash layout or packaging. Use Policy Judge for agent-instruction
