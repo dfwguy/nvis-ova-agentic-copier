@@ -29,12 +29,10 @@ from hypothesis import strategies as st
 
 from agent_work import (
     domain,
+    repository,
     runtime,
     serial,
     state_machine,
-)
-from agent_work import (
-    repository as repository_module,
 )
 from agent_work.cli import build_parser
 from agent_work.domain import (
@@ -11119,8 +11117,8 @@ def test_publication_transport_failure_schedules_a_recoverable_retry(
 
 
 def _publication_commit_rejection() -> RepositoryError:
-    failure_type = repository_module.PublicationCommitFailure
-    rejected_type = repository_module.PublicationCommitRejected
+    failure_type = repository.PublicationCommitFailure
+    rejected_type = repository.PublicationCommitRejected
     return rejected_type(
         failure_type(
             diagnostic="Installed pre-commit rejected the commit: readability-check.",
