@@ -80,8 +80,8 @@ Record the refusal. Name the plan. Check its result. Then continue or hand off.
 Keep the scope fixed. Keep authority clear. Keep the target exact.
 
 The worker exception changes who publishes. It does not weaken the workflow.
-It also makes serial preparation Red-first. Ordinary interactive work stays
-concurrent. Before the accepted boundary captures the checkpoint, the dedicated
+Both serial and interactive coding work run Red first. Before the accepted
+boundary captures the serial checkpoint, the dedicated
 worktree may change only at the approved test paths. A production,
 documentation, or policy change stops capture. Preserve that work for recovery.
 The accepted boundary persists coding-lane authority. It verifies preconditions
@@ -89,8 +89,9 @@ and changed paths. It reruns Red. It persists and ref-binds the checkpoint.
 Then it loads and verifies its exact retained proof. That proof binds the
 project, issue, source branch, base SHA, tree OID, ref, test paths, command,
 nonzero exit, failure marker, and output digest. Only then may the resumed
-segment run documentation or policy work and start Green. Green never starts
-from prose or an unverified checkpoint.
+segment run policy preparation. Green and the Diátaxis Writer start together
+after policy preparation. Green never starts from prose or an unverified
+checkpoint.
 
 The Red-only intent is one protocol-version-2 `red_checkpoint_ready` envelope.
 It has the Architect and Red receipts, the exact `red_checkpoint_request`, a

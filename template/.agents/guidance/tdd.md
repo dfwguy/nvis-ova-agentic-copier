@@ -25,24 +25,26 @@ guidance. Do not load this file for content-only work.
 
 Use explicit stages. Each stage has a distinct role:
 
-- **Test Writer** — writes failing tests for the desired behavior. In ordinary
-  interactive work, it runs at the same time as the preparation writers. In
-  the first serial segment, only this role may change files. It stops when tests
-  are confirmed Red.
-- **Diátaxis Writer** — drafts required `docs/` updates or says why none are
-  needed. It alone may change `docs/`. Serial work starts it only after the
-  exact retained Red checkpoint passes controller checks.
+- **Test Writer** — writes failing tests for the desired behavior. It runs
+  first and stops when tests are confirmed Red. In the first serial segment,
+  only this role may change files.
+- **Diátaxis Writer** — owns `docs/**`, `template/docs/**`, `README.md`, and
+  prose in `template/README.md.jinja`, or says why no update is needed. It does
+  not change executable Jinja logic. It runs beside Green after the accepted Red checkpoint.
+  Serial work starts it only after the exact retained Red checkpoint passes
+  controller checks.
 - **Agent Policy Writer** — when needed, edits only approved root/template
-  agent-policy paths. Serial work starts it only after the same checks.
+  agent-policy paths after the accepted Red checkpoint and before Green and
+  the Diátaxis Writer start.
 - **Architect** — accepts and routes Red's direct evidence. It returns
   interactive work to Main for a local Red commit. In serial work, the same
   live workflow owner that assembles the exact boundary input invokes the
   trusted result boundary through its identity-bound broker while active.
   Architect stays read-only.
-- **Implementer** — starts only after all applicable preparation receipts/N/A
-  and the exact mode-specific Red checkpoint. Writes production, tests, and
-  docs. Reconciles drafts against final interfaces. Never edits agent-policy
-  paths.
+- **Implementer** — starts after the applicable policy preparation receipt/N/A
+  and the exact mode-specific Red checkpoint. Writes production and tests only.
+  Shares final interface details with the Diátaxis Writer. Never edits docs,
+  README, or agent-policy paths.
 - **Judge** — validates the full cycle. It checks meaningful tests, clean
   implementation, passing tooling, and conventions.
 
@@ -68,12 +70,14 @@ It cannot commit, push, or publish. Before capture, only approved test paths may
 change. Production, documentation, or policy changes reject capture. They remain
 preserved. A canonical rejection goes to the live producer for one corrected
 request. Only accepted retained evidence may start the resumed segment,
-documentation and policy preparation, then Green. Green inspects the ordinary
+policy preparation, then concurrent Green and documentation writing. Green inspects the ordinary
 Git diff from that checkpoint before implementation and review.
 
 During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`, and
-`uv run ty check`. It then runs focused behavior tests. It stages the exact
-candidate and records its tree OID. These fast commands are repair tools.
+`uv run ty check`. It then runs focused behavior tests. Main waits until Green
+and the Diátaxis Writer stop editing, stages their combined exact candidate,
+and records its tree OID. Repeat this boundary after each correction. These
+fast commands are repair tools.
 Validation verifies the candidate. It owns the one expensive tox/full-suite
 run. In serial validation, Judge invokes exactly one mutation-gated durable validation
 session for that staged tree. The session runs the installed hook and persists
@@ -128,9 +132,10 @@ fetches and rechecks both refs just before publishing with exact old-source
 merge. Keep the readback. The factory timer is irrelevant to reconciliation.
 Keep each proof. Check each result. Keep the tree. Keep the refs. Check the state.
 
-Policy findings return through Architect to the Agent Policy Writer. Green
-consolidates the finding but does not repair policy. Each correction gets a
-fresh Judge before dependent review.
+Documentation and README findings return through Architect to the Diátaxis
+Writer. Policy findings return through Architect to the Agent Policy Writer.
+Green consolidates findings but repairs only production and tests. Each
+correction gets a fresh Judge before dependent review.
 
 ## Never
 

@@ -18,13 +18,14 @@ tools: Read, Grep, Glob
 ## Role
 
 You are the read-only README judge. Green invokes you concurrently with the
-other applicable reviewers after completing user-facing edits. Check that
+other applicable reviewers after the Diátaxis Writer finishes user-facing edits
+and the validation Judge approves the staged tree. Check that
 `README.md` gives visitors a true start. Send all findings to Green.
 
 ## Scope
 
-Review `README.md` only. The Diátaxis Writer owns its preparation `docs/` draft.
-Green owns all later documentation reconciliation and edits. Do not edit README, other docs, code, tests,
+Review `README.md` only. The Diátaxis Writer owns its edits and any correction.
+Do not edit README, other docs, code, tests,
 `AGENTS.md`, or agent definitions.
 
 Keep README to the project aim, key needs, the main first-success path, and
@@ -54,7 +55,8 @@ is accurate.”
 2. **Decide if README needs updating**: use the scope above. If a visitor does
    not need this change to learn or start the project, stop and report.
 3. **Return every finding**: give all missing or stale README facts in one
-   receipt so Green can make one repair.
+   receipt to Green. Green routes them through Architect to the Diátaxis
+   Writer for repair.
 
 ## Constraints
 

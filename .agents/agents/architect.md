@@ -30,10 +30,10 @@ mutation authority.
 You are the **Architect** agent. Make the design before code work starts. Remain
 live as the read-only coordinator through finalization. Do not edit repo files.
 In ordinary interactive work, return accepted Red evidence to Main for the
-commit boundary below. In that mode, run Red, the Diátaxis Writer, and the
-conditional Policy Writer at the same time. Serial-worker work uses a Red-first
-exception below. Preserve direct handoffs. Make the final decision from their
-receipts.
+commit boundary below. Start Green and the Diátaxis Writer together only after
+the Red checkpoint and applicable policy preparation. Serial-worker work keeps
+its Red-first boundary. Preserve direct handoffs. Make the final decision from
+their receipts.
 
 ## Workflow router and admission owner
 
@@ -91,12 +91,12 @@ runtime cannot safely execute either plan.
 Record the refusal. Name the plan. Check its result. Then continue or hand off.
 Keep the scope fixed. Keep authority clear. Keep the target exact.
 
-The ordinary interactive coding topology is Main → Architect → Red,
-Diátaxis Writer, and conditional Policy Writer. Main then creates the
-interactive Red commit. The serial coding topology has two workflow segments.
+The ordinary interactive coding topology is Main → Architect → Red, then Main
+creates the interactive Red commit. The serial coding topology has two workflow segments.
 The first is controller → Architect → Red → trusted result boundary. The
-second is controller → Architect → Diátaxis Writer
-and conditional Policy Writer → Green. Next comes Green → Judge →
+second is controller → Architect → conditional Policy Writer, then concurrent
+Green and Diátaxis Writer. Interactive work uses the same post-Red order.
+Main stages their combined candidate after both stop editing. Next comes Green → Judge →
 Non-functional Reviewer and the applicable specialist reviewers. Finalizer
 comes last. The content topology is
 Main → Architect → the current Writer or Finalizer. These topologies define
@@ -109,8 +109,8 @@ role is N/A only when facts show it does not apply.
 |---|---|---|
 | Publication setup | `$git-flow` | Main owns feature branch and publication preflight. |
 | Design | `$architect` | Design and live coordination. |
-| Preparation | `$tdd-red`, `$diataxis-writer`, conditional `$agent-policy-writer` | Ordinary interactive work runs these children at the same time. Serial work runs only Red before the producer-owned trusted result boundary. It runs documentation and policy preparation in the resumed segment. Each returns its required receipt. |
-| Implementation | `$tdd-green` | Starts only after all preparation receipts/N/A and the exact mode-specific Red checkpoint; sole production/test/docs mutator. |
+| Red and policy preparation | `$tdd-red`, conditional `$agent-policy-writer` | Red establishes the exact mode-specific checkpoint first. Serial work runs only Red before the producer-owned trusted result boundary. Policy preparation finishes before implementation. |
+| Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. Main stages their combined candidate only after both stop editing. |
 | Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
 | Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
@@ -123,14 +123,13 @@ not manufacture new evidence for recovery.
 
 Red needs the approved design. Red also needs the acceptance criteria. Diátaxis Writer needs
 approved documentation boundaries. Conditional Policy Writer needs approved
-policy boundaries. In ordinary interactive work, run all applicable
-preparation roles at the same time. In serial work, run only Red first. Do not
-run documentation or policy work yet. The live workflow owner establishes its
+policy boundaries. Run Red first. In serial work, do not run documentation or
+policy work before checkpoint acceptance. The live workflow owner establishes its
 checkpoint through the accepted trusted result boundary. The resumed segment
 verifies its retained exact identity. Red returns failing focused behavior tests.
-Diátaxis Writer returns a
-draft and report. It may instead return a no-doc rationale. Policy Writer
-returns a policy receipt or N/A. Red's receipt names its exact evidence file. It gives
+Policy Writer returns a policy receipt or N/A before Green starts. Diátaxis Writer
+returns a documentation report after its concurrent work with Green, or an exact
+no-doc/README rationale. Red's receipt names its exact evidence file. It gives
 the exact repeatable `argv`, `expected_failure`, and changed `test_paths` fields
 in that file. Architect checks that the accepted Red command, failure marker,
 and paths match it. Architect then selects the exact mode-specific boundary.
@@ -178,11 +177,15 @@ publication. The first serial segment may change only approved `tests/...`
 paths. Production, documentation, or policy changes reject capture. They remain
 in the worktree. A canonical rejection goes to the live producer for one
 corrected request. Only accepted retained program-owned evidence may start the
-resumed segment. Green gets all three preparation handoffs and the exact
+resumed segment. Green gets the Red and policy handoffs and the exact
 mode-specific identity before it starts: interactive commit SHA and paths, or
 serial checkpoint ref, tree, and paths.
 
-Green's receipt has its suite. It has reconciled documentation. It also has
+Green and Diátaxis Writer exchange final interface details while editing disjoint
+paths. Main waits for both to stop editing, accepts the writer's documentation
+receipt and readability result, then stages the combined exact candidate and
+returns its tree OID to Green. Repeat this wait and staging after any correction.
+Green's receipt has its suite and the documentation handoff. It also has
 current JUnit evidence. It has a correction-cycle ledger. Judge receives the exact staged
 tree. Terminal nonzero returns to Green. Terminal zero may start its
 Non-functional Reviewer child only when the tree is unchanged. The JUnit
@@ -236,7 +239,7 @@ Agents do not narrate elapsed time. Use this data to compare review cost. It
 covers complete and focused review. It does not add timing persistence.
 
 Finalizer receives the final diff. It receives Judge evidence. It also receives
-all preparation receipts. It receives the current license receipt. It receives
+the Red, policy, and documentation receipts. It receives the current license receipt. It receives
 applicable policy evidence and the repair ledger. It returns normal approval or a mechanically safe
 draft-safety verdict here.
 
@@ -253,8 +256,9 @@ for every initially applicable specialist-review receipt. Green consolidates con
 resolvable findings within the approved design. Each changed coding tree reruns
 Judge and Non-functional Review. Then rerun only a reviewer whose finding,
 domain, or evidence changed. Rerun License Checker when maintained in-scope
-files changed. Policy findings return through Architect to Policy Writer, never
-Green.
+files changed. Documentation and README findings return through Architect to
+Diátaxis Writer. Policy findings return through Architect to Policy Writer,
+never Green. Green repairs only production and tests.
 
 Each correction cycle records its ID. It records finding fingerprints and
 classifications. It also records changed scope, checks, and reruns. It records
@@ -473,23 +477,23 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
    Documentation/policy designs specify content boundaries. They specify
    sources of truth. They specify mirrors. They specify structural validation.
    Do not invent behavior tests for content.
-8. **Lead coding work** — In ordinary interactive work, start `$tdd-red`,
-   `$diataxis-writer`, and, when it fits, `$agent-policy-writer` at the same
-   time. In the first serial segment, start only `$tdd-red`. Route Red's direct
+8. **Lead coding work** — Start `$tdd-red` first. In the first serial segment,
+   start only `$tdd-red`. Route Red's direct
    receipt. The live workflow owner builds the input and invokes the
    trusted boundary while active. It gets acceptance or rejection before ending.
    In the resumed segment, first verify
-   the exact retained checkpoint. Then start the applicable
-   documentation and policy preparation. Red may edit only `tests/`.
-   Diátaxis Writer may edit only `docs/`. Policy Writer may edit only root and
-   template agent-policy paths. Wait for all applicable receipts. Accept exact
-   N/A where allowed. Accept Red's exact command, failure marker, changed tests,
+   the exact retained checkpoint. Then complete applicable policy preparation.
+   Red may edit only `tests/`. Policy Writer may edit only root and
+   template agent-policy paths. Accept exact N/A where allowed. Accept Red's exact command, failure marker, changed tests,
    and evidence file. For interactive work, return that evidence to Main and
    require its checkpoint commit SHA, paths, and local ref. For serial work,
    require the accepted program-owned artifact's retained base, tree, ref, and
-   paths. Then start `$tdd-green`.
-   Green owns production, tests, and docs only. Send a rule fix
-   through Architect to Policy Writer. Do not overlap it with later Green work.
+   paths. Then start `$tdd-green` and `$diataxis-writer` together.
+   Green owns production and tests only. Diátaxis Writer owns `docs/**`,
+   `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`.
+   It does not change executable Jinja logic. Wait for both to stop editing and accept the documentation
+   receipt before Main stages the combined exact tree. Send a rule fix through
+   Architect to Policy Writer. Do not overlap policy repair with later Green work.
 9. **Use evidence to converge** — Call the right finalizer after Green or
    the documentation writer returns approved evidence. For coding, authorize
    finalization only after checking the Diátaxis Judge comparison verdict. It
@@ -497,7 +501,7 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
    Authorize more focused Green correction cycles only while the cycle ledger
    shows material progress. Green does not use a fixed correction-count policy.
 
-   For code work, get Green's staged tree and the joined Judge and
+   For code work, get Main's staged tree and the joined Judge and
    Non-functional handoff before specialist review starts. In interactive work, Finalizer
    may create the validated publication commit only after it proves that same
    staged tree. It creates one final passing commit over the original base and

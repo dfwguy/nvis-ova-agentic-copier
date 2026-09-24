@@ -26,9 +26,8 @@ Writer or writes Red evidence retrospectively.
 
 ## Model selection
 
-The live Architect runs this work with `$diataxis-writer` and conditional
-`$agent-policy-writer`. It waits for each needed preparation receipt or N/A. It
-accepts Red's exact evidence. For interactive work, Main creates the local Red
-commit and ref. For serial work, the trusted executable creates the tree ref.
-Green starts after that checkpoint. Use this skill's
+Architect runs Red first and checks its evidence. For interactive work, Main
+creates the local Red commit and ref. For serial work, the trusted tool creates
+the tree ref. Policy work starts after that checkpoint, when needed. Green and
+the Diátaxis Writer start together after policy work. Use this skill's
 `metadata.model-tier`. The live Architect router maps the tier.
