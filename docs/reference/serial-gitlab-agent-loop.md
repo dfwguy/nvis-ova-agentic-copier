@@ -80,7 +80,8 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          --marker TEXT
                          [--impact TEXT] [--additional-context TEXT]
                          [--priority TEXT] [--severity TEXT]
-                         [--label TEXT] [--issue-iid IID] [--apply] [--json] [--debug]
+                         [--label TEXT] [--issue-iid IID] [--feedback-audit]
+                         [--apply] [--json] [--debug]
 agent-work validation run --candidate-tree TREE [--apply] [--json]
 agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
@@ -112,7 +113,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `review-handoff manifest` | Worktree and session ID | Reads the current receipt set and its digest. Optional expected digest rejects drift. |
 | `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
-| `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
+| `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
@@ -246,6 +247,36 @@ its create request after an uncertain result.
 An explicit `--issue-iid` is update-only. It must select exactly one open
 issue with the supplied marker. Missing, mismatched, or ambiguous evidence
 fails closed before any mutation. It never creates a replacement issue.
+
+Use `--feedback-audit` to create a new issue from automatic feedback. The CLI
+finds the sole `*-agent-work.service` unit in the checkout's `systemd/` folder.
+It checks that the installed user unit has the same name and bytes. It must be
+under `.config/systemd/user/` in the effective user's OS account home. The
+source unit must have one active, exact
+`EnvironmentFile=%h/.config/<unit-stem>/agent-work.env` line. The CLI reads
+that file from the same home. Its parent directory must belong to that user
+and have mode `0700`. The file must be regular, bounded in size, owned by that
+user, and have mode `0600`. It must use the exact version 1 non-secret format.
+
+The audit checks these facts before a new issue POST:
+
+- The file's host and numeric project ID match the configured checkout project.
+- `AGENT_WORK_FACTORY_USERNAME` matches the GitLab `/user` name.
+- Project issues are enabled, and the user has Developer (`30`) access
+  from the project or its group.
+- The project's default branch is protected, with no Developer push or merge
+  access. The user cannot push to it.
+- A global or applies-all approval rule needs at least one approval.
+
+Missing or conflicting facts stop the POST. The audit does not call the
+Maintainer-only project `/approvals` endpoint.
+
+The audit runs after the exact-marker search. It runs only for a new feedback
+issue. An exact-marker match reuses the open issue. An explicit `--issue-iid`
+updates one open issue. Neither path runs the audit. Preview stays local and
+reads no unit, config, or GitLab API. The audit uses only API reads: `/user`,
+the numeric project, its default branch, and `/approval_rules`. It does not
+change project settings or grant approval or merge authority.
 
 `issue publish` is the configured-checkout boundary for policy callers. These
 include findings triage and pipeline feedback. Upstream-finding and split-child

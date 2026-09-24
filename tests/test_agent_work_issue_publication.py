@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,6 +80,8 @@ def _publish(
     apply: bool,
     issue_iid: int | None = None,
     problem: str = "Publishing issue bodies as escaped text hides the review intent.",
+    feedback_audit: bool = False,
+    audit_feedback: Callable[[], None] | None = None,
 ) -> gitlab.IssuePublicationReport:
     """Exercise the public boundary with scalar, reviewable content."""
     return gitlab.publish_issue(
@@ -95,6 +99,8 @@ def _publish(
         issue_iid=issue_iid,
         apply=apply,
         port=port,
+        feedback_audit=feedback_audit,
+        audit_feedback=audit_feedback,
     )
 
 
@@ -623,3 +629,437 @@ def test_issue_publication_boundary_is_synchronized_into_the_template() -> None:
 
     assert "def publish_issue(" in root
     assert root == template
+
+
+def test_feedback_audit_runs_after_exact_marker_scan_before_creation() -> None:
+    port = RecordingIssuePort()
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    def audit() -> None:
+        observed.extend(port.calls)
+
+    report = _publish(port, apply=True, feedback_audit=True, audit_feedback=audit)
+
+    assert report.action == "create"
+    assert observed == [
+        (
+            "list",
+            {
+                "project_id": 310967,
+                "marker": ISSUE_MARKER,
+            },
+        )
+    ]
+    assert [name for name, _ in port.calls] == ["list", "create", "fetch"]
+
+
+def test_feedback_audit_failure_prevents_issue_creation() -> None:
+    port = RecordingIssuePort()
+
+    def reject() -> None:
+        raise gitlab.IssuePublicationError("feedback safeguards failed")
+
+    with pytest.raises(gitlab.IssuePublicationError, match="feedback safeguards"):
+        _publish(port, apply=True, feedback_audit=True, audit_feedback=reject)
+
+    assert [name for name, _ in port.calls] == ["list"]
+
+
+@pytest.mark.parametrize(
+    ("apply", "existing_iid", "issue_iid", "expected_calls"),
+    (
+        (False, None, None, []),
+        (True, 71, None, ["list", "update", "fetch"]),
+        (True, 71, 71, ["list", "update", "fetch"]),
+    ),
+)
+def test_feedback_audit_skips_preview_and_exact_existing_issue_reuse(
+    apply: bool,
+    existing_iid: int | None,
+    issue_iid: int | None,
+    expected_calls: list[str],
+) -> None:
+    port = RecordingIssuePort(existing_iid=existing_iid)
+    calls: list[str] = []
+
+    report = _publish(
+        port,
+        apply=apply,
+        issue_iid=issue_iid,
+        feedback_audit=True,
+        audit_feedback=lambda: calls.append("audit"),
+    )
+
+    assert report.action == ("would-create" if not apply else "update")
+    assert calls == []
+    assert [name for name, _ in port.calls] == expected_calls
+
+
+def _feedback_environment() -> bytes:
+    return (
+        b"AGENT_WORK_ENV_VERSION=1\n"
+        b"GITLAB_HOST=gitlab.example\n"
+        b"GITLAB_PROJECT_ID=310967\n"
+        b"AGENT_WORK_CHECKOUT=/srv/agent-work\n"
+        b"AGENT_WORK_DIRENV=/usr/bin/direnv\n"
+        b"AGENT_WORK_GIT=/usr/bin/git\n"
+        b"AGENT_WORK_GLAB=/usr/bin/glab\n"
+        b"AGENT_WORK_JQ=/usr/bin/jq\n"
+        b"AGENT_WORK_UV=/usr/bin/uv\n"
+        b"AGENT_WORK_FLOCK=/usr/bin/flock\n"
+        b"AGENT_WORK_TIMEOUT=/usr/bin/timeout\n"
+        b"AGENT_WORK_AGENT=codex\n"
+        b"AGENT_WORK_AGENT_PATH=/usr/bin/codex\n"
+        b"AGENT_WORK_BASE_BRANCH=agent/factory\n"
+        b"AGENT_WORK_FACTORY_USERNAME=factory-bot\n"
+    )
+
+
+def _feedback_cli_args() -> list[str]:
+    return [
+        "issue",
+        "publish",
+        "--title",
+        "Feedback issue",
+        "--problem",
+        "P",
+        "--outcome",
+        "O",
+        "--acceptance",
+        "A",
+        "--marker",
+        ISSUE_MARKER,
+        "--feedback-audit",
+        "--apply",
+    ]
+
+
+def _feedback_file_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    checkout = tmp_path / "checkout"
+    unit = checkout / "systemd" / "agentic-copier-agent-work.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_bytes(
+        b"[Service]\n"
+        b"EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env\n"
+    )
+    home = tmp_path / "home"
+    installed = home / ".config" / "systemd" / "user" / unit.name
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(unit.read_bytes())
+    config_dir = home / ".config" / "agentic-copier-agent-work"
+    config_dir.mkdir(parents=True, mode=0o700)
+    config_dir.chmod(0o700)
+    environment_file = config_dir / "agent-work.env"
+    environment_file.write_bytes(_feedback_environment())
+    environment_file.chmod(0o600)
+    return checkout, home, environment_file
+
+
+def _feedback_cli(
+    tmp_path: Path,
+    run_command: Callable[..., CommandResult],
+    *,
+    arguments: list[str] | None = None,
+    read_bytes: Callable[[Path], bytes] | None = None,
+    checkout: Path | None = None,
+    home: Path | None = None,
+    prepare_tree: Callable[[Path, Path, Path], object] | None = None,
+) -> tuple[int, list[str], list[str]]:
+    canonical_checkout, canonical_home, environment_file = _feedback_file_tree(tmp_path)
+    if prepare_tree is not None:
+        prepare_tree(canonical_checkout, canonical_home, environment_file)
+    stdout: list[str] = []
+    stderr: list[str] = []
+    status = main(
+        arguments or _feedback_cli_args(),
+        environment={"GITLAB_HOST": "gitlab.example", "GITLAB_PROJECT_ID": "310967"},
+        find_executable=lambda _name: "/bin/glab",
+        run_command=run_command,
+        read_bytes=read_bytes or Path.read_bytes,
+        checkout_root=lambda: checkout or canonical_checkout,
+        home_directory=lambda: home or canonical_home,
+        effective_uid=os.geteuid,
+        inspect_path=lambda path: path.lstat(),
+        write_stdout=stdout.append,
+        write_stderr=stderr.append,
+    )
+    return status, stdout, stderr
+
+
+def test_feedback_audit_cli_uses_canonical_service_files_and_checks_before_post(
+    tmp_path: Path,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    read_paths: list[Path] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        endpoint = command[command.index("-X") + 2]
+        payload: object
+        if endpoint == "projects/310967/issues":
+            payload = {"iid": 71} if "POST" in command else []
+        elif endpoint == "user":
+            payload = {"username": "factory-bot"}
+        elif endpoint == "projects/310967":
+            payload = {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "permissions": {
+                    "project_access": None,
+                    "group_access": {"access_level": 30},
+                },
+            }
+        elif "repository/branches/main" in endpoint:
+            payload = {
+                "name": "main",
+                "default": True,
+                "protected": True,
+                "developers_can_push": False,
+                "developers_can_merge": False,
+                "can_push": False,
+            }
+        elif endpoint == "projects/310967/approval_rules":
+            payload = [{"id": 1, "approvals_required": 1, "protected_branches": []}]
+        elif endpoint == "projects/310967/issues/71":
+            payload = {
+                "project_id": 310967,
+                "iid": 71,
+                "title": "Feedback issue",
+                "description": "## Problem\nP\n\n## Outcome\nO\n\n## Acceptance criteria\n- A\n\n<!-- agent-work-issue-publication:structured-markdown -->",
+                "labels": [],
+                "state": "opened",
+            }
+        else:
+            raise AssertionError(endpoint)
+        return CommandResult(0, json.dumps(payload), "")
+
+    def read(path: Path) -> bytes:
+        read_paths.append(path)
+        return path.read_bytes()
+
+    status, _, stderr = _feedback_cli(tmp_path, run, read_bytes=read)
+
+    assert status == 0, stderr
+    assert set(read_paths) == {
+        tmp_path / "checkout/systemd/agentic-copier-agent-work.service",
+        tmp_path / "home/.config/systemd/user/agentic-copier-agent-work.service",
+        tmp_path / "home/.config/agentic-copier-agent-work/agent-work.env",
+    }
+    assert len(read_paths) == 3
+    endpoints = [command[command.index("-X") + 2] for command in commands]
+    assert endpoints == [
+        "projects/310967/issues",
+        "user",
+        "projects/310967",
+        "projects/310967/repository/branches/main",
+        "projects/310967/approval_rules",
+        "projects/310967/issues",
+        "projects/310967/issues/71",
+    ]
+    assert "projects/310967/approvals" not in endpoints
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    (
+        ("user", {"username": "other"}),
+        ("user", {"message": "403 Forbidden"}),
+        (
+            "projects/310967",
+            {
+                "id": 310968,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "permissions": {"project_access": {"access_level": 30}},
+            },
+        ),
+        (
+            "projects/310967",
+            {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": False,
+                "permissions": {"project_access": {"access_level": 30}},
+            },
+        ),
+        (
+            "projects/310967",
+            {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "issues_access_level": "disabled",
+                "permissions": {"project_access": {"access_level": 30}},
+            },
+        ),
+        (
+            "projects/310967",
+            {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "permissions": {"project_access": {"access_level": 20}},
+            },
+        ),
+        (
+            "projects/310967",
+            {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "permissions": {
+                    "project_access": {"access_level": 20},
+                    "group_access": None,
+                    "unrelated_access": {"access_level": 30},
+                },
+            },
+        ),
+        (
+            "projects/310967/repository/branches/main",
+            {
+                "name": "main",
+                "default": True,
+                "protected": True,
+                "developers_can_push": True,
+                "developers_can_merge": False,
+                "can_push": False,
+            },
+        ),
+        ("projects/310967/approval_rules", []),
+        ("projects/310967/approval_rules", {"message": "403 Forbidden"}),
+        (
+            "projects/310967/approval_rules",
+            [{"id": 1, "approvals_required": 0, "protected_branches": []}],
+        ),
+        (
+            "projects/310967/approval_rules",
+            [{"id": 1, "approvals_required": 1, "protected_branches": [{"id": 2}]}],
+        ),
+    ),
+)
+def test_feedback_audit_cli_rejects_invalid_safeguards_before_post(
+    tmp_path: Path, endpoint: str, payload: object
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        target = command[command.index("-X") + 2]
+        defaults: dict[str, object] = {
+            "projects/310967/issues": [],
+            "user": {"username": "factory-bot"},
+            "projects/310967": {
+                "id": 310967,
+                "default_branch": "main",
+                "issues_enabled": True,
+                "permissions": {"project_access": {"access_level": 30}},
+            },
+            "projects/310967/repository/branches/main": {
+                "name": "main",
+                "default": True,
+                "protected": True,
+                "developers_can_push": False,
+                "developers_can_merge": False,
+                "can_push": False,
+            },
+            "projects/310967/approval_rules": [
+                {"id": 1, "approvals_required": 1, "protected_branches": []}
+            ],
+        }
+        return CommandResult(
+            0, json.dumps(payload if target == endpoint else defaults[target]), ""
+        )
+
+    status, _, _ = _feedback_cli(tmp_path, run)
+
+    assert status == 1
+    assert not any("POST" in command or "PUT" in command for command in commands)
+
+
+def test_feedback_audit_cli_preview_does_not_read_files_or_call_api(
+    tmp_path: Path,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("preview touched external boundary")
+
+    status, stdout, stderr = _feedback_cli(
+        tmp_path,
+        forbidden,
+        arguments=[*(_feedback_cli_args()[:-1])],
+        read_bytes=forbidden,
+    )
+
+    assert status == 0, stderr
+    assert stdout
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        pytest.param(
+            lambda checkout, home, env: env.parent.chmod(0o755),
+            id="public-config-directory",
+        ),
+        pytest.param(
+            lambda checkout, home, env: env.chmod(0o644),
+            id="public-environment-file",
+        ),
+        pytest.param(
+            lambda checkout, home, env: env.write_bytes(b"AGENT_WORK_ENV_VERSION=2\n"),
+            id="invalid-service-contract",
+        ),
+        pytest.param(
+            lambda checkout, home, env: (
+                home / ".config/systemd/user/agentic-copier-agent-work.service"
+            ).write_bytes(b"[Service]\nEnvironmentFile=/tmp/substitute\n"),
+            id="substituted-installed-unit",
+        ),
+        pytest.param(
+            lambda checkout, home, env: (
+                (checkout / "systemd/agentic-copier-agent-work.service").write_bytes(
+                    b"[Service]\n"
+                    b"# EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env\n"
+                ),
+                (
+                    home / ".config/systemd/user/agentic-copier-agent-work.service"
+                ).write_bytes(
+                    b"[Service]\n"
+                    b"# EnvironmentFile=%h/.config/agentic-copier-agent-work/agent-work.env\n"
+                ),
+            ),
+            id="commented-environment-file",
+        ),
+        pytest.param(
+            lambda checkout, home, env: (
+                env.unlink(),
+                env.symlink_to(home / "same-uid-substitute"),
+            ),
+            id="same-uid-symlink-substitute",
+        ),
+        pytest.param(
+            lambda checkout, home, env: env.write_bytes(
+                _feedback_environment().replace(
+                    b"GITLAB_PROJECT_ID=310967", b"GITLAB_PROJECT_ID=310968"
+                )
+            ),
+            id="wrong-project-in-service-config",
+        ),
+    ),
+)
+def test_feedback_audit_cli_rejects_untrusted_installed_configuration_before_post(
+    tmp_path: Path, damage: Callable[[Path, Path, Path], object]
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, "[]", "")
+
+    status, _, _ = _feedback_cli(tmp_path, run, prepare_tree=damage)
+
+    assert status == 1
+    assert [command[command.index("-X") + 2] for command in commands] == [
+        "projects/310967/issues"
+    ]
+    assert not any("POST" in command or "PUT" in command for command in commands)

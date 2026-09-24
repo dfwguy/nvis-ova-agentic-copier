@@ -207,17 +207,33 @@ fingerprint. Do not put pipeline ID, job ID, timestamps, or other run-specific
 identity there. Keep observed MR/source/pipeline/job evidence outside the
 marker in the issue body.
 
-Before writing, search open GitLab issues for the stable marker. Compare exact
-marker text. Reuse an exact open match. If none exists, complete the required
-submission-identity and approval-policy audits. Then publish one GitLab Bug
-template ordinary issue only through the checkout-owned CLI boundary. Run
-`<checkout>/bin/agent-work-from-checkout issue publish`. Supply scalar
+Search open GitLab issues for the stable marker. Compare the full marker text.
+Reuse an exact open match. Reuse needs no new-issue audit.
+
+For a new issue, use only the checkout CLI. Run
+`<checkout>/bin/agent-work-from-checkout issue publish --feedback-audit --apply`.
+This creates one ordinary GitLab Bug-template issue. The trusted audit finds
+the canonical systemd service unit in the checkout. It checks that the
+installed user unit matches. It reads the canonical non-secret service
+environment under the OS home directory. Do not give it a model-chosen path
+or username.
+
+The audit parses the v1 config. It checks the exact bot username in that
+config. It checks the bot's issue capability in the numeric project and
+Developer access level 30. It checks that the effective default branch is
+protected. It checks that a global approval rule needs at least one approval.
+It never calls the project `/approvals` endpoint or needs wider credentials.
+An API error, including 403 or a malformed response, leaves the issue
+unfiled. Report only non-secret details.
+
+Supply scalar
 `--title`, `--problem`, and `--outcome`. Supply optional scalar `--impact` and
 `--additional-context`. Supply repeated `--acceptance`; scalar `--priority`
 and `--severity`; and repeated `--label` only for verified existing labels.
 Supply the marker through scalar `--marker`. Do not change any marker bytes.
 Use `--additional-context` only for ordinary context or evidence. Use `--json`
-for the machine-readable receipt. Use `--apply` only to persist the issue.
+for the machine-readable receipt. New automatic feedback needs audited
+`--apply` to persist the issue.
 Dry-run is the default. The boundary renders canonical Markdown with real
 newlines. It rejects literal escaped or percent-encoded linebreak text. Exact
 readback verifies the project and issue internal ID (IID). It verifies title,

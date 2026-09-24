@@ -17,9 +17,11 @@ import hashlib
 import json
 import logging
 import os
+import pwd
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -86,6 +88,7 @@ from .service_environment import (
     ServiceEnvironmentDependencies,
     ServiceEnvironmentError,
     ServiceEnvironmentReport,
+    parse_service_environment,
 )
 from .service_environment import (
     migrate_service_environment as default_migrate_service_environment,
@@ -124,6 +127,16 @@ from .worker import (
     request_candidate_validation,
     submit_worker_result_to_broker,
 )
+
+
+def _package_checkout_root() -> Path:
+    """Return the checkout containing the installed agent-work package."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _account_home() -> Path:
+    """Return the operating-system home for this effective user."""
+    return Path(pwd.getpwuid(os.geteuid()).pw_dir)
 
 
 class _PreviewUpstream(Protocol):
@@ -308,6 +321,7 @@ class _PublishIssue(Protocol):
         labels: tuple[str, ...],
         issue_iid: int | None,
         apply: bool,
+        feedback_audit: bool = False,
     ) -> IssuePublicationReport: ...
 
 
@@ -397,6 +411,11 @@ def _configured_issue_publisher(
     environment: Mapping[str, str],
     find_executable: Callable[[str], str | None],
     run_command: CommandRunner,
+    read_bytes: Callable[[Path], bytes],
+    checkout_root: Callable[[], Path],
+    home_directory: Callable[[], Path],
+    effective_uid: Callable[[], int],
+    inspect_path: Callable[[Path], os.stat_result],
 ) -> _PublishIssue:
     """Compose the configured numeric-project issue publisher once at the CLI edge."""
     host = environment.get("GITLAB_HOST", "")
@@ -430,7 +449,62 @@ def _configured_issue_publisher(
         labels: tuple[str, ...],
         issue_iid: int | None,
         apply: bool,
+        feedback_audit: bool = False,
     ) -> IssuePublicationReport:
+        def audit_feedback() -> None:
+            checkout = checkout_root()
+            units = tuple((checkout / "systemd").glob("*-agent-work.service"))
+            if len(units) != 1:
+                raise GitLabError("feedback service unit is ambiguous")
+            unit = units[0]
+            home = home_directory()
+            installed = home / ".config/systemd/user" / unit.name
+            config_dir = home / ".config" / unit.stem
+            env_file = config_dir / "agent-work.env"
+            uid = effective_uid()
+            for path, expected_mode, directory in (
+                (installed, None, False),
+                (config_dir, 0o700, True),
+                (env_file, 0o600, False),
+            ):
+                metadata = inspect_path(path)
+                if (
+                    metadata.st_uid != uid
+                    or (
+                        stat.S_ISDIR(metadata.st_mode)
+                        if directory
+                        else stat.S_ISREG(metadata.st_mode)
+                    )
+                    is False
+                    or (
+                        expected_mode is not None
+                        and stat.S_IMODE(metadata.st_mode) != expected_mode
+                    )
+                ):
+                    raise GitLabError(
+                        "installed feedback service configuration is unsafe"
+                    )
+            source = read_bytes(unit)
+            installed_bytes = read_bytes(installed)
+            if (
+                len(source) > 65536
+                or source != installed_bytes
+                or source.splitlines().count(
+                    f"EnvironmentFile=%h/.config/{unit.stem}/agent-work.env".encode()
+                )
+                != 1
+            ):
+                raise GitLabError("installed feedback service unit is invalid")
+            environment_bytes = read_bytes(env_file)
+            if len(environment_bytes) > 65536:
+                raise GitLabError("installed feedback environment is invalid")
+            service = parse_service_environment(environment_bytes)
+            if service.host != host or service.project_id != project_id:
+                raise GitLabError(
+                    "installed feedback environment does not match project"
+                )
+            port.audit_feedback(username=service.factory_username)
+
         return default_publish_issue(
             project_id=project_id,
             title=title,
@@ -446,6 +520,8 @@ def _configured_issue_publisher(
             issue_iid=issue_iid,
             apply=apply,
             port=port,
+            feedback_audit=feedback_audit,
+            audit_feedback=audit_feedback if feedback_audit else None,
         )
 
     return publish
@@ -834,6 +910,11 @@ def build_parser() -> argparse.ArgumentParser:
     issue_publish.add_argument("--severity")
     issue_publish.add_argument("--label", action="append", default=[])
     issue_publish.add_argument("--issue-iid", type=_positive_integer)
+    issue_publish.add_argument(
+        "--feedback-audit",
+        action="store_true",
+        help="verify factory identity and review safeguards before creating an issue",
+    )
     _common(issue_publish, apply_help="create or update the issue; omit for preview")
     validation = resources.add_parser(
         "validation", help="run or observe one durable Judge validation"
@@ -1492,6 +1573,10 @@ def main(
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
     current_checkout: Callable[[], Path] = Path.cwd,
+    checkout_root: Callable[[], Path] = _package_checkout_root,
+    home_directory: Callable[[], Path] = _account_home,
+    effective_uid: Callable[[], int] = os.geteuid,
+    inspect_path: Callable[[Path], os.stat_result] = lambda path: path.lstat(),
     load_record: _LoadRecord | None = None,
     changed_paths: _ChangedPaths | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
@@ -1732,6 +1817,11 @@ def main(
                 environment=environment,
                 find_executable=find_executable,
                 run_command=run_command,
+                read_bytes=read_bytes,
+                checkout_root=checkout_root,
+                home_directory=home_directory,
+                effective_uid=effective_uid,
+                inspect_path=inspect_path,
             )
             report = publisher(
                 title=parsed.title,
@@ -1746,6 +1836,7 @@ def main(
                 labels=tuple(parsed.label),
                 issue_iid=parsed.issue_iid,
                 apply=parsed.apply,
+                **({"feedback_audit": True} if parsed.feedback_audit else {}),
             )
         except (GitLabError, RuntimeError, ValueError, OSError) as error:
             if parsed.debug:
