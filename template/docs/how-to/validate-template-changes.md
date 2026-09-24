@@ -120,6 +120,14 @@ description before changing GitLab. Git-flow resolves the active worktree root
 and calls its publisher wrapper. This uses the checkout's `agent-work`, rather
 than selecting an ambient command:
 
+The checkout wrapper supplies `UV_CACHE_DIR` when the caller has not set it. It
+uses `$XDG_CACHE_HOME/uv` when `XDG_CACHE_HOME` is set, otherwise
+`$HOME/.cache/uv`. Set `UV_CACHE_DIR` explicitly to a writable, private cache
+when running in a workspace-write sandbox with a read-only home directory.
+Serial services and interactive callers use the same wrapper and therefore the
+same contract; the cache path is the only additional writable scratch path
+needed by `uv`.
+
 ```bash
 active_worktree="$(git rev-parse --show-toplevel)"
 "$active_worktree/bin/agent-work-from-checkout" merge-request publish \
