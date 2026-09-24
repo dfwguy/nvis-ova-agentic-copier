@@ -12,9 +12,9 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Use these guides to do work in this repo or in a project made from it. Pick the
-guide for the job. Read each step, run each check, and fix what fails. Use the
-links for facts and rules as you do the work.
+Pick a guide for the work you need to do. Each guide has steps that you can run
+and check. If a check fails, fix the cause and run it once more. Use the links
+to learn the facts and rules that help you make a good change.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -27,7 +27,7 @@ links for facts and rules as you do the work.
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
 - [How to refresh the CI validation images](refresh-ci-image.md) — Build and check three root CI images and clean up old tags.
 - [How to update a generated project](update-a-generated-project.md) — Apply a reviewed template revision and inspect its human-review merge request.
-- [How to validate template changes](validate-template-changes.md) — Check a change.
+- [How to validate template changes](validate-template-changes.md) — Run local tests and CI checks for a template change.
 
 ### Agent Workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Set live-agent capacity for a workflow lane.

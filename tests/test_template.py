@@ -387,9 +387,9 @@ def test_ci_jobs_publish_independent_reports(
         "paths": [".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX"],
         "when": "always",
     }
-    for environment in ("py311", "py314"):
+    for environment, shard_count in (("py311", 17), ("py314", 6)):
         pytest_job = configuration[f"pytest-{environment}"]
-        assert pytest_job["parallel"] == 6
+        assert pytest_job["parallel"] == shard_count
         assert pytest_job["variables"] == {
             "TEST_ENVIRONMENT": environment,
         }

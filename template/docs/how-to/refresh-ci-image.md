@@ -5,7 +5,7 @@ summary: Build and check three root CI images and clean up old tags.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-24
 related:
   - path: validate-template-changes.md
     why: Verifies the checks and timing budget protected by the images.
@@ -38,7 +38,7 @@ three rootless BuildKit candidates from the current `Dockerfile`,
 | Target | Locked dependency scope | Candidate tag | Jobs |
 | --- | --- | --- | --- |
 | `tooling` | `dev` group | `$CI_REGISTRY_IMAGE/validation-tooling:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`, and `shellcheck` |
-| `pytest-py311` | Project default dependencies and the `test` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The six `pytest-py311` shards and `coverage-py311` |
+| `pytest-py311` | Project default dependencies and the `test` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The 17 `pytest-py311` shards and `coverage-py311` |
 | `pytest-py314` | Project default dependencies and the `test` group on Python 3.14.3 | `$CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The six `pytest-py314` shards and `coverage-py314` |
 
 The tooling image has pinned Git, jq, and ShellCheck. Both pytest images have
@@ -121,20 +121,21 @@ validation candidates.
 
 Inspect the eight named root validation jobs: `ruff-check`, `ruff-format`,
 `yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`,
-and `shellcheck`, plus all six pytest shards and their aggregation job for each
-supported Python. Confirm that each job uses the target shown in the mapping
-table. None may run `apt-get`, `uv python install`, `uv sync`, or an install
-fallback.
+and `shellcheck`, plus all 17 Python 3.11 shards, all six Python 3.14 shards,
+and both aggregation jobs. Confirm that each job uses the target shown in the
+mapping table. None may run `apt-get`, `uv python install`, `uv sync`, or an
+install fallback.
 
 Inspect those jobs directly. The root has no aggregate validation job or
-aggregate JUnit gate suite. For each Python, the six shards use validated
-`CI_NODE_INDEX` and `CI_NODE_TOTAL` values to make one deterministic,
-exhaustive full-suite partition. Invalid metadata must fail before pytest.
-Each shard publishes a unique JUnit report and raw coverage file. Its matching
-aggregation job waits for all six shards, combines exactly six coverage files,
-measures only maintained `src/agent_work` code, enforces the 85% floor, and
-publishes Cobertura. A shard, coverage combine, coverage floor, report, or
-aggregation failure fails the pipeline.
+aggregate JUnit gate suite. The 17 Python 3.11 shards and six Python 3.14
+shards each use validated `CI_NODE_INDEX` and `CI_NODE_TOTAL` values to make
+one deterministic, exhaustive full-suite partition per version. Invalid
+metadata must fail before pytest. Each shard publishes a unique JUnit report
+and raw coverage file. Each aggregation job waits for its matching shards.
+`coverage-py311` combines exactly 17 files; `coverage-py314` combines exactly
+six. Both jobs measure only maintained `src/agent_work` code, enforce the 85%
+floor, and publish Cobertura. A shard, coverage combine, coverage floor,
+report, or aggregation failure fails the pipeline.
 
 Use the longest terminal job with a numeric run time for the budget. Prefer 60
 seconds or less. Reject more than 120 seconds. Report skipped, canceled, and

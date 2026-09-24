@@ -132,15 +132,19 @@ ruff-format:
   script:
     - |
       case "$TEST_ENVIRONMENT" in
-          py311) python_environment="$CI_PY311_ENVIRONMENT" ;;
-          py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
+          py311) python_environment="$CI_PY311_ENVIRONMENT"; shard_count=17 ;;
+          py314) python_environment="$CI_PY314_ENVIRONMENT"; shard_count=6 ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
       case "${CI_NODE_INDEX-}" in
-          [1-6]) ;;
+          [1-9]|1[0-7]) ;;
           *) printf 'Invalid CI_NODE_INDEX: %s\n' "${CI_NODE_INDEX-}" >&2; exit 2 ;;
       esac
-      if [ "${CI_NODE_TOTAL-}" != 6 ]; then
+      if [ "$CI_NODE_INDEX" -gt "$shard_count" ]; then
+          printf 'Invalid CI_NODE_INDEX: %s\n' "$CI_NODE_INDEX" >&2
+          exit 2
+      fi
+      if [ "${CI_NODE_TOTAL-}" != "$shard_count" ]; then
           printf 'Invalid CI_NODE_TOTAL: %s\n' "${CI_NODE_TOTAL-}" >&2
           exit 2
       fi
@@ -151,7 +155,7 @@ ruff-format:
           uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
           -p tests.helpers.serial_runtime_shard \
           --serial-runtime-shard-index="$shard_index" \
-          --serial-runtime-shard-count=6 \
+          --serial-runtime-shard-count="$shard_count" \
           --cov=src/agent_work \
           --junitxml="test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml" \
           -o "junit_suite_name=$TEST_ENVIRONMENT" \
@@ -176,7 +180,18 @@ ruff-format:
                   .coverage.py311-shard-3 \
                   .coverage.py311-shard-4 \
                   .coverage.py311-shard-5 \
-                  .coverage.py311-shard-6
+                  .coverage.py311-shard-6 \
+                  .coverage.py311-shard-7 \
+                  .coverage.py311-shard-8 \
+                  .coverage.py311-shard-9 \
+                  .coverage.py311-shard-10 \
+                  .coverage.py311-shard-11 \
+                  .coverage.py311-shard-12 \
+                  .coverage.py311-shard-13 \
+                  .coverage.py311-shard-14 \
+                  .coverage.py311-shard-15 \
+                  .coverage.py311-shard-16 \
+                  .coverage.py311-shard-17
               ;;
           py314)
               python_environment="$CI_PY314_ENVIRONMENT"
@@ -220,7 +235,7 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
-  parallel: 6
+  parallel: 17
   needs:
     - job: ci-image:pytest-py311
       artifacts: false
