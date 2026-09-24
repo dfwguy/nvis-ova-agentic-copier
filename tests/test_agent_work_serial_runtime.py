@@ -17788,3 +17788,24 @@ def test_loop_recover_apply_advances_exact_stale_target_beside_stale_peer(
 
     assert report.items and report.items[0].issue_iid == 13
     assert ledger.load(peer.issue_iid) == peer
+
+
+@pytest.mark.parametrize("failure", ("missing", "mismatch", "stale", "replayed"))
+def test_guarded_feedback_repair_fails_closed_for_invalid_retained_red(
+    tmp_path: Path, failure: str
+) -> None:
+    """The guarded loop must never enter repair without exact retained Red proof."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = _record(
+        tmp_path, state=RunnerState.AWAITING_HUMAN, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(update={"merge_request_iid": 88, "source_sha": "a" * 40})
+    ledger.persist(record)
+    gitlab = FakeGitLab()
+    repository = FakeRepository(config)
+    selected, _issue_value = select_record(
+        ledger, gitlab, now=NOW, repository=repository
+    )
+    assert selected is None, failure
+    assert repository.prepared is False
+    assert repository.pushes == 0
