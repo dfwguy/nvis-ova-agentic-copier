@@ -142,6 +142,10 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
             ]
         elif job_name.startswith("pytest-"):
             assert job["needs"] == [{"job": f"ci-image:{job_name}", "artifacts": False}]
+        elif job_name in {"license-check", "type-check"}:
+            assert job["needs"] == [
+                {"job": "ci-image:pytest-py311", "artifacts": False}
+            ]
         else:
             assert "needs" not in job
         assert "dependencies" not in job
@@ -354,11 +358,11 @@ def test_readability_dependency_and_generated_ci_helper_are_rendered_portably(
     generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
     """Both projects install textstat and run all-scope portability checks."""
-    for root in (project_root, generated_project):
+    for root, group in ((project_root, "tooling"), (generated_project, "dev")):
         configuration = tomllib.loads((root / "pyproject.toml").read_text())
         assert any(
             isinstance(dependency, str) and dependency.startswith("textstat>=")
-            for dependency in configuration["dependency-groups"]["dev"]
+            for dependency in configuration["dependency-groups"][group]
         )
 
     for root in (template_dir, generated_project):
@@ -573,7 +577,7 @@ def test_ruff_uses_version_016_defaults(
         (generated_project / "pyproject.toml").read_text(),
     )
 
-    for config in (root_config, generated_config):
+    for config, group in ((root_config, "tooling"), (generated_config, "dev")):
         lint_config = config["tool"]["ruff"]["lint"]
         assert "select" not in lint_config
         assert lint_config["ignore"] == [
@@ -584,7 +588,7 @@ def test_ruff_uses_version_016_defaults(
             "COM812",
             "S603",
         ]
-        assert "ruff>=0.16.4" in config["dependency-groups"]["dev"]
+        assert "ruff>=0.16.4" in config["dependency-groups"][group]
 
 
 def test_generated_hatch_configuration_builds_both_src_packages(

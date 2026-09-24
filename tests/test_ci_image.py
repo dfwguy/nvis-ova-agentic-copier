@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,8 @@ _TOOLING_JOBS = _VALIDATION_JOBS - {
     "coverage-py314",
     "pytest-py311",
     "pytest-py314",
+    "type-check",
+    "license-check",
 }
 _KINGFISHER_CACHE = "/home/validation/.cache/kingfisher/rule-cache"
 _KINGFISHER_COMPILE = (
@@ -187,8 +190,8 @@ def _network_ca_contract_is_exact(
     return not users
 
 
-def _has_exact_pytest_sync_scope(docker_target: str) -> bool:
-    """Return whether one sync installs only defaults and the test group."""
+def _has_exact_pytest_sync_scope(docker_target: str, *, typed: bool = False) -> bool:
+    """Return whether one sync installs defaults and its required groups."""
     invocations = _uv_sync_invocations(docker_target)
     if len(invocations) != 1:
         return False
@@ -199,13 +202,69 @@ def _has_exact_pytest_sync_scope(docker_target: str) -> bool:
         sync_tokens[:2] == ("uv", "sync")
         and "--locked" in sync_tokens
         and "--no-dev" in sync_tokens
-        and groups == ("test",)
+        and groups == (("test", "typing") if typed else ("test",))
         and "--no-install-project" in sync_tokens
         and not only_groups
         and "--dev" not in sync_tokens
         and "--only-dev" not in sync_tokens
         and "--all-groups" not in sync_tokens
     )
+
+
+def _has_exact_tooling_sync_scope(docker_target: str) -> bool:
+    """Return whether the tooling image installs only its locked CI group."""
+    invocations = _uv_sync_invocations(docker_target)
+    if len(invocations) != 1:
+        return False
+    sync_tokens = invocations[0]
+    return (
+        sync_tokens[:2] == ("uv", "sync")
+        and "--locked" in sync_tokens
+        and _option_values(sync_tokens, "--only-group") == ("tooling",)
+        and not _option_values(sync_tokens, "--group")
+        and "--no-install-project" in sync_tokens
+        and "--dev" not in sync_tokens
+        and "--only-dev" not in sync_tokens
+        and "--all-groups" not in sync_tokens
+    )
+
+
+def test_ci_tooling_group_excludes_test_dependencies_and_keeps_local_dev_tools(
+    project_root: Path,
+) -> None:
+    """The CI image installs tools while local dev still includes tests and hooks."""
+    project = tomllib.loads((project_root / "pyproject.toml").read_text())
+    groups = project["dependency-groups"]
+    tooling = {
+        re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0]
+        for requirement in groups["tooling"]
+    }
+    dev = groups["dev"]
+
+    assert tooling == {"kingfisher-bin", "ruff", "textstat", "yamllint"}
+    assert set(groups["typing"]) == {"ty>=0.0.1a11", "textstat>=0.7.4"}
+    assert {"include-group": "test"} in dev
+    assert {"include-group": "tooling"} in dev
+    assert {"include-group": "typing"} in dev
+    assert {
+        re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0]
+        for requirement in dev
+        if isinstance(requirement, str)
+    } == {"pre-commit", "tox", "tox-uv"}
+
+
+def test_ci_tooling_group_is_locked_with_exact_members(project_root: Path) -> None:
+    """The lock records exact tooling and typing members in both group tables."""
+    lock = tomllib.loads((project_root / "uv.lock").read_text())
+    package = next(
+        item for item in lock["package"] if item["name"] == "ova-agentic-flow-copier"
+    )
+    for group_name, expected in (
+        ("tooling", {"kingfisher-bin", "ruff", "textstat", "yamllint"}),
+        ("typing", {"ty", "textstat"}),
+    ):
+        for table in (package["dev-dependencies"], package["metadata"]["requires-dev"]):
+            assert {dependency["name"] for dependency in table[group_name]} == expected
 
 
 @pytest.mark.parametrize(
@@ -303,19 +362,19 @@ def test_validation_image_targets_install_only_their_locked_dependency_scope(
     assert "shellcheck=0.9.0-1" not in shared_base
     assert "shellcheck=0.9.0-1" not in py311
     assert "shellcheck=0.9.0-1" not in py314
-    assert "uv sync --locked --only-group dev" in tooling
-    for pytest_target in (py311, py314):
+    assert _has_exact_tooling_sync_scope(tooling)
+    for pytest_target, typed in ((py311, True), (py314, False)):
         sync_invocations = _uv_sync_invocations(pytest_target)
         assert len(sync_invocations) == 1
         sync_tokens = sync_invocations[0]
         groups = _option_values(sync_tokens, "--group")
         only_groups = _option_values(sync_tokens, "--only-group")
 
-        assert _has_exact_pytest_sync_scope(pytest_target)
+        assert _has_exact_pytest_sync_scope(pytest_target, typed=typed)
         assert sync_tokens[:2] == ("uv", "sync")
         assert "--locked" in sync_tokens
         assert "--no-dev" in sync_tokens
-        assert groups == ("test",)
+        assert groups == (("test", "typing") if typed else ("test",))
         assert "--no-install-project" in sync_tokens
         assert "dev" not in groups
         assert "dev" not in only_groups
@@ -426,7 +485,7 @@ def test_validation_image_compiles_kingfisher_rules_once_after_locked_installs(
     tooling = _docker_target_body(dockerfile, "tooling")
 
     assert dockerfile.count(_KINGFISHER_COMPILE) == 1
-    locked_sync = tooling.index("uv sync --locked --only-group dev")
+    locked_sync = tooling.index("uv sync --locked --only-group tooling")
     compile_rules = tooling.index(_KINGFISHER_COMPILE)
     verify_tools = tooling.index("kingfisher --version")
     verify_git = tooling.index("git --version")
@@ -441,6 +500,43 @@ def test_validation_image_compiles_kingfisher_rules_once_after_locked_installs(
     assert compile_rules < verify_tools < final_workdir
     assert compile_rules < verify_git < final_workdir
     assert compile_rules < verify_jq < final_workdir
+
+
+def test_tooling_image_verifies_global_uv_from_base_image(project_root: Path) -> None:
+    """The tooling image verifies the base image's uv, outside its synced venv."""
+    dockerfile = (project_root / "Dockerfile").read_text()
+    tooling = _docker_target_body(dockerfile, "tooling")
+    lines = tooling.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("RUN /opt/ci/py311/bin/python --version")
+    )
+    verification_lines = []
+    for line in lines[start:]:
+        verification_lines.append(line)
+        if not line.endswith("\\"):
+            break
+    verification_run = "\n".join(verification_lines)
+    lexer = shlex.shlex(
+        re.sub(r"\\\n\s*", " ", verification_run),
+        posix=True,
+        punctuation_chars=";&|",
+    )
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    segments: list[tuple[str, ...]] = []
+    segment: list[str] = []
+    for token in lexer:
+        if token == "&&":
+            segments.append(tuple(segment))
+            segment = []
+        else:
+            segment.append(token)
+    segments.append(tuple(segment))
+
+    assert ("uv", "--version") in segments
+    assert "/opt/ci/py311/bin/uv --version" not in verification_run
 
 
 def test_validation_image_retains_the_stable_kingfisher_rule_cache(
@@ -667,10 +763,9 @@ def test_root_validation_uses_its_lane_image_without_runtime_bootstrap(
         "ruff-format": "uv run --no-sync ruff format --check",
         "yamllint": "uv run --no-sync yamllint",
         "kingfisher": _KINGFISHER_SCAN,
-        "type-check": "uv run --no-sync ty check",
-        "license-check": "uv run --no-sync python scripts/check_licenses.py --root .",
         "readability-check": (
-            "uv run --locked --all-groups python -m agent_work.readability "
+            'PYTHONPATH="$CI_PROJECT_DIR/src" uv run --no-sync '
+            "python -m agent_work.readability "
             "--root . --scope all"
         ),
         "shellcheck": "shellcheck",
@@ -680,6 +775,16 @@ def test_root_validation_uses_its_lane_image_without_runtime_bootstrap(
         assert effective_job["needs"] == [tooling_need]
         assert effective_job["image"]["name"] == tooling_image
         assert required_tooling_commands[job_name] in "\n".join(effective_job["script"])
+    for job_name, expected_script in (
+        ("type-check", "uv run --no-sync ty check"),
+        ("license-check", "uv run --no-sync python scripts/check_licenses.py --root ."),
+    ):
+        job = configuration[job_name]
+        assert job["image"]["name"] == (
+            "$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+        )
+        assert job["needs"] == [{"job": "ci-image:pytest-py311", "artifacts": False}]
+        assert job["script"] == [expected_script]
     for environment in ("py311", "py314"):
         target = f"pytest-{environment}"
         image = f"$CI_REGISTRY_IMAGE/validation-{target}:$CI_COMMIT_SHA-$CI_PIPELINE_ID"

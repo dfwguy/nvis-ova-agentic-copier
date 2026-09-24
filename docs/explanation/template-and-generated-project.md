@@ -57,11 +57,13 @@ This split makes two kinds of change clear. Template maintainers improve shared 
 
 The root repository has its own CI boundary. Each merge-request and
 default-branch pipeline builds and pushes three project-only validation
-candidates. One tooling image contains the locked development tools and pinned
-system tools. Two pytest images contain pinned Git and jq, the project's locked
-default dependencies, and the test group for Python 3.11 or 3.14.3. The
-tooling checks use the first image. Each Python's pytest shards and coverage
-job use its matching image.
+candidates. One tooling image contains only four locked CI tools and pinned
+system tools. Local development also includes tests, ty,
+pre-commit, and tox. Two pytest images contain pinned Git and jq, the project's
+locked default dependencies, and the test group for Python 3.11 or 3.14.3.
+The Python 3.11 image also contains ty for the full type check and the
+dependencies needed by the license check. Other tooling checks use the tooling
+image. Each Python's pytest shards and coverage job use its matching image.
 
 Each target has its own commit-and-pipeline tag, registry cache, build
 metadata, and digest evidence. This keeps unrelated tools out of the pytest
@@ -69,6 +71,8 @@ images and lets GitLab build the lanes independently. The split is meant to
 reduce the work on the longest path. It does not promise that a job will meet
 a fixed run time. Jobs still validate the current Dockerfile and locked
 dependencies, not a stale fixed digest, and do not install dependencies again.
+The readability job imports the root package from `src` with `PYTHONPATH` and
+runs without a dependency sync.
 
 The root pytest work is a simple DAG, not a state machine. Seventeen Python
 3.11 shards and six Python 3.14 shards each make one deterministic, exhaustive

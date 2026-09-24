@@ -300,18 +300,28 @@ kingfisher:
 
 type-check:
   extends: .base_uv
+  image:
+    name: "$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+  needs:
+    - job: ci-image:pytest-py311
+      artifacts: false
   script:
     - uv run --no-sync ty check
 
 license-check:
   extends: .base_uv
+  image:
+    name: "$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+  needs:
+    - job: ci-image:pytest-py311
+      artifacts: false
   script:
     - uv run --no-sync python scripts/check_licenses.py --root .
 
 readability-check:
   extends: .base_uv
   script:
-    - uv run --locked --all-groups python -m agent_work.readability --root . --scope all
+    - PYTHONPATH="$CI_PROJECT_DIR/src" uv run --no-sync python -m agent_work.readability --root . --scope all
 
 shellcheck:
   extends: .base_uv

@@ -51,18 +51,20 @@ commit-specific candidates:
 
 | Build job and target | Dependency scope | Validation work |
 | --- | --- | --- |
-| `ci-image:tooling` / `tooling` | Locked `dev` group and pinned system tools | The eight single validation jobs |
-| `ci-image:pytest-py311` / `pytest-py311` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.11 | `pytest-py311` shards and `coverage-py311` |
+| `ci-image:tooling` / `tooling` | Only the locked `tooling` group, plus pinned system tools | Six single validation jobs |
+| `ci-image:pytest-py311` / `pytest-py311` | Pinned Git and jq, plus locked project defaults, `test` group, and `typing` group on Python 3.11 | `pytest-py311` shards, `coverage-py311`, `type-check`, and `license-check` |
 | `ci-image:pytest-py314` / `pytest-py314` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.14.3 | `pytest-py314` shards and `coverage-py314` |
 
 Each validation job waits for and runs in its lane's image. The tags are
 `validation-tooling`, `validation-pytest-py311`, and
 `validation-pytest-py314`, each followed by
 `:$CI_COMMIT_SHA-$CI_PIPELINE_ID`. They do not bootstrap with `apt-get`,
-`uv python install`, or `uv sync`. Most tooling jobs use
-`uv run --no-sync`; `readability-check` uses
-`uv run --locked --all-groups`. Test and coverage jobs use the prepared
-environment in their Python-specific image.
+`uv python install`, or `uv sync`. Tooling jobs use `uv run --no-sync`.
+`readability-check` sets `PYTHONPATH` to the checkout's `src` directory so
+the prepared image can import `agent_work` without installing dependencies at
+runtime. `type-check` and `license-check` run in the Python 3.11 image so they
+can resolve test and project imports. Test and coverage jobs use the prepared environment in their
+Python-specific image.
 
 Each target has a separate registry cache. Its name has the target name and a
 `-cache` suffix. Each build keeps its own metadata and digest environment file

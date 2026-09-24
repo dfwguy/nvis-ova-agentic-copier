@@ -47,7 +47,7 @@ RUN --mount=type=secret,id=network-ca,target=/run/secrets/network-ca,uid=10001,r
         export UV_NATIVE_TLS=true SSL_CERT_FILE=/tmp/network-ca-bundle; \
     fi \
     && UV_PROJECT_ENVIRONMENT=/opt/ci/py311 \
-        uv sync --locked --only-group dev --python 3.11 \
+        uv sync --locked --only-group tooling --python 3.11 \
         --no-managed-python --no-install-project \
     && /opt/ci/py311/bin/kingfisher rules compile-cache --no-update-check \
     && rm -f /tmp/network-ca-bundle \
@@ -57,8 +57,7 @@ RUN /opt/ci/py311/bin/python --version \
     && /opt/ci/py311/bin/ruff --version \
     && /opt/ci/py311/bin/yamllint --version \
     && /opt/ci/py311/bin/kingfisher --version \
-    && /opt/ci/py311/bin/ty --version \
-    && /opt/ci/py311/bin/uv --version \
+    && uv --version \
     && git --version \
     && jq --version \
     && shellcheck --version
@@ -77,13 +76,14 @@ RUN --mount=type=secret,id=network-ca,target=/run/secrets/network-ca,uid=10001,r
         export UV_NATIVE_TLS=true SSL_CERT_FILE=/tmp/network-ca-bundle; \
     fi \
     && UV_PROJECT_ENVIRONMENT=/opt/ci/py311 \
-        uv sync --locked --no-dev --group test --python 3.11 \
+        uv sync --locked --no-dev --group test --group typing --python 3.11 \
         --no-managed-python --no-install-project \
     && rm -f /tmp/network-ca-bundle \
     && rm -rf /home/validation/.cache/uv
 
 RUN /opt/ci/py311/bin/python --version \
-    && /opt/ci/py311/bin/pytest --version
+    && /opt/ci/py311/bin/pytest --version \
+    && /opt/ci/py311/bin/ty --version
 
 ENV PATH="/opt/ci/py311/bin:${PATH}" \
     UV_PROJECT_ENVIRONMENT=/opt/ci/py311 \
