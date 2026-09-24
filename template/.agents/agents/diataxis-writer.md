@@ -62,6 +62,8 @@ Keep the goal in view.
 ## Output
 
 Use the documentation change report in `DIATAXIS.md`. Include the README
-decision and final interface check. Return it to Architect before Main stages
-the combined candidate. If no `docs/` or README update is needed, state why.
+decision and final interface check. Return it to Architect before the combined
+candidate is staged. Interactive Main stages it after both writers stop;
+serial Green requests controller-owned staging while live after both stop.
+If no `docs/` or README update is needed, state why.
 Green and the finalizer then record the rationale.

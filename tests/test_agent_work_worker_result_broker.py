@@ -33,8 +33,381 @@ from agent_work.repository import CommandResult
 from agent_work.worker import (
     AgentInvoker,
     WorkerProtocolError,
+    WorkerResultBrokerClientRequest,
     WorkerResultBrokerFactory,
+    create_candidate_broker,
+    request_candidate_validation,
 )
+
+
+@pytest.fixture
+def candidate_scratch(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Give Unix sockets a short, pytest-owned path."""
+    return tmp_path_factory.mktemp("c")
+
+
+def test_candidate_broker_returns_rejected_judge_evidence_then_accepts_correction(
+    candidate_scratch: Path,
+) -> None:
+    """A failing tree returns bounded evidence while the same producer can correct it."""
+    trees = iter(("b" * 40, "c" * 40))
+    calls: list[tuple[str, str | None]] = []
+
+    def candidate_action(action: str, tree: str | None) -> dict[str, object]:
+        calls.append((action, tree))
+        if action == "stage":
+            return {"candidate_tree": next(trees), "state": "staged"}
+        assert tree is not None
+        if tree == "b" * 40:
+            return {
+                "candidate_tree": tree,
+                "state": "terminal-failure",
+                "failed_tests": ["test_case::test_failure"],
+                "failed_junit_digests": ["d" * 64],
+            }
+        return {
+            "candidate_tree": tree,
+            "state": "terminal-success",
+            "evidence_id": "e" * 64,
+            "junit_artifacts": [
+                {"environment": "py311", "sha256": "f" * 64, "test_count": 1}
+            ],
+            "elapsed_seconds": 1.25,
+        }
+
+    session = create_candidate_broker(
+        candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    first = request_candidate_validation(session.socket_path, client, action="stage")
+    rejected = request_candidate_validation(
+        session.socket_path,
+        client,
+        action="validate",
+        candidate_tree=cast(str, first["candidate_tree"]),
+    )
+    second = request_candidate_validation(session.socket_path, client, action="stage")
+    accepted = request_candidate_validation(
+        session.socket_path,
+        client,
+        action="validate",
+        candidate_tree=cast(str, second["candidate_tree"]),
+    )
+    status = request_candidate_validation(
+        session.socket_path,
+        client,
+        action="status",
+        candidate_tree=cast(str, second["candidate_tree"]),
+    )
+
+    assert rejected["failed_tests"] == ["test_case::test_failure"]
+    assert accepted["evidence_id"] == status["evidence_id"]
+    assert session.close_and_capture() == "c" * 40
+    assert not session.socket_path.parent.exists()
+    assert calls == [
+        ("stage", None),
+        ("validate", "b" * 40),
+        ("stage", None),
+        ("validate", "c" * 40),
+        ("status", "c" * 40),
+    ]
+
+
+def test_candidate_broker_rejects_malformed_frame_and_fails_closed(
+    candidate_scratch: Path,
+) -> None:
+    """A truncated frame invalidates the private session without invoking Git."""
+    invoked = False
+
+    def candidate_action(_action: str, _tree: str | None) -> dict[str, object]:
+        nonlocal invoked
+        invoked = True
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    session = create_candidate_broker(
+        candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(str(session.socket_path))
+        connection.sendall((9).to_bytes(4, "big") + b"{}")
+        connection.shutdown(socket.SHUT_WR)
+        assert connection.recv(4)
+    with pytest.raises(WorkerProtocolError, match="malformed frame"):
+        session.close_and_capture()
+    assert not invoked
+    assert not session.socket_path.parent.exists()
+
+
+@pytest.mark.parametrize("wrong_field", ("issue", "nonce"))
+def test_candidate_broker_rejects_wrong_identity(
+    candidate_scratch: Path, wrong_field: str
+) -> None:
+    """A wrong issue or nonce cannot reach controller staging."""
+    called = False
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    wrong = WorkerResultBrokerClientRequest(
+        nonce="f" * 32 if wrong_field == "nonce" else _request().nonce,
+        issue_iid=82 if wrong_field == "issue" else 81,
+    )
+    with pytest.raises(
+        WorkerProtocolError,
+        match=(
+            "response identity mismatch"
+            if wrong_field == "nonce"
+            else "request identity mismatch"
+        ),
+    ):
+        request_candidate_validation(session.socket_path, wrong, action="stage")
+    with pytest.raises(WorkerProtocolError, match="request identity mismatch"):
+        session.close_and_capture()
+    assert not called
+
+
+def test_candidate_broker_rejects_oversized_frame(candidate_scratch: Path) -> None:
+    """An oversized declared request fails before parsing or Git work."""
+    session = create_candidate_broker(
+        lambda _action, _tree: pytest.fail("unexpected controller callback"),
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(str(session.socket_path))
+        connection.sendall((1_048_577).to_bytes(4, "big"))
+        connection.shutdown(socket.SHUT_WR)
+        assert connection.recv(4)
+    with pytest.raises(WorkerProtocolError, match="malformed frame"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_rejects_callback_past_deadline(
+    candidate_scratch: Path,
+) -> None:
+    """A late staged tree cannot become accepted evidence."""
+    now = [1.0]
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        now[0] = 12.0
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+        clock=lambda: now[0],
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    with pytest.raises(WorkerProtocolError, match="request timed out"):
+        request_candidate_validation(session.socket_path, client, action="stage")
+    with pytest.raises(WorkerProtocolError, match="request timed out"):
+        session.close_and_capture()
+
+
+@pytest.mark.parametrize(
+    ("counter", "limit", "diagnostic"),
+    (
+        ("_requests", 256, "request is not permitted"),
+        ("_bytes_received", 4_194_304, "request byte budget exceeded"),
+    ),
+)
+def test_candidate_broker_fails_closed_at_transport_budget(
+    candidate_scratch: Path, counter: str, limit: int, diagnostic: str
+) -> None:
+    """A protocol budget is enforced independently of candidate outcomes."""
+    called = False
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    setattr(session, counter, limit)
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    with pytest.raises(WorkerProtocolError, match=diagnostic):
+        request_candidate_validation(session.socket_path, client, action="stage")
+    with pytest.raises(WorkerProtocolError, match=diagnostic):
+        session.close_and_capture()
+    assert not called
+    assert not session.socket_path.parent.exists()
+
+
+def test_candidate_broker_extra_request_revokes_accepted_tree(
+    candidate_scratch: Path,
+) -> None:
+    """A completed candidate cannot survive a later forbidden request."""
+    session = create_candidate_broker(
+        lambda action, _tree: {
+            "candidate_tree": "b" * 40,
+            "state": "staged" if action == "stage" else "terminal-success",
+        },
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    staged = request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="validate",
+        candidate_tree=cast(str, staged["candidate_tree"]),
+    )
+    session._requests = 256
+    with pytest.raises(WorkerProtocolError, match="request is not permitted"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="status",
+            candidate_tree=cast(str, staged["candidate_tree"]),
+        )
+    with pytest.raises(WorkerProtocolError, match="request is not permitted"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_rejects_deleted_socket_after_acceptance(
+    candidate_scratch: Path,
+) -> None:
+    """A replaced or deleted socket cannot authorize a captured candidate."""
+    session = create_candidate_broker(
+        lambda _action, _tree: {"candidate_tree": "b" * 40, "state": "staged"},
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    request_candidate_validation(session.socket_path, client, action="stage")
+    session.socket_path.unlink()
+
+    with pytest.raises(WorkerProtocolError, match="cleanup failed"):
+        session.close_and_capture()
+    assert not session.socket_path.parent.exists()
+
+
+def test_candidate_broker_deferred_cleanup_waits_for_blocked_callback(
+    candidate_scratch: Path,
+) -> None:
+    """A late callback cannot leave an orphaned private socket after release."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    errors: list[WorkerProtocolError] = []
+
+    def submit() -> None:
+        try:
+            request_candidate_validation(session.socket_path, client, action="stage")
+        except WorkerProtocolError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=submit)
+    thread.start()
+    assert entered.wait(timeout=2)
+    root = session.socket_path.parent
+    try:
+        with pytest.raises(WorkerProtocolError, match="cleanup failed"):
+            session.close_and_capture()
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    for _ in range(100):
+        if not root.exists():
+            break
+        threading.Event().wait(0.01)
+    assert not root.exists()
+    assert errors
+
+
+def test_candidate_broker_cleans_private_root_on_prebind_failure(
+    candidate_scratch: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setup failure before socket bind retains no private scratch."""
+    original_chmod = Path.chmod
+
+    def fail_candidate_chmod(path: Path, mode: int) -> None:
+        if path.name.startswith("agent-work-candidate-"):
+            raise OSError("private mode unavailable")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", fail_candidate_chmod)
+    with pytest.raises(OSError, match="private mode unavailable"):
+        create_candidate_broker(
+            lambda _action, _tree: {"candidate_tree": "b" * 40},
+            request=_request(),
+            timeout_seconds=10,
+            temporary_directory=candidate_scratch,
+        )
+    assert list(candidate_scratch.iterdir()) == []
+
+
+def test_invoker_closes_result_broker_when_candidate_setup_fails(
+    candidate_scratch: Path,
+) -> None:
+    """The first private socket cannot survive failed second-socket setup."""
+    closed = False
+
+    class ResultSession:
+        socket_path = candidate_scratch / "result.sock"
+        cache_path = candidate_scratch / "cache"
+
+        def close_and_capture(self) -> None:
+            nonlocal closed
+            closed = True
+
+    def candidate_factory(*_args: object, **_kwargs: object) -> None:
+        raise OSError("candidate bind failed")
+
+    invoker = AgentInvoker(
+        lambda *_args, **_kwargs: pytest.fail("worker must not launch"),
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        broker_factory=cast(Any, lambda *_args, **_kwargs: ResultSession()),
+        candidate_broker_factory=cast(Any, candidate_factory),
+    )
+    invocation = invoker.invoke(
+        candidate_scratch,
+        "safe prompt",
+        10,
+        broker_request=_request(),
+        build_artifact=lambda payload: payload,
+        candidate_action=lambda _action, _tree: {"candidate_tree": "b" * 40},
+    )
+    assert closed
+    assert invocation.protocol_error is not None
+    assert "setup failed" in str(invocation.protocol_error)
 
 
 def _request() -> Any:
@@ -584,6 +957,102 @@ def test_agent_invoker_keeps_the_broker_live_for_the_producer(
     assert session.closed is True
     assert invocation.worker_result == b'{"accepted":true}'
     assert invocation.stdout == "untrusted worker stdout"
+
+
+def test_agent_invoker_validates_candidate_while_producer_is_active(
+    tmp_path: Path,
+) -> None:
+    """The worker can request trusted candidate validation through a private socket."""
+    request = _request()
+    checkout = tmp_path / "worker-checkout"
+    checkout.mkdir()
+    result_socket = tmp_path / "private-result" / "result.sock"
+    candidate_socket = tmp_path / "private-candidate" / "candidate.sock"
+    active = False
+    validated = False
+
+    class ResultSession:
+        socket_path = result_socket
+        cache_path = result_socket.parent / "uv-cache"
+
+        def close_and_capture(self) -> bytes:
+            return b'{"accepted":true}'
+
+    class CandidateSession:
+        socket_path = candidate_socket
+
+        def __init__(
+            self, action: Callable[[str, str | None], dict[str, object]]
+        ) -> None:
+            self.action = action
+            self.receipt: str | None = None
+
+        def accept(self) -> None:
+            staged = self.action("stage", None)
+            tree = staged["candidate_tree"]
+            assert isinstance(tree, str)
+            validated = self.action("validate", tree)
+            assert validated["state"] == "terminal-success"
+            self.receipt = tree
+
+        def close_and_capture(self) -> str | None:
+            return self.receipt
+
+    candidate_session: CandidateSession | None = None
+
+    def candidate_broker_factory(
+        action: Callable[[str, str | None], dict[str, object]], **_kwargs: object
+    ) -> CandidateSession:
+        nonlocal candidate_session
+        candidate_session = CandidateSession(action)
+        return candidate_session
+
+    def candidate_action(action: str, tree: str | None) -> dict[str, object]:
+        nonlocal validated
+        assert active
+        if action == "validate":
+            assert tree == "b" * 40
+            validated = True
+            return {"candidate_tree": tree, "state": "terminal-success"}
+        assert action == "stage" and tree is None
+        return {"candidate_tree": "b" * 40, "state": "staged"}
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        nonlocal active
+        assert str(candidate_socket.parent) in command
+        assert "--candidate-socket" in cast(str, kwargs["stdin"])
+        assert candidate_session is not None
+        active = True
+        try:
+            candidate_session.accept()
+        finally:
+            active = False
+        return CommandResult(0, "untrusted stdout", "")
+
+    result_socket.parent.mkdir()
+    (result_socket.parent / "uv-cache").mkdir()
+    candidate_socket.parent.mkdir()
+    invocation = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+        broker_factory=cast(
+            WorkerResultBrokerFactory, lambda _request, **_kwargs: ResultSession()
+        ),
+        candidate_broker_factory=cast(Any, candidate_broker_factory),
+    ).invoke(
+        checkout,
+        (
+            "bin/agent-work-from-checkout --broker-socket PATH --broker-nonce "
+            f"{request.nonce} --candidate-socket PATH"
+        ),
+        10,
+        broker_request=request,
+        build_artifact=lambda _input: b'{"accepted":true}',
+        candidate_action=candidate_action,
+    )
+
+    assert validated
+    assert invocation.validated_candidate == "b" * 40
 
 
 @pytest.mark.parametrize("returncode", (0, 23))

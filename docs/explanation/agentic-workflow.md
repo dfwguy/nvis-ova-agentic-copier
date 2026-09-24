@@ -121,18 +121,29 @@ freshly and stops on invalid, stale, missing, or changed evidence. The trusted
 controller later makes the one final commit for the whole change.
 
 Green runs the fast formatter, lint, type checks, and focused behavior tests.
-Main waits for Green and the Diátaxis Writer to stop editing, then stages their
-combined candidate and records its tree OID. During serial validation,
-TDD Judge uses an applied saved session keyed by that tree. It records running
-state and runs exactly one
-`git hook run pre-commit`. During that one hook execution, the validation session
-captures fixed JUnit snapshots, digests, and test counts as final
-evidence. Judge inspects the unchanged tree only after success. Failure blocks
-the workflow. Judge and Non-functional Reviewer can authenticate persisted
-evidence after a frontend loses its handle without rerunning the hook. These
-checks run before Non-functional Reviewer and specialist reviews. The [serial
-GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
-defines run and read-only status commands.
+Green and the Diátaxis Writer stop editing before their combined candidate is
+staged. In interactive work, Main stages it and records its tree ID. Judge uses
+`validation run` for that tree. The durable session runs one
+`git hook run pre-commit`, then saves fixed JUnit snapshots, digests, and test
+counts. Judge checks the unchanged tree after success. Judge and Non-functional
+Reviewer can read persisted evidence after a lost command handle without
+rerunning the hook. See the [validation command
+reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status).
+
+In serial work, Green asks a private controller socket to stage the changed
+paths the controller observes. It returns the exact Git tree ID. The worker
+cannot write the linked checkout's Git administrative data or controller state.
+Judge uses the same socket to validate that tree and read its durable status.
+The trusted controller runs one hook for each tree and records fixed JUnit
+snapshots, digests, test counts, and elapsed time. It returns an opaque
+evidence ID and bounded results without private snapshot paths. A failed
+result gives the same live worker safe test names and digests when available;
+the worker can correct the code, stage a new tree, and validate it. Status
+recovers the saved result without rerunning the hook. The separate result
+broker accepts final workflow intent. After worker exit, the controller checks
+the tree, changed paths, and identity again before publication. The normal
+ledger transition records that authorization. See the [candidate command
+reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-validate-and-status).
 
 Long review cycles use context. In interactive work, Green saves its full,
 bounded correction ledger through the trusted controller checkout while Green
@@ -186,7 +197,8 @@ This also applies in the serial GitLab loop.
 
 ## Workflow topology
 
-The diagrams show the normal clean-publication path. They also show stops that
+The first two diagrams show the interactive workflow. The third shows the
+serial controller's boundary. They also show stops that
 need human direction. A resident parent remains live while child roles work. A
 fresh-context node is a new AI context. It is not an interrupted agent's continuation.
 
@@ -347,7 +359,9 @@ changes only `AGENTS.md`, `.agents/**`, and their declared portable mirrors.
 Architect waits for each applicable receipt or exact not-applicable record.
 Green and the writer compare the final interface while both are live; the
 writer aligns the prose. Once both stop editing, Main stages their combined
-work. Judge and applicable read-only specialists inspect that same tree.
+work in interactive sessions. In serial sessions, Green requests controller
+staging through the private socket. Judge and applicable read-only specialists
+inspect that same tree.
 Green consolidates feedback and routes documentation findings to the writer.
 Green never edits docs, README, or agent-policy paths.
 
@@ -388,8 +402,9 @@ and tests. Documentation and README findings go through Architect to the
 Diátaxis Writer. Policy findings go through Architect to Agent-policy Writer;
 that work runs in series with Green. Green does not edit either owner's files.
 
-After each correction, Main waits for Green and the Diátaxis Writer to stop
-editing and for any policy repair to finish. Main stages their combined tree.
+After each correction, the workflow waits for Green and the Diátaxis Writer to
+stop editing and for any policy repair to finish. Main stages their combined
+tree in interactive work; in serial work, Green requests controller staging.
 A fresh Judge checks that tree before applicable reviewers run again. Finalizer
 uses the accepted result.
 

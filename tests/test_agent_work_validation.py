@@ -15,7 +15,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -205,6 +205,117 @@ def test_terminal_failure_persists_only_aggregate_supported_junit_counts() -> No
     assert "hook-secret" not in persisted
     assert "xml-secret" not in persisted
     assert "secret-test-name" not in persisted
+
+
+def test_failed_junit_names_and_digests_survive_source_artifact_cleanup() -> None:
+    """A later status read retains bounded test identity without source XML."""
+    state = ValidationStateFake()
+    artifact = (
+        b"<testsuite failures='1' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_known_failure'>"
+        b"<failure message='secret detail'/></testcase></testsuite>"
+    )
+    artifacts: dict[Path, bytes | OSError] = {Path("test-results-py311.xml"): artifact}
+    dependencies, calls, _reads = _diagnostic_dependencies(
+        state, artifacts=artifacts, returncode=7
+    )
+
+    run_report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    artifacts.clear()
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert (
+        run_report.failed_tests
+        == status.failed_tests
+        == ("tests.test_module::test_known_failure",)
+    )
+    assert status.failed_junit_digests == (hashlib.sha256(artifact).hexdigest(),)
+    assert "secret detail" not in str(state.records[_CANDIDATE])
+
+
+def test_success_timing_is_durable_and_status_does_not_rerun_hook() -> None:
+    """A yielded Judge handle can recover the same controller timing evidence."""
+    state = ValidationStateFake()
+    readings = iter((10.0, 11.25))
+    dependencies, calls = _dependencies(state, monotonic_clock=lambda: next(readings))
+
+    ran = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert ran.elapsed_seconds == status.elapsed_seconds == 1.25
+    assert calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_success_junit_timing_summary_is_bounded_and_durable() -> None:
+    """Nonfunctional review can read total and slowest tests after source cleanup."""
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    artifact = (
+        b"<testsuite tests='3' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_fast' time='0.5'/>"
+        b"<testcase classname='tests.test_module' name='test_slow' time='3.0'/>"
+        b"<testcase name='private-secret' time='0.25'/></testsuite>"
+    )
+    dependencies = replace(dependencies, read_artifact=lambda _path: artifact)
+
+    run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert [item.total_seconds for item in status.junit_timings] == [3.75, 3.75]
+    assert status.junit_timings[0].slowest_cases[0].name == (
+        "tests.test_module::test_slow"
+    )
+    assert "private-secret" not in str(state.records[_CANDIDATE])
+
+
+def test_junit_evidence_drops_absolute_and_traversal_classnames() -> None:
+    """Raw JUnit classnames cannot reveal a controller-private path."""
+    artifact = (
+        b"<testsuite tests='3' failures='3' errors='0'>"
+        b"<testcase classname='/home/private/state' name='test_secret' time='3'>"
+        b"<failure/></testcase>"
+        b"<testcase classname='tests/../private' name='test_secret' time='2'>"
+        b"<failure/></testcase>"
+        b"<testcase classname='tests.test_module' name='test_safe' time='1'>"
+        b"<failure/></testcase></testsuite>"
+    )
+    state = ValidationStateFake()
+    dependencies, _calls, _reads = _diagnostic_dependencies(
+        state,
+        artifacts={Path("test-results-py311.xml"): artifact},
+        returncode=1,
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert report.failed_tests == ("tests.test_module::test_safe",)
+    assert "/home/private" not in str(state.records[_CANDIDATE])
+
+    success_state = ValidationStateFake()
+    success_dependencies, _success_calls = _dependencies(success_state)
+    success_dependencies = replace(
+        success_dependencies, read_artifact=lambda _path: artifact
+    )
+    success = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=success_dependencies
+    )
+    assert success.junit_timings[0].total_seconds == 6.0
+    assert [case.name for case in success.junit_timings[0].slowest_cases] == [
+        "tests.test_module::test_safe"
+    ]
 
 
 def test_terminal_failure_without_usable_artifacts_persists_fixed_fallback() -> None:
@@ -574,6 +685,7 @@ def test_apply_runs_one_fixed_hook_and_persists_its_terminal_code(
         "schema_version": 2,
         "state": expected_state,
         "returncode": returncode,
+        "elapsed_seconds": 0.0,
     }
     if returncode != 0:
         expected_record["diagnostic"] = (

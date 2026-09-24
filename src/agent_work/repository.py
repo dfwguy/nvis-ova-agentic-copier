@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -31,7 +32,11 @@ from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
-from .validation import HookFailure, parse_installed_precommit_failures
+from .validation import (
+    HookFailure,
+    is_safe_junit_test_name,
+    parse_installed_precommit_failures,
+)
 
 
 class RepositoryError(RuntimeError):
@@ -968,7 +973,219 @@ class GitRepository:
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str:
         """Observe exact current candidate content as an unpublished tree identity."""
+        if not paths:
+            return self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         return self.snapshot_test_tree(worktree, base_sha, paths)
+
+    def stage_candidate(self, worktree: Path, base_sha: str) -> str:
+        """Stage only controller-observed paths and return the exact tree."""
+        if self.head(worktree) != base_sha:
+            raise RepositoryError("candidate head changed")
+        paths = tuple(sorted(set(self.changed_paths(worktree))))
+        if len(paths) > 128:
+            raise RepositoryError("candidate changed paths are invalid")
+        if paths:
+            self._git("add", "--all", "--", *paths, cwd=worktree)
+        tree = self._git("write-tree", cwd=worktree)
+        if not re.fullmatch(r"[0-9a-f]{40}", tree):
+            raise RepositoryError("candidate tree is invalid")
+        if tuple(sorted(set(self.changed_paths(worktree)))) != paths:
+            raise RepositoryError("candidate changed paths changed during staging")
+        if self.red_candidate_tree(worktree, base_sha, paths) != tree:
+            raise RepositoryError("candidate changed during staging")
+        return tree
+
+    def judge_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        changed_paths: tuple[str, ...],
+        action: str,
+        timeout_seconds: int,
+    ) -> dict[str, object]:
+        """Run or observe durable Judge evidence from the trusted checkout."""
+        if action not in {"validate", "status"}:
+            raise RepositoryError("candidate action is invalid")
+        if self._git("write-tree", cwd=worktree) != candidate_tree:
+            raise RepositoryError("candidate tree changed")
+        result = self._bounded_command(
+            (
+                str(self.config.checkout / "bin" / "agent-work-from-checkout"),
+                "validation",
+                "run" if action == "validate" else "status",
+                "--candidate-tree",
+                candidate_tree,
+                *(("--apply",) if action == "validate" else ()),
+                "--json",
+            ),
+            current_directory=worktree,
+            environment=self._environment,
+            timeout_seconds=timeout_seconds,
+        )
+        try:
+            report = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise RepositoryError(
+                "candidate validation response is malformed"
+            ) from error
+        if (
+            result.returncode not in {0, 1}
+            or not isinstance(report, dict)
+            or report.get("candidate_tree") != candidate_tree
+        ):
+            raise RepositoryError("candidate validation response is invalid")
+        artifacts = report.get("junit_artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) > 2:
+            raise RepositoryError("candidate validation evidence is invalid")
+        safe_artifacts: list[dict[str, object]] = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or artifact.get("environment") not in {
+                "py311",
+                "py314",
+            }:
+                raise RepositoryError("candidate validation evidence is invalid")
+            sha = artifact.get("sha256")
+            count = artifact.get("test_count")
+            if (
+                not isinstance(sha, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha) is None
+                or not isinstance(count, int)
+                or count < 0
+            ):
+                raise RepositoryError("candidate validation evidence is invalid")
+            safe_artifacts.append(
+                {
+                    "environment": artifact["environment"],
+                    "sha256": sha,
+                    "test_count": count,
+                }
+            )
+        state = report.get("state")
+        if state not in {
+            "running",
+            "terminal-success",
+            "terminal-failure",
+            "terminal-artifact-failure",
+        }:
+            raise RepositoryError("candidate validation state is invalid")
+        if (state == "terminal-success") != (result.returncode == 0):
+            raise RepositoryError("candidate validation exit is inconsistent")
+        failed_tests = report.get("failed_tests")
+        failed_digests = report.get("failed_junit_digests")
+        if (
+            not isinstance(failed_tests, list)
+            or len(failed_tests) > 16
+            or any(
+                not isinstance(name, str) or not is_safe_junit_test_name(name)
+                for name in failed_tests
+            )
+            or not isinstance(failed_digests, list)
+            or len(failed_digests) > 2
+            or any(
+                not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                for digest in failed_digests
+            )
+        ):
+            raise RepositoryError("candidate failure evidence is invalid")
+        elapsed = report.get("elapsed_seconds")
+        if elapsed is not None and (
+            not isinstance(elapsed, (float, int))
+            or not math.isfinite(elapsed)
+            or elapsed < 0
+            or elapsed > 10_800
+        ):
+            raise RepositoryError("candidate timing evidence is invalid")
+        raw_timings = report.get("junit_timings")
+        if not isinstance(raw_timings, list) or len(raw_timings) > 2:
+            raise RepositoryError("candidate JUnit timing evidence is invalid")
+        safe_timings: list[dict[str, object]] = []
+        for item in raw_timings:
+            if not isinstance(item, dict) or item.get("environment") not in {
+                "py311",
+                "py314",
+            }:
+                raise RepositoryError("candidate JUnit timing evidence is invalid")
+            total = item.get("total_seconds")
+            cases = item.get("slowest_cases")
+            if (
+                not isinstance(total, (int, float))
+                or not math.isfinite(total)
+                or total < 0
+                or total > 1_000_000
+                or not isinstance(cases, list)
+                or len(cases) > 3
+            ):
+                raise RepositoryError("candidate JUnit timing evidence is invalid")
+            safe_cases: list[dict[str, object]] = []
+            for case in cases:
+                if not isinstance(case, dict):
+                    raise RepositoryError("candidate JUnit timing evidence is invalid")
+                name = case.get("name")
+                seconds = case.get("seconds")
+                if (
+                    not isinstance(name, str)
+                    or not is_safe_junit_test_name(name)
+                    or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds)
+                    or seconds < 0
+                    or seconds > 1_000_000
+                ):
+                    raise RepositoryError("candidate JUnit timing evidence is invalid")
+                safe_cases.append({"name": name, "seconds": seconds})
+            safe_timings.append(
+                {
+                    "environment": item["environment"],
+                    "total_seconds": total,
+                    "slowest_cases": safe_cases,
+                }
+            )
+        if (
+            self.head(worktree) != base_sha
+            or self._git("write-tree", cwd=worktree) != candidate_tree
+            or tuple(sorted(set(self.changed_paths(worktree)))) != changed_paths
+            or self.red_candidate_tree(worktree, base_sha, changed_paths)
+            != candidate_tree
+        ):
+            raise RepositoryError("candidate changed during validation")
+        durable_evidence = {
+            key: report.get(key)
+            for key in (
+                "candidate_tree",
+                "state",
+                "exit_code",
+                "diagnostic",
+                "hook_failures",
+                "junit_artifacts",
+                "failed_tests",
+                "failed_junit_digests",
+                "elapsed_seconds",
+                "junit_timings",
+            )
+        }
+        return {
+            "candidate_tree": candidate_tree,
+            "state": state,
+            "exit_code": report.get("exit_code")
+            if isinstance(report.get("exit_code"), int)
+            else None,
+            "diagnostic": str(report.get("diagnostic") or "")[:512],
+            "hook_failures": report.get("hook_failures")
+            if isinstance(report.get("hook_failures"), list)
+            else [],
+            "junit_artifacts": safe_artifacts,
+            "failed_tests": failed_tests,
+            "failed_junit_digests": failed_digests,
+            "elapsed_seconds": elapsed,
+            "junit_timings": safe_timings,
+            "evidence_id": sha256(
+                json.dumps(
+                    durable_evidence, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+        }
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

@@ -106,7 +106,9 @@ creates the interactive Red commit. The serial coding topology has two workflow 
 The first is controller → Architect → Red → trusted result boundary. The
 second is controller → Architect → conditional Policy Writer, then concurrent
 Green and Diátaxis Writer. Interactive work uses the same post-Red order.
-Main stages their combined candidate after both stop editing. Next comes Green → Judge →
+In interactive work, Main stages their combined work after both stop editing.
+In serial work, Green asks the controller to stage it after both stop. The
+serial worker never stages with Git. Next comes Green → Judge →
 Non-functional Reviewer and the applicable specialist reviewers. Finalizer
 comes last. The content topology is
 Main → Architect → the current Writer or Finalizer. These topologies define
@@ -120,7 +122,7 @@ role is N/A only when facts show it does not apply.
 | Publication setup | `$git-flow` | Main owns feature branch and publication preflight. |
 | Design | `$architect` | Design and live coordination. |
 | Red and policy preparation | `$tdd-red`, conditional `$agent-policy-writer` | Red establishes the exact mode-specific checkpoint first. Serial work runs only Red before the producer-owned trusted result boundary. Policy preparation finishes before implementation. |
-| Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. Main stages their combined candidate only after both stop editing. |
+| Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. After both stop editing, interactive Main stages their combined candidate; serial Green requests controller-owned staging. |
 | Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
 | Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
@@ -192,14 +194,22 @@ mode-specific identity before it starts: interactive commit SHA and paths, or
 serial checkpoint ref, tree, and paths.
 
 Green and Diátaxis Writer exchange final interface details while editing disjoint
-paths. Main waits for both to stop editing, accepts the writer's documentation
-receipt and readability result, then stages the combined exact candidate and
-returns its tree OID to Green. Repeat this wait and staging after any correction.
-Green's receipt has its suite and the documentation handoff. It also has
-current JUnit evidence. It has a correction-cycle ledger. Judge receives the exact staged
-tree. Terminal nonzero returns to Green. Terminal zero may start its
-Non-functional Reviewer child only when the tree is unchanged. The JUnit
-snapshots, digests, and counts must also be immutable.
+paths. The workflow owner waits for both to stop editing and accepts the
+writer's documentation receipt and readability result. In interactive work, Main
+stages the combined exact candidate and returns its tree OID to Green. In
+serial work, Green requests staging through the controller-owned boundary
+while active. The controller scans the worktree, stages only allowed paths,
+and returns the tree OID. The worker does not stage with Git. Repeat the
+applicable staging boundary after each correction.
+
+Green's receipt has its suite, matched documentation, current JUnit proof,
+and correction-cycle ledger. Judge receives the exact candidate tree. In
+serial work, Judge gets saved test proof from the trusted validation boundary;
+the worker does not run the old validation CLI. A nonzero exit goes to Green.
+An exit of zero may start Judge's Non-functional Reviewer child only if the
+tree did not change. Interactive JUnit snapshots, digests, and counts stay
+immutable. Serial proof has an opaque ID and bounded counts, hashes, and time
+data from trusted code. Model prose cannot prove a pass in either mode.
 
 Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
@@ -516,8 +526,11 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
    paths. Then start `$tdd-green` and `$diataxis-writer` together.
    Green owns production and tests only. Diátaxis Writer owns `docs/**`,
    `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`.
-   It does not change executable Jinja logic. Wait for both to stop editing and accept the documentation
-   receipt before Main stages the combined exact tree. Send a rule fix through
+   It does not change executable Jinja logic. Wait for both to stop editing and
+   accept the documentation receipt before the applicable staging boundary.
+   Interactive Main stages the combined exact tree. Serial Green asks the
+   controller to stage it while live; the serial worker never stages with Git.
+   Send a rule fix through
    Architect to Policy Writer. Do not overlap policy repair with later Green work.
 9. **Use evidence to converge** — Call the right finalizer after Green or
    the documentation writer returns approved evidence. For coding, authorize
@@ -526,7 +539,7 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
    Authorize more focused Green correction cycles only while the cycle ledger
    shows material progress. Green does not use a fixed correction-count policy.
 
-   For code work, get Main's staged tree and the joined Judge and
+   For code work, get the staged tree for this mode and the joined Judge and
    Non-functional handoff before specialist review starts. In interactive work, Finalizer
    may create the validated publication commit only after it proves that same
    staged tree. It creates one final passing commit over the original base and

@@ -27,6 +27,9 @@ model. Each frontend uses its own configured map. Do not name a provider model
 in this skill.
 
 The TDD Judge delegates this review after the validation session's one hook
-run. Use only the exact staged tree and immutable absolute JUnit snapshot
-paths, digests, and counts it provides. Return the timing receipt to the
-Judge, never to specialist review.
+run. In interactive work, use its exact staged tree and immutable JUnit
+snapshots, digests, and counts. In serial work, use only the controller-owned
+result's tree identity, opaque evidence identity, and bounded program-derived
+counts, digests, and timing summary. Never request controller-private snapshot
+paths or treat model prose as validation evidence. Return the timing receipt to
+the Judge, never to specialist review.
