@@ -28,6 +28,7 @@ import pytest
 from agent_work.cli import build_parser, main
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
 from agent_work.models import LedgerRecord, WorkerResultEnvelope
+from agent_work.red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
 from agent_work.repository import CommandResult
 from agent_work.worker import (
     AgentInvoker,
@@ -256,7 +257,7 @@ def test_broker_startup_failure_removes_scratch_and_closes_its_root_fd(
 def test_worker_result_apply_json_emits_canonical_broker_receipt(
     tmp_path: Path,
 ) -> None:
-    """A live accepted submission prints only the canonical nonce receipt."""
+    """A non-Red live acceptance prints only the bounded nonce receipt."""
     request = _request()
     input_bytes = b'{"workflow_lane":"coding","result_kind":"needs_human"}'
     input_path = tmp_path / "input.json"
@@ -297,6 +298,122 @@ def test_worker_result_apply_json_emits_canonical_broker_receipt(
     assert status == 0
     assert output == [f'{{"accepted":true,"nonce":"{request.nonce}"}}']
     assert artifact == input_bytes
+
+
+def test_worker_result_apply_json_returns_exact_red_checkpoint_to_live_producer(
+    tmp_path: Path,
+) -> None:
+    """A live Red acceptance returns controller-owned evidence before worker exit."""
+    request = _request()
+    checkpoint_request = RedCheckpointRequest(
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "tests/test_agent_work_worker_result_broker.py::test_red",
+        ),
+        expected_failure="assert Red boundary",
+        test_paths=("tests/test_agent_work_worker_result_broker.py",),
+    )
+    checkpoint = RedCheckpointEvidence(
+        project_id=request.project_id,
+        issue_iid=request.issue_iid,
+        source_branch=request.source_branch,
+        base_sha=request.source_sha,
+        tree_oid="b" * 40,
+        ref=(
+            f"refs/agent-work/red-checkpoints/{request.issue_iid}/{request.source_sha}"
+        ),
+        test_paths=checkpoint_request.test_paths,
+        argv=checkpoint_request.argv,
+        exit_code=1,
+        expected_failure=checkpoint_request.expected_failure,
+        output_sha256="c" * 64,
+    )
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        '{"workflow_lane":"coding","result_kind":"red_checkpoint_ready"}'
+    )
+    result = WorkerResultEnvelope(
+        project_id=request.project_id,
+        issue_iid=request.issue_iid,
+        ledger_revision=request.ledger_revision,
+        expected_state=request.expected_state,
+        expected_phase=request.expected_phase,
+        workflow_lane=WorkflowLane.CODING,
+        result_kind="red_checkpoint_ready",
+        phase_status="complete",
+        completed_phase=request.expected_phase,
+        change_summary="Failing tests are ready for capture.",
+        next_action="Create the trusted checkpoint.",
+        red_checkpoint_request=checkpoint_request,
+    )
+    artifact = importlib.import_module(
+        "agent_work.worker"
+    ).build_worker_result_artifact(
+        LedgerRecord(
+            project_id=request.project_id,
+            issue_iid=request.issue_iid,
+            revision=request.ledger_revision,
+            state=request.expected_state,
+            phase=request.expected_phase,
+            workflow_lane=WorkflowLane.UNKNOWN,
+            work_kind=WorkKind.ORDINARY,
+            source_branch=request.source_branch,
+            worktree=tmp_path,
+            source_sha=request.source_sha,
+        ),
+        result,
+        nonce=request.nonce,
+        changed_paths=(),
+        red_checkpoint=checkpoint,
+    )
+    session = importlib.import_module("agent_work.worker").create_worker_result_broker(
+        request,
+        build_artifact=lambda _received: artifact,
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+    )
+    output: list[str] = []
+    try:
+        status = main(
+            [
+                "worker-result",
+                "build",
+                "--issue-iid",
+                str(request.issue_iid),
+                "--input-file",
+                str(input_path),
+                "--broker-socket",
+                str(session.socket_path),
+                "--broker-nonce",
+                request.nonce,
+                "--apply",
+                "--json",
+            ],
+            write_stdout=output.append,
+        )
+        retained = session.close_and_capture()
+    finally:
+        if session.socket_path.parent.exists():
+            try:
+                session.close_and_capture()
+            except WorkerProtocolError:
+                pass
+
+    assert status == 0
+    assert output == [
+        json.dumps(
+            {
+                "accepted": True,
+                "nonce": request.nonce,
+                "red_checkpoint": checkpoint.model_dump(mode="json"),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    ]
+    assert retained == artifact
 
 
 def test_worker_result_apply_rejects_a_different_issue_iid(tmp_path: Path) -> None:

@@ -12,8 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -152,15 +150,6 @@ class RedCheckpointEvidence(_CheckpointModel):
         return self
 
 
-@dataclass(frozen=True)
-class RedCheckpointReport:
-    """Preview or applied outcome for one checkpoint transaction."""
-
-    applied: bool
-    action: Literal["would-create", "created", "existing"]
-    evidence: RedCheckpointEvidence | None
-
-
 class _LoadRecord(Protocol):
     def __call__(self, issue_iid: int) -> LedgerRecord | None: ...
 
@@ -173,7 +162,8 @@ class RedCheckpointDependencies:
     current_head: Callable[[Path], str]
     changed_paths: Callable[[Path], tuple[str, ...]]
     run_red_command: Callable[[Path, tuple[str, ...]], CommandResult]
-    snapshot_tests: Callable[[str, tuple[str, ...], str], str]
+    snapshot_test_tree: Callable[[str, tuple[str, ...]], str]
+    expected_tree_oid: str
     read_evidence: Callable[[int, int, str], RedCheckpointEvidence | None]
     write_evidence: Callable[[RedCheckpointEvidence], None]
 
@@ -201,7 +191,7 @@ def _validate_record(record: LedgerRecord | None, issue_iid: int) -> LedgerRecor
         or record.issue_iid != issue_iid
         or record.state is not RunnerState.EXECUTING
         or record.phase is not WorkflowPhase.WORKFLOW
-        or record.workflow_lane is not WorkflowLane.CODING
+        or record.workflow_lane is not WorkflowLane.UNKNOWN
         or record.work_kind is not WorkKind.ORDINARY
         or record.source_sha is None
     ):
@@ -236,9 +226,8 @@ def create_red_checkpoint(
     *,
     issue_iid: int,
     request: RedCheckpointRequest,
-    apply: bool,
     dependencies: RedCheckpointDependencies,
-) -> RedCheckpointReport:
+) -> RedCheckpointEvidence:
     """Verify and retain one idempotent Red checkpoint transaction."""
     request = validate_red_checkpoint_request(request)
     record = _validate_record(dependencies.load_record(issue_iid), issue_iid)
@@ -256,18 +245,20 @@ def create_red_checkpoint(
             raise RedCheckpointError(
                 "retained red checkpoint conflicts with this request"
             )
-        if apply:
-            tree_oid = dependencies.snapshot_tests(
-                record.source_sha, request.test_paths, retained.ref
-            )
-            if tree_oid != retained.tree_oid:
-                raise RedCheckpointError(
-                    "retained red checkpoint conflicts with local ref"
-                )
-        return RedCheckpointReport(apply, "existing", retained)
-    if not apply:
-        return RedCheckpointReport(False, "would-create", None)
+        tree_oid = dependencies.snapshot_test_tree(
+            record.source_sha, request.test_paths
+        )
+        if tree_oid != dependencies.expected_tree_oid:
+            raise RedCheckpointError("red checkpoint candidate tree changed")
+        if tree_oid != retained.tree_oid:
+            raise RedCheckpointError("retained red checkpoint conflicts with local ref")
+        return retained
     result = dependencies.run_red_command(record.worktree, request.argv)
+    if dependencies.current_head(record.worktree) != record.source_sha:
+        raise RedCheckpointError("worktree head changed during red checkpoint")
+    fresh_paths = tuple(sorted(dependencies.changed_paths(record.worktree)))
+    if fresh_paths != request.test_paths:
+        raise RedCheckpointError("changed test paths changed during red checkpoint")
     output = f"{result.stdout}{result.stderr}"
     if result.returncode == 0:
         raise RedCheckpointError("red checkpoint command must fail")
@@ -294,7 +285,9 @@ def create_red_checkpoint(
                 "red checkpoint evidence exceeds the durable bound"
             ) from error
         raise RedCheckpointError("red checkpoint evidence is invalid") from error
-    tree_oid = dependencies.snapshot_tests(record.source_sha, request.test_paths, ref)
+    tree_oid = dependencies.snapshot_test_tree(record.source_sha, request.test_paths)
+    if tree_oid != dependencies.expected_tree_oid:
+        raise RedCheckpointError("red checkpoint candidate tree changed")
     try:
         evidence = RedCheckpointEvidence.model_validate(
             evidence.model_dump() | {"tree_oid": tree_oid}
@@ -302,11 +295,11 @@ def create_red_checkpoint(
     except ValidationError as error:
         raise RedCheckpointError("red checkpoint snapshot tree is invalid") from error
     dependencies.write_evidence(evidence)
-    return RedCheckpointReport(True, "created", evidence)
+    return evidence
 
 
 class RedCheckpointStore:
-    """Atomic sidecar storage outside ledger revisions."""
+    """Read-only legacy sidecar compatibility for retained v1 checkpoints."""
 
     def __init__(self, state_root: Path) -> None:
         self._root = state_root / "red-checkpoints"
@@ -343,46 +336,3 @@ class RedCheckpointStore:
         ):
             raise RedCheckpointError("red checkpoint evidence identity is invalid")
         return evidence
-
-    def write(self, evidence: RedCheckpointEvidence) -> None:
-        """Atomically create one compact record without overwriting a peer."""
-        target = self._path(evidence.project_id, evidence.issue_iid, evidence.base_sha)
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target.parent.chmod(0o700)
-        content = evidence.model_dump_json().encode() + b"\n"
-        if len(content) > 32_768:
-            raise RedCheckpointError(
-                "red checkpoint evidence exceeds the durable bound"
-            )
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent, prefix=".checkpoint-"
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.chmod(0o600)
-            try:
-                os.link(temporary, target)
-            except FileExistsError:
-                retained = self.read(
-                    evidence.project_id, evidence.issue_iid, evidence.base_sha
-                )
-                if retained != evidence:
-                    raise RedCheckpointError(
-                        "retained red checkpoint conflicts with this request"
-                    ) from None
-                return
-            directory = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as error:
-            raise RedCheckpointError(
-                "red checkpoint evidence could not be written"
-            ) from error
-        finally:
-            temporary.unlink(missing_ok=True)

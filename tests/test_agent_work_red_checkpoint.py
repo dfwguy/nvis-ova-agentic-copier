@@ -14,17 +14,17 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agent_work.cli import build_parser, main
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
 from agent_work.models import AgentWorkConfig, LedgerRecord
+from agent_work.red_checkpoint import RedCheckpointError
 from agent_work.repository import CommandResult, GitRepository, RepositoryError
 from agent_work.worker import build_worker_prompt
 
@@ -45,7 +45,7 @@ def _record(tmp_path: Path, **changes: object) -> LedgerRecord:
         "revision": 7,
         "state": RunnerState.EXECUTING,
         "phase": WorkflowPhase.WORKFLOW,
-        "workflow_lane": WorkflowLane.CODING,
+        "workflow_lane": WorkflowLane.UNKNOWN,
         "work_kind": WorkKind.ORDINARY,
         "source_branch": "agent/issue-81",
         "worktree": tmp_path / "worktree",
@@ -94,6 +94,7 @@ class FakeDependencies:
         self.head = BASE_SHA
         self.paths: tuple[str, ...] = (TEST_PATH,)
         self.command_result = CommandResult(1, "assert 1 == 2\n", "")
+        self.after_run: Callable[[], None] | None = None
         self.retained: Any | None = None
         self.snapshot_result = TREE_OID
         self.calls: list[tuple[str, object]] = []
@@ -112,10 +113,12 @@ class FakeDependencies:
 
     def run_red_command(self, worktree: Path, argv: tuple[str, ...]) -> CommandResult:
         self.calls.append(("run", (worktree, argv)))
+        if self.after_run is not None:
+            self.after_run()
         return self.command_result
 
-    def snapshot_tests(self, base_sha: str, paths: tuple[str, ...], ref: str) -> str:
-        self.calls.append(("snapshot", (base_sha, paths, ref)))
+    def snapshot_test_tree(self, base_sha: str, paths: tuple[str, ...]) -> str:
+        self.calls.append(("snapshot", (base_sha, paths)))
         return self.snapshot_result
 
     def read_evidence(
@@ -135,34 +138,11 @@ class FakeDependencies:
             current_head=self.current_head,
             changed_paths=self.changed_paths,
             run_red_command=self.run_red_command,
-            snapshot_tests=self.snapshot_tests,
+            snapshot_test_tree=self.snapshot_test_tree,
+            expected_tree_oid=self.snapshot_result,
             read_evidence=self.read_evidence,
             write_evidence=self.write_evidence,
         )
-
-
-def test_red_checkpoint_preview_validates_without_running_or_mutating(
-    tmp_path: Path,
-) -> None:
-    checkpoint = _checkpoint_module()
-    dependencies = FakeDependencies(tmp_path)
-
-    report = checkpoint.create_red_checkpoint(
-        issue_iid=81,
-        request=_request(),
-        apply=False,
-        dependencies=dependencies.value(),
-    )
-
-    assert report.applied is False
-    assert report.action == "would-create"
-    assert report.evidence is None
-    assert [name for name, _value in dependencies.calls] == [
-        "load",
-        "head",
-        "paths",
-        "read",
-    ]
 
 
 def test_red_checkpoint_apply_reruns_failure_then_snapshots_and_records(
@@ -171,21 +151,21 @@ def test_red_checkpoint_apply_reruns_failure_then_snapshots_and_records(
     checkpoint = _checkpoint_module()
     dependencies = FakeDependencies(tmp_path)
 
-    report = checkpoint.create_red_checkpoint(
+    evidence = checkpoint.create_red_checkpoint(
         issue_iid=81,
         request=_request(),
-        apply=True,
         dependencies=dependencies.value(),
     )
 
-    assert report.applied is True and report.action == "created"
-    assert report.evidence == _evidence()
+    assert evidence == _evidence()
     assert [name for name, _value in dependencies.calls] == [
         "load",
         "head",
         "paths",
         "read",
         "run",
+        "head",
+        "paths",
         "snapshot",
         "write",
     ]
@@ -202,11 +182,45 @@ def test_red_checkpoint_rejects_malformed_snapshot_tree_before_evidence_write(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
     assert "snapshot" in [name for name, _value in dependencies.calls]
+    assert "write" not in [name for name, _value in dependencies.calls]
+
+
+def test_red_checkpoint_rejects_test_tree_changed_by_red_before_ref_write(
+    tmp_path: Path,
+) -> None:
+    """The atomic ref is not published when Red changes the candidate tree."""
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+
+    dependencies.after_run = lambda: setattr(dependencies, "snapshot_result", "c" * 40)
+    with pytest.raises(checkpoint.RedCheckpointError, match="candidate tree changed"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=dependencies.value()
+        )
+
+    assert "write" not in [name for name, _value in dependencies.calls]
+
+
+def test_red_checkpoint_rejects_undeclared_path_added_by_red_before_ref_write(
+    tmp_path: Path,
+) -> None:
+    """The transaction rechecks all changed paths after running Red."""
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    dependencies.after_run = lambda: setattr(
+        dependencies, "paths", (TEST_PATH, "tests/test_added.py")
+    )
+
+    with pytest.raises(checkpoint.RedCheckpointError, match="paths changed"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=dependencies.value()
+        )
+
+    assert dependencies.retained is None
     assert "write" not in [name for name, _value in dependencies.calls]
 
 
@@ -215,14 +229,13 @@ def test_red_checkpoint_exact_replay_is_idempotent(tmp_path: Path) -> None:
     dependencies = FakeDependencies(tmp_path)
     dependencies.retained = _evidence()
 
-    report = checkpoint.create_red_checkpoint(
+    evidence = checkpoint.create_red_checkpoint(
         issue_iid=81,
         request=_request(),
-        apply=True,
         dependencies=dependencies.value(),
     )
 
-    assert report.action == "existing" and report.evidence == dependencies.retained
+    assert evidence == dependencies.retained
     assert "run" not in [name for name, _value in dependencies.calls]
     assert "write" not in [name for name, _value in dependencies.calls]
 
@@ -258,7 +271,6 @@ def test_red_checkpoint_rejects_invalid_or_unproven_evidence_before_storage(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(**request_changes),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
@@ -274,7 +286,6 @@ def test_red_checkpoint_rejects_wrong_state_phase_or_identity(tmp_path: Path) ->
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
@@ -292,7 +303,6 @@ def test_red_checkpoint_rejects_conflicting_retained_ref_or_record(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
@@ -324,7 +334,6 @@ def test_red_checkpoint_rejects_every_request_size_boundary_before_side_effects(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(**request_changes),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
@@ -352,7 +361,6 @@ def test_red_checkpoint_rejects_non_normalized_test_path_adversaries(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(argv=("uv", "run", "pytest", *paths), test_paths=paths),
-            apply=True,
             dependencies=dependencies.value(),
         )
 
@@ -402,36 +410,10 @@ def test_red_checkpoint_preflights_total_evidence_size_before_git_snapshot(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=request,
-            apply=True,
             dependencies=dependencies.value(),
         )
 
     assert "snapshot" not in [name for name, _value in dependencies.calls]
-
-
-def test_red_checkpoint_store_is_atomic_idempotent_and_fails_closed(
-    tmp_path: Path,
-) -> None:
-    checkpoint = _checkpoint_module()
-    store = checkpoint.RedCheckpointStore(tmp_path)
-    evidence = _evidence()
-
-    store.write(evidence)
-    store.write(evidence)
-
-    assert store.read(310967, 81, BASE_SHA) == evidence
-    target = tmp_path / "red-checkpoints" / "310967" / "81" / f"{BASE_SHA}.json"
-    assert target.stat().st_mode & 0o777 == 0o600
-    assert not tuple(target.parent.glob(".checkpoint-*"))
-
-    with pytest.raises(checkpoint.RedCheckpointError, match="conflict"):
-        store.write(evidence.model_copy(update={"expected_failure": "different"}))
-    assert store.read(310967, 81, BASE_SHA) == evidence
-    assert not tuple(target.parent.glob(".checkpoint-*"))
-
-    target.write_bytes(b"not-json")
-    with pytest.raises(checkpoint.RedCheckpointError, match="malformed"):
-        store.read(310967, 81, BASE_SHA)
 
 
 def _config(tmp_path: Path) -> AgentWorkConfig:
@@ -446,7 +428,7 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
     )
 
 
-def test_repository_snapshots_declared_tests_with_a_temporary_index_and_local_ref(
+def test_repository_snapshots_declared_tests_with_a_temporary_index(
     tmp_path: Path,
 ) -> None:
     commands: list[tuple[tuple[str, ...], dict[str, Any]]] = []
@@ -459,8 +441,8 @@ def test_repository_snapshots_declared_tests_with_a_temporary_index_and_local_re
             return CommandResult(1, "", "")
         return CommandResult(0, "", "")
 
-    tree = GitRepository(_config(tmp_path), run).snapshot_tests(
-        tmp_path / "worktree", BASE_SHA, (TEST_PATH,), CHECKPOINT_REF
+    tree = GitRepository(_config(tmp_path), run).snapshot_test_tree(
+        tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
     )
 
     assert tree == TREE_OID
@@ -468,10 +450,6 @@ def test_repository_snapshots_declared_tests_with_a_temporary_index_and_local_re
     assert ("read-tree", BASE_SHA) in rendered
     assert ("add", "--", TEST_PATH) in rendered
     assert ("write-tree",) in rendered
-    assert any(
-        command[:2] == ("update-ref", CHECKPOINT_REF) and TREE_OID in command
-        for command in rendered
-    )
     assert all(
         "GIT_INDEX_FILE" in kwargs["environment"]
         for command, kwargs in commands
@@ -482,19 +460,129 @@ def test_repository_snapshots_declared_tests_with_a_temporary_index_and_local_re
     )
 
 
-def test_repository_rejects_a_checkpoint_ref_bound_to_another_tree(
+def test_repository_checkpoint_ref_uses_one_cas_commit_and_exact_readback(
     tmp_path: Path,
 ) -> None:
-    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        if "write-tree" in command:
-            return CommandResult(0, f"{TREE_OID}\n", "")
-        if "rev-parse" in command and CHECKPOINT_REF in " ".join(command):
-            return CommandResult(0, f"{'c' * 40}\n", "")
-        return CommandResult(0, "", "")
+    """Injected Git responses prove the new ref protocol without a subprocess."""
+    evidence = _evidence()
+    commit_oid = "c" * 40
+    commands: list[tuple[str, ...]] = []
+    commit_arguments: tuple[str, ...] | None = None
 
-    with pytest.raises(RepositoryError, match="checkpoint ref"):
-        GitRepository(_config(tmp_path), run).snapshot_tests(
-            tmp_path / "worktree", BASE_SHA, (TEST_PATH,), CHECKPOINT_REF
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        nonlocal commit_arguments
+        commands.append(command[3:])
+        arguments = command[3:]
+        if arguments[:1] == ("commit-tree",):
+            commit_arguments = arguments
+            return CommandResult(0, f"{commit_oid}\n", "")
+        if arguments[:1] == ("update-ref",):
+            return CommandResult(0, "", "")
+        if arguments[:1] == ("rev-parse",) and "--verify" in arguments:
+            return CommandResult(0, f"{commit_oid}\n", "")
+        if arguments[:2] == ("cat-file", "-t"):
+            return CommandResult(0, "commit\n", "")
+        if arguments[:2] == ("cat-file", "-s"):
+            return CommandResult(0, "512\n", "")
+        if arguments[:3] == ("show", "-s", "--format=%B"):
+            assert commit_arguments is not None
+            return CommandResult(0, commit_arguments[5], "")
+        if arguments[:3] == ("show", "-s", "--format=%P"):
+            assert commit_arguments is not None
+            return CommandResult(0, f"{commit_arguments[3]}\n", "")
+        if arguments[:1] == ("rev-parse",) and arguments[-1].endswith("^{tree}"):
+            assert commit_arguments is not None
+            return CommandResult(0, f"{commit_arguments[1]}\n", "")
+        raise AssertionError(arguments)
+
+    repository = GitRepository(_config(tmp_path), run)
+    repository.write_red_checkpoint_ref(tmp_path / "worktree", evidence)
+    assert (
+        repository.read_red_checkpoint_ref(tmp_path / "worktree", 310967, 81, BASE_SHA)
+        == evidence
+    )
+    assert commit_arguments == (
+        "commit-tree",
+        TREE_OID,
+        "-p",
+        BASE_SHA,
+        "-m",
+        evidence.model_dump_json(),
+    )
+    assert ("update-ref", CHECKPOINT_REF, commit_oid, "") in commands
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    (
+        ("missing", None),
+        ("legacy", None),
+        ("oversized", "exceeds the durable bound"),
+        ("malformed", "malformed"),
+    ),
+)
+def test_repository_checkpoint_ref_reader_fails_closed_with_injected_git(
+    tmp_path: Path, scenario: str, message: str | None
+) -> None:
+    """Missing and legacy refs fall through; corrupt commit evidence is rejected."""
+    evidence = _evidence()
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        arguments = command[3:]
+        if arguments[:1] == ("rev-parse",) and "--verify" in arguments:
+            return (
+                CommandResult(1, "", "")
+                if scenario == "missing"
+                else CommandResult(0, "c" * 40 + "\n", "")
+            )
+        if arguments[:2] == ("cat-file", "-t"):
+            return CommandResult(
+                0, "tree\n" if scenario == "legacy" else "commit\n", ""
+            )
+        if arguments[:2] == ("cat-file", "-s"):
+            return CommandResult(
+                0, "65537\n" if scenario == "oversized" else "512\n", ""
+            )
+        if arguments[:3] == ("show", "-s", "--format=%B"):
+            return CommandResult(
+                0,
+                "not json" if scenario == "malformed" else evidence.model_dump_json(),
+                "",
+            )
+        if arguments[:3] == ("show", "-s", "--format=%P"):
+            return CommandResult(0, f"{BASE_SHA}\n", "")
+        if arguments[:1] == ("rev-parse",):
+            return CommandResult(0, f"{TREE_OID}\n", "")
+        raise AssertionError(arguments)
+
+    reader = GitRepository(_config(tmp_path), run)
+    if message is None:
+        assert (
+            reader.read_red_checkpoint_ref(tmp_path / "worktree", 310967, 81, BASE_SHA)
+            is None
+        )
+    else:
+        with pytest.raises(RedCheckpointError, match=message):
+            reader.read_red_checkpoint_ref(tmp_path / "worktree", 310967, 81, BASE_SHA)
+
+
+def test_repository_checkpoint_ref_cas_failure_leaves_no_visible_authority(
+    tmp_path: Path,
+) -> None:
+    """A failed compare-and-swap does not report a retained checkpoint."""
+    evidence = _evidence()
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        arguments = command[3:]
+        if arguments[:1] == ("commit-tree",):
+            return CommandResult(0, "c" * 40 + "\n", "")
+        if arguments[:1] == ("update-ref",):
+            return CommandResult(1, "", "conflict")
+        raise AssertionError(arguments)
+
+    with pytest.raises(RepositoryError, match="ref could not be created"):
+        GitRepository(_config(tmp_path), run).write_red_checkpoint_ref(
+            tmp_path / "worktree", evidence
         )
 
 
@@ -545,7 +633,7 @@ def test_checkpoint_ref_never_changes_one_commit_final_publication_history(
         service_environment={"GITLAB_TOKEN": "dedicated-token"},
     )
     worktree = tmp_path / "worktree"
-    repository.snapshot_tests(worktree, BASE_SHA, (TEST_PATH,), CHECKPOINT_REF)
+    repository.snapshot_test_tree(worktree, BASE_SHA, (TEST_PATH,))
     prepared = repository.prepare_commit(
         worktree,
         "agent/issue-81",
@@ -572,147 +660,6 @@ def _evidence_file() -> bytes:
             "test_paths": [TEST_PATH],
         }
     ).encode()
-
-
-def test_red_checkpoint_cli_preview_and_apply_are_injected_and_json_bounded() -> None:
-    checkpoint = _checkpoint_module()
-    calls: list[tuple[int, Any, bool]] = []
-    output: list[str] = []
-
-    def create(*, issue_iid: int, request: Any, apply: bool) -> Any:
-        calls.append((issue_iid, request, apply))
-        return SimpleNamespace(
-            applied=apply,
-            action="created" if apply else "would-create",
-            evidence=_evidence() if apply else None,
-        )
-
-    arguments = [
-        "red-checkpoint",
-        "create",
-        "--issue-iid",
-        "81",
-        "--evidence-file",
-        "red.json",
-        "--json",
-    ]
-    assert (
-        main(
-            arguments,
-            read_bytes=lambda _path: _evidence_file(),
-            create_red_checkpoint=create,
-            write_stdout=output.append,
-        )
-        == 0
-    )
-    assert calls == [(81, _request(), False)]
-    assert json.loads(output.pop()) == {"action": "would-create", "applied": False}
-
-    assert (
-        main(
-            [*arguments, "--apply"],
-            read_bytes=lambda _path: _evidence_file(),
-            create_red_checkpoint=create,
-            write_stdout=output.append,
-        )
-        == 0
-    )
-    assert calls[-1] == (81, _request(), True)
-    payload = json.loads(output.pop())
-    assert payload["tree_oid"] == TREE_OID
-    assert payload["ref"] == CHECKPOINT_REF
-    assert "output" not in payload
-    assert checkpoint.RedCheckpointRequest.model_validate_json(_evidence_file())
-
-
-def test_red_checkpoint_cli_help_errors_and_boundary_failure_exit_codes(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as help_exit:
-        build_parser().parse_args(["red-checkpoint", "create", "--help"])
-    assert help_exit.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "--evidence-file" in help_text
-    assert "without --apply" in help_text
-    assert "sanitized checkpoint diagnostics" in help_text
-
-    with pytest.raises(SystemExit) as invalid_exit:
-        build_parser().parse_args(["red-checkpoint", "create"])
-    assert invalid_exit.value.code == 2
-
-    checkpoint = _checkpoint_module()
-    errors: list[str] = []
-
-    def fail(**_kwargs: object) -> Any:
-        raise checkpoint.RedCheckpointError("red checkpoint rejected")
-
-    assert (
-        main(
-            [
-                "red-checkpoint",
-                "create",
-                "--issue-iid",
-                "81",
-                "--evidence-file",
-                "red.json",
-            ],
-            read_bytes=lambda _path: _evidence_file(),
-            create_red_checkpoint=fail,
-            write_stderr=errors.append,
-        )
-        == 1
-    )
-    assert errors == ["red checkpoint rejected"]
-
-
-def test_red_checkpoint_cli_debug_never_exposes_rejected_evidence() -> None:
-    secret = "DO-NOT-PRINT-THIS-MARKER"
-    errors: list[str] = []
-
-    exit_code = main(
-        [
-            "red-checkpoint",
-            "create",
-            "--issue-iid",
-            "81",
-            "--evidence-file",
-            "red.json",
-            "--debug",
-        ],
-        read_bytes=lambda _path: json.dumps(
-            {
-                "argv": ["unsafe", secret],
-                "expected_failure": secret,
-                "test_paths": [TEST_PATH],
-            }
-        ).encode(),
-        write_stderr=errors.append,
-    )
-
-    assert exit_code == 1
-    assert errors
-    assert secret not in "\n".join(errors)
-
-
-def test_red_checkpoint_cli_rejects_oversized_raw_evidence_before_parsing() -> None:
-    errors: list[str] = []
-
-    assert (
-        main(
-            [
-                "red-checkpoint",
-                "create",
-                "--issue-iid",
-                "81",
-                "--evidence-file",
-                "red.json",
-            ],
-            read_bytes=lambda _path: b"x" * 32_769,
-            write_stderr=errors.append,
-        )
-        == 1
-    )
-    assert errors == ["red checkpoint evidence file exceeds the input bound"]
 
 
 def test_recovery_prompt_exposes_retained_checkpoint_without_publication_authority() -> (

@@ -23,7 +23,6 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -47,7 +46,7 @@ from .gitlab import (
 )
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
-from .ledger import JsonLedger, LedgerCorrupt, LockBusy, state_home
+from .ledger import LedgerCorrupt, LockBusy, state_home
 from .models import (
     AgentWorkConfig,
     CommandReport,
@@ -57,16 +56,9 @@ from .models import (
 )
 from .ports import CommandRunner
 from .red_checkpoint import (
-    RedCheckpointDependencies,
-    RedCheckpointError,
     RedCheckpointEvidence,
-    RedCheckpointReport,
-    RedCheckpointRequest,
-    RedCheckpointStore,
-    validate_red_checkpoint_request,
 )
-from .red_checkpoint import create_red_checkpoint as default_create_red_checkpoint
-from .repository import GitRepository, RepositoryError, discover_config, run_subprocess
+from .repository import discover_config, run_subprocess
 from .runtime import dispatch as default_dispatch
 from .service_environment import (
     ServiceEnvironmentDependencies,
@@ -193,14 +185,6 @@ class _RegistryCleanupAction(Protocol):
     """Injected read-only registry cleanup assessment boundary."""
 
     def __call__(self, *, apply: bool) -> registry_cleanup.CleanupAssessment: ...
-
-
-class _CreateRedCheckpoint(Protocol):
-    """Injected Red-checkpoint transaction boundary."""
-
-    def __call__(
-        self, *, issue_iid: int, request: RedCheckpointRequest, apply: bool
-    ) -> RedCheckpointReport: ...
 
 
 class _ApplyUpstream(Protocol):
@@ -717,27 +701,6 @@ def build_parser() -> argparse.ArgumentParser:
         debug_help="retain bounded diagnostics on failure",
         json_help="emit the preview envelope or applied broker receipt as stable JSON",
     )
-    red_checkpoint = resources.add_parser(
-        "red-checkpoint", help="verify and retain one failing-test checkpoint"
-    )
-    red_checkpoint_actions = red_checkpoint.add_subparsers(dest="action", required=True)
-    red_checkpoint_create = red_checkpoint_actions.add_parser(
-        "create",
-        help="preview or create one durable Red checkpoint",
-        description=(
-            "Validate and preview without --apply; --apply reruns and retains "
-            "the checkpoint."
-        ),
-    )
-    red_checkpoint_create.add_argument(
-        "--issue-iid", type=_positive_integer, required=True
-    )
-    red_checkpoint_create.add_argument("--evidence-file", type=Path, required=True)
-    _common(
-        red_checkpoint_create,
-        apply_help="rerun and retain the exact verified failing-test checkpoint",
-        debug_help="retain sanitized checkpoint diagnostics on failure",
-    )
     merge_request = resources.add_parser(
         "merge-request", help="preview or publish one merge request"
     )
@@ -1190,7 +1153,6 @@ def main(
     changed_paths: _ChangedPaths | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
-    create_red_checkpoint: _CreateRedCheckpoint | None = None,
     publish_merge_request: _PublishMergeRequest | None = None,
     publish_issue: _PublishIssue | None = None,
     rotate: Callable[..., CredentialRotationReport] = default_rotate_credential,
@@ -1339,98 +1301,6 @@ def main(
             else assessment.human_message
         )
         return assessment.exit_code
-    if parsed.resource == "red-checkpoint" and parsed.action == "create":
-        try:
-            if read_bytes is Path.read_bytes:
-                with parsed.evidence_file.open("rb") as handle:
-                    raw_evidence = handle.read(32_769)
-            else:
-                raw_evidence = read_bytes(parsed.evidence_file)
-            if len(raw_evidence) > 32_768:
-                raise RedCheckpointError(
-                    "red checkpoint evidence file exceeds the input bound"
-                )
-            try:
-                request = RedCheckpointRequest.model_validate_json(raw_evidence)
-            except ValueError as error:
-                raise RedCheckpointError(
-                    "red checkpoint evidence file is invalid"
-                ) from error
-            request = validate_red_checkpoint_request(request)
-            creator = create_red_checkpoint
-            if creator is None:
-                config = discover_config(
-                    current_directory=current_checkout(),
-                    environment=environment,
-                    run_command=run_command,
-                )
-                ledger = JsonLedger(config.state_root, clock=lambda: datetime.now(UTC))
-                repository = GitRepository(
-                    config, run_command, service_environment=environment
-                )
-                store = RedCheckpointStore(config.state_root)
-
-                def read_verified(
-                    project_id: int, issue_iid: int, base_sha: str
-                ) -> RedCheckpointEvidence | None:
-                    evidence = store.read(project_id, issue_iid, base_sha)
-                    if (
-                        evidence is not None
-                        and repository.checkpoint_tree(evidence.ref)
-                        != evidence.tree_oid
-                    ):
-                        raise RedCheckpointError(
-                            "red checkpoint ref does not match retained tree"
-                        )
-                    return evidence
-
-                def snapshot_tests(
-                    base_sha: str, paths: tuple[str, ...], ref: str
-                ) -> str:
-                    record = ledger.load_read_only(parsed.issue_iid)
-                    if record is None:
-                        raise RedCheckpointError("red checkpoint record is unavailable")
-                    return repository.snapshot_tests(
-                        record.worktree, base_sha, paths, ref
-                    )
-
-                creator = partial(
-                    default_create_red_checkpoint,
-                    dependencies=RedCheckpointDependencies(
-                        load_record=ledger.load_read_only,
-                        current_head=repository.head,
-                        changed_paths=repository.changed_paths,
-                        run_red_command=repository.run_red_command,
-                        snapshot_tests=snapshot_tests,
-                        read_evidence=read_verified,
-                        write_evidence=store.write,
-                    ),
-                )
-            report = creator(
-                issue_iid=parsed.issue_iid,
-                request=request,
-                apply=parsed.apply,
-            )
-        except (OSError, RepositoryError, RedCheckpointError, ValueError) as error:
-            message = (
-                str(error)
-                if isinstance(error, RedCheckpointError)
-                else "red checkpoint could not be created"
-            )
-            write_stderr(message)
-            return 1
-        payload: dict[str, object] = {
-            "action": report.action,
-            "applied": report.applied,
-        }
-        if report.evidence is not None:
-            payload.update(report.evidence.model_dump(mode="json"))
-        write_stdout(
-            json.dumps(payload, separators=(",", ":"))
-            if parsed.json
-            else " ".join(f"{key}={value}" for key, value in payload.items())
-        )
-        return 0
     if parsed.resource == "validation":
         try:
             if (parsed.action == "run" and validation_run is None) or (
@@ -1711,7 +1581,7 @@ def main(
             return 1
         if parsed.apply:
             try:
-                submit_worker_result_to_broker(
+                receipt = submit_worker_result_to_broker(
                     cast(Path, parsed.broker_socket),
                     WorkerResultBrokerClientRequest(
                         nonce=cast(str, parsed.broker_nonce),
@@ -1727,7 +1597,7 @@ def main(
             if parsed.json:
                 write_stdout(
                     json.dumps(
-                        {"accepted": True, "nonce": parsed.broker_nonce},
+                        receipt,
                         separators=(",", ":"),
                         sort_keys=True,
                     )

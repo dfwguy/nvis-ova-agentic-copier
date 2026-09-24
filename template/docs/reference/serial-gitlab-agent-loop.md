@@ -59,8 +59,6 @@ agent-work worker-result build --issue-iid IID --input-file PATH
                                [--broker-socket PATH]
                                [--broker-nonce NONCE]
                                [--json] [--apply] [--debug]
-agent-work red-checkpoint create --issue-iid IID --evidence-file PATH
-                                 [--json] [--apply] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -92,7 +90,6 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
-| `red-checkpoint create` | Exact `--issue-iid` and bounded `--evidence-file` | Bare invocation previews; `--apply` verifies and retains one durable Red checkpoint. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, and repeated acceptance criteria | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
@@ -111,55 +108,23 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 
 The tables list the commands and their use.
 
-### `red-checkpoint create`
-
-`red-checkpoint create` retains the failing-test boundary from TDD Red. Its
-strict JSON evidence contains only `argv`, `expected_failure`, and
-`test_paths`. `argv` must begin with the exact `uv run pytest` argument vector.
-The other fields name the expected failure marker and declared changed test
-paths for one positive issue IID.
-
-Without `--apply`, the command checks and previews the intended action. It does
-not run the test command, create a Git ref, write a checkpoint record, change
-the worktree, or change GitLab. The first `--apply` reruns the recorded command
-with the exact argument vector. The command must exit nonzero and emit the
-expected marker. An exact replay verifies and reuses the retained checkpoint
-without rerunning the command. A passing command, missing marker, changed
-input, undeclared test path, or invalid or stale evidence fails closed.
-
-After verification, apply overlays only the declared changed tests onto the
-recorded base tree. It stores the complete tree under an issue-namespaced local
-ref and writes a bounded checkpoint record. The record binds the project, issue,
-branch, base, ref, tree OID, paths, argument vector, nonzero exit code, expected
-marker, and an output digest. It never retains raw command output or a worktree
-path. Green, test review, and the final audit must use that exact identity. The
-ref is local recovery evidence. It is never pushed.
-
-An interrupted retry reuses the checkpoint only when its record, ref, tree,
-paths, and recorded base identity still match. A missing or changed ref, tree
-or path mismatch, stale base identity, or malformed record fails closed. The
-trusted recovery prompt gives a later worker the checkpoint ref, tree, and
-declared paths so it can inspect the same Red boundary. Ordinary `git diff
-<ref>` can inspect the Git-native snapshot.
-
-`--json` returns the same bounded identity and outcome for automation.
-`--debug` does not weaken redaction. Checkpoint validation failures remain
-sanitized and never include rejected evidence values or raw test output.
-
 ### Coding workflow Red boundary
 
-A coarse coding workflow keeps Red tests apart from code changes. The
-controller sees and checks the handoff between two worker runs.
+A coding workflow creates its Red checkpoint while its producer is still live.
+The producer writes bounded input in private scratch and calls the trusted
+builder through its private broker. That one boundary establishes coding-lane
+authority, reruns and validates Red, and persists and ref-binds the checkpoint
+before it accepts a result.
 
 | Condition or step | Controller contract |
 | --- | --- |
-| Fresh coding work without a retained checkpoint | The first worker segment may change only declared test paths. It submits `red_checkpoint_ready` with `change_summary`, `next_action`, and one `red_checkpoint_request` with `argv`, `expected_failure`, and `test_paths`. It does not start Green or authorize a later workflow transition. |
-| Durable lane selection | Before applying the trusted checkpoint transaction, the controller persists `workflow_lane: coding` in the ledger. The applied transaction therefore cannot run against an unknown or inferred lane. |
-| Trusted checkpoint transaction | The controller rejects production-path changes, validates the Red-only result, applies `red-checkpoint create`, then loads the retained evidence through the trusted checkpoint boundary. The returned and loaded evidence must match exactly. |
-| Later coding segment | Only after exact checkpoint verification does the controller start a new worker invocation. Its prompt includes the retained checkpoint identity. That invocation completes Green and the remaining coding workflow for fresh controller verification. |
-| Restart with exact evidence | When the trusted loader finds the exact checkpoint for the project, issue, source branch, and recorded base, the controller reuses it. It does not recreate the checkpoint or repeat the Red-only segment. It starts the later full workflow with the same retained identity. |
-| Failed boundary | A failed Red broker request, parsing, or validation remains a worker-protocol outcome and retains its existing canonical bounded worker diagnostic. Retained-checkpoint precheck, checkpoint-context preparation, request and path verification, checkpoint execution and persistence, and retained-evidence reload mismatch each stop at distinct fixed recovery-safe Red checkpoint stages. Recovery inventory projects the exact allowlisted diagnostic for that stage. The ledger, status, inventory, and issue notes never retain raw worker content, rejected values, exception text, command output, or unsafe paths. The controller preserves the worktree and never starts the later coding segment. A reviewed retry is allowed only for the historical pre-checkpoint test-only shape: ordinary work with the exact retained branch, base, head, and worktree; a clean index; tracked test-only unstaged paths; and no prior workflow, correction, publication, audit, merge, untracked, unmerged, rename, or open-dependency evidence. Apply rechecks the saved plan and resumes `preparing` without creating checkpoint, lane, correction, or publication evidence. All other failed-boundary records remain blocked. |
-| Content lane | Content work keeps its existing single coarse workflow invocation. It does not enter the Red checkpoint transaction. |
+| Fresh coding work | The producer may establish coding authority only through this atomic boundary. There is no pre-checkpoint lane write, Red handoff result, or later controller checkpoint command. |
+| Atomic checkpoint transaction | The broker uses controller-observed candidate identity to reject drift, rerun the declared Red command, require its expected failure marker, and bind the complete test-only tree and evidence in one issue-namespaced checkpoint commit ref. It returns controller-owned checkpoint evidence to the still-live producer. |
+| Canonical correction | The broker returns at most one canonical rejection. It accepts one corrected request only when the controller freshly observes unchanged worktree evidence. A further request, changed paths, stale identity, missing marker, passing command, malformed input, or time-limit failure fails closed. |
+| Retained authority | A retained exact checkpoint binds the coding lane to its project, issue, branch, base, ref, tree, paths, test command, expected marker, nonzero exit, and output digest. It is local recovery evidence and is never pushed. |
+| Resume | The controller freshly reloads and verifies the checkpoint before a resumed coding workflow. Missing, stale, malformed, or mismatched identity stops the workflow. It does not recreate a checkpoint from model output. |
+| Failure and retention | The controller preserves the worktree and records only bounded sanitized diagnostics. It retains no raw worker content, rejected values, exception text, command output, unsafe paths, or obsolete Red-stage transport state. |
+| Content lane | Content work does not establish a Red checkpoint. |
 
 ### `merge-request publish`
 
@@ -432,20 +397,22 @@ accepted for consistent invocation and changes nothing.
 
 `worker-result build` validates one `WorkerResultBuildInput` object during the
 live worker session and builds one controller-owned worker result.
+The broker is small. Its rules are strict.
+It takes one request. It may take one fix. It keeps its own state.
 
 | Worker-result action, field, or outcome | Contract |
 | --- | --- |
-| Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object from the live workflow owner’s private scratch file. The object is untrusted builder input. The broker injects the current record, expected changed paths, and checkpoint dependencies; the worker cannot provide them. |
-| Private broker | `AgentInvoker` creates one private Unix-socket broker in a fresh private `/tmp` directory for each invocation. It gives the worker the socket only for the live builder request. The worker receives no ledger directory, state-root path, or writable controller handoff artifact. |
-| Request limit | The broker accepts one request. A canonical rejection returns directly to the live producer for at most one corrected request within the existing worker budget. A third request fails closed. |
+| Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object from private scratch owned by the live workflow owner. The input is untrusted. The broker injects the record, changed paths, and checkpoint dependencies. |
+| Private broker | `AgentInvoker` creates a private Unix-socket broker in a fresh `/tmp` directory for each invocation. It gives the worker the socket for the live builder request only. The worker receives no ledger directory, state-root path, or writable handoff artifact. |
+| Request limit | The broker accepts one request. A standard rejection returns to the live producer for at most one corrected request in the worker budget. A third request fails closed. |
 | Builder time bound | Each request has the worker time still remaining. The builder cannot extend the worker budget. Timeout, deletion, race, oversize input, malformed framing, or an extra request fails closed. |
-| Controller-owned result | The broker constructs the accepted result in controller memory. It writes no durable acceptance record and exposes no accepted artifact to the worker. Model standard output and raw input are never controller state. |
-| Controller verification | After the worker exits, the controller freshly verifies the nonce, project, issue, ledger revision, branch, source SHA, state, phase, envelope, and observed changed paths before its normal ledger transition. Missing, malformed, stale, or mismatched evidence fails closed. |
+| Trusted result | The broker builds the accepted result in controller memory. It writes no saved acceptance record and exposes no accepted artifact to the worker. Model output and raw input are never controller state. |
+| Controller verification | After exit, the controller verifies the nonce, project, issue, ledger revision, branch, source SHA, state, phase, envelope, and changed paths. Missing, malformed, stale, or mismatched evidence fails closed. |
 | Cleanup | The controller removes the private scratch and socket directory for every outcome. A deletion or cleanup failure rejects the result. |
 | Standard error and debug | Human status and diagnostics are sanitized. They never include credentials, environment values, worker prose, prompts, raw input, or transcripts. |
 | Mutation boundary | Broker acceptance alone changes no ledger, Git, GitLab, publication, or tracked worktree content. The exact verified ledger transition remains the durable proof. |
 | Preview stdout | Without `--json`, stdout is one concise human-readable status line. With `--json`, stdout is exactly one `WorkerResultEnvelope` JSON object. Preview output is diagnostic and is never controller state. |
-| Applied JSON stdout | `--apply --json` emits exactly one canonical object containing `accepted: true` and the exact broker nonce after broker acceptance. |
+| Applied JSON stdout | `--apply --json` emits one standard object with `accepted: true` and the broker nonce. A Red acceptance also includes exact trusted `red_checkpoint` evidence. |
 | Success | Exits `0`. |
 | Validation or runtime failure | Exits `1`. |
 | Argparse usage failure | Exits `2`. |
@@ -462,7 +429,7 @@ live worker session and builds one controller-owned worker result.
 | `post-publication` | Gets `complete` only for `ready_to_publish`. Failed, actionable, and other non-success results remain `rejected`. |
 | Successful post-publication assessment | Advances the verified exact-source handoff to `awaiting-human`. The `$pipeline-performance-judge` role and its prose remain AI discussion context rather than worker-result fields. |
 | Malformed, contradictory, failed, or actionable assessment | Keeps existing rejection and feedback handling; it does not advance that handoff. |
-| Red-only coding result | `red_checkpoint_ready` is valid only for a coarse coding `workflow` without exact retained Red evidence. It has the required `change_summary`, `next_action`, and one `red_checkpoint_request`. It has no merge-request draft, split plan, or error code, and it cannot advance to publication. |
+| Red coding result | `red_checkpoint_ready` supplies the bounded `red_checkpoint_request`. While the producer is live, broker acceptance reruns and validates Red and returns controller-owned checkpoint evidence. It does not create a post-exit handoff. |
 | Completed ordinary workflow lane | Use `coding` or `content` with that lane's applicable controller-owned checkpoints and final interface. |
 | Workflow evidence | The controller verifies the applicable program-owned checkpoints and final interface before a transition. Model-authored specialist receipts and audit prose cannot authorize a result. |
 | Coarse and legacy route | New coarse `WORKFLOW` results use the broker boundary. A legacy recorded phased route remains readable and finishes its recorded route. |
@@ -473,7 +440,7 @@ The other result kinds preserve their distinct controller transitions:
 
 | Result kind | Use and needed intent |
 | --- | --- |
-| `red_checkpoint_ready` | A tests-only coding result. Supply the required `change_summary`, `next_action`, and exact `red_checkpoint_request`. Do not supply a merge-request draft, split plan, or error code. The controller verifies and retains its checkpoint before any later coding segment. |
+| `red_checkpoint_ready` | A tests-only coding result. Supply the required `change_summary`, `next_action`, and exact `red_checkpoint_request`. The broker verifies and retains its checkpoint synchronously before accepting the result. Do not supply a merge-request draft, split plan, or error code. |
 | `retryable` | A bounded transient outcome. Include the applicable error code and redacted summary when available. The controller schedules ordinary retained-worktree recovery. |
 | `needs_human` | A blocker requiring human authority or a decision. Provide the bounded redacted summary, next action, and applicable error code. |
 | `split_required` | An oversized fresh workflow. Use `workflow_lane: unknown` and a `split_plan` of 2–25 ordered, independently mergeable slices. It needs no receipts, audit, merge-request draft, or error code. |
@@ -862,15 +829,17 @@ The oneshot service has a bounded outer limit. `TimeoutStartSec=190min`.
 While the workflow owner is live, it stores one strict
 `WorkerResultBuildInput` JSON object in private scratch and invokes the trusted
 controller-checkout `worker-result build` helper through its private broker.
-The broker returns a canonical rejection to that same producer for one bounded
-correction. It keeps an accepted result in controller memory. It does not write
-a handoff artifact. Final messages and all model standard output, including
-output from a successful worker process, are never controller state or a
-handoff result.
+For coding work, that invocation also establishes lane authority and performs
+the atomic Red checkpoint transaction. The broker returns a canonical rejection
+to that same producer for one bounded correction only when controller-observed
+worktree evidence has not changed. It keeps accepted results and checkpoint
+evidence in controller memory. It does not write a handoff artifact. Final
+messages and all model standard output, including output from a successful
+worker process, are never controller state or a handoff result.
 
 | Envelope field or check | Contract |
 | --- | --- |
-| Result | `red_checkpoint_ready` for the coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, or `split_required` for a workflow-owning result. |
+| Result | `red_checkpoint_ready` for the synchronous coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, or `split_required` for a workflow-owning result. Broker acceptance adds verified checkpoint evidence before it returns `red_checkpoint_ready`. |
 | Content | Include bounded worker intent, diagnostic, and next action. Specialist receipts and audit prose are discussion context only. |
 | Trusted runner | Before changing state, freshly check the nonce, ledger, configured numeric project, revision, branch, source SHA, state, phase, accepted envelope, observed changed paths, and applicable controller-owned checkpoints. |
 | Broker result | `AgentInvoker` accepts one request, then at most one corrected request after a canonical rejection. The broker keeps an accepted result only in controller memory. |

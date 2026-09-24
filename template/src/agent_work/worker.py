@@ -27,7 +27,7 @@ from time import monotonic
 from types import UnionType
 from typing import Literal, Protocol, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -120,6 +120,7 @@ class WorkerResultArtifact(BoundaryModel):
     source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     changed_paths: tuple[str, ...] = Field(max_length=128)
     envelope: WorkerResultEnvelope
+    red_checkpoint: RedCheckpointEvidence | None = None
 
     @field_validator("changed_paths")
     @classmethod
@@ -128,6 +129,28 @@ class WorkerResultArtifact(BoundaryModel):
         if value != tuple(sorted(set(value))):
             raise ValueError("changed paths must be sorted and unique")
         return value
+
+    @model_validator(mode="after")
+    def validate_checkpoint_presence(self) -> WorkerResultArtifact:
+        """Require a checkpoint only on the producer-owned Red transition."""
+        is_red = self.envelope.result_kind == "red_checkpoint_ready"
+        if is_red != (self.red_checkpoint is not None):
+            raise ValueError("red checkpoint does not match result kind")
+        if self.red_checkpoint is not None:
+            request = self.envelope.red_checkpoint_request
+            if (
+                request is None
+                or self.envelope.workflow_lane is not WorkflowLane.CODING
+                or self.red_checkpoint.project_id != self.project_id
+                or self.red_checkpoint.issue_iid != self.issue_iid
+                or self.red_checkpoint.source_branch != self.source_branch
+                or self.red_checkpoint.base_sha != self.source_sha
+                or self.red_checkpoint.argv != request.argv
+                or self.red_checkpoint.expected_failure != request.expected_failure
+                or self.red_checkpoint.test_paths != request.test_paths
+            ):
+                raise ValueError("red checkpoint identity does not match artifact")
+        return self
 
 
 @dataclass(frozen=True)
@@ -375,10 +398,37 @@ class WorkerResultBrokerSession:
                             "worker_result_broker", "request was not accepted"
                         )
                     self._artifact = artifact
+                    receipt: dict[str, object] = {
+                        "accepted": True,
+                        "nonce": self.request.nonce,
+                    }
+                    try:
+                        raw_artifact = json.loads(artifact)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raw_artifact = None
+                    if (
+                        isinstance(raw_artifact, dict)
+                        and "red_checkpoint" in raw_artifact
+                    ):
+                        try:
+                            typed_artifact = WorkerResultArtifact.model_validate(
+                                raw_artifact
+                            )
+                        except ValidationError as error:
+                            raise WorkerProtocolError(
+                                "worker_result_broker", "malformed artifact"
+                            ) from error
+                        if typed_artifact.red_checkpoint is None:
+                            raise WorkerProtocolError(
+                                "worker_result_broker", "malformed artifact"
+                            )
+                        receipt["red_checkpoint"] = (
+                            typed_artifact.red_checkpoint.model_dump(mode="json")
+                        )
                     _write_frame(
                         connection,
                         json.dumps(
-                            {"accepted": True, "nonce": self.request.nonce}
+                            receipt, separators=(",", ":"), sort_keys=True
                         ).encode(),
                     )
                 except WorkerProtocolError as error:
@@ -505,7 +555,7 @@ def submit_worker_result_to_broker(
     timeout_seconds: int,
     socket_factory: Callable[..., socket.socket] = socket.socket,
     clock: Callable[[], float] = monotonic,
-) -> None:
+) -> dict[str, object]:
     deadline = clock() + timeout_seconds
     try:
         with socket_factory(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -554,7 +604,7 @@ def submit_worker_result_to_broker(
     if not isinstance(response, dict) or response.get("nonce") != nonce:
         raise WorkerProtocolError("worker_result_broker", "response identity mismatch")
     if response.get("accepted") is True:
-        return
+        return response
     diagnostic = response.get("diagnostic")
     if isinstance(diagnostic, str) and ": " in diagnostic:
         field, reason = diagnostic.split(": ", 1)
@@ -933,6 +983,7 @@ def build_worker_result_artifact(
     *,
     nonce: str,
     changed_paths: tuple[str, ...],
+    red_checkpoint: RedCheckpointEvidence | None = None,
 ) -> bytes:
     """Build a controller-memory result artifact bound to its live request."""
     if record.source_sha is None:
@@ -947,6 +998,7 @@ def build_worker_result_artifact(
             source_sha=record.source_sha,
             changed_paths=tuple(sorted(set(changed_paths))),
             envelope=result,
+            red_checkpoint=red_checkpoint,
         )
     except ValidationError as error:
         raise WorkerProtocolError(
@@ -955,12 +1007,12 @@ def build_worker_result_artifact(
     return artifact.model_dump_json(exclude_none=True).encode()
 
 
-def parse_worker_result_artifact(
+def parse_worker_result_accepted_artifact(
     payload: bytes | None,
     *,
     request: WorkerResultBrokerRequest,
     changed_paths: tuple[str, ...],
-) -> WorkerResultEnvelope:
+) -> WorkerResultArtifact:
     """Freshly verify a broker artifact before applying a ledger transition."""
     if payload is None:
         raise WorkerProtocolError("worker_result_broker", "result was not accepted")
@@ -986,7 +1038,19 @@ def parse_worker_result_artifact(
         raise WorkerProtocolError("worker_result_broker", "identity mismatch")
     if artifact.changed_paths != tuple(sorted(set(changed_paths))):
         raise WorkerProtocolError("worker_result_broker", "changed-path mismatch")
-    return artifact.envelope
+    return artifact
+
+
+def parse_worker_result_artifact(
+    payload: bytes | None,
+    *,
+    request: WorkerResultBrokerRequest,
+    changed_paths: tuple[str, ...],
+) -> WorkerResultEnvelope:
+    """Return the envelope after verifying its controller-owned artifact."""
+    return parse_worker_result_accepted_artifact(
+        payload, request=request, changed_paths=changed_paths
+    ).envelope
 
 
 def _json_size(value: object) -> int:
@@ -1405,7 +1469,7 @@ def build_worker_prompt(
         "Store exactly one strict WorkerResultBuildInput JSON object in private scratch and invoke "
         f"`{worker_command} worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH --broker-socket PATH --broker-nonce "
-        f"{worker_result_broker.nonce if worker_result_broker is not None else 'NONCE'} --apply`. The live broker returns one canonical rejection "
+        f"{worker_result_broker.nonce if worker_result_broker is not None else 'NONCE'} --apply --json`. The live broker returns one canonical rejection "
         "for one corrected request and keeps acceptance in controller memory. "
     )
     prompt = (
