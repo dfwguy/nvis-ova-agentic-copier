@@ -428,6 +428,9 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
 
 1. **Know the need** — Restate it in your own words. Ask the user about any
    unclear point.
+   For the initial design of a new Web UI application with external data
+   collection and a UI or CLI, confirm whether the optional
+   `.agents/architecture.md` guide applies. Load it only when it does.
 2. **Read the codebase** — Read the files that show its shape, norms, and limits.
 3. **Identify constraints**:
    - For coding design, read `.agents/guidance/code-quality.md`. It owns the
