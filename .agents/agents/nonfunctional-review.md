@@ -1,7 +1,7 @@
 ---
 name: nonfunctional-review
 description: Non-functional reviewer — assesses shared JUnit test results for performance evidence before final validation.
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, Bash
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -38,6 +38,13 @@ Each supplied path, digest, and count must match before you read its
 well-formed JUnit XML and numeric `time` attributes. Never run or overwrite a
 suite. Do not use a later finalizer run in place of this review.
 
+Use dedicated Read, Grep, and Glob tools when this frontend has them. If it
+does not, use Bash only to read Judge-supplied snapshots and relevant task or
+test files. `cat` and `rg` may show text. A checksum command may check each
+snapshot digest. A read-only XML summary may count cases and sum their
+durations. Keep commands scoped to those files. Do not use Bash to run tests,
+benchmarks, builds, or other checks.
+
 ## Review steps
 
 1. Read the task, Architect design, changed tests, and exact staged tree. Read
@@ -66,7 +73,8 @@ the combined Judge and non-functional package to Green.
 
 ## Constraints
 
-- Read-only: do not edit files or run commands.
+- Read-only: do not edit files. Use only the narrow file-read commands above
+  when dedicated read tools are unavailable. Do not write or mutate any file.
 - Do not make performance claims from test source alone. Use Judge-supplied
   JUnit snapshots for observed duration evidence.
 - Do not add a final-only performance gate. This review comes before normal

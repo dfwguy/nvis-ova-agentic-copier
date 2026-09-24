@@ -59,6 +59,16 @@ agent-work worker-result build --issue-iid IID --input-file PATH
                                [--broker-socket PATH]
                                [--broker-nonce NONCE]
                                [--json] [--apply] [--debug]
+bin/agent-work-from-checkout review-handoff begin --worktree PATH
+    [--issue-iid IID] [--apply] [--json]
+bin/agent-work-from-checkout review-handoff submit --worktree PATH
+    --session-id ID --role '$tdd-green' --review-version N
+    --kind correction-ledger --input-file PATH [--apply] [--json]
+bin/agent-work-from-checkout review-handoff manifest --worktree PATH
+    --session-id ID [--expected-manifest-sha256 SHA256] [--json]
+bin/agent-work-from-checkout review-handoff read --worktree PATH
+    --session-id ID --receipt-id ID
+    [--expected-manifest-sha256 SHA256] [--json]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -91,6 +101,10 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
+| `review-handoff begin` | Candidate worktree; optional issue number matching its branch | `--apply` saves one candidate-bound session after successful Judge validation. |
+| `review-handoff submit` | Worktree, session ID, Green role, review version, correction-ledger kind, and private input file | Green calls `--apply` while active to save its full bounded ledger. |
+| `review-handoff manifest` | Worktree and session ID | Reads the current receipt set and its digest. Optional expected digest rejects drift. |
+| `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project; `--json` returns its result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
@@ -108,6 +122,39 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | Open factory MR awaiting review | `AGENT_WORK_FACTORY_USERNAME` is needed and must equal the authenticated GitLab service username. The loop reads bounded general comments and inline discussion replies. New human feedback wakes only that issue for existing-MR remediation. It acknowledges no-change feedback once. Code changes reuse the same MR and preserve its title, description, and closing reference. |
 
 The tables list the commands and their use.
+
+### Interactive correction-ledger handoff
+
+The active controller checkout owns the `review-handoff` commands. Point them
+at the candidate worktree. They need a numeric configured project ID and a bare
+`GITLAB_HOST`. The controller and candidate must have matching, credential-free
+HTTPS `origin` URLs on that host. An archived controller checkout also needs
+its matching `origin` metadata. After Judge succeeds, `begin --apply` opens a
+session bound to the branch, staged tree, and Judge JUnit digests. An optional
+issue number must match the branch name; this does not prove GitLab ownership.
+`submit --apply` stores
+Green's complete bounded correction ledger while Green is still active. Bare
+`begin` and `submit` preview the operation. The `manifest` and `read` commands
+are read-only.
+
+The JSON result from `begin` has `session_id` and `applied`; `submit` returns
+`receipt_id`, `sha256`, and `applied`. Green sends its parent those IDs and
+the manifest digest. The manifest names the project, issue association,
+branch, candidate tree, JUnit digests, and each receipt's role, review
+version, kind, ID, and SHA-256. Finalizer reads the manifest and ledger
+directly. `--expected-manifest-sha256` rejects a changed receipt set.
+Finalizer also checks the candidate tree, Judge evidence, and applicable Red
+identity before using the ledger. A plain `read` prints safe UTF-8 text;
+`read --json` returns exact bytes as `content_base64`.
+Specialist review results remain direct agent-to-agent handoffs. The saved
+ledger is context for the review, not authorization for a program transition.
+
+For recovery, read the manifest and Green's ledger from the named session.
+Use the saved manifest digest with `manifest` and `read` to catch drift.
+If the ledger is missing or stale, Green must submit a fresh ledger while
+active. A changed candidate needs a new Judge result and session. Keep older
+sessions for diagnosis; do not copy their prose into a new submission.
+Finalization needs the current ledger and applicable specialist reviews.
 
 ### Coding workflow Red boundary
 

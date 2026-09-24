@@ -134,6 +134,15 @@ checks run before Non-functional Reviewer and specialist reviews. The [serial
 GitLab agent-loop reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status)
 defines run and read-only status commands.
 
+Long review cycles use context. In interactive work, Green saves its full,
+bounded correction ledger through the trusted controller checkout while Green
+is still active. Its parent carries a short reference and digest. Finalizer
+reads the saved ledger directly and checks the candidate tree and Judge
+evidence. Specialist reviews still pass directly between agents. The saved
+ledger is workflow context. It does not replace Judge or grant approval or
+merge power. The [review-handoff reference](../reference/serial-gitlab-agent-loop.md#interactive-correction-ledger-handoff)
+lists the commands and recovery checks.
+
 During finalization, Finalizer may use `--no-verify`. It may do so only after matching
 that evidence. The serial runner uses its normal commit path. Pipeline review
 checks the exact source commit after publication. It never replaces Judge.

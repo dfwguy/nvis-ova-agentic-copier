@@ -88,7 +88,9 @@ not add untested functionality.
    at once when slots allow. Include `$license-checker`. Give
    each its related diff. Give each its instructions. Give each current
    test/JUnit evidence. Reviewers are read-only. Wait for every result. Wait
-   even when one rejects. The first Quality Judge review must be independent.
+   even when one rejects. Keep each complete reviewer receipt as a direct
+   AI-to-AI handoff. Do not ask reviewers to write files or call the ledger
+   store. The first Quality Judge review must be independent.
    It must be complete. It covers the exact staged tree. Green cannot
    self-certify it. Give Test Judge the accepted mode-specific Red checkpoint
    and ordinary Git diff from that checkpoint to this Green candidate.
@@ -144,7 +146,20 @@ not add untested functionality.
    The focused receipt lists prior sections. Mark those still supported
    unchanged. It also lists scope reviewed fresh. The prior sections come from
    the complete receipt.
-7. **Return a cycle ledger to Architect.** Report Red/Green evidence. Report
+7. **Return a cycle ledger to Architect.** In interactive work, write the full
+   correction ledger in private scratch. While live, run the separate trusted
+   controller checkout's `bin/agent-work-from-checkout review-handoff
+   submit --worktree PATH --session-id ID --role '$tdd-green'
+   --review-version N --kind correction-ledger --input-file PATH --apply
+   --json`. You may fix one canonical rejection once. Give the accepted
+   ledger ref, its SHA-256, the session ID, and saved manifest SHA-256.
+   Read the full ledger back with `review-handoff manifest --worktree PATH
+   --session-id ID --expected-manifest-sha256 SHA --json` and `review-handoff
+   read --worktree PATH --session-id ID --expected-manifest-sha256 SHA
+   --receipt-id ID --json`. Stop if the saved hash is lost or changed. This
+   ledger is AI review context. It grants no program authority. Keep the full
+   specialist reviews. Send them straight to Architect and Finalizer. In serial
+   work, keep the current ledger handoff. Report Red/Green evidence. Report
    the retained checkpoint identity and Red-to-Green Git diff. Report changed
    paths and documentation status. Report each judge verdict, repairs,
    unresolved findings, and current JUnit evidence. For an extra Architect-authorized

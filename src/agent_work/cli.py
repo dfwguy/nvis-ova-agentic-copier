@@ -12,13 +12,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sys
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -26,6 +29,7 @@ from contextlib import AbstractContextManager, contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
+from urllib.parse import urlparse
 
 from . import (
     registry_cleanup,
@@ -41,7 +45,11 @@ from .credential_rotation import (
     atomic_write_environment,
 )
 from .credential_rotation import rotate_credential as default_rotate_credential
-from .domain import DEFAULT_MAX_ACTIVATION_SECONDS, CommandRequest
+from .domain import (
+    DEFAULT_MAX_ACTIVATION_SECONDS,
+    HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+    CommandRequest,
+)
 from .gitlab import (
     GitLabError,
     GitLabIssuePublisher,
@@ -51,6 +59,7 @@ from .gitlab import (
 )
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
+from .interactive_receipts import AtomicObjectStore, read_bounded_regular
 from .ledger import LedgerCorrupt, LockBusy, state_home
 from .models import (
     AgentWorkConfig,
@@ -64,6 +73,14 @@ from .red_checkpoint import (
     RedCheckpointEvidence,
 )
 from .repository import discover_config, run_subprocess
+from .review_handoff import (
+    ReviewHandoffDependencies,
+    ReviewHandoffError,
+    begin_review_handoff,
+    read_review_handoff,
+    review_handoff_manifest,
+    submit_review_handoff,
+)
 from .runtime import dispatch as default_dispatch
 from .service_environment import (
     ServiceEnvironmentDependencies,
@@ -481,6 +498,15 @@ def _candidate_tree(value: str) -> str:
     return value
 
 
+def _sha256_digest(value: str) -> str:
+    """Require one canonical SHA-256 digest at the CLI boundary."""
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise argparse.ArgumentTypeError(
+            "digest must be 64 lowercase hexadecimal characters"
+        )
+    return value
+
+
 def _broker_nonce(value: str) -> str:
     """Require one bounded lowercase nonce at the CLI boundary."""
     if re.fullmatch(r"[0-9a-f]{32}", value) is None:
@@ -763,6 +789,40 @@ def build_parser() -> argparse.ArgumentParser:
         validation_status,
         apply_help="accepted for command consistency; validation status remains read-only",
     )
+    handoff = resources.add_parser(
+        "review-handoff", help="retain Green's interactive correction ledger"
+    )
+    handoff_actions = handoff.add_subparsers(dest="action", required=True)
+    for action in ("begin", "submit", "manifest", "read"):
+        command = handoff_actions.add_parser(action, help=f"{action} a ledger handoff")
+        command.add_argument("--worktree", type=Path, required=True)
+        if action == "begin":
+            command.add_argument("--issue-iid", type=_positive_integer)
+        else:
+            command.add_argument("--session-id", required=True)
+        if action == "submit":
+            command.add_argument("--role", choices=("$tdd-green",), required=True)
+            command.add_argument(
+                "--review-version", type=_positive_integer, required=True
+            )
+            command.add_argument(
+                "--kind", choices=("correction-ledger",), required=True
+            )
+            command.add_argument("--input-file", type=Path, required=True)
+        if action == "read":
+            command.add_argument("--receipt-id", required=True)
+        if action in {"manifest", "read"}:
+            command.add_argument(
+                "--expected-manifest-sha256",
+                type=_sha256_digest,
+                help="fail if the current manifest differs from the saved digest",
+            )
+        _common(
+            command,
+            apply_help="persist the ledger handoff"
+            if action in {"begin", "submit"}
+            else "accepted for read-only inspection",
+        )
     repository = resources.add_parser("repository", help="inspect repository policy")
     repository_actions = repository.add_subparsers(dest="action", required=True)
     cleanup_policy = repository_actions.add_parser(
@@ -787,6 +847,202 @@ def _read_validation_artifact(path: Path) -> bytes:
     """Read at most one bounded fixed validation artifact."""
     with path.open("rb") as handle:
         return handle.read(1_048_577)
+
+
+def _review_handoff_dependencies(
+    *,
+    worktree: Path,
+    issue_iid: int | None,
+    environment: Mapping[str, str],
+    run_command: CommandRunner,
+) -> ReviewHandoffDependencies:
+    """Wire candidate observation to a private controller-side object store."""
+    candidate = worktree.resolve(strict=True)
+
+    git_environment = {
+        key: value for key, value in environment.items() if not key.startswith("GIT_")
+    }
+    git_environment["GIT_OPTIONAL_LOCKS"] = "0"
+
+    def git_read(
+        checkout: Path,
+        *args: str,
+        command_environment: Mapping[str, str] | None = None,
+    ) -> str:
+        result = run_command(
+            ("git", "-C", str(checkout), *args),
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            environment=command_environment or git_environment,
+        )
+        if result.returncode != 0:
+            raise ReviewHandoffError("candidate Git observation failed")
+        return result.stdout.strip()
+
+    controller = Path(__file__).resolve().parents[2]
+    host = environment.get("GITLAB_HOST", "")
+    if not host or "://" in host or "/" in host or ":" in host:
+        raise ReviewHandoffError("GITLAB_HOST must be a bare hostname")
+
+    def origin_identity(checkout: Path) -> tuple[str, str]:
+        origin = git_read(checkout, "remote", "get-url", "origin")
+        parsed = urlparse(origin)
+        origin_host = parsed.hostname
+        path = parsed.path.removesuffix(".git").strip("/")
+        if (
+            parsed.scheme != "https"
+            or origin_host is None
+            or origin_host != host
+            or parsed.username
+            or parsed.password
+            or parsed.port is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.params
+            or not path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise ReviewHandoffError(
+                "review handoff origin must be credential-free project HTTPS"
+            )
+        return origin_host, path
+
+    if origin_identity(candidate) != origin_identity(controller):
+        raise ReviewHandoffError("candidate origin differs from trusted controller")
+
+    git_directory = Path(git_read(candidate, "rev-parse", "--absolute-git-dir"))
+    if not git_directory.is_absolute():
+        raise ReviewHandoffError("candidate Git directory is not absolute")
+    key = hashlib.sha256(str(git_directory.resolve()).encode()).hexdigest()
+    state = state_home(environment=environment)
+    validation_root = state / "agent-work-validation" / key
+    store = AtomicObjectStore(state / "agent-work-review-handoff" / key)
+    try:
+        project_id = int(environment["GITLAB_PROJECT_ID"])
+    except (KeyError, ValueError) as error:
+        raise ReviewHandoffError("numeric project ID is required") from error
+    if project_id <= 0:
+        raise ReviewHandoffError("numeric project ID is required")
+
+    def observe() -> dict[str, object]:
+        index_path = Path(git_read(candidate, "rev-parse", "--git-path", "index"))
+        objects_path = Path(git_read(candidate, "rev-parse", "--git-path", "objects"))
+        if not index_path.is_absolute() or not objects_path.is_absolute():
+            raise ReviewHandoffError("candidate Git paths are not absolute")
+        index_bytes = read_bounded_regular(index_path, limit=64 * 1024 * 1024)
+        if index_bytes is None or len(index_bytes) > 64 * 1024 * 1024:
+            raise ReviewHandoffError("candidate Git index is missing or oversized")
+        try:
+            shared_objects = objects_path.resolve(strict=True)
+        except OSError as error:
+            raise ReviewHandoffError("candidate Git objects are unavailable") from error
+        if not shared_objects.is_dir() or ":" in str(shared_objects):
+            raise ReviewHandoffError("candidate Git objects path is invalid")
+        with tempfile.TemporaryDirectory(
+            prefix="agent-work-review-tree-", dir="/tmp"
+        ) as scratch_name:
+            scratch = Path(scratch_name)
+            private_index = scratch / "index"
+            descriptor = os.open(
+                private_index,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(index_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            private_objects = scratch / "objects"
+            private_objects.mkdir(mode=0o700)
+            tree = git_read(
+                candidate,
+                "write-tree",
+                command_environment={
+                    **git_environment,
+                    "GIT_INDEX_FILE": str(private_index),
+                    "GIT_OBJECT_DIRECTORY": str(private_objects),
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(shared_objects),
+                },
+            )
+        if read_bounded_regular(index_path, limit=64 * 1024 * 1024) != index_bytes:
+            raise ReviewHandoffError("candidate Git index changed during observation")
+        branch = git_read(candidate, "symbolic-ref", "--short", "HEAD")
+        if re.fullmatch(r"[0-9a-f]{40}", tree) is None or not branch:
+            raise ReviewHandoffError("candidate Git identity is malformed")
+        issue_match = re.search(
+            r"(?:^|/)(?:issue-?|agent/issue-)([1-9][0-9]*)(?:-|$)", branch
+        )
+        observed_issue = int(issue_match.group(1)) if issue_match else None
+        if issue_iid is not None and issue_iid != observed_issue:
+            raise ReviewHandoffError(
+                "requested issue differs from branch-derived association"
+            )
+        record_path = validation_root / f"{tree}.json"
+        raw = read_bounded_regular(record_path)
+        if raw is None or len(raw) > 1_048_576:
+            raise ReviewHandoffError("successful Judge validation is missing")
+        try:
+            record = json.loads(raw)
+            if not isinstance(record, dict):
+                raise TypeError("invalid validation record")
+            artifacts = record["junit_artifacts"]
+            if (
+                type(record["schema_version"]) is not int
+                or record["schema_version"] != 2
+                or record["candidate_tree"] != tree
+                or record["state"] != "terminal-success"
+                or type(record["returncode"]) is not int
+                or record["returncode"] != 0
+                or not isinstance(artifacts, list)
+                or len(artifacts) != 2
+            ):
+                raise ValueError("invalid validation record")
+            digests = []
+            for index, artifact in enumerate(artifacts):
+                if not isinstance(artifact, dict):
+                    raise TypeError("invalid JUnit artifact")
+                artifact_fields = cast("Mapping[str, object]", artifact)
+                expected_environment = ("py311", "py314")[index]
+                expected_path = (
+                    validation_root / tree / f"test-results-{expected_environment}.xml"
+                )
+                artifact_path = artifact_fields.get("path")
+                digest = artifact_fields.get("sha256")
+                count = artifact_fields.get("test_count")
+                if (
+                    artifact_fields.get("environment") != expected_environment
+                    or not isinstance(artifact_path, str)
+                    or Path(artifact_path) != expected_path
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                    or type(count) is not int
+                    or count < 0
+                ):
+                    raise ValueError("invalid JUnit identity")
+                content = read_bounded_regular(expected_path)
+                if content is None or hashlib.sha256(content).hexdigest() != digest:
+                    raise ValueError("invalid JUnit digest")
+                digests.append(f"{expected_environment}:{digest}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ReviewHandoffError("Judge evidence is malformed or stale") from error
+        return {
+            "project_id": project_id,
+            "issue_iid": observed_issue,
+            "branch": branch,
+            "worktree": str(candidate),
+            "candidate_tree": tree,
+            "validation_state": "terminal-success",
+            "junit_digests": tuple(digests),
+        }
+
+    return ReviewHandoffDependencies(
+        observe_candidate=observe,
+        read_input=read_bounded_regular,
+        write_object=store.write_once,
+        read_object=store.read,
+        list_objects=store.list_prefix,
+        nonce=lambda: secrets.token_hex(16),
+        clock=time.time,
+    )
 
 
 def _remove_validation_artifact(path: Path) -> None:
@@ -1202,6 +1458,110 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "review-handoff":
+        human_output: str | None = None
+        try:
+            dependencies = _review_handoff_dependencies(
+                worktree=parsed.worktree,
+                issue_iid=getattr(parsed, "issue_iid", None),
+                environment=environment,
+                run_command=run_command,
+            )
+            if parsed.action == "begin":
+                result = begin_review_handoff(
+                    worktree=parsed.worktree.resolve(strict=True),
+                    apply=parsed.apply,
+                    dependencies=dependencies,
+                )
+                payload: dict[str, object] = {
+                    "session_id": result.session_ref,
+                    "applied": result.applied,
+                }
+            elif parsed.action == "submit":
+                input_path = parsed.input_file
+                if not input_path.is_absolute():
+                    input_path = Path.cwd() / input_path
+                result = submit_review_handoff(
+                    session_ref=parsed.session_id,
+                    role=parsed.role,
+                    version=parsed.review_version,
+                    kind=parsed.kind,
+                    payload_path=input_path,
+                    apply=parsed.apply,
+                    dependencies=dependencies,
+                )
+                payload = {
+                    "receipt_id": result.receipt_ref,
+                    "sha256": result.sha256,
+                    "applied": result.applied,
+                }
+            elif parsed.action == "manifest":
+                result = review_handoff_manifest(
+                    session_ref=parsed.session_id, dependencies=dependencies
+                )
+                if (
+                    parsed.expected_manifest_sha256 is not None
+                    and result.sha256 != parsed.expected_manifest_sha256
+                ):
+                    raise ReviewHandoffError(
+                        "review manifest changed since the saved handoff"
+                    )
+                payload = {
+                    "session_id": result.session_ref,
+                    "project_id": result.project_id,
+                    "issue_iid": result.issue_iid,
+                    "branch": result.branch,
+                    "candidate_tree": result.candidate_tree,
+                    "junit_digests": list(result.junit_digests),
+                    "receipt_ids": list(result.receipt_refs),
+                    "receipts": [
+                        {
+                            "role": item.role,
+                            "review_version": item.review_version,
+                            "kind": item.kind,
+                            "receipt_id": item.receipt_ref,
+                            "sha256": item.sha256,
+                        }
+                        for item in result.receipts
+                    ],
+                    "sha256": result.sha256,
+                }
+            else:
+                contents = read_review_handoff(
+                    session_ref=parsed.session_id,
+                    receipt_ref=parsed.receipt_id,
+                    dependencies=dependencies,
+                    expected_manifest_sha256=parsed.expected_manifest_sha256,
+                )
+                payload = {
+                    "receipt_id": parsed.receipt_id,
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "content_base64": base64.b64encode(contents).decode("ascii"),
+                }
+                try:
+                    decoded = contents.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded = ""
+                human_output = (
+                    decoded
+                    if decoded
+                    and all(
+                        character.isprintable() or character in "\n\t"
+                        for character in decoded
+                    )
+                    else "Receipt contains binary or control bytes; use --json to read exact bytes."
+                )
+        except (ReviewHandoffError, OSError, ValueError) as error:
+            write_stderr(str(error))
+            return 1
+        write_stdout(
+            json.dumps(payload, separators=(",", ":"))
+            if parsed.json
+            else human_output
+            if human_output is not None
+            else " ".join(f"{key}={value}" for key, value in payload.items())
+        )
+        return 0
     if parsed.resource == "template" and parsed.action == "update":
         try:
             comparison_runner = template_run_command
