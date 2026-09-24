@@ -31,7 +31,7 @@ class RecordingIssuePort:
         self,
         *,
         existing_iid: int | None = None,
-        existing_description: object = "<!-- agent-work-issue-publication:v1 -->",
+        existing_description: object = ISSUE_MARKER,
     ) -> None:
         self.existing_iid = existing_iid
         self.existing_description = existing_description
@@ -175,6 +175,11 @@ def test_issue_publication_apply_mutates_once_then_reads_back_every_requested_fi
     assert report.issue.state == "opened"
     mutations = [call for call in port.calls if call[0] in {"create", "update"}]
     assert len(mutations) == 1
+    if expected_action == "update":
+        assert port.calls[0] == (
+            "list",
+            {"project_id": 310967, "marker": ISSUE_MARKER},
+        )
     assert port.calls[-1] == ("fetch", {"project_id": 310967, "iid": 71})
 
 
