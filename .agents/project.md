@@ -23,6 +23,13 @@ factory. It allows merge requests that improve that factory. This file owns
 that context. `AGENTS.md` owns portable standing authority, safeguards, and
 human approval and merge boundaries.
 
+For the local recovery scenario in issue #158 and merge request !236, reject
+the proposed 25-file pre-checkpoint migration. It serves a retained snapshot,
+not a state the current workflow can recreate after merge. Reimplement any
+still-needed behavior under the current workflow with authentic Red evidence.
+Do not fabricate a Red checkpoint or weaken recovery safeguards to carry the
+old snapshot forward.
+
 ## Architecture
 
 ### Template Configuration (`copier.yaml`)

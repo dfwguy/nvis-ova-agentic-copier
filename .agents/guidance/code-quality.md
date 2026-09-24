@@ -45,6 +45,11 @@ review. Language-specific rules stay in the matching `.agents/lang/` guide.
   data structures that fit. Avoid needless copies.
 - Do not leave dead code, commented-out blocks, unused imports, or duplicate
   logic.
+- Before adding permanent compatibility for recovery, establish that the
+  triggering state can recur after merge. Name the owner, behavior tests, and
+  ongoing contract for that state. A retained one-time snapshot alone does
+  not justify a permanent path. Fix a reproducible bug when its behavior can
+  recur, even if a single snapshot revealed it.
 
 ## Clarity
 
