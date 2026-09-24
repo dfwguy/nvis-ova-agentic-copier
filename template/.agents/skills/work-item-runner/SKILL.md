@@ -57,9 +57,17 @@ The deterministic controller, AI workflow, and required nested agents use the
 same scoped Developer GitLab credential. Humans provide product and policy
 inputs. Only humans may approve. Only humans may merge.
 
-Classify the whole change. Then delegate one live `$architect`. The live router
-is `.agents/agents/architect.md`. It owns coding routing. It owns
-documentation/policy routing. It owns admission, parentage, and stage
+Classify the whole change. Then delegate one live `$architect`. In each fresh
+serial segment, it runs the proposal gate before its first child may edit.
+This covers the Red-first and resumed segments. One exact
+`$architect-proposal-balanced` and two exact `$architect-proposal-fast` children
+start concurrently. They work alone and send plans to the same Architect. All
+three valid plans are required. Architect checks repo facts itself and owns the
+sole formal receipt. Plans are direct AI-to-AI context, never
+`WorkerResultBuildInput` or controller evidence. For a failed child, one fresh
+same-skill, same-tier replacement is allowed. If the gate still fails, stop
+before edits. The live router is `.agents/agents/architect.md`. It owns coding
+routing, documentation/policy routing, admission, parentage, and stage
 contracts. It also owns receipts and correction cycles. It owns normal, Draft,
 or `needs_human` decisions. Mixed or
 uncertain work uses the coding route. Read and activate each exact `$skill-id`.
@@ -70,7 +78,7 @@ or not-applicable receipt in the single result envelope.
 The worker makes one launch-scoped capacity decision before it delegates
 Architect. Architect checks again before Red, Documentation Writer, worktree
 mutation, or later fanout. Both use the fixed global live-slot requirement for
-the selected lane. Coding requires 12. Content requires 3. For capacity, stop
+the selected lane. Coding requires 12. Content requires 5. For capacity, stop
 only on an actual report from the active frontend or runtime. That report must
 show global capacity below the selected requirement.
 Continue when global capacity is unreported. Also stop if an actual delegation

@@ -2,7 +2,7 @@
 name: architect
 description: Design non-trivial changes before tests or implementation; use at the start of feature work or refactors.
 metadata:
-  model-tier: most-capable
+  model-tier: balanced
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->

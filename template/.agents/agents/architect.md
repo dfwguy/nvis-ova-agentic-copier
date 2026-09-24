@@ -40,7 +40,29 @@ their receipts.
 This role is the canonical detailed workflow router. Each skill sets its own
 `metadata.model-tier`. Codex maps `most-capable` to `gpt-6-sol` / `high`. It
 maps `balanced` to `gpt-6-sol` / `medium`. It maps `fast` to `gpt-6-luna`
-/ `low`. Do not choose Frontier. Do not swap a tier.
+/ `low`. Do not choose Frontier. Do not swap a tier. An explicit
+`metadata.reasoning-effort` changes only the tier's default effort. It never
+changes the tier or model. Thus the fast proposal skill uses `gpt-6-luna` with
+high effort. The Architect skill stays at the balanced tier.
+
+The exact `$architect` starts as one persistent live parent under `AGENTS.md`.
+At each fresh launch or session, read repo facts. Before the first child that
+may edit, start exactly three independent read-only proposal children
+concurrently: one exact `$architect-proposal-balanced` and two separate exact
+`$architect-proposal-fast` children. This gate covers coding, content, the
+serial first and resumed checkpoint segments, and reconciliation. Each child
+works alone and sends its plan directly to the same live Architect. A child
+may not see a peer's plan, delegate, edit files, or call a trusted boundary.
+
+All three valid plans must return before any child may edit. If a child fails,
+check why. Each slot may get at most one fresh same-skill, same-tier replacement.
+The replacement works alone and may not see its peers' plans. If a replacement
+fails or any slot still lacks a valid plan, stop before edits. Check each plan
+against repository facts. Then weigh them and set the design and route.
+Architect alone owns the applicability record, formal workflow receipt,
+delegation, correction, and final decision. Plans are direct AI-to-AI context
+only. Never put them in `WorkerResultBuildInput` or treat them as controller or
+trusted-program evidence.
 
 ### Parent handoffs and context
 
@@ -83,7 +105,7 @@ It must stay live while its children work. Roles in the same concurrent stage
 run together.
 
 Each lane has one fixed global live-slot requirement. Coding requires 12 live
-slots. Content requires 3. Use a trusted current report from the active
+slots. Content requires 5. Use a trusted current report from the active
 frontend or runtime. Admit a lane when that report shows capacity at or above
 its requirement. Continue when global capacity is unreported. Missing capacity
 facts are not a shortage.
@@ -101,18 +123,20 @@ runtime cannot safely execute either plan.
 Record the refusal. Name the plan. Check its result. Then continue or hand off.
 Keep the scope fixed. Keep authority clear. Keep the target exact.
 
-The ordinary interactive coding topology is Main → Architect → Red, then Main
-creates the interactive Red commit. The serial coding topology has two workflow segments.
-The first is controller → Architect → Red → trusted result boundary. The
-second is controller → Architect → conditional Policy Writer, then concurrent
-Green and Diátaxis Writer. Interactive work uses the same post-Red order.
-In interactive work, Main stages their combined work after both stop editing.
-In serial work, Green asks the controller to stage it after both stop. The
-serial worker never stages with Git. Next comes Green → Judge →
+The ordinary interactive coding topology is Main → Architect → three
+independent proposal children → Red, then Main creates the interactive Red
+commit. The serial coding topology has two workflow segments. The first is
+controller → Architect → three independent proposal children → Red → trusted
+result boundary. The second is controller → Architect → three fresh independent
+proposal children → conditional Policy Writer, then concurrent Green and
+Diátaxis Writer. Interactive work uses the same post-Red order. In interactive
+work, Main stages their combined work after both stop editing. In serial work,
+Green asks the controller to stage it after both stop. The serial worker never
+stages with Git. Next comes Green → Judge →
 Non-functional Reviewer and the applicable specialist reviewers. Finalizer
-comes last. The content topology is
-Main → Architect → the current Writer or Finalizer. These topologies define
-routing only. They also define parentage. Do not use them as capacity evidence. A conditional
+comes last. The content topology is Main → Architect → three independent
+proposal children → the current Writer or Finalizer. These topologies define
+routing and parentage only. Do not use them as capacity evidence. A conditional
 role is N/A only when facts show it does not apply.
 
 ### Coding workflow

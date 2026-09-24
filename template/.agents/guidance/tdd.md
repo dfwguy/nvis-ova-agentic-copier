@@ -40,7 +40,14 @@ Use explicit stages. Each stage has a distinct role:
   interactive work to Main for a local Red commit. In serial work, the same
   live workflow owner that assembles the exact boundary input invokes the
   trusted result boundary through its identity-bound broker while active.
-  Architect stays read-only.
+  Architect stays read-only. Each fresh Architect session gets three
+  independent read-only plans at once before its first child can edit: one
+  exact `$architect-proposal-balanced` and two exact `$architect-proposal-fast`
+  children. It checks all three against repo facts and writes the only formal
+  receipt. The first and resumed serial segments each repeat this gate with
+  fresh children. A failed child gets at most one fresh replacement with the
+  same skill and tier. If that fails, stop before edits. Plans cannot enter
+  trusted boundary input.
 - **Implementer** — starts after the applicable policy preparation receipt/N/A
   and the exact mode-specific Red checkpoint. Writes production and tests only.
   Shares final interface details with the Diátaxis Writer. Never edits docs,

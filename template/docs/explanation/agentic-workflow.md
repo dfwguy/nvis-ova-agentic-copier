@@ -43,7 +43,7 @@ may load or delegate.
 
 Architect checks capacity at launch. This check still runs after a serial
 wrapper passes preflight and starts Architect. Each lane has one fixed global
-limit: coding needs 12 live slots, while docs and agent-policy work needs 3.
+limit: coding needs 12 live slots, while docs and agent-policy work needs 5.
 Run the check before delegation, fan-out, or a worktree change.
 
 Only a trusted current report can show free global slots. It must come
@@ -83,6 +83,23 @@ loading. It gives the route to `$architect`. Architect owns lane manifests. It
 owns model mapping, admission, parentage, receipts, correction, and final
 decisions. Skills own procedure and capability metadata. `$git-flow` owns
 publication. `$work-item-runner` owns the serial controller/worker exception.
+
+## Architect considers three independent designs
+
+Each fresh session starts with one Architect. Before it starts a child that can
+edit files, it launches three read-only proposals at once: one
+`$architect-proposal-balanced` and two separate `$architect-proposal-fast`
+children with high reasoning effort. Each works alone. Architect reads all
+three, checks them, and chooses one design. It stays the router and owns the
+only formal `$architect` receipt. There is no separate Architect Judge.
+
+The proposal children cannot delegate, edit files, or call program boundaries.
+Their prose helps Architect decide. It is not controller state or a workflow
+receipt. Architect needs all three before it can start a child that edits. If
+one fails, it checks the cause and tries one fresh child with the same skill
+and tier. If a proposal is still missing, it stops before any edit. A resumed
+serial segment starts a fresh Architect session and repeats this gate. A serial
+Red-first segment also runs the gate before Red.
 
 ## Two lanes keep validation proportional
 
@@ -198,24 +215,34 @@ This also applies in the serial GitLab loop.
 ## Workflow topology
 
 The first two diagrams show the interactive workflow. The third shows the
-serial controller's boundary. They also show stops that
+serial controller's boundary. The last two show later selection and recovery.
+They also show stops that
 need human direction. A resident parent remains live while child roles work. A
 fresh-context node is a new AI context. It is not an interrupted agent's continuation.
 
 ```mermaid
 flowchart TD
     main["Main / $git-flow"] --> architect["Resident Architect"]
+    subgraph proposals["Read-only design proposals: parallel work"]
+        balanced["Balanced proposal"]
+        fastone["Fast proposal, high reasoning"]
+        fasttwo["Fast proposal, high reasoning"]
+    end
+    architect --> balanced
+    architect --> fastone
+    architect --> fasttwo
+    balanced --> synthesis["Architect judges and synthesizes one design"]
+    fastone --> synthesis
+    fasttwo --> synthesis
     red["$tdd-red"]
     subgraph implementation["After accepted Red: parallel work"]
         writer["$diataxis-writer"]
         green["$tdd-green"]
     end
-    subgraph preparation["Conditional policy preparation"]
+    subgraph preparation["After accepted Red: conditional policy preparation"]
         policywriter["$agent-policy-writer (conditional)"]
     end
-    architect --> red
-    red --> writer
-    red --> green
+    synthesis --> red
     red --> policywriter
     architect -. owns .-> green
     policywriter --> green
@@ -240,15 +267,15 @@ flowchart TD
         license["$license-checker"]
     end
     judge --> nonfunctional
-    green --> diataxis
-    green --> quality
-    green --> testjudge
-    green --> cicd
-    green --> readme
-    green --> cli
-    green --> filesystem
-    green --> policy
-    green --> license
+    nonfunctional --> diataxis
+    nonfunctional --> quality
+    nonfunctional --> testjudge
+    nonfunctional --> cicd
+    nonfunctional --> readme
+    nonfunctional --> cli
+    nonfunctional --> filesystem
+    nonfunctional --> policy
+    nonfunctional --> license
     nonfunctional --> reviews["All initially applicable reviews returned"]
     diataxis --> reviews
     quality --> reviews
@@ -283,7 +310,18 @@ flowchart TD
 ```mermaid
 flowchart TD
     docmain["Main / $git-flow"] --> docarchitect["Resident Architect"]
-    docarchitect --> docwriter["$documentation-writer"]
+    subgraph docproposals["Three concurrent read-only design proposals"]
+        docbalanced["Balanced proposal"]
+        docfastone["Fast proposal, high reasoning"]
+        docfasttwo["Fast proposal, high reasoning"]
+    end
+    docarchitect --> docbalanced
+    docarchitect --> docfastone
+    docarchitect --> docfasttwo
+    docbalanced --> docsynthesis["Architect checks all three and chooses one design"]
+    docfastone --> docsynthesis
+    docfasttwo --> docsynthesis
+    docsynthesis --> docwriter["$documentation-writer"]
     docwriter --> docfinalizer["$documentation-finalizer"]
     docfinalizer --> docprogress{"Resolvable finding and material progress?"}
     docprogress -- "yes: evidence-led repair" --> docwriter
@@ -300,7 +338,8 @@ flowchart TD
 flowchart TD
     reconcile["Controller: reconcile, select, and prepare retained worktree"]
     reconcile --> fresharchitect["Fresh AI context: Architect"]
-    fresharchitect --> fullworkflow["Applicable full workflow"]
+    fresharchitect --> serialproposals["Three concurrent read-only proposals; Architect checks all three"]
+    serialproposals --> fullworkflow["Applicable full workflow: Red-first or resumed work"]
     fullworkflow --> controllerpublish["Controller publication"]
     controllerpublish --> serialmr["Merge request"]
     serialmr --> wait["Cheap wait for exact-SHA terminal state"]
@@ -321,11 +360,15 @@ flowchart TD
 flowchart TD
     interruption["Interruption"] --> retain["Retain worktree and evidence"]
     retain --> recovery["Controller reconciliation"]
-    recovery --> recoveryworkflow["Fresh AI context: applicable full workflow"]
+    recovery --> recoveryarchitect["Fresh AI context: Architect"]
+    recoveryarchitect --> recoveryproposals["Three concurrent read-only proposals"]
+    recoveryproposals --> recoveryworkflow["Applicable full workflow"]
     oversized["Oversized intake"] --> split["Structured split plan"]
     split --> children["Controller reuses marker-matched children or creates missing ordered child issues"]
     children --> selection["Later selection of each child"]
-    selection --> childworkflow["Fresh AI context: applicable full workflow"]
+    selection --> childarchitect["Fresh AI context: Architect"]
+    childarchitect --> childproposals["Three concurrent read-only proposals"]
+    childproposals --> childworkflow["Applicable full workflow"]
 ```
 
 License Checker starts specialist review as a read-only reviewer. TDD Judge owns the
@@ -348,7 +391,7 @@ Each manifest row names a semantic tier. The live Architect router owns the
 Codex mapping. It sets each tier's current model and reasoning effort. Other
 enabled frontends use equivalent tiers. Frontier is never a fallback.
 
-Architect owns one coding workflow session. It does not launch unrelated
+Architect owns each coding workflow session. It does not launch unrelated
 top-level processes. It sends the approved design to Red first. Red changes
 only `tests/` and stops at the accepted checkpoint. Architect finishes policy
 work, if needed. It then starts Green and the Diátaxis Writer together. Green
