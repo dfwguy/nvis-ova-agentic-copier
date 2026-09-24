@@ -28,8 +28,11 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 1. Check for the Judge's current non-functional child receipt and each needed
    specialist-review receipt, including the current approving license receipt. Check the
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
-   matching the final policy diff. Check the Diátaxis Writer and Judge comparison
-   receipts, correction ledger, and allowed N/A records.
+   matching the final policy diff. Check the writer's final docs and README
+   receipt. Check the Diátaxis and README Judge verdicts against the staged
+   tree. Main must stage after both writers stop, even after a fix. Check the
+   correction ledger and allowed
+   N/A records.
 2. Check the accepted Red identity for this mode. For interactive work, require
    Main's commit SHA, approved test paths, local named ref, and original base.
    For serial work, require the applied report. Check its project, issue,

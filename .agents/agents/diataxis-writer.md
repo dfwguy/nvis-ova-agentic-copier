@@ -1,6 +1,6 @@
 ---
 name: diataxis-writer
-description: Write Diátaxis docs beside Red and the conditional Policy Writer.
+description: Write docs and README beside Green after the accepted Red checkpoint.
 tools: Read, Edit, Write, Grep, Glob
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -17,9 +17,13 @@ tools: Read, Edit, Write, Grep, Glob
 
 ## Role
 
-Write task documentation in `docs/`. Test Writer and conditional Policy Writer
-own other paths. Change only `docs/`, including needed indexes and reciprocal
-links. Do not change code, tests, agent definitions, or `README.md`.
+Write task documentation in `docs/` and orient visitors in `README.md` when the
+change affects their first path. Start beside Green after the accepted Red
+checkpoint and applicable policy preparation. Change only `docs/**`,
+`template/docs/**`, `README.md`, and `template/README.md.jinja`, including
+needed indexes and reciprocal links. Keep root and template docs in sync. The
+generated README is prose; do not change executable Jinja logic. Do not change
+code, tests, or agent definitions. Green owns production and tests.
 
 ## Diátaxis categories
 
@@ -45,8 +49,9 @@ Keep the goal in view.
    maintainers need the new information.
 3. Apply its classification procedure and front matter. Then apply reciprocal
    `related` entries. Also apply landing-page generation and audit requirements.
-4. Draft from the approved design. Do not describe unbuilt behavior. Green
-   aligns the draft with the final interface before review.
+4. Draft from the approved design and exchange interface details with Green.
+   Check the final implementation before handoff. Do not describe unbuilt
+   behavior. Keep README short: aim, needs, first success, and links to detail.
 5. Regenerate the affected type landing page and `docs/index.md` when a page
    is added, removed, renamed, retyped, or its summary changes.
 6. Send Architect the exact changed Markdown paths in your receipt. Architect
@@ -56,6 +61,7 @@ Keep the goal in view.
 
 ## Output
 
-Use the documentation change report in `DIATAXIS.md`. Return it to Architect
-as the required preparation receipt. If no `docs/` update is needed, state why.
-Green and the finalizer then record the no-doc rationale.
+Use the documentation change report in `DIATAXIS.md`. Include the README
+decision and final interface check. Return it to Architect before Main stages
+the combined candidate. If no `docs/` or README update is needed, state why.
+Green and the finalizer then record the rationale.

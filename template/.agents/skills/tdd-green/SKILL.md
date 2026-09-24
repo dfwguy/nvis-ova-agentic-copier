@@ -19,13 +19,15 @@ metadata:
 Use this portable skill for implementation. Read and follow
 [the role instructions](../../agents/tdd-green.md) before acting. That file
 defines the role. This skill works with Claude Code, Codex, and Pi.
-Green owns the worktree. Reviewers do not edit it.
+Green owns production and test edits. Diátaxis Writer concurrently owns
+`docs/**`, `template/docs/**`, `README.md`, and prose in
+`template/README.md.jinja`. Reviewers do not edit files.
 
 ## Model selection
 
-The live Architect delegates this work after each applicable preparation
-receipt/N/A and the accepted mode-specific Red checkpoint. It waits while
-Green owns all later worktree mutations and review feedback. Use this skill's
+The live Architect delegates this work after policy preparation and the
+accepted mode-specific Red checkpoint, beside the Diátaxis Writer. It waits
+while Green coordinates review feedback. Use this skill's
 `metadata.model-tier`. The Architect router picks the mapping.
 
 For reconciliation, Green receives the mechanically re-proved retained Red
@@ -34,13 +36,15 @@ target, and conflict manifest. It records fresh three-way evidence apart from
 historical Red-to-source provenance. Finalization directly commits the approved
 staged tree from the pending merge state. Do not compact a passing commit.
 
-Green stages the implementation candidate tree. It records the tree before it
-delegates the serial validation Judge. Specialist review needs the Judge's
+Main stages the combined candidate tree only after Green and Diátaxis Writer
+stop editing. Green receives that tree before it delegates the serial
+validation Judge. Specialist review needs the Judge's
 validation-session receipt. That receipt has the unchanged tree OID, fixed
 version JUnit snapshots, SHA-256 digests, counts, and the
 `$nonfunctional-review` child receipt.
 
-After a candidate-tree change, Green stages a new tree. It gets a fresh Judge
+After a change, Main waits for both writers to stop. It stages the new tree.
+Green gets a fresh Judge
 receipt before review or finalization. Each coding candidate needs the full
 hook. Green uses fast format, lint, and type commands for repair. The validation
 session owns one costly tox or full-suite check. It runs one hook.

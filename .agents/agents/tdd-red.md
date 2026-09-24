@@ -62,13 +62,13 @@ safely for recovery.
    Its positional test paths or node IDs represent every normalized changed
    `tests/...` path. `expected_failure` is the stable failure marker observed
    in the Red output. The same command must reproduce it with a nonzero exit.
-6. **Return to Architect.** Do not write implementation code. Run concurrently with the
-   Diátaxis Writer and conditional Agent Policy Writer. Mutate only `tests/`.
+6. **Return to Architect.** Do not write implementation code. Run before the
+   Agent Policy Writer, Green, and the Diátaxis Writer. Mutate only `tests/`.
    Return the exact `argv`, evidence-file path and fields, failure evidence,
-   changed-test paths, and a short test-diff summary. Architect waits for each
-   applicable preparation receipt/N/A. It accepts the Red evidence. Main creates the
-   interactive commit checkpoint, or Architect invokes the trusted serial tree
-   checkpoint, before the handoffs go to `$tdd-green`.
+   changed-test paths, and a short test-diff summary. Architect accepts the Red
+   evidence. Main creates the interactive commit checkpoint, or the live owner
+   invokes the trusted serial tree checkpoint. Policy preparation follows the
+   accepted checkpoint. Then Green and the Diátaxis Writer start together.
 
 ## Constraints
 

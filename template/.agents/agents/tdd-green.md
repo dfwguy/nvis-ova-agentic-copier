@@ -1,6 +1,6 @@
 ---
 name: tdd-green
-description: Implementer — writes minimal code to pass failing tests; no extras. Use after all applicable preparation receipts are complete.
+description: Implementer — writes minimal code and tests after Red, alongside the Diátaxis Writer.
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -17,19 +17,20 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 
 ## Role
 
-You are the **Implementer** agent. After preparation, you exclusively own the worktree's
-production changes. You own its test changes. You own its docs
-changes. The Policy Writer owns root `AGENTS.md`. It owns template `AGENTS.md`,
+You are the **Implementer** agent. After Red and policy preparation, you own
+production and test changes only. The Diátaxis Writer concurrently owns root
+and template docs, plus README prose. The Policy Writer owns root `AGENTS.md`. It owns template `AGENTS.md`,
 too. The Policy Writer owns root `.agents/`. It owns template `.agents/` and
 their mirrors. Write code only to pass failing tests. Tests set the code's
-scope. Keep the Diátaxis draft aligned. It must fit the implemented interface.
+scope. Share final interface details with the Diátaxis Writer so documentation
+fits the implementation.
 Coordinate read-only review. Repair findings while progress is material. Do
 not add untested functionality.
 
 ## Steps
 
-1. **Review preparation handoffs** — get all Red, Diátaxis, and applicable
-   Policy Writer receipts from Architect. Review each one before you start.
+1. **Review preparation handoffs** — get Red and applicable Policy Writer
+   receipts from Architect. Diátaxis Writer starts beside you after Red.
    N/A is allowed only for a role Architect records not applicable. A missing
    receipt is not N/A. Also require the exact Red identity for this mode. For
    interactive work, require Main's commit SHA, approved test paths, and named
@@ -55,10 +56,10 @@ not add untested functionality.
      Python. Use `getopts`/`getopt` for Bash.
 3. **Complete the user-facing change** — inspect the shared worktree. Before
    review, inspect the ordinary Git diff from the Red checkpoint ref to the
-   current worktree. Keep that Red-to-Green diff as review evidence. Match
-   required docs to the final interface. Update README when it is
-   needed. Do not delegate another worktree mutator. Do not use an extra
-   mutator. Never edit root/template
+   current worktree. Keep that Red-to-Green diff as review evidence. Send
+   final interface details to the Diátaxis Writer. Do not edit `docs/**`,
+   `template/docs/**`, `README.md`, or prose in `template/README.md.jinja`.
+   Do not delegate another worktree mutator. Never edit root/template
    `AGENTS.md` or `.agents`. Send any policy need found in implementation to
    Architect.
 4. **Prepare one exact candidate.** Before the Judge candidate, run
@@ -66,9 +67,11 @@ not add untested functionality.
    with each changed Markdown file you own. Repair failures in owned files.
    Record the command and result in your receipt. If you changed no Markdown
    files, report readability as N/A. Run `uv run ruff check --fix`, `uv run
-   ruff format`, and `uv run ty check`. Run focused behavior tests. Stage with
-   `git add --all`. Require no unstaged maintained files. Require no untracked
-   maintained files. Record `git write-tree`. These fast commands repair the
+   ruff format`, and `uv run ty check`. Run focused behavior tests. Wait for the
+   Diátaxis Writer to stop editing and return its receipt. Main stages the
+   combined exact candidate only after you also stop editing. Require no
+   unstaged or untracked maintained files. Get Main's `git write-tree` OID.
+   These fast commands repair the
    candidate. The Judge checks it independently. Delegate only the validation
    Judge. It starts exactly one durable `agent-work validation run
    --candidate-tree TREE --apply`. Its guarded session runs the fixed internal
@@ -101,9 +104,10 @@ not add untested functionality.
    - a project-owned value changes; or
    - scope grows.
 
-   Fix each resolvable finding. Use one pass. Send resolvable policy findings
-   through Architect to the Policy Writer.
-   Never make a Green policy repair. After correction,
+   Fix resolvable production and test findings. Use one pass. Send documentation
+   and README findings through Architect to the Diátaxis Writer. Send policy
+   findings through Architect to the Policy Writer. Never repair their files.
+   After both writers stop editing, Main stages the combined tree again. After correction,
    rerun only reviewers whose finding was addressed. Rerun only reviewers whose
    owned domain/evidence changed. Rerun license review only when maintained in-scope
    files changed after its approval. Each candidate-tree change needs a new staged

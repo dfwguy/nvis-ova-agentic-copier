@@ -645,11 +645,11 @@ Use this note to review the shown work.
 | First rollout | Has no sidecar checkpoint for each role or workflow stage. |
 | Legacy phase-ledger value | Finishes its recorded route. |
 | New work | Uses `WORKFLOW`. |
-| Approved design | Architect gives it to Red and the Diátaxis Writer concurrently. The conditional Agent-policy Writer joins when portable agent policy is in scope. |
-| Writer scope | Red changes only `tests/`. The Diátaxis Writer changes only `docs/`. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
-| Before Green | Architect waits for every applicable receipt, or the exact not-applicable record. |
-| Green | Aligns the documentation draft with the final interface. It never changes agent-policy paths or their mirrors. It then runs the serial validation TDD Judge against its staged tree. |
-| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same stable post-Green diff. |
+| Approved design | Architect gives it to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
+| Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
+| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. Main stages their combined work and records one tree OID for the serial validation TDD Judge. |
+| Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
+| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. |
 | Findings | Green combines all initial findings. |
 | Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
 | Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |

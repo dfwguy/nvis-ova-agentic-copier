@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-24
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -57,7 +57,7 @@ child space. These facts do not control admission or create a second capacity
 gate. A real delegation or tool refusal still stops work when no safe fix exists.
 
 Routing and capacity are separate. Main owns Architect. Architect owns
-the preparation writers, Green, and Finalizer. Green owns Judge and applicable
+Red, the Diátaxis Writer, Green, and Finalizer. Green owns Judge and applicable
 specialist reviewers. Judge owns Non-functional Reviewer. A conditional role
 leaves the route only when its condition is demonstrably false. Reuse needs an
 explicit, verified plan with the same owner and tier. The work must not
@@ -89,11 +89,11 @@ publication. `$work-item-runner` owns the serial controller/worker exception.
 The coding lane applies when a diff has code, tests, CI, packaging, config,
 schemas, command contracts, or executable automation. Its TDD
 route has architecture, Red, Green, timing review, and validation. It has
-applicable implementation, test, CI, CLI, and filesystem reviews. Red and
-Diátaxis Writer prepare separate tests and docs. They work in parallel.
-Agent-policy Writer joins mixed coding work that touches portable policy. Green
-implements production changes. It reconciles docs with behavior, tests, and final
-interfaces. Green never edits agent-policy paths.
+applicable implementation, test, CI, CLI, and filesystem reviews. Red first
+proves the failing tests. After Red and any policy work, Green writes code and
+tests. At the same time, the Diátaxis Writer updates `docs/` and `README.md`.
+Agent-policy Writer handles portable policy when it applies. Green never edits
+docs, README, or agent-policy paths.
 
 Red keeps a verified failing-test boundary. In an interactive workflow, Main
 creates one approved checkpoint commit and local ref after Red proves the
@@ -121,7 +121,8 @@ freshly and stops on invalid, stale, missing, or changed evidence. The trusted
 controller later makes the one final commit for the whole change.
 
 Green runs the fast formatter, lint, type checks, and focused behavior tests.
-It stages one candidate and records its tree OID. During serial validation,
+Main waits for Green and the Diátaxis Writer to stop editing, then stages their
+combined candidate and records its tree OID. During serial validation,
 TDD Judge uses an applied saved session keyed by that tree. It records running
 state and runs exactly one
 `git hook run pre-commit`. During that one hook execution, the validation session
@@ -183,19 +184,25 @@ fresh-context node is a new AI context. It is not an interrupted agent's continu
 ```mermaid
 flowchart TD
     main["Main / $git-flow"] --> architect["Resident Architect"]
-    subgraph preparation["Preparation: parallel work"]
-        red["$tdd-red"]
+    red["$tdd-red"]
+    subgraph implementation["After accepted Red: parallel work"]
         writer["$diataxis-writer"]
+        green["$tdd-green"]
+    end
+    subgraph preparation["Conditional policy preparation"]
         policywriter["$agent-policy-writer (conditional)"]
     end
     architect --> red
-    architect --> writer
-    architect --> policywriter
-    architect -. owns .-> green["$tdd-green"]
+    red --> writer
     red --> green
-    writer --> green
+    red --> policywriter
+    architect -. owns .-> green
     policywriter --> green
-    green --> judge
+    policywriter --> writer
+    writer --> staged["Main stages combined tree"]
+    green --> staged
+    policywriter --> staged
+    staged --> judge
     subgraph validation["Validation: serial Judge evidence"]
         judge["$tdd-judge"]
         nonfunctional["$nonfunctional-review"]
@@ -232,10 +239,13 @@ flowchart TD
     policy --> reviews
     license --> reviews
     reviews --> reviewoutcome{"Concrete, resolvable specialist-review findings with material progress?"}
-    reviewoutcome -- "non-policy finding" --> focusedgreen["Focused $tdd-green correction"]
+    reviewoutcome -- "code or test finding" --> focusedgreen["Focused $tdd-green correction"]
+    reviewoutcome -- "docs or README finding" --> docscorrection["Green → Architect → $diataxis-writer correction"]
     reviewoutcome -- "policy-path finding" --> policycorrection["Architect serializes $agent-policy-writer correction"]
-    focusedgreen --> correctionjudge["Validation: fresh serial Judge and non-functional handoff"]
-    policycorrection --> correctionjudge
+    focusedgreen --> restage["Main waits for owners and stages combined tree"]
+    docscorrection --> restage
+    policycorrection --> restage
+    restage --> correctionjudge["Validation: fresh serial Judge and non-functional handoff"]
     correctionjudge --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
     selective --> reviewoutcome
     reviewoutcome -- "no findings" --> finalizer["Finalization: $tdd-finalizer"]
@@ -298,8 +308,8 @@ flowchart TD
 ```
 
 License Checker starts specialist review as a read-only reviewer. TDD Judge owns the
-read-only validation Non-functional Reviewer. Each specialist reviewer sees the same
-stable post-Green diff. Green gets every initial receipt. It then consolidates
+read-only validation Non-functional Reviewer. Each specialist sees the same
+staged tree. Green gets every initial receipt. It then consolidates
 findings. A license receipt never needs another review receipt. A violation joins
 other actionable findings in focused correction. Rerun the checker only when a
 maintained file changes in its checked scope. Final validation needs a current
@@ -318,19 +328,21 @@ Codex mapping. It sets each tier's current model and reasoning effort. Other
 enabled frontends use equivalent tiers. Frontier is never a fallback.
 
 Architect owns one coding workflow session. It does not launch unrelated
-top-level processes. It sends design to Red and Diátaxis Writer at once. When
-portable policy applies, it sends the approved scope to Agent-policy Writer.
-Red changes only `tests/`. Diátaxis Writer changes only
-`docs/`. This includes indexes and reciprocal links. Agent-policy Writer changes
-only `AGENTS.md`, `.agents/**`, and declared portable `template/` mirrors.
-Architect waits for each applicable receipt or exact not-applicable record. It
-then gives Green design, Red test diff, Diátaxis draft/report or no-doc rationale,
-and policy-writer receipt. Green implements production and test changes. It
-reconciles docs. It fans out applicable read-only judges. It repairs its feedback.
-It consolidates results. Green never edits agent-policy paths or mirrors.
+top-level processes. It sends the approved design to Red first. Red changes
+only `tests/` and stops at the accepted checkpoint. Architect finishes policy
+work, if needed. It then starts Green and the Diátaxis Writer together. Green
+changes code and tests. The writer
+owns `docs/`, its indexes and reciprocal links, and `README.md`, including
+declared portable mirrors. When portable policy applies, Agent-policy Writer
+changes only `AGENTS.md`, `.agents/**`, and their declared portable mirrors.
+Architect waits for each applicable receipt or exact not-applicable record.
+Green and the writer compare the final interface while both are live; the
+writer aligns the prose. Once both stop editing, Main stages their combined
+work. Judge and applicable read-only specialists inspect that same tree.
+Green consolidates feedback and routes documentation findings to the writer.
+Green never edits docs, README, or agent-policy paths.
 
-Green makes needed README and doc edits before read-only fan-out. No second agent
-mutates the shared worktree. In the documentation and agent-policy lane,
+In the documentation and agent-policy lane,
 Architect delegates one Documentation Writer. That writer alone may edit.
 Architect then delegates one
 consolidated Documentation Finalizer. Repair cycles need material progress. A
@@ -338,10 +350,9 @@ repeated finding returns to Architect for human direction. Unchanged evidence
 also returns to Architect. Scope expansion does too. Neither lane has a fixed
 repair count.
 
-Preparation docs are an approved-design draft. They do not promise unwritten code.
-Before review, Green reconciles them with final code, configuration, and
-interfaces. Diátaxis Judge checks the design, writer report, final docs, and
-final implementation or config. Finalizer needs that receipt. Each
+The writer checks its prose against the final code, configuration, and
+interfaces before review. Diátaxis Judge checks the design, writer report,
+final docs, and final implementation or config. Finalizer needs that receipt. Each
 declared root/template mirror is byte-identical. Each changed Copier mirror is
 smoke-rendered.
 
@@ -363,13 +374,15 @@ Humans decide:
 
 ### Correction route
 
-Green groups specialist-review findings before routing them. Policy findings follow:
+Green groups specialist-review findings before routing them. It repairs code
+and tests. Documentation and README findings go through Architect to the
+Diátaxis Writer. Policy findings go through Architect to Agent-policy Writer;
+that work runs in series with Green. Green does not edit either owner's files.
 
-1. The still-live Architect receives the finding.
-2. Architect sends it to Agent-policy Writer. It runs that work in series with
-   Green.
-3. Green may not repair policy.
-4. Each fixed candidate gets a fresh Judge, applicable review, and Finalizer.
+After each correction, Main waits for Green and the Diátaxis Writer to stop
+editing and for any policy repair to finish. Main stages their combined tree.
+A fresh Judge checks that tree before applicable reviewers run again. Finalizer
+uses the accepted result.
 
 ### Cycle ledger and stop conditions
 
@@ -503,10 +516,10 @@ visible and preserves the human approval and merge boundary.
 | Architect | Owns the coding workflow session, design, context handoff, and final decision | Write production changes or tests |
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
-| Diátaxis Writer | Coding-lane `docs/` owner running alongside Red; drafts documentation for Green to reconcile | Change executable scope, tests, README, or agent policy |
-| Agent-policy Writer | Conditional coding-lane owner for `AGENTS.md`, `.agents/**`, and declared portable template mirrors | Change tests, docs, or production paths; let Green repair policy |
+| Diátaxis Writer | Coding-lane `docs/` and README owner running alongside Green after Red and policy preparation; aligns prose with the final interface | Change executable scope, tests, or agent policy |
+| Agent-policy Writer | Conditional coding-lane owner for `AGENTS.md`, `.agents/**`, and declared portable template mirrors | Change tests, docs, or production paths |
 | Documentation Writer | Architect-delegated editor confined to the content-only documentation and agent-policy lane | Change executable scope or manufacture behavior tests |
-| Implementer | Green's production, test, and documentation owner after preparation; reads the diff and consolidates judge feedback | Edit agent-policy paths or waive failed review evidence |
+| Implementer | Green's production and test owner after Red and policy preparation; reads the diff and consolidates judge feedback | Edit docs, README, or agent-policy paths, or waive failed review evidence |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
@@ -517,7 +530,7 @@ visible and preserves the human approval and merge boundary.
 | CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
-| License Checker | Independently checks license compliance on the stable post-Green diff | Edit files, wait for another review receipt, or waive a violation |
+| License Checker | Independently checks license compliance on the stable staged tree | Edit files, wait for another review receipt, or waive a violation |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |
 | Documentation Finalizer | Verifies content classification, structure, mirrors, and source synchronization | Edit, stage, publish, or call remote APIs |
 

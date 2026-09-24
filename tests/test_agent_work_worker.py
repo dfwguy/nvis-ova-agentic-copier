@@ -255,7 +255,8 @@ def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
         effective_worker_budget_seconds=1800,
     ).casefold()
 
-    assert "conditional $agent-policy-writer concurrently" in prompt
+    assert "delegates conditional $agent-policy-writer" in prompt
+    assert "then delegates green and diátaxis writer concurrently" in prompt
     assert (
         "reconciles documentation against final implemented code, configuration, and interfaces"
         in prompt
@@ -489,7 +490,13 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     assert "one workflow-owning session" in prompt
     architect = prompt.index("Delegate Architect")
     red = prompt.index("delegates Red")
-    green = prompt.index("then delegates Green")
+    assert "delegates Green and Diátaxis Writer concurrently" in (prompt), (
+        "parallel_documentation_owner_must_start_with_green"
+    )
+    parallel_implementation = prompt.index(
+        "delegates Green and Diátaxis Writer concurrently"
+    )
+    combined_candidate = prompt.index("after both Green and Diátaxis Writer finish")
     judge = prompt.index("$tdd-judge alone")
     nonfunctional = prompt.index(
         "delegates $nonfunctional-review as its read-only child"
@@ -502,7 +509,8 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
     assert (
         architect
         < red
-        < green
+        < parallel_implementation
+        < combined_candidate
         < judge
         < nonfunctional
         < specialist_review
@@ -510,11 +518,63 @@ def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> Non
         < feedback
     )
     assert "conditional $agent-policy-writer" in prompt
-    assert "Green owns production, tests, and docs" in prompt
+    assert "Green owns production and tests" in prompt
+    assert "Diátaxis Writer owns docs/ and README" in prompt
+    assert "Green owns production, tests, and docs" not in prompt
     assert "Quality Judge receives the architecture" in prompt
     assert "Test Judge receives the Red receipt" in prompt
     assert "still-live Architect" in prompt
     assert "Do not commit, push, approve, or merge" in prompt
+
+
+def test_workflow_prompt_reconciles_documentation_after_final_code_interfaces() -> None:
+    prompt = build_worker_prompt(
+        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    )
+
+    assert (
+        "Diátaxis Writer reconciles documentation against final implemented code"
+        in (prompt)
+    ), "parallel_documentation_owner_must_reconcile_final_interfaces"
+    assert prompt.index("Diátaxis Writer reconciles documentation") < prompt.index(
+        "returns all receipts and unresolved findings"
+    )
+
+
+def test_resumed_prompt_orders_policy_before_parallel_implementation() -> None:
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "red_checkpoint": {
+                "tree_oid": "a" * 40,
+                "ref": "refs/agent-work/red/issue207",
+                "test_paths": ["tests/test_agent_work_worker.py"],
+            },
+        },
+        project_id=310967,
+        issue_iid=207,
+        effective_worker_budget_seconds=1800,
+    )
+
+    resumed = prompt.split(
+        "For the coding lane, the trusted Red checkpoint already exists.", maxsplit=1
+    )[1].split("After the trusted coding checkpoint is present", maxsplit=1)[0]
+    assert (
+        "then complete applicable policy preparation before delegating Green and Diátaxis Writer concurrently"
+        in resumed
+    )
+    assert "rerun Red or manufacture replacement evidence" in resumed
+    assert prompt.index("receives its receipt or N/A") < prompt.index(
+        "then delegates Green and Diátaxis Writer concurrently"
+    )
+    assert prompt.index("after both Green and Diátaxis Writer finish") < prompt.index(
+        "$tdd-judge alone"
+    )
 
 
 def test_workflow_prompt_uses_descriptive_stage_labels() -> None:
@@ -547,7 +607,7 @@ def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:
     architect = normalized.index("delegate architect")
     sizing = normalized.index("intake sizing decision")
     red = normalized.index("delegates red")
-    mutation = normalized.index("green owns production, tests, and docs")
+    mutation = normalized.index("green owns production and tests")
     assert architect < sizing < red < mutation
     assert "behavioral boundaries" in normalized
     assert "dependency/order boundaries" in normalized
