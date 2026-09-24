@@ -280,6 +280,11 @@ def _render_issue_description(
     )
 
 
+def _issue_has_marker(item: dict[str, object], marker: str) -> bool:
+    candidate_description = item.get("description")
+    return isinstance(candidate_description, str) and marker in candidate_description
+
+
 def publish_issue(
     *,
     project_id: int,
@@ -349,7 +354,11 @@ def publish_issue(
         raise IssuePublicationError("issue IID must be a positive integer")
     if not apply:
         return IssuePublicationReport(False, "would-create", None, description, marker)
-    matches = port.list_issues(project_id=project_id, marker=marker)
+    matches = tuple(
+        item
+        for item in port.list_issues(project_id=project_id, marker=marker)
+        if _issue_has_marker(item, marker)
+    )
     if issue_iid is not None:
         matches = tuple(item for item in matches if item.get("iid") == issue_iid)
         if len(matches) != 1:
