@@ -741,16 +741,23 @@ def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
         "expected_message",
     ),
     (
-        ("py311", "1", "6", "/opt/ci/py311", 0, None),
+        ("py311", "1", "17", "/opt/ci/py311", 0, None),
+        ("py311", "7", "17", "/opt/ci/py311", 0, None),
+        ("py311", "10", "17", "/opt/ci/py311", 0, None),
+        ("py311", "16", "17", "/opt/ci/py311", 0, None),
+        ("py311", "17", "17", "/opt/ci/py311", 0, None),
+        ("py314", "1", "6", "/opt/ci/py314", 0, None),
         ("py314", "6", "6", "/opt/ci/py314", 0, None),
-        ("unknown", "1", "6", None, 2, "Unknown test environment"),
-        ("py311", None, "6", None, 2, "CI_NODE_INDEX"),
+        ("unknown", "1", "17", None, 2, "Unknown test environment"),
+        ("py311", None, "17", None, 2, "CI_NODE_INDEX"),
         ("py311", "1", None, None, 2, "CI_NODE_TOTAL"),
-        ("py311", "one", "6", None, 2, "CI_NODE_INDEX"),
+        ("py311", "one", "17", None, 2, "CI_NODE_INDEX"),
         ("py311", "1", "six", None, 2, "CI_NODE_TOTAL"),
-        ("py311", "0", "6", None, 2, "CI_NODE_INDEX"),
-        ("py311", "7", "6", None, 2, "CI_NODE_INDEX"),
-        ("py311", "1", "5", None, 2, "CI_NODE_TOTAL"),
+        ("py311", "0", "17", None, 2, "CI_NODE_INDEX"),
+        ("py311", "18", "17", None, 2, "CI_NODE_INDEX"),
+        ("py311", "1", "6", None, 2, "CI_NODE_TOTAL"),
+        ("py314", "7", "6", None, 2, "CI_NODE_INDEX"),
+        ("py314", "1", "17", None, 2, "CI_NODE_TOTAL"),
     ),
 )
 def test_root_pytest_job_validates_gitlab_parallel_metadata_and_runs_one_native_shard(
@@ -820,7 +827,7 @@ def test_root_pytest_job_validates_gitlab_parallel_metadata_and_runs_one_native_
             "run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest "
             "-p tests.helpers.serial_runtime_shard "
             f"--serial-runtime-shard-index={int(node_index) - 1} "
-            "--serial-runtime-shard-count=6 "
+            f"--serial-runtime-shard-count={node_total} "
             "--cov=src/agent_work "
             f"--junitxml=test-results-{test_environment}-shard-{node_index}.xml "
             f"-o junit_suite_name={test_environment} "
@@ -828,7 +835,7 @@ def test_root_pytest_job_validates_gitlab_parallel_metadata_and_runs_one_native_
         )
 
 
-def test_root_pytest_jobs_use_six_gitlab_native_shards_with_unique_artifacts(
+def test_root_pytest_jobs_use_environment_specific_native_shards_with_unique_artifacts(
     project_root: Path,
 ) -> None:
     """GitLab schedules one complete-suite partition per job and interpreter."""
@@ -842,15 +849,15 @@ def test_root_pytest_jobs_use_six_gitlab_native_shards_with_unique_artifacts(
         "when": "always",
     }
     assert "coverage combine" not in pytest_template["script"][0]
-    for environment in ("py311", "py314"):
+    for environment, shard_count in (("py311", 17), ("py314", 6)):
         job = configuration[f"pytest-{environment}"]
         assert job["extends"] == ".pytest"
-        assert job["parallel"] == 6
+        assert job["parallel"] == shard_count
         assert job["variables"] == {"TEST_ENVIRONMENT": environment}
 
 
 @pytest.mark.parametrize("environment", ("py311", "py314"))
-def test_root_coverage_job_combines_matching_six_shard_artifacts(
+def test_root_coverage_job_combines_matching_native_shard_artifacts(
     project_root: Path,
     tmp_path: Path,
     environment: str,
@@ -862,8 +869,9 @@ def test_root_coverage_job_combines_matching_six_shard_artifacts(
     coverage_template = configuration[".pytest_coverage"]
     coverage_job = configuration[f"coverage-{environment}"]
     script = "\n".join(coverage_template["script"])
+    shard_count = 17 if environment == "py311" else 6
     expected_raw_files = [
-        f".coverage.{environment}-shard-{index}" for index in range(1, 7)
+        f".coverage.{environment}-shard-{index}" for index in range(1, shard_count + 1)
     ]
 
     assert coverage_job["extends"] == ".pytest_coverage"

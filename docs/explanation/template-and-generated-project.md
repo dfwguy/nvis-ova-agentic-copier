@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-24
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -70,16 +70,17 @@ reduce the work on the longest path. It does not promise that a job will meet
 a fixed run time. Jobs still validate the current Dockerfile and locked
 dependencies, not a stale fixed digest, and do not install dependencies again.
 
-The root pytest work is a simple DAG, not a state machine. For each Python,
-six shards make one deterministic, exhaustive partition of the full suite.
-Each validates `CI_NODE_INDEX` and `CI_NODE_TOTAL` before pytest. Each writes a
-JUnit report and raw coverage file. A per-Python aggregation job waits for the
-six matching shards. It combines exactly those six coverage files, measures
-`src/agent_work`, enforces the 85% floor, and publishes Cobertura. Invalid
+The root pytest work is a simple DAG, not a state machine. Seventeen Python
+3.11 shards and six Python 3.14 shards each make one deterministic, exhaustive
+partition of the full suite. Each validates `CI_NODE_INDEX` and
+`CI_NODE_TOTAL` before pytest. Each writes a JUnit report and raw coverage
+file. A per-Python aggregation job waits for its matching shards. Python 3.11
+combines exactly 17 coverage files; Python 3.14 combines exactly six. Both jobs
+measure `src/agent_work`, enforce the 85% floor, and publish Cobertura. Invalid
 shard metadata, a shard failure, or an aggregation failure fails the pipeline.
 Queue time stays outside the unchanged 60-second preference and 120-second
-hard per-job limits. The image split does not change the six-shard partition,
-coverage inputs, 85% floor, or reports.
+hard per-job limits. The image split does not change each version's full-suite
+partition, coverage floor, or reports.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
