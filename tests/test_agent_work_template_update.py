@@ -358,10 +358,10 @@ def test_template_update_cli_defaults_to_a_json_read_only_plan() -> None:
     }
 
 
-def test_template_update_cli_default_composition_uses_discovered_project(
+def test_template_update_cli_preview_skips_project_discovery(
     tmp_path: Path,
 ) -> None:
-    """The real CLI composition builds a dry-run update from injected config."""
+    """A dry-run plan needs no GitLab project configuration."""
 
     discovered: list[tuple[Path, object, object]] = []
     output: list[str] = []
@@ -403,7 +403,7 @@ def test_template_update_cli_default_composition_uses_discovered_project(
         == 0
     )
 
-    assert discovered[0][0] == Path("/generated/widget")
+    assert discovered == []
     assert json.loads(output[0])["outcome"] == "planned"
 
 

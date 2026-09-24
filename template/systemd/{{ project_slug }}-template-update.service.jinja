@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+[Unit]
+Description=Preview one guarded Copier template update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/{{ project_slug }}-template-update/template-update.env
+ExecStart=/usr/bin/env ${AGENT_WORK_DIRENV} exec ${AGENT_WORK_CHECKOUT} ${AGENT_WORK_CHECKOUT}/bin/agent-work-from-checkout template update --candidate-revision ${TEMPLATE_UPDATE_CANDIDATE_REVISION} --project-root ${AGENT_WORK_CHECKOUT}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ project_slug }}-template-update
+TimeoutStartSec=190min
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+SendSIGKILL=yes

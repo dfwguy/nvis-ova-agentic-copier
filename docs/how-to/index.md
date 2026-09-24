@@ -26,7 +26,7 @@ links for facts and rules as you do the work.
 ### Template Maintenance
 - [How to preview a template revision](preview-template-revision.md) — Compare a saved template commit with a new revision.
 - [How to refresh the CI validation images](refresh-ci-image.md) — Build and check three root CI images and clean up old tags.
-- [How to update a generated project](update-a-generated-project.md) — Update a Copier project with a reviewed template revision.
+- [How to update a generated project](update-a-generated-project.md) — Apply a reviewed template revision and inspect its human-review merge request.
 - [How to validate template changes](validate-template-changes.md) — Check a change.
 
 ### Agent Workflow

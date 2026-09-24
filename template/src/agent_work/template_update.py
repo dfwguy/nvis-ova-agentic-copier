@@ -707,7 +707,10 @@ def default_dependencies(
             if names
             else None
         )
-        return TemplateUpdateWorktree("", head, names, conflicts, tree)
+        branch = decode(
+            checked("git", "-C", str(path), "branch", "--show-current").stdout
+        )
+        return TemplateUpdateWorktree(branch, head, names, conflicts, tree)
 
     def worker(request: TemplateUpdateWorkflowRequest) -> bytes:
         prompt = "Read AGENTS.md, classify the actual diff, complete the applicable workflow, and do not commit, push, create an MR, approve, or merge. Return one completion JSON object."

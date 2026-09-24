@@ -50,4 +50,6 @@ and explanation readers. Template contributors should
 [validate template changes](docs/how-to/validate-template-changes.md).
 Generated-project maintainers can
 [preview a template revision](docs/how-to/preview-template-revision.md) before
-they decide whether to update.
+they decide whether to update. [How to update a generated
+project](docs/how-to/update-a-generated-project.md) explains how applying a
+reviewed revision that changes files opens an MR for human review.

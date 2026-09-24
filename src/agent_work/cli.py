@@ -27,7 +27,12 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from . import registry_cleanup, template_comparison, template_update
+from . import (
+    registry_cleanup,
+    template_comparison,
+    template_update,
+    template_update_publication,
+)
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -999,7 +1004,10 @@ def _render_template_preview(result: TemplateComparison, *, as_json: bool) -> st
 
 
 def _render_template_update(
-    report: template_update.TemplateUpdateReport, *, as_json: bool
+    report: template_update.TemplateUpdateReport,
+    *,
+    as_json: bool,
+    publication: object | None = None,
 ) -> str:
     """Render the stable non-secret template-update result."""
     payload: dict[str, object] = {
@@ -1020,8 +1028,19 @@ def _render_template_update(
         payload["conflict_paths"] = list(report.conflict_paths)
     if report.recovery_stage is not None:
         payload["recovery_stage"] = report.recovery_stage
-    if report.completion is not None:
+    if report.completion is not None and publication is None:
         payload["completion"] = report.completion.model_dump(mode="json")
+    if publication is not None:
+        payload["outcome"] = getattr(publication, "outcome", "needs-recovery")
+        payload["state"] = getattr(publication, "state", "needs-recovery")
+        payload["next_action"] = getattr(
+            publication, "next_action", "inspect retained template update evidence"
+        )
+        iid = getattr(publication, "merge_request_iid", None)
+        url = getattr(publication, "merge_request_url", None)
+        if isinstance(iid, int) and iid > 0 and isinstance(url, str) and url:
+            payload["merge_request_iid"] = iid
+            payload["merge_request_url"] = url
     if as_json:
         return json.dumps(payload, separators=(",", ":"))
     return " ".join(f"{key}={value}" for key, value in payload.items())
@@ -1171,6 +1190,7 @@ def main(
     ] = template_update.execute_template_update,
     template_update_dependencies: template_update.TemplateUpdateDependencies
     | None = None,
+    publish_template_update: Callable[..., object] | None = None,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
     read_validation_artifact: Callable[[Path], bytes | None] = (
@@ -1184,8 +1204,27 @@ def main(
     parsed = build_parser().parse_args(arguments)
     if parsed.resource == "template" and parsed.action == "update":
         try:
+            comparison_runner = template_run_command
+            if comparison_runner is None:
+                resolved_git = find_executable("git")
+                if resolved_git is None or not Path(resolved_git).is_absolute():
+                    raise TemplateComparisonError(stage="input")
+                comparison_runner = partial(
+                    template_comparison.run_git_command,
+                    git_executable=Path(resolved_git),
+                    environment=environment,
+                )
+            compare_update = partial(
+                compare_template_revisions,
+                read_text=template_read_text,
+                run_command=comparison_runner,
+                private_repository=template_private_repository,
+                timeout_seconds=30,
+            )
+            config: AgentWorkConfig | None = None
             if (
-                template_update_dependencies is None
+                parsed.apply
+                and template_update_dependencies is None
                 and run_template_update is template_update.execute_template_update
             ):
                 config = discover_agent_work_config(
@@ -1214,10 +1253,32 @@ def main(
                     parsed.candidate_revision,
                     parsed.project_root,
                     apply=parsed.apply,
-                    compare=compare_template_revisions,
+                    compare=compare_update,
                     dependencies=dependencies,
                 ),
             )
+            publication: object | None = None
+            if (
+                parsed.apply
+                and report.state is template_update.TemplateUpdateState.READY
+                and report.changed_paths
+            ):
+                if publish_template_update is not None:
+                    publication = publish_template_update(report)
+                else:
+                    if config is None:
+                        raise RuntimeError(
+                            "template update publication needs configured project identity"
+                        )
+                    publication = template_update_publication.publish_ready_template_update(
+                        report,
+                        dependencies=template_update_publication.default_publication_dependencies(
+                            config=config,
+                            update=dependencies,
+                            service_environment=environment,
+                            run_command=run_command,
+                        ),
+                    )
         except (
             OSError,
             RuntimeError,
@@ -1228,7 +1289,13 @@ def main(
                 raise
             write_stderr(str(error))
             return 1
-        write_stdout(_render_template_update(report, as_json=parsed.json))
+        write_stdout(
+            _render_template_update(
+                report, as_json=parsed.json, publication=publication
+            )
+        )
+        if publication is not None:
+            return 0 if getattr(publication, "outcome", None) == "published" else 1
         return 0 if report.outcome in {"planned", "ready"} else 1
     if parsed.resource == "issue" and parsed.action == "publish":
         try:
