@@ -482,6 +482,160 @@ def test_candidate_broker_completes_only_after_all_paged_bytes(
     assert session.reviewed_candidate == tree
 
 
+@pytest.mark.parametrize("paged", [False, True])
+def test_candidate_read_returns_only_after_review_is_published(
+    candidate_scratch: Path, monkeypatch: pytest.MonkeyPatch, *, paged: bool
+) -> None:
+    """A client that received the final frame observes the reviewed tree."""
+    tree = "b" * 40
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    pause_delivery = threading.Event()
+    frame_sent = threading.Event()
+    release_delivery = threading.Event()
+    response_received = threading.Event()
+    client_done = threading.Event()
+    real_socket = socket.socket
+    listener_created = False
+    result: dict[str, object] = {}
+
+    class AcceptedSocket:
+        def __init__(self, connection: socket.socket) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.connection.close()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+        def sendall(self, payload: bytes) -> None:
+            self.connection.sendall(payload)
+            response = json.loads(payload[4:])
+            is_final_read = (
+                response.get("state") == "read-complete"
+                if paged
+                else "files" in response and response.get("paged") is not True
+            )
+            if pause_delivery.is_set() and is_final_read:
+                frame_sent.set()
+                if not release_delivery.wait(timeout=5):
+                    raise TimeoutError("test delivery was not released")
+
+    class ListeningSocket:
+        def __init__(self, connection: socket.socket) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+        def accept(self) -> tuple[AcceptedSocket, object]:
+            accepted, address = self.connection.accept()
+            return AcceptedSocket(accepted), address
+
+    def socket_factory(
+        family: int = -1,
+        kind: int = -1,
+        proto: int = -1,
+        fileno: int | None = None,
+    ) -> socket.socket:
+        nonlocal listener_created
+        connection = real_socket(family, kind, proto, fileno)
+        if not listener_created:
+            listener_created = True
+            return cast(socket.socket, ListeningSocket(connection))
+        return connection
+
+    monkeypatch.setattr(socket, "socket", socket_factory)
+
+    def inline_action(kind: str, _tree: str | None) -> dict[str, object]:
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        return {
+            "candidate_tree": tree,
+            "base_sha": request.source_sha,
+            "base_tree": "c" * 40,
+            "changed_paths": ["docs/guide.md"],
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "old_mode": None,
+                    "new_mode": "100644",
+                    "old_content": None,
+                    "new_content": "reviewed\n",
+                }
+            ],
+        }
+
+    session = create_candidate_broker(
+        _paged_candidate_action if paged else inline_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    if paged:
+        request_candidate_validation(
+            session.socket_path, client, action="read", candidate_tree=tree
+        )
+        for side in ("old", "new"):
+            request_candidate_validation(
+                session.socket_path,
+                client,
+                action="read",
+                candidate_tree=tree,
+                selector={
+                    "mode": "chunk",
+                    "path": "docs/guide.md",
+                    "side": side,
+                    "offset": 0,
+                    "length": 6,
+                },
+            )
+        assert session.reviewed_candidate is None
+
+    def read_final_response() -> None:
+        try:
+            result["response"] = request_candidate_validation(
+                session.socket_path,
+                client,
+                action="read",
+                candidate_tree=tree,
+                selector={"mode": "complete"} if paged else None,
+            )
+            response_received.set()
+            result["reviewed_candidate"] = session.reviewed_candidate
+        except WorkerProtocolError as error:
+            result["error"] = error
+        finally:
+            client_done.set()
+
+    pause_delivery.set()
+    reader = threading.Thread(target=read_final_response)
+    reader.start()
+    try:
+        assert frame_sent.wait(timeout=5)
+        assert response_received.wait(timeout=5)
+        observed_before_publication = client_done.wait(timeout=0.2)
+    finally:
+        release_delivery.set()
+        reader.join(timeout=5)
+        session.close_and_capture()
+    assert not reader.is_alive()
+    assert "error" not in result
+    assert cast(dict[str, object], result["response"])["accepted"] is True
+    assert result["reviewed_candidate"] == tree, (
+        "candidate review state was observed before response delivery committed"
+    )
+    assert session.reviewed_candidate == tree
+    assert not observed_before_publication, (
+        "candidate review state was observed before response delivery committed"
+    )
+
+
 @pytest.mark.parametrize("invalid_page", [False, True])
 def test_candidate_broker_rejects_invalid_or_changed_read_base(
     candidate_scratch: Path, *, invalid_page: bool

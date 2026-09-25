@@ -347,6 +347,7 @@ class CandidateBrokerSession:
         self._failure: WorkerProtocolError | None = None
         self._candidate: str | None = None
         self._reviewed: str | None = None
+        self._review_lock = threading.Lock()
         self._prepared: str | None = None
         self._read_base_sha: str | None = None
         self._manifest: dict[tuple[str, str], tuple[int, str]] | None = None
@@ -446,7 +447,8 @@ class CandidateBrokerSession:
                         )
                     if action == "stage":
                         self._candidate = None
-                        self._reviewed = None
+                        with self._review_lock:
+                            self._reviewed = None
                         self._prepared = None
                         self._read_base_sha = None
                         self._manifest = None
@@ -714,27 +716,30 @@ class CandidateBrokerSession:
                         "nonce": self._request.nonce,
                         "diagnostic": str(failure),
                     }
-                try:
-                    serialized = json.dumps(response).encode()
-                    _write_frame(connection, serialized)
-                    self._bytes_sent += len(serialized)
-                    if response.get("accepted") is True and action == "read":
-                        if outcome.get("paged") is True:
-                            self._manifest = manifest
-                            self._next_offset = {key: 0 for key in manifest}
-                            self._page_bytes = {key: bytearray() for key in manifest}
-                        elif mode == "chunk":
-                            assert chunk_key is not None
-                            self._page_bytes[chunk_key].extend(decoded)
-                            self._next_offset[chunk_key] += cast(
-                                int, selection["length"]
-                            )
-                        elif mode == "complete" or selector is None:
-                            self._reviewed = cast(str, candidate)
-                except (OSError, WorkerProtocolError):
-                    self._failure = WorkerProtocolError(
-                        "candidate_broker", "response could not be delivered"
-                    )
+                with self._review_lock:
+                    try:
+                        serialized = json.dumps(response).encode()
+                        _write_frame(connection, serialized)
+                        self._bytes_sent += len(serialized)
+                        if response.get("accepted") is True and action == "read":
+                            if outcome.get("paged") is True:
+                                self._manifest = manifest
+                                self._next_offset = {key: 0 for key in manifest}
+                                self._page_bytes = {
+                                    key: bytearray() for key in manifest
+                                }
+                            elif mode == "chunk":
+                                assert chunk_key is not None
+                                self._page_bytes[chunk_key].extend(decoded)
+                                self._next_offset[chunk_key] += cast(
+                                    int, selection["length"]
+                                )
+                            elif mode == "complete" or selector is None:
+                                self._reviewed = cast(str, candidate)
+                    except (OSError, WorkerProtocolError):
+                        self._failure = WorkerProtocolError(
+                            "candidate_broker", "response could not be delivered"
+                        )
 
     def _cleanup_root(self) -> None:
         """Remove only the inode-verified private root after the server exits."""
@@ -790,7 +795,8 @@ class CandidateBrokerSession:
     @property
     def reviewed_candidate(self) -> str | None:
         """Return the latest successfully delivered exact content read."""
-        return self._reviewed if self._failure is None else None
+        with self._review_lock:
+            return self._reviewed if self._failure is None else None
 
 
 def create_candidate_broker(
