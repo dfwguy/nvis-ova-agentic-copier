@@ -789,3 +789,131 @@ def test_template_update_cli_only_publishes_changed_applied_ready_update(
 
     assert status == 0
     assert publications == ([report] if should_publish else [])
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("fetch", "origin", "main"),
+        ("push", "origin", "HEAD:refs/heads/agent/template-update"),
+        ("ls-remote", "--heads", "origin", "refs/heads/main"),
+    ],
+)
+def test_template_update_network_git_uses_explicit_credential_controls(
+    tmp_path: Path, arguments: tuple[str, ...]
+) -> None:
+    """Network Git pins credential controls in argv after ambient config is scrubbed."""
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    token = "service-token"
+    helper = tmp_path / "controller" / "src" / "agent-work-git-credential.sh"
+
+    def process(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment = cast(dict[str, str], kwargs["env"])
+        calls.append((command, environment))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    dependencies = _DefaultDependencies(
+        AgentWorkConfig(
+            host="git.example.test",
+            project_id=37,
+            checkout=tmp_path / "controller",
+            state_root=tmp_path / "state",
+            git_path=Path("/usr/bin/git"),
+            glab_path=Path("/usr/bin/glab"),
+            base_branch="agent/factory",
+        ),
+        cast(Any, object()),
+        {
+            "PATH": "/bin",
+            "GITLAB_TOKEN": token,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_PARAMETERS": "credential.helper=hostile",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "hostile",
+            "GIT_ASKPASS": "/hostile/askpass",
+            "SSH_ASKPASS": "/hostile/ssh-askpass",
+        },
+        lambda *_args, **_kwargs: CommandResult(0, "", ""),
+        process,
+    )
+
+    dependencies._git(tmp_path / "prepared", *arguments, network=True)
+
+    command, environment = calls.pop()
+    assert command == (
+        "/usr/bin/git",
+        "-C",
+        str(tmp_path / "prepared"),
+        "-c",
+        "credential.helper=",
+        "-c",
+        'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+        "-c",
+        "credential.useHttpPath=true",
+        "-c",
+        "core.askPass=/bin/false",
+        *arguments,
+    )
+    assert token not in command
+    assert str(helper) not in command
+    assert environment == {
+        "PATH": "/bin",
+        "GITLAB_TOKEN": token,
+        "GIT_ASKPASS": "/bin/false",
+        "SSH_ASKPASS": "/bin/false",
+        "AGENT_WORK_GIT_CREDENTIAL_HELPER": str(helper),
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+    }
+
+
+def test_template_update_local_git_excludes_credential_controls(tmp_path: Path) -> None:
+    """Local Git commands retain neither GitLab token nor credential controls."""
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    def process(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment = cast(dict[str, str], kwargs["env"])
+        calls.append((command, environment))
+        return subprocess.CompletedProcess(command, 0, b"main\n", b"")
+
+    dependencies = _DefaultDependencies(
+        AgentWorkConfig(
+            host="git.example.test",
+            project_id=37,
+            checkout=tmp_path / "controller",
+            state_root=tmp_path / "state",
+            git_path=Path("/usr/bin/git"),
+            glab_path=Path("/usr/bin/glab"),
+            base_branch="agent/factory",
+        ),
+        cast(Any, object()),
+        {
+            "PATH": "/bin",
+            "GITLAB_TOKEN": "service-token",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_PARAMETERS": "credential.helper=hostile",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "hostile",
+            "GIT_ASKPASS": "/hostile/askpass",
+            "SSH_ASKPASS": "/hostile/ssh-askpass",
+            "AGENT_WORK_GIT_CREDENTIAL_HELPER": "/hostile/helper",
+        },
+        lambda *_args, **_kwargs: CommandResult(0, "", ""),
+        process,
+    )
+
+    assert dependencies._git(tmp_path / "prepared", "status", "--porcelain") == "main"
+
+    command, environment = calls.pop()
+    assert command == (
+        "/usr/bin/git",
+        "-C",
+        str(tmp_path / "prepared"),
+        "status",
+        "--porcelain",
+    )
+    assert environment == {"PATH": "/bin"}
