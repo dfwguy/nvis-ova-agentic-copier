@@ -77,6 +77,7 @@ class RecoveryObservation:
     merge_request_url: str | None = None
     error_code: str | None = None
     precheckpoint_test_only_red: bool = False
+    retry_ineligible_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,8 @@ def _classification(observation: RecoveryObservation) -> RecoveryClassification:
     dependency_states = {state for _, state in observation.split_dependencies}
     if "opened" in dependency_states:
         return RecoveryClassification.DEPENDENCY_GATED
+    if observation.retry_ineligible_reason is not None:
+        return RecoveryClassification.NEEDS_HUMAN_DECISION
     if observation.record_state is RunnerState.BLOCKED or (
         observation.split_dependencies and dependency_states == {"closed"}
     ):

@@ -450,6 +450,8 @@ def _recovery_observation(
     owner_status: str = "unknown",
     split_dependencies: tuple[tuple[int, str], ...] = (),
     state_root: Path | None = None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
 ) -> RecoveryObservation:
     """Build bounded recovery evidence without reading untrusted issue prose."""
     observed_issue = gitlab.fetch_issue(issue_iid) if issue is None else issue
@@ -561,6 +563,26 @@ def _recovery_observation(
         state_root=state_root,
         split_dependencies=split_dependencies,
     )
+    retry_ineligible_reason = None
+    dirty = None if exists is None else bool(paths)
+    if (
+        record is not None
+        and record.state is RunnerState.BLOCKED
+        and repository is not None
+        and not _precheckpoint_test_only_red_family(record)
+    ):
+        try:
+            dirty = repository.has_changes(record.worktree)
+            _retained_dirty_recovery_evidence(
+                record,
+                repository=repository,
+                load_red_checkpoint=load_red_checkpoint,
+            )
+        except RepositoryError:
+            retry_ineligible_reason = "retained worktree evidence could not be verified"
+            dirty = None
+        except (OSError, RuntimeError, SegmentError, ValueError) as error:
+            retry_ineligible_reason = _safe_retry_ineligible_reason(error)
     return RecoveryObservation(
         issue_iid=issue_iid,
         issue_state=observed_issue.state,
@@ -582,7 +604,7 @@ def _recovery_observation(
         worktree=None if record is None else str(record.worktree),
         worktree_exists=exists,
         worktree_head=head,
-        worktree_dirty=None if exists is None else bool(paths),
+        worktree_dirty=dirty,
         worktree_changed_paths=paths,
         merge_request_iid=merge_request_iid,
         merge_request_state=merge_request_state,
@@ -597,6 +619,22 @@ def _recovery_observation(
         if record is None or record.error_code is None
         else record.error_code.value,
         precheckpoint_test_only_red=precheckpoint is not None,
+        retry_ineligible_reason=retry_ineligible_reason,
+    )
+
+
+def _safe_retry_ineligible_reason(error: Exception) -> str:
+    """Expose only fixed recovery-validator categories, never arbitrary details."""
+    known = {
+        "correction recovery evidence is incomplete",
+        "correction recovery evidence changed",
+        "legacy publication recovery evidence is ineligible",
+        "affected correction recovery evidence is ineligible",
+        "retained dirty recovery evidence is ineligible",
+    }
+    detail = str(error)
+    return (
+        detail if detail in known else "retained dirty recovery evidence is ineligible"
     )
 
 
@@ -753,26 +791,10 @@ def _recovery_plan(
         state_root=config.state_root,
         split_dependencies=split_dependencies,
     )
-    legacy = (
+    dirty_evidence = (
         None
         if _precheckpoint_test_only_red_family(record)
-        else _legacy_dirty_publication_evidence(
-            record, repository=repository, load_red_checkpoint=load_red_checkpoint
-        )
-    )
-    authored = (
-        None
-        if legacy is not None or _precheckpoint_test_only_red_family(record)
-        else _authored_candidate_recovery_evidence(
-            record, repository=repository, load_red_checkpoint=load_red_checkpoint
-        )
-    )
-    affected = (
-        None
-        if authored is not None
-        or legacy is not None
-        or _precheckpoint_test_only_red_family(record)
-        else _affected_dirty_correction_evidence(
+        else _retained_dirty_recovery_evidence(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
     )
@@ -790,6 +812,7 @@ def _recovery_plan(
             merge_requests=merge_requests,
             split_dependencies=split_dependencies,
             state_root=config.state_root,
+            load_red_checkpoint=load_red_checkpoint,
         )
         resolution = build_resolution_plan(
             ResolutionRequest(
@@ -821,12 +844,8 @@ def _recovery_plan(
             "resolution_digest": resolution.digest,
         }
     )
-    if legacy is not None:
-        evidence.update(legacy)
-    if authored is not None:
-        evidence.update(authored)
-    if affected is not None:
-        evidence.update(affected)
+    if dirty_evidence is not None:
+        evidence.update(dirty_evidence)
     if _precheckpoint_test_only_red_family(record) and precheckpoint is None:
         raise RuntimeError(
             "pre-checkpoint test-only Red recovery evidence is ineligible"
@@ -845,6 +864,38 @@ def _recovery_plan(
         target_iid=request.issue_iid,
         evidence=evidence,
     ), observation
+
+
+def _retained_dirty_recovery_evidence(
+    record: LedgerRecord | None,
+    *,
+    repository: RepositoryPort | None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> dict[str, str] | None:
+    """Select exact retained dirty recovery evidence for preview and inventory."""
+    legacy = _legacy_dirty_publication_evidence(
+        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    )
+    if legacy is not None:
+        return legacy
+    authored = _authored_candidate_recovery_evidence(
+        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    )
+    if authored is not None:
+        return authored
+    affected = _affected_dirty_correction_evidence(
+        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+    )
+    if affected is not None:
+        return affected
+    if (
+        record is not None
+        and record.state is RunnerState.BLOCKED
+        and repository is not None
+        and repository.has_changes(record.worktree)
+    ):
+        raise RuntimeError("retained dirty recovery evidence is ineligible")
+    return None
 
 
 def _legacy_dirty_publication_evidence(
@@ -2015,6 +2066,7 @@ def _recovery_candidate_report(
         "controller_status": observation.controller_status,
         "owner_status": observation.owner_status,
         "blocked_cause": observation.blocked_cause,
+        "retry_ineligible_reason": observation.retry_ineligible_reason,
         "stale": observation.stale,
         "ambiguous": observation.ambiguous,
         "precheckpoint_test_only_red": (
@@ -2034,6 +2086,8 @@ def _recovery_candidate_report(
         "needs_human_decision": (
             "Use agent-work loop recover for this stale active record."
             if observation.stale
+            else "Inspect the retained worktree and ledger evidence before choosing a reviewed resolution."
+            if observation.retry_ineligible_reason is not None
             else "Review the contradictory evidence before choosing a resolution."
         ),
         "closure_candidate": "Review closure evidence and choose close only with a reason and link.",
@@ -2057,19 +2111,25 @@ def _recovery_candidate_report(
         active=active,
         human_action_required=human_action,
         blocked_cause=(
-            observation.blocked_cause
-            if (
-                observation.blocked_cause is not None
-                and (
-                    candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
-                    or observation.error_code == ErrorCode.RED_CHECKPOINT_FAILED.value
+            observation.retry_ineligible_reason
+            if observation.retry_ineligible_reason is not None
+            else (
+                observation.blocked_cause
+                if (
+                    observation.blocked_cause is not None
+                    and (
+                        candidate.classification
+                        is RecoveryClassification.SAFELY_RETRYABLE
+                        or observation.error_code
+                        == ErrorCode.RED_CHECKPOINT_FAILED.value
+                    )
                 )
+                else "pipeline evidence disagrees"
+                if observation.pipeline_status == "failed"
+                else "retained evidence requires review"
+                if observation.ambiguous or observation.stale
+                else None
             )
-            else "pipeline evidence disagrees"
-            if observation.pipeline_status == "failed"
-            else "retained evidence requires review"
-            if observation.ambiguous or observation.stale
-            else None
         ),
         dependency_explanation=(
             "Trusted prerequisite"
@@ -2087,6 +2147,11 @@ def _recovery_candidate_report(
                 observation.blocked_cause is not None
                 and candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
             )
+            else (
+                "Inspect the retained worktree and ledger evidence for issue "
+                f"#{candidate.issue_iid} before choosing a reviewed resolution."
+            )
+            if observation.retry_ineligible_reason is not None
             else f"Review issue #{candidate.issue_iid} before selecting one resolution."
             if human_action
             else "Monitor the active retained work; do not recover it."
@@ -2349,6 +2414,7 @@ def dispatch(
                             for dependency_iid in child_dependencies.get(iid, ())
                         ),
                         state_root=config.state_root,
+                        load_red_checkpoint=wired.load_red_checkpoint,
                     )
                     for iid in sorted(candidate_iids)
                 )

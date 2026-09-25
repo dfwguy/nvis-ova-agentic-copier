@@ -801,6 +801,7 @@ class FakeRepository:
         self.legacy_has_untracked = False
         self.legacy_has_unmerged = False
         self.legacy_has_renames = False
+        self.legacy_observation_error: RepositoryError | None = None
         self.single_parent_result: str | None = None
         self.allow_base_ancestor_calls: list[bool] = []
         self.candidate_reads: list[tuple[str, bool, tuple[str, ...]]] = []
@@ -946,6 +947,8 @@ class FakeRepository:
         self, worktree: Path
     ) -> LegacyPublicationCandidate:
         del worktree
+        if self.legacy_observation_error is not None:
+            raise self.legacy_observation_error
         return LegacyPublicationCandidate(
             branch=self.legacy_branch,
             head=self.current_head,
@@ -4534,6 +4537,13 @@ def test_recovery_retry_preview_binds_exact_legacy_dirty_hook_evidence(
     repository.current_head = record.source_sha or ""
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
 
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+    assert inventory.recovery_candidates[0].classification == "safely_retryable"
+
     preview = dispatch(
         CommandRequest(
             command="recovery.resolve",
@@ -4719,6 +4729,12 @@ def test_recovery_retry_bootstraps_affected_dirty_correction_without_publication
     repository.legacy_unstaged_paths = ("src/agent_work/timing.py",)
     gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
     dependencies = _dependencies(config, ledger, gitlab, repository)
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+    assert inventory.recovery_candidates[0].classification == "safely_retryable"
     request = CommandRequest(
         command="recovery.resolve",
         issue_iid=record.issue_iid,
@@ -5498,6 +5514,208 @@ def test_recovery_retry_preview_rejects_ineligible_legacy_dirty_hook_evidence(
     assert gitlab.created_merge_requests == 0 and gitlab.labels == []
 
 
+def test_recovery_inventory_uses_dirty_probe_when_changed_paths_are_empty(
+    tmp_path: Path,
+) -> None:
+    """A dirty worktree remains ineligible even when path inventory is empty."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.paths = ()
+    repository.legacy_unstaged_paths = ()
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["worktree_dirty"] == "true"
+    assert candidate.corroboration["retry_ineligible_reason"]
+
+
+def test_recovery_inventory_redacts_repository_observation_failure(
+    tmp_path: Path,
+) -> None:
+    """Repository exception text cannot become a human-facing recovery reason."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_observation_error = RepositoryError("private candidate detail")
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["retry_ineligible_reason"] == (
+        '"retained worktree evidence could not be verified"'
+    )
+    assert "private candidate detail" not in candidate.model_dump_json()
+
+
+@pytest.mark.parametrize("identity_drift", (False, True))
+def test_recovery_inventory_checks_now_clean_retained_correction_identity(
+    tmp_path: Path, *, identity_drift: bool
+) -> None:
+    """A now-clean blocked correction still needs its exact identity verified."""
+    config, ledger, gitlab, repository, original, resumed = (
+        _apply_legacy_dirty_hook_correction(tmp_path)
+    )
+    del original
+    record = ledger.persist(
+        resumed.model_copy(
+            update={
+                "state": RunnerState.BLOCKED,
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.WORKFLOW,
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+            }
+        )
+    )
+    repository.dirty = False
+    if identity_drift:
+        repository.legacy_index_fingerprint = "e" * 64
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == (
+        "needs_human_decision" if identity_drift else "safely_retryable"
+    )
+    assert candidate.corroboration["worktree_dirty"] == "false"
+    if identity_drift:
+        assert candidate.corroboration["retry_ineligible_reason"] == (
+            '"correction recovery evidence changed"'
+        )
+        assert "retained worktree and ledger" in candidate.next_action
+        with pytest.raises(RuntimeError, match="correction recovery evidence changed"):
+            dispatch(
+                CommandRequest(
+                    command="recovery.resolve",
+                    issue_iid=record.issue_iid,
+                    choice="retry",
+                    reason="Review exact retained identity.",
+                ),
+                apply=False,
+                dependencies=dependencies,
+            )
+    else:
+        preview = dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="Review exact retained identity.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
+        assert preview.operational_plan is not None
+
+
+@pytest.mark.parametrize(
+    ("retained_shape", "expected_reason"),
+    (
+        (
+            "legacy_missing_unstaged",
+            "legacy publication recovery evidence is ineligible",
+        ),
+        (
+            "affected_merge_head",
+            "affected correction recovery evidence is ineligible",
+        ),
+        (
+            "authored_wrong_failure",
+            "affected correction recovery evidence is ineligible",
+        ),
+    ),
+)
+def test_recovery_inventory_never_advertises_a_rejected_dirty_retry_as_safe(
+    tmp_path: Path, retained_shape: str, expected_reason: str
+) -> None:
+    """Inventory and retry preview agree on retained dirty eligibility."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    if retained_shape == "legacy_missing_unstaged":
+        record = _legacy_dirty_hook_publication_record(tmp_path)
+        repository.legacy_unstaged_paths = ()
+    elif retained_shape == "affected_merge_head":
+        record = _affected_dirty_correction_record(tmp_path)
+        repository.paths = ("src/agent_work/domain.py",)
+        repository.legacy_staged_paths = repository.paths
+        repository.legacy_unstaged_paths = ()
+        repository.legacy_merge_head = "c" * 40
+    else:
+        record = _authored_candidate_recovery_record(tmp_path).model_copy(
+            update={"error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH}
+        )
+        repository.paths = ("tests/test_template.py",)
+        repository.legacy_staged_paths = repository.paths
+        repository.legacy_unstaged_paths = ()
+        checkpoint = _authored_candidate_checkpoint(record)
+        repository.single_parent_result = checkpoint.base_sha
+    record = ledger.persist(record)
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    if retained_shape == "authored_wrong_failure":
+        dependencies = replace(
+            dependencies,
+            load_red_checkpoint=lambda *_args: checkpoint,
+        )
+
+    with pytest.raises(RuntimeError, match="recovery evidence is ineligible"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="Review the exact retained evidence.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    candidate = inventory.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["retry_ineligible_reason"] == json.dumps(
+        expected_reason
+    )
+    assert len(candidate.corroboration["retry_ineligible_reason"]) <= 256
+    assert "retained worktree and ledger" in candidate.recommendation
+    assert "retained worktree and ledger" in candidate.next_action
+    assert ledger.load(record.issue_iid) == record
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("head", "paths", "checkpoint", "intent", "unknown_lane"),
@@ -5711,6 +5929,20 @@ def test_precheckpoint_test_only_red_inventory_never_advertises_ineligible_varia
         report.recovery_candidates[0].corroboration["precheckpoint_test_only_red"]
         == "false"
     )
+    with pytest.raises(
+        RuntimeError,
+        match="pre-checkpoint.*ineligible|retry requires a blocked retained record",
+    ):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="Review the retained test-only candidate.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
     assert ledger.load(record.issue_iid) == retained
     assert repository.binds == repository.prepares == repository.pushes == 0
     assert gitlab.created_merge_requests == 0 and gitlab.labels == []

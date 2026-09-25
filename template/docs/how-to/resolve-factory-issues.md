@@ -61,8 +61,13 @@ exact evidence.
 
 Treat stale running work as `needs_human_decision`, never as a retry target.
 Use `agent-work loop recover` for retained state. Retry only a retained
-`BLOCKED` record whose trusted prerequisites are all closed or absent; this
-retry keeps retained publication replay and retry history.
+`BLOCKED` record after inventory marks it `safely_retryable` and the explicit
+retry preview accepts its current evidence. Inventory checks dirty retained
+artifacts, including eligible legacy forms, against rules shared with retry
+preview. Its classification alone does not pass the remaining preview guards.
+When it reports `needs_human_decision`, inspect the retained worktree and ledger.
+Review the bounded reason before choosing a resolution. An eligible retry
+keeps retained publication replay and retry history.
 
 The supervisor finds recovery that requires action and
 `$software-factory-supervisor` hands one IID to `$resolve-factory-issues`.
