@@ -476,8 +476,20 @@ class _DefaultDependencies:
                 and not key.startswith(("GIT_CONFIG_", "AGENT_WORK_GIT_CREDENTIAL"))
             }
         )
+        command = (str(self.config.git_path), "-C", str(path))
+        if network:
+            command += (
+                "-c",
+                "credential.helper=",
+                "-c",
+                'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+                "-c",
+                "credential.useHttpPath=true",
+                "-c",
+                "core.askPass=/bin/false",
+            )
         completed = self.run_process(
-            (str(self.config.git_path), "-C", str(path), *arguments),
+            (*command, *arguments),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
