@@ -749,6 +749,19 @@ class GitRepository:
             has_renames=any("R" in flag for flag in flags),
         )
 
+    def single_parent(self, worktree: Path, candidate_sha: str) -> str | None:
+        """Return the sole parent of one exact candidate commit, if it has one."""
+        parents = self._git(
+            "rev-list", "--parents", "-n", "1", candidate_sha, cwd=worktree
+        ).split()
+        if (
+            len(parents) != 2
+            or parents[0] != candidate_sha
+            or not all(re.fullmatch(r"[0-9a-f]{40}", item) for item in parents)
+        ):
+            return None
+        return parents[1]
+
     def run_red_command(
         self, worktree: Path, argv: tuple[str, ...]
     ) -> CommandResultProtocol:
@@ -989,11 +1002,19 @@ class GitRepository:
             return self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         return self.snapshot_test_tree(worktree, base_sha, paths)
 
-    def stage_candidate(self, worktree: Path, base_sha: str) -> str:
+    def stage_candidate(
+        self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
+    ) -> str:
         """Stage only controller-observed paths and return the exact tree."""
-        if self.head(worktree) != base_sha:
+        if self.head(worktree) != base_sha and not (
+            allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+        ):
             raise RepositoryError("candidate head changed")
-        paths = tuple(sorted(set(self.changed_paths(worktree))))
+        paths = (
+            self.publication_changed_paths(worktree, base_sha)
+            if allow_base_ancestor
+            else tuple(sorted(set(self.changed_paths(worktree))))
+        )
         if len(paths) > 128:
             raise RepositoryError("candidate changed paths are invalid")
         if paths:
@@ -1001,7 +1022,11 @@ class GitRepository:
         tree = self._git("write-tree", cwd=worktree)
         if not re.fullmatch(r"[0-9a-f]{40}", tree):
             raise RepositoryError("candidate tree is invalid")
-        if tuple(sorted(set(self.changed_paths(worktree)))) != paths:
+        if (
+            self.publication_changed_paths(worktree, base_sha)
+            if allow_base_ancestor
+            else tuple(sorted(set(self.changed_paths(worktree))))
+        ) != paths:
             raise RepositoryError("candidate changed paths changed during staging")
         if self.red_candidate_tree(worktree, base_sha, paths) != tree:
             raise RepositoryError("candidate changed during staging")
@@ -1013,6 +1038,7 @@ class GitRepository:
         candidate_tree: str,
         *,
         base_sha: str,
+        allow_base_ancestor: bool = False,
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
@@ -1155,9 +1181,20 @@ class GitRepository:
                 }
             )
         if (
-            self.head(worktree) != base_sha
+            (
+                self.head(worktree) != base_sha
+                and not (
+                    allow_base_ancestor
+                    and self._is_ancestor(base_sha, "HEAD", worktree)
+                )
+            )
             or self._git("write-tree", cwd=worktree) != candidate_tree
-            or tuple(sorted(set(self.changed_paths(worktree)))) != changed_paths
+            or (
+                self.publication_changed_paths(worktree, base_sha)
+                if allow_base_ancestor
+                else tuple(sorted(set(self.changed_paths(worktree))))
+            )
+            != changed_paths
             or self.red_candidate_tree(worktree, base_sha, changed_paths)
             != candidate_tree
         ):

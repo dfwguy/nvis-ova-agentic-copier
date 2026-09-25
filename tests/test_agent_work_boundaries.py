@@ -184,6 +184,55 @@ def test_stage_candidate_normalizes_observed_git_order(tmp_path: Path) -> None:
     assert [command[-1] for command in calls] == ["z.py", "write-tree"]
 
 
+def test_stage_candidate_accepts_verified_ancestor_only_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """Authored recovery may stage from its verified original base."""
+    base = "a" * 40
+    head = "b" * 40
+    tree = "c" * 40
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return head
+
+        def _is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
+            del worktree
+            return ancestor == base and descendant == "HEAD"
+
+        def publication_changed_paths(
+            self, worktree: Path, target_sha: str
+        ) -> tuple[str, ...]:
+            del worktree
+            assert target_sha == base
+            return ("authored.py", "recovery.py")
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree
+            assert (base_sha, paths) in {
+                (base, ("authored.py", "recovery.py")),
+                (head, ("ordinary.py",)),
+            }
+            return tree
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("ordinary.py",)
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        return CommandResult(0, "", "")
+
+    repository = ObservedRepository(_config(tmp_path), run)
+    assert repository.stage_candidate(tmp_path, base, allow_base_ancestor=True) == tree
+    with pytest.raises(RepositoryError, match="candidate head changed"):
+        repository.stage_candidate(tmp_path, base)
+
+
 @pytest.mark.parametrize(
     ("state", "returncode"),
     (("terminal-success", 0), ("terminal-failure", 1)),
@@ -265,6 +314,88 @@ def test_trusted_candidate_judge_response_strips_state_paths(
     assert observed["evidence_id"]
     if returncode == 0:
         assert observed["junit_timings"] == report["junit_timings"]
+
+
+def test_judge_candidate_accepts_verified_ancestor_scope(tmp_path: Path) -> None:
+    """Authored validation keeps its original-base paths through Judge."""
+    base, head, tree = "a" * 40, "b" * 40, "c" * 40
+    report = {
+        "candidate_tree": tree,
+        "state": "terminal-success",
+        "terminal": True,
+        "exit_code": 0,
+        "hook_failures": [],
+        "junit_artifacts": [],
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "junit_timings": [],
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            0, tree if command[-1] == "write-tree" else json.dumps(report), ""
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return head
+
+        def _is_ancestor(self, ancestor: str, descendant: str, worktree: Path) -> bool:
+            del worktree
+            return (ancestor, descendant) == (base, "HEAD")
+
+        def publication_changed_paths(
+            self, worktree: Path, target_sha: str
+        ) -> tuple[str, ...]:
+            del worktree
+            assert target_sha == base
+            return ("authored.py", "recovery.py")
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree
+            assert (base_sha, paths) in {
+                (base, ("authored.py", "recovery.py")),
+                (head, ("ordinary.py",)),
+            }
+            return tree
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("ordinary.py",)
+
+    observed = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path,
+        tree,
+        base_sha=base,
+        allow_base_ancestor=True,
+        changed_paths=("authored.py", "recovery.py"),
+        action="status",
+        timeout_seconds=1,
+    )
+    assert observed["candidate_tree"] == tree
+    assert observed["evidence_id"]
+    ordinary = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path,
+        tree,
+        base_sha=head,
+        changed_paths=("ordinary.py",),
+        action="status",
+        timeout_seconds=1,
+    )
+    assert ordinary["candidate_tree"] == tree
+    with pytest.raises(RepositoryError, match="candidate changed during validation"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path,
+            tree,
+            base_sha=base,
+            allow_base_ancestor=False,
+            changed_paths=("ordinary.py",),
+            action="status",
+            timeout_seconds=1,
+        )
 
 
 def test_candidate_judge_rejects_tree_changed_while_hook_ran(tmp_path: Path) -> None:

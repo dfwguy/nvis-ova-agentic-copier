@@ -230,7 +230,9 @@ class RepositoryPort(Protocol):
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str: ...
 
-    def stage_candidate(self, worktree: Path, base_sha: str) -> str: ...
+    def stage_candidate(
+        self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
+    ) -> str: ...
 
     def judge_candidate(
         self,
@@ -238,6 +240,7 @@ class RepositoryPort(Protocol):
         candidate_tree: str,
         *,
         base_sha: str,
+        allow_base_ancestor: bool = False,
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
@@ -246,6 +249,8 @@ class RepositoryPort(Protocol):
     def observe_legacy_publication_candidate(
         self, worktree: Path
     ) -> LegacyPublicationCandidate: ...
+
+    def single_parent(self, worktree: Path, candidate_sha: str) -> str | None: ...
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str

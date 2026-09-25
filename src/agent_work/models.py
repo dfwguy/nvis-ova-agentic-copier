@@ -689,7 +689,7 @@ class AuditReceiptSummary(BoundaryModel):
 class PublicationCorrectionIdentity(BoundaryModel):
     """Immutable controller-authored identity for one dirty publication correction."""
 
-    mode: Literal["publication_commit_rejected"]
+    mode: Literal["publication_commit_rejected", "authored_candidate_recovery"]
     project_id: int = Field(gt=0)
     issue_iid: int = Field(gt=0)
     worktree: Path
@@ -743,6 +743,11 @@ class PublicationCorrectionIdentity(BoundaryModel):
             )
         if self.workflow_lane is WorkflowLane.UNKNOWN:
             raise ValueError("correction workflow lane must be known")
+        if (
+            self.mode == "authored_candidate_recovery"
+            and self.baseline_sha == self.head_sha
+        ):
+            raise ValueError("authored candidate must retain its original base")
         return self
 
 

@@ -771,6 +771,10 @@ class FakeRepository:
         self.legacy_has_untracked = False
         self.legacy_has_unmerged = False
         self.legacy_has_renames = False
+        self.single_parent_result: str | None = None
+        self.allow_base_ancestor_calls: list[bool] = []
+        self.judged_paths: list[tuple[str, ...]] = []
+        self.red_candidate_tree_calls: list[tuple[str, tuple[str, ...]]] = []
 
     def refresh_base(self) -> None:
         """Model a successful clean-checkout refresh."""
@@ -833,12 +837,17 @@ class FakeRepository:
     def red_candidate_tree(
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str:
-        del worktree, base_sha, paths
+        del worktree
+        self.red_candidate_tree_calls.append((base_sha, paths))
         return self.candidate_tree
 
-    def stage_candidate(self, worktree: Path, base_sha: str) -> str:
+    def stage_candidate(
+        self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
+    ) -> str:
         del worktree
-        assert base_sha == self.current_head
+        self.allow_base_ancestor_calls.append(allow_base_ancestor)
+        assert base_sha in {self.current_head, self.single_parent_result}
+        assert allow_base_ancestor is (base_sha == self.single_parent_result)
         return self.candidate_tree
 
     def judge_candidate(
@@ -847,15 +856,24 @@ class FakeRepository:
         candidate_tree: str,
         *,
         base_sha: str,
+        allow_base_ancestor: bool = False,
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
     ) -> dict[str, object]:
         del worktree, timeout_seconds
+        self.allow_base_ancestor_calls.append(allow_base_ancestor)
+        self.judged_paths.append(changed_paths)
         assert action in {"validate", "status"}
         assert candidate_tree == self.candidate_tree
-        assert base_sha == self.current_head
-        assert changed_paths == tuple(sorted(set(self.paths)))
+        assert base_sha in {self.current_head, self.single_parent_result}
+        assert allow_base_ancestor is (base_sha == self.single_parent_result)
+        expected_paths = (
+            self.publication_paths
+            if allow_base_ancestor and self.publication_paths is not None
+            else self.paths
+        )
+        assert changed_paths == tuple(sorted(set(expected_paths)))
         return {"candidate_tree": candidate_tree, "state": "terminal-success"}
 
     def observe_legacy_publication_candidate(
@@ -873,6 +891,11 @@ class FakeRepository:
             has_unmerged=self.legacy_has_unmerged,
             has_renames=self.legacy_has_renames,
         )
+
+    def single_parent(self, worktree: Path, candidate_sha: str) -> str | None:
+        """Model the one original parent retained for an authored candidate."""
+        del worktree, candidate_sha
+        return self.single_parent_result
 
     def publication_changed_paths(
         self, worktree: Path, target_sha: str
@@ -1760,6 +1783,130 @@ def _affected_dirty_correction_record(tmp_path: Path) -> LedgerRecord:
     )
 
 
+def _authored_candidate_recovery_record(tmp_path: Path) -> LedgerRecord:
+    """Build the retained #221 candidate with its pre-candidate Red provenance."""
+    candidate_sha = "a947b006a9d4240cd916a362b97cf0f9fbffb31a"
+    return _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "issue_iid": 221,
+            "source_branch": "agent/issue-221",
+            "source_sha": candidate_sha,
+            "main_sha": "b28518d675168aadc3f5f7f6af07fdcc99b4ee75",
+            "prior_state": RunnerState.EXECUTING,
+            "prior_phase": WorkflowPhase.WORKFLOW,
+            "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+            "audit_evidence": "unknown",
+            "merge_request_draft": MergeRequestDraft(
+                title="Recover authored candidate",
+                description="Retained draft provenance",
+            ),
+            "condition_history": (
+                ConditionEvidence(
+                    occurred_at=NOW,
+                    retry_count=1,
+                    code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                    detail="broker changed-path mismatch",
+                ),
+                ConditionEvidence(
+                    occurred_at=NOW,
+                    retry_count=2,
+                    code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                    detail="broker request missing",
+                ),
+            ),
+        }
+    )
+
+
+def _authored_candidate_checkpoint(record: LedgerRecord) -> RedCheckpointEvidence:
+    """Return the exact Red checkpoint retained below the candidate's parent."""
+    original_base = "18a4b501" + "0" * 32
+    return RedCheckpointEvidence(
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        source_branch=record.source_branch,
+        base_sha=original_base,
+        tree_oid="c" * 40,
+        ref=f"refs/agent-work/red-checkpoints/{record.issue_iid}/{original_base}",
+        test_paths=("tests/test_template.py",),
+        argv=("uv", "run", "pytest", "tests/test_template.py::test_red"),
+        exit_code=1,
+        expected_failure="assert authored candidate failure",
+        output_sha256=hashlib.sha256(
+            b"assert authored candidate failure\n"
+        ).hexdigest(),
+    )
+
+
+def test_recovery_of_original_authored_candidate_preserves_staged_scope(
+    tmp_path: Path,
+) -> None:
+    """The original broker-reconciliation candidate resumes for full revalidation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _authored_candidate_recovery_record(tmp_path).model_copy(
+            update={
+                "issue_iid": 200,
+                "source_branch": "agent/issue-200",
+                "source_sha": "4c32146a" + "0" * 32,
+                "error_code": ErrorCode.STATE_RECONCILIATION_FAILED,
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        retry_count=1,
+                        code=ErrorCode.STATE_RECONCILIATION_FAILED.value,
+                        detail="candidate_broker: submission failed",
+                    ),
+                ),
+            }
+        )
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_template.py",)
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    checkpoint = _authored_candidate_checkpoint(record).model_copy(
+        update={
+            "base_sha": "dfaae81c" + "0" * 32,
+            "ref": "refs/agent-work/red-checkpoints/200/dfaae81c" + "0" * 32,
+        }
+    )
+    repository.single_parent_result = checkpoint.base_sha
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact authored candidate was reviewed.",
+    )
+
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "original-authored-candidate-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    applied = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert applied.applied and resumed is not None
+    assert resumed.correction_identity is not None
+    assert resumed.correction_identity.staged_paths == repository.paths
+    assert resumed.correction_identity.unstaged_paths == ()
+    assert repository.binds == repository.prepares == repository.pushes == 0
+
+
 def _precheckpoint_test_only_red_record(tmp_path: Path) -> LedgerRecord:
     """Build the one preserved test-only Red candidate that predates a checkpoint."""
     return _record(
@@ -2151,6 +2298,7 @@ def test_coding_publication_requires_controller_validated_candidate(
     )
     repository = FakeRepository(config)
     repository.paths = ("src/example.py", "tests/test_agent_work_serial_runtime.py")
+    repository.publication_paths = ("unexpected/from/original-base.py",)
     invoker = SingleSessionInvoker(validate_candidate=False)
     invoker.changed_paths = repository.paths
     checkpoint = _red_checkpoint_evidence_for_segment(record)
@@ -4376,6 +4524,353 @@ def test_recovery_retry_bootstraps_affected_dirty_correction_without_publication
     assert identity.red_checkpoint is not None
     assert repository.binds == repository.prepares == repository.pushes == 0
     assert gitlab.created_merge_requests == 0
+
+
+def test_recovery_of_authored_candidate_preserves_pre_candidate_red_and_provenance(
+    tmp_path: Path,
+) -> None:
+    """A reviewed authored candidate resumes without discarding retained provenance."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_authored_candidate_recovery_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_template.py",)
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    checkpoint = _authored_candidate_checkpoint(record)
+    repository.single_parent_result = checkpoint.base_sha
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact authored candidate was reviewed.",
+    )
+
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=dependencies,
+    )
+    assert inventory.recovery_candidates[0].classification == "safely_retryable"
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.evidence["authored_candidate"] == "true"
+    assert preview.operational_plan.evidence["retained_audit_evidence"] == "unknown"
+    assert "retained_merge_request_draft" in preview.operational_plan.evidence
+    plan_file = tmp_path / "authored-candidate-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    applied = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert applied.applied and resumed is not None
+    assert resumed.state is RunnerState.EXECUTING
+    assert resumed.phase is WorkflowPhase.WORKFLOW
+    assert resumed.audit_evidence == "unknown"
+    assert resumed.merge_request_draft is None
+    assert resumed.correction_identity is not None
+    assert resumed.correction_identity.head_sha == record.source_sha
+    assert resumed.correction_identity.red_checkpoint == checkpoint
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0
+
+    replay = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+    assert replay.applied and ledger.load(record.issue_iid) == resumed
+
+
+def test_authored_candidate_replay_rechecks_retained_identity(
+    tmp_path: Path,
+) -> None:
+    """A reviewed replay refuses candidate drift after its first application."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_authored_candidate_recovery_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_template.py",)
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    checkpoint = _authored_candidate_checkpoint(record)
+    repository.single_parent_result = checkpoint.base_sha
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact authored candidate was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "authored-candidate-replay-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    repository.legacy_index_fingerprint = "e" * 64
+    with pytest.raises(RuntimeError, match="correction recovery evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert gitlab.labels == ["agent::running"]
+
+
+def test_authored_candidate_execution_uses_ancestor_validation_only(
+    tmp_path: Path,
+) -> None:
+    """An applied authored recovery validates through the original-base boundary."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_authored_candidate_recovery_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("recovery.py",)
+    repository.publication_paths = ("authored.py", "recovery.py")
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    checkpoint = _authored_candidate_checkpoint(record)
+    repository.single_parent_result = checkpoint.base_sha
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact authored candidate was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "authored-execution-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    invoker = SingleSessionInvoker()
+    invoker.changed_paths = repository.publication_paths
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert repository.allow_base_ancestor_calls == [True, True]
+    assert repository.judged_paths == [("authored.py", "recovery.py")]
+    assert (
+        repository.red_candidate_tree_calls
+        == [(checkpoint.base_sha, ("authored.py", "recovery.py"))] * 3
+    )
+    assert outcome is not None and outcome.state is RunnerState.PUBLISHING
+
+
+def test_ordinary_candidate_execution_keeps_exact_head_validation(
+    tmp_path: Path,
+) -> None:
+    """An ordinary coding candidate never enables ancestor-base validation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/example.py", "tests/test_agent_work_serial_runtime.py")
+    repository.publication_paths = ("unexpected/from/original-base.py",)
+    repository.current_head = record.source_sha or ""
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+
+    run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=SingleSessionInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert repository.allow_base_ancestor_calls == [False, False]
+
+
+def test_authored_candidate_recovery_rejects_unrelated_failure(
+    tmp_path: Path,
+) -> None:
+    """Only the retained broker reconciliation failure can enter this recovery."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _authored_candidate_recovery_record(tmp_path).model_copy(
+            update={"error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH}
+        )
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_template.py",)
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    checkpoint = _authored_candidate_checkpoint(record)
+    repository.single_parent_result = checkpoint.base_sha
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository),
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    with pytest.raises(RuntimeError, match="affected correction recovery evidence"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=record.issue_iid,
+                choice="retry",
+                reason="The exact authored candidate was reviewed.",
+            ),
+            apply=False,
+            dependencies=dependencies,
+        )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("branch", "head", "index", "parent", "checkpoint", "audit", "draft", "owner"),
+)
+def test_authored_candidate_recovery_rejects_drift_before_effects(
+    tmp_path: Path, drift: str
+) -> None:
+    """Every reviewed authored-candidate identity field is re-read under the lock."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_authored_candidate_recovery_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.legacy_branch = record.source_branch
+    repository.current_head = record.source_sha or ""
+    repository.paths = ("tests/test_template.py",)
+    repository.legacy_staged_paths = repository.paths
+    repository.legacy_unstaged_paths = ()
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+    owner = {"status": "missing"}
+    checkpoint = _authored_candidate_checkpoint(record)
+    repository.single_parent_result = checkpoint.base_sha
+    dependencies = _with_issue_owner_probe(
+        replace(
+            _dependencies(config, ledger, gitlab, repository),
+            load_red_checkpoint=lambda *_args: checkpoint,
+        ),
+        lambda _iid: owner["status"],
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The exact authored candidate was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "authored-candidate-drift-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    if drift == "branch":
+        repository.legacy_branch = "agent/issue-999"
+    elif drift == "head":
+        repository.current_head = "c" * 40
+    elif drift == "index":
+        repository.legacy_index_fingerprint = "e" * 64
+    elif drift == "parent":
+        repository.single_parent_result = "d" * 40
+    elif drift == "checkpoint":
+        dependencies = replace(
+            dependencies,
+            load_red_checkpoint=lambda *_args: checkpoint.model_copy(
+                update={"tree_oid": "d" * 40}
+            ),
+        )
+    elif drift == "audit":
+        ledger.persist(record.model_copy(update={"audit_evidence": None}))
+    elif drift == "draft":
+        ledger.persist(record.model_copy(update={"merge_request_draft": None}))
+    else:
+        owner["status"] = "active"
+
+    with pytest.raises(
+        RuntimeError, match="evidence changed|correction|recovery|owner"
+    ):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
+
+
+def test_loop_retry_schedules_then_blocks_an_ambiguous_authored_candidate(
+    tmp_path: Path,
+) -> None:
+    """Only an exact reviewed recovery may reactivate the retained candidate."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_authored_candidate_recovery_record(tmp_path))
+    repository = FakeRepository(config)
+    gitlab = FakeGitLab(
+        _issue(iid=record.issue_iid).model_copy(update={"labels": ("agent::blocked",)})
+    )
+
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    scheduled = dispatch(
+        CommandRequest(command="loop.retry", issue_iid=record.issue_iid),
+        apply=True,
+        dependencies=dependencies,
+    )
+    assert scheduled.outcome == "retry_scheduled"
+    scheduled_record = ledger.load(record.issue_iid)
+    assert scheduled_record is not None
+    assert scheduled_record.state is RunnerState.PREPARING
+
+    dispatch(
+        CommandRequest(command="loop.run", max_activation_seconds=5),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    blocked = ledger.load(record.issue_iid)
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.BRANCH_OWNERSHIP_AMBIGUOUS
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.labels == ["agent::running", "agent::running", "agent::blocked"]
 
 
 @pytest.mark.parametrize(
