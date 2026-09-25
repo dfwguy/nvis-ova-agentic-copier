@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -539,22 +539,34 @@ debug output with private work details into an issue.
 ## Retry or recover retained work.
 
 Inspect the saved state and next action first. Retry a named blocked item only
-after clear human direction. This resets its retry budget and returns it to
-resumable setup.
+when the shared `recovery resolve --choice retry` predicate accepts its current
+evidence. This resets its retry budget and returns it to resumable setup. It
+does not need a new human unblocking approval.
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
 uv run agent-work loop status --json
-uv run agent-work loop retry --issue-iid IID --json
-uv run agent-work loop retry --issue-iid IID --apply --json
+uv run agent-work loop retry --issue-iid IID --json >agent-work-loop-retry-IID-plan.json
+uv run agent-work loop retry --issue-iid IID --apply \
+  --plan-file agent-work-loop-retry-IID-plan.json --json
 ```
+
+`retry_preview` is the only preview that supplies an eligible plan. An apply
+that returns `retry_scheduled` resumes the reported retained workflow.
+`correction_activated` requires the reported correction and validation before
+publication. `retry_ineligible` reports known ineligible evidence and changes
+nothing; correct the evidence and create an exact `recovery resolve --choice
+retry` preview. If a check is unavailable, unclear, stale, or uncertain, it
+exits with an error, not `retry_ineligible`; do not apply a plan. See the
+[retry outcome reference](../reference/serial-gitlab-agent-loop.md#retry-outcomes).
 
 The first try and three retries are automatic. A run yields when a retry due
 time is in the future. When retries run out, the issue is `agent::blocked`.
-Follow its saved next action. After a human fixes the case, retry that exact IID
-clearly. Do not change labels to resume blocked work. Leave a dirty saved
-worktree in place. If status lists a stash, keep it for review. Do not use
-`git stash apply` or `git stash drop` as an automatic restore step.
+Follow its saved next action. After the evidence is corrected, create and apply
+the retry plan for that exact IID. A failed predicate changes nothing. Do not
+change labels to resume blocked work. Leave a dirty saved worktree in place. If
+status lists a stash, keep it for review. Do not use `git stash apply` or `git
+stash drop` as an automatic restore step.
 
 An exact failed current-source merge-request pipeline repairs itself when it
 has one unique backed retained owner. Keep the timer on or run one normal
@@ -577,8 +589,9 @@ It is an unusual, reviewed path for one exact IID with live backing. It does
 not spend or reset the automatic repair budget. Unclear or inexact user, active
 owner, key, policy, or authority conflicts stay fail-closed. Neither issue nor
 merge-request text can set repair priority, the budget, or backoff. The loop
-never approves or merges. Reclassify one blocked record at a time with live
-backing.
+never approves or merges. For a blocked target, it uses the same retry
+predicate and rejects ineligible evidence without changes. Reclassify one
+blocked record at a time with live backing.
 
 An `agent::suggest_close` label is a structured recommendation for human
 closure, never an automated close. Review its duplicate, superseded,
@@ -623,8 +636,9 @@ suitable outcome, explicitly retry that IID only after the edit is complete:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
-uv run agent-work loop retry --issue-iid IID --json
-uv run agent-work loop retry --issue-iid IID --apply --json
+uv run agent-work loop retry --issue-iid IID --json >agent-work-loop-retry-IID-plan.json
+uv run agent-work loop retry --issue-iid IID --apply \
+  --plan-file agent-work-loop-retry-IID-plan.json --json
 ```
 
 Do not remove lifecycle or prerequisite-projection labels by hand. Do not
@@ -683,9 +697,10 @@ review that fixed label-spec action and use the same stopped-timer order. Apply
 checks the preview again, creates lost fixed labels or the `agent-work::manual`
 marker, and fixes their color or text. It never assigns a label to an issue.
 
-When status finds a retained item that needs restore, make a separate plan for
-that exact IID. Do not use normal `loop run`; it would skip the targeted proof
-check:
+When status finds a nonblocked retained item that needs restore, make a separate
+plan for that exact IID. Do not use normal `loop run`; it would skip the
+targeted proof check. For a blocked item, use the `loop retry` plan above; it
+shares the `recovery resolve --choice retry` predicate.
 
 ```bash
 uv run agent-work loop recover --issue-iid IID --json >agent-work-recover-IID-plan.json
@@ -812,7 +827,8 @@ boundary unchanged.
 
 For retained publication recovery, first inspect status, the source branch,
 local `HEAD`, recorded source SHA, and the exact pending publication intent.
-Run preview. Then explicitly run `agent-work loop retry --issue-iid IID --apply`.
+Save and review the retry preview. Then apply that exact `loop retry` plan with
+`--plan-file`.
 A retained publish intent moves directly back to publishing. It keeps the same
 branch, SHA, draft evidence, and intent. It replays the clean committed head
 without a second commit or merge request. Do not copy credentials or command

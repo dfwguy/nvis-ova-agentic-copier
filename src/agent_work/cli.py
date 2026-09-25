@@ -699,8 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status.add_argument("--issue-iid", type=_positive_integer)
     retry = loop_actions.add_parser("retry", help="preview or retry one blocked item")
-    _common(retry)
+    _common(retry, apply_help="apply only the exact reviewed retry plan")
     retry.add_argument("--issue-iid", type=_positive_integer, required=True)
+    retry.add_argument("--plan-file", type=Path)
     canary = loop_actions.add_parser(
         "canary",
         help="preview a non-claiming operational checkpoint",
@@ -2341,7 +2342,7 @@ def main(
         return 0 if report.outcome in {"preview", "verified"} else 1
     if (
         parsed.resource == "loop"
-        and parsed.action in {"canary", "recover"}
+        and parsed.action in {"canary", "recover", "retry"}
         and parsed.apply
         and parsed.plan_file is None
     ):

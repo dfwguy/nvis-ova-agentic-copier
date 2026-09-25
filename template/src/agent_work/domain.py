@@ -611,6 +611,7 @@ class CommandRequest:
     max_segments: int = 16
     max_activation_seconds: int = DEFAULT_MAX_ACTIVATION_SECONDS
     debug: bool = False
+    _automatic_blocked_retry: bool = False
 
 
 def label_for_state(state: RunnerState) -> str | None:

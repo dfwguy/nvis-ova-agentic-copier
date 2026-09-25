@@ -18,7 +18,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -126,6 +126,13 @@ from .state_machine import retained_ordinary_is_untouched, transition_record
 from .status import project_status
 from .timing import is_bounded_timing_append
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
+
+
+class RecoveryIneligibleError(RuntimeError):
+    """The retry predicate rejected complete, current recovery evidence."""
+
+
+_AUTOMATIC_BLOCKED_RETRY_REASON = "Automatic blocked retry continuation."
 
 
 def _item(
@@ -782,6 +789,10 @@ def _recovery_plan(
 ) -> tuple[OperationalPlan, RecoveryObservation]:
     if request.issue_iid is None or request.choice is None or request.reason is None:
         raise RuntimeError("recovery resolution request is incomplete")
+    try:
+        choice = ResolutionChoice(request.choice)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     split_dependencies = _recovery_split_dependencies(
         request.issue_iid, project=project, gitlab=gitlab
     )
@@ -793,13 +804,13 @@ def _recovery_plan(
     )
     dirty_evidence = (
         None
-        if _precheckpoint_test_only_red_family(record)
+        if choice is not ResolutionChoice.RETRY
+        or _precheckpoint_test_only_red_family(record)
         else _retained_dirty_recovery_evidence(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
     )
     try:
-        choice = ResolutionChoice(request.choice)
         observation = _recovery_observation(
             record,
             issue_iid=request.issue_iid,
@@ -814,6 +825,8 @@ def _recovery_plan(
             state_root=config.state_root,
             load_red_checkpoint=load_red_checkpoint,
         )
+        if choice is ResolutionChoice.RETRY and request._automatic_blocked_retry:
+            _require_safely_retryable_automatic_retry(observation)
         resolution = build_resolution_plan(
             ResolutionRequest(
                 request.issue_iid,
@@ -846,8 +859,12 @@ def _recovery_plan(
     )
     if dirty_evidence is not None:
         evidence.update(dirty_evidence)
-    if _precheckpoint_test_only_red_family(record) and precheckpoint is None:
-        raise RuntimeError(
+    if (
+        choice is ResolutionChoice.RETRY
+        and _precheckpoint_test_only_red_family(record)
+        and precheckpoint is None
+    ):
+        raise RecoveryIneligibleError(
             "pre-checkpoint test-only Red recovery evidence is ineligible"
         )
     if precheckpoint is not None:
@@ -864,6 +881,20 @@ def _recovery_plan(
         target_iid=request.issue_iid,
         evidence=evidence,
     ), observation
+
+
+def _require_safely_retryable_automatic_retry(
+    observation: RecoveryObservation,
+) -> None:
+    """Require the inventory's current safe classification for direct retry."""
+    candidates = build_inventory((observation,)).candidates
+    if (
+        len(candidates) != 1
+        or candidates[0].classification is not RecoveryClassification.SAFELY_RETRYABLE
+    ):
+        raise RuntimeError(
+            "automatic blocked retry requires safely retryable recovery evidence"
+        )
 
 
 def _retained_dirty_recovery_evidence(
@@ -894,7 +925,7 @@ def _retained_dirty_recovery_evidence(
         and repository is not None
         and repository.has_changes(record.worktree)
     ):
-        raise RuntimeError("retained dirty recovery evidence is ineligible")
+        raise RecoveryIneligibleError("retained dirty recovery evidence is ineligible")
     return None
 
 
@@ -948,7 +979,9 @@ def _legacy_dirty_publication_evidence(
         or record.phase is not WorkflowPhase.READY_TO_PUBLISH
         or record.source_sha is None
     ):
-        raise RuntimeError("legacy publication recovery evidence is ineligible")
+        raise RecoveryIneligibleError(
+            "legacy publication recovery evidence is ineligible"
+        )
     candidate = repository.observe_legacy_publication_candidate(record.worktree)
     expected = record.intent.expected_evidence
     eligible = (
@@ -981,7 +1014,9 @@ def _legacy_dirty_publication_evidence(
     elif record.workflow_lane is not WorkflowLane.CONTENT:
         eligible = False
     if not eligible:
-        raise RuntimeError("legacy publication recovery evidence is ineligible")
+        raise RecoveryIneligibleError(
+            "legacy publication recovery evidence is ineligible"
+        )
     identity = build_publication_correction_identity(
         record, candidate, checkpoint=checkpoint
     )
@@ -1041,7 +1076,9 @@ def _affected_dirty_correction_evidence(
             for item in record.condition_history
         )
     ):
-        raise RuntimeError("affected correction recovery evidence is ineligible")
+        raise RecoveryIneligibleError(
+            "affected correction recovery evidence is ineligible"
+        )
     candidate = repository.observe_legacy_publication_candidate(record.worktree)
     checkpoint = (
         None
@@ -1052,7 +1089,9 @@ def _affected_dirty_correction_evidence(
         record, candidate, checkpoint=checkpoint
     )
     if candidate.merge_head is not None:
-        raise RuntimeError("affected correction recovery evidence is ineligible")
+        raise RecoveryIneligibleError(
+            "affected correction recovery evidence is ineligible"
+        )
     return {
         "correction_identity": identity.model_dump_json(),
         "affected_correction": "true",
@@ -2141,8 +2180,8 @@ def _recovery_candidate_report(
             else None
         ),
         next_action=(
-            "Resolve the blocker, then run agent-work loop retry "
-            f"--issue-iid {candidate.issue_iid} --apply."
+            "Resolve the blocker, then preview agent-work loop retry "
+            f"--issue-iid {candidate.issue_iid} and apply its exact --plan-file."
             if (
                 observation.blocked_cause is not None
                 and candidate.classification is RecoveryClassification.SAFELY_RETRYABLE
@@ -2330,6 +2369,99 @@ def _matches_recovery_intent(
     )
 
 
+def _dispatch_reviewed_blocked_retry(
+    request: CommandRequest,
+    *,
+    apply: bool,
+    dependencies: RuntimeDependencies,
+) -> CommandReport:
+    """Route a blocked loop retry through the shared reviewed recovery proof."""
+    if request.issue_iid is None:
+        raise RuntimeError("retry requires an issue IID")
+    if apply and request.plan_file is None:
+        raise RuntimeError(
+            "blocked retry requires exact `agent-work recovery.resolve "
+            f"--issue-iid {request.issue_iid} --choice retry` evidence: "
+            "recovery apply requires --plan-file"
+        )
+    recovery_request = replace(
+        request,
+        command="recovery.resolve",
+        choice=ResolutionChoice.RETRY.value,
+        reason=_AUTOMATIC_BLOCKED_RETRY_REASON,
+        _automatic_blocked_retry=True,
+    )
+    try:
+        report = dispatch(recovery_request, apply=apply, dependencies=dependencies)
+    except RecoveryIneligibleError as error:
+        if not apply:
+            project, username = _recovery_identity(
+                dependencies.gitlab, dependencies.config
+            )
+            return _report(
+                request,
+                applied=False,
+                outcome="retry_ineligible",
+                records=(
+                    (record,)
+                    if (record := dependencies.ledger.load(request.issue_iid))
+                    is not None
+                    else ()
+                ),
+                project={
+                    "host": dependencies.config.host,
+                    "project_id": project.id,
+                },
+                summary="Blocked retry is ineligible.",
+                next_action=(
+                    "Use `agent-work recovery.resolve "
+                    f"--issue-iid {request.issue_iid} --choice retry` after resolving "
+                    "the evidence error."
+                ),
+                operational_plan=OperationalPlan(
+                    command=request.command,
+                    action="retry_ineligible",
+                    project={
+                        "host": project.host,
+                        "project_id": project.id,
+                        "default_branch": project.default_branch,
+                    },
+                    authenticated_username=username,
+                    target_iid=request.issue_iid,
+                    evidence={"retry_resolution": "ineligible"},
+                ),
+            )
+        raise RuntimeError(
+            "blocked retry requires exact `agent-work recovery.resolve "
+            f"--issue-iid {request.issue_iid} --choice retry` evidence: {error}"
+        ) from error
+    correction_activated = apply and any(
+        item.state is RunnerState.EXECUTING for item in report.items
+    )
+    return report.model_copy(
+        update={
+            "command": request.command,
+            "outcome": (
+                "correction_activated"
+                if correction_activated
+                else "retry_scheduled"
+                if apply
+                else "retry_preview"
+            ),
+            "summary": (
+                "Reviewed retained correction activated."
+                if correction_activated
+                else report.summary
+            ),
+            "next_action": (
+                "Complete correction and validation before publication."
+                if correction_activated
+                else report.next_action
+            ),
+        }
+    )
+
+
 def dispatch(
     request: CommandRequest,
     *,
@@ -2342,6 +2474,28 @@ def dispatch(
     ledger = wired.ledger
     gitlab = wired.gitlab
     repository = wired.repository
+    if request.command == "loop.retry":
+        return _dispatch_reviewed_blocked_retry(
+            request, apply=apply, dependencies=wired
+        )
+    if (
+        request.command == "loop.recover"
+        and request.issue_iid is not None
+        and (record := ledger.load(request.issue_iid)) is not None
+        and (
+            record.state is RunnerState.BLOCKED
+            or (
+                apply
+                and request.plan_file is not None
+                and record.state in {RunnerState.PREPARING, RunnerState.EXECUTING}
+                and record.intent is not None
+                and record.intent.kind == "human_recovery_retry"
+            )
+        )
+    ):
+        return _dispatch_reviewed_blocked_retry(
+            request, apply=apply, dependencies=wired
+        )
     wired.logger.info("command=%s applied=%s", request.command, apply)
     wired.logger.debug(
         "issue_iid=%s max_activation_seconds=%s",
@@ -2592,6 +2746,14 @@ def dispatch(
                     merge_requests=snapshot_mrs,
                     load_red_checkpoint=wired.load_red_checkpoint,
                 )
+            except RecoveryIneligibleError as error:
+                if request._automatic_blocked_retry:
+                    raise
+                if apply and reviewed is not None:
+                    raise RuntimeError(
+                        "recovery evidence changed; create a new preview"
+                    ) from error
+                raise
             except RuntimeError as error:
                 if apply and reviewed is not None:
                     raise RuntimeError(
@@ -2626,7 +2788,13 @@ def dispatch(
             # pre-acquisition probe so the lock cannot make its own plan drift.
             current_controller = snapshot_controller
             replaying = _matches_recovery_intent(current_record, reviewed, choice)
-            if replaying:
+            blocked_automatic_replay = (
+                replaying
+                and request._automatic_blocked_retry
+                and current_record is not None
+                and current_record.state is RunnerState.BLOCKED
+            )
+            if replaying and not blocked_automatic_replay:
                 current_observation = _recovery_observation(
                     current_record,
                     issue_iid=request.issue_iid or 0,
@@ -2644,13 +2812,26 @@ def dispatch(
                 )
                 current_plan = reviewed
             else:
+                plan_record = current_record
+                if blocked_automatic_replay and current_record is not None:
+                    reviewed_revision = reviewed.evidence.get("ledger_revision")
+                    if (
+                        type(reviewed_revision) is not int
+                        or current_record.revision != reviewed_revision + 1
+                    ):
+                        raise RuntimeError(
+                            "recovery evidence changed; create a new preview"
+                        )
+                    plan_record = current_record.model_copy(
+                        update={"revision": reviewed_revision, "intent": None}
+                    )
                 try:
                     current_plan, current_observation = _recovery_plan(
                         request,
                         config=config,
                         project=project,
                         username=username,
-                        record=current_record,
+                        record=plan_record,
                         gitlab=gitlab,
                         repository=repository,
                         controller_status=current_controller,
@@ -2663,7 +2844,18 @@ def dispatch(
                     raise RuntimeError(
                         "recovery evidence changed; create a new preview"
                     ) from error
-            if not replaying and current_plan != reviewed:
+            if (
+                choice is ResolutionChoice.RETRY
+                and request._automatic_blocked_retry
+                and not (
+                    replaying
+                    and current_record is not None
+                    and current_record.state
+                    in {RunnerState.PREPARING, RunnerState.EXECUTING}
+                )
+            ):
+                _require_safely_retryable_automatic_retry(current_observation)
+            if (not replaying or blocked_automatic_replay) and current_plan != reviewed:
                 raise RuntimeError("recovery evidence changed; create a new preview")
             if not replaying:
                 try:
@@ -3369,94 +3561,6 @@ def dispatch(
             applied=True,
             outcome="migration_applied",
             actions=plan.actions,
-            project=identity,
-        )
-
-    if request.command == "loop.retry":
-        if request.issue_iid is None:
-            raise RuntimeError("retry requires an issue IID")
-        if not apply:
-            record = ledger.load(request.issue_iid)
-            return _report(
-                request,
-                applied=False,
-                outcome="retry_preview",
-                records=() if record is None else (record,),
-                project=identity,
-            )
-        with wired.lock():
-            record = ledger.load(request.issue_iid)
-            if record is None or record.state is not RunnerState.BLOCKED:
-                raise RuntimeError("only a recorded blocked issue can be retried")
-            _raise_for_immediate_owner_conflict(record, ledger=ledger)
-            retained_publication = (
-                record.intent is not None
-                and record.intent.kind == "publish_merge_request"
-            )
-            if (
-                retained_publication
-                and record.pending_feedback is None
-                and record.publication_sha is None
-            ):
-                if record.source_sha is None:
-                    raise RuntimeError("retained publication has no baseline SHA")
-                publication_sha = wired.repository.bind_retained_commit(
-                    record.worktree,
-                    record.source_branch,
-                    record.issue_iid,
-                    record.source_sha,
-                )
-                if record.intent is None:
-                    raise RuntimeError("retained publication has no exact intent")
-                record = ledger.persist(
-                    record.model_copy(
-                        update={
-                            "publication_sha": publication_sha,
-                            "intent": record.intent.model_copy(
-                                update={
-                                    "expected_evidence": record.intent.expected_evidence
-                                    | {"publication_sha": publication_sha}
-                                }
-                            ),
-                        }
-                    )
-                )
-            current = _current_condition(record)
-            history = record.condition_history
-            if current is not None:
-                history = (
-                    *history,
-                    current.model_copy(
-                        update={
-                            "occurred_at": wired.clock(),
-                            "retry_count": record.retry_count,
-                        }
-                    ),
-                )[-64:]
-            resumed = ledger.persist(
-                transition_record(
-                    record,
-                    RunnerState.PUBLISHING
-                    if retained_publication
-                    else RunnerState.PREPARING,
-                    retry_count=0,
-                    retry_at=None,
-                    error_code=None,
-                    condition_history=history,
-                    summary="Human-directed retry requested.",
-                    next_action=(
-                        "Replay the retained publication intent."
-                        if retained_publication
-                        else "Reconcile and resume preparation."
-                    ),
-                )
-            )
-            gitlab.transition_labels(record.issue_iid, label_for_state(resumed.state))
-        return _report(
-            request,
-            applied=True,
-            outcome="retry_scheduled",
-            records=(resumed,),
             project=identity,
         )
 
