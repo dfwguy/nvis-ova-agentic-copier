@@ -74,6 +74,8 @@ deps = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.4",
 ]
 commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py311.xml", "--junitxml=test-results-py311.xml", "-o", "junit_suite_name=py311"]]
 
@@ -89,6 +91,8 @@ deps = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.4",
 ]
 commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:coverage-py314.xml", "--junitxml=test-results-py314.xml", "-o", "junit_suite_name=py314"]]
 
@@ -102,6 +106,8 @@ test = [
     "pytest-subprocess>=1.5.3",
     "pytest-timeout>=2.2.0",
     "copier>=9.0.0",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.4",
 ]
 tooling = [
     "kingfisher-bin>=1.112.0",
@@ -117,7 +123,6 @@ dev = [
     {include-group = "test"},
     {include-group = "tooling"},
     {include-group = "typing"},
-    "pre-commit>=4.6.2",
     "tox>=4.27.0",
     "tox-uv>=1.20",
 ]

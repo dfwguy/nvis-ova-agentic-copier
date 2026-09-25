@@ -515,12 +515,14 @@ dev = [
 test = [
     { name = "copier" },
     { name = "hypothesis" },
+    { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "pytest-randomly" },
     { name = "pytest-subprocess" },
     { name = "pytest-timeout" },
+    { name = "ruff" },
 ]
 tooling = [
     { name = "kingfisher-bin" },
@@ -562,12 +564,14 @@ dev = [
 test = [
     { name = "copier", specifier = ">=9.0.0" },
     { name = "hypothesis", specifier = ">=6.0" },
+    { name = "pre-commit", specifier = ">=4.6.2" },
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-cov", specifier = ">=6.1.1" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pytest-randomly", specifier = ">=3.15.0" },
     { name = "pytest-subprocess", specifier = ">=1.5.3" },
     { name = "pytest-timeout", specifier = ">=2.2.0" },
+    { name = "ruff", specifier = ">=0.16.4" },
 ]
 tooling = [
     { name = "kingfisher-bin", specifier = ">=1.112.0" },

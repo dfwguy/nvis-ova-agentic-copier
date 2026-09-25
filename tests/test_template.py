@@ -68,6 +68,115 @@ def test_tox_hook_runs_for_every_coding_candidate(project_root: Path) -> None:
     assert "types" not in tox_hook
 
 
+def _local_pre_commit_hooks(root: Path) -> list[dict[str, Any]]:
+    """Return the local hook mappings from one project configuration."""
+    configuration = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+    local_repository = next(
+        repository
+        for repository in configuration["repos"]
+        if repository["repo"] == "local"
+    )
+    return local_repository["hooks"]
+
+
+def test_installed_ruff_format_hooks_reject_unstaged_defect_without_editing(
+    generated_project: Path, tmp_path: Path
+) -> None:
+    """The installed hook checks the full tree after staged-only formatting."""
+    hooks = [
+        hook
+        for hook in _local_pre_commit_hooks(generated_project)
+        if hook["id"] in {"ruff-format", "ruff-format-check"}
+    ]
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".pre-commit-config.yaml").write_text(
+        yaml.safe_dump(
+            {"repos": [{"repo": "local", "hooks": hooks}]},
+            sort_keys=False,
+        )
+    )
+    unformatted = "def add(a,b):return a+b\n"
+    bad_file = repository / "bad.py"
+    bad_file.write_text(unformatted)
+    staged_file = repository / "staged.py"
+    staged_file.write_text("value = 1\n")
+    _initialize_test_repository(repository)
+    _commit_repository_state(repository, "initial state")
+
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    _write_command(commands / "uv", 'test "$1" = run\nshift\nexec "$@"')
+    environment = os.environ | {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PATH": f"{commands}:{os.environ['PATH']}",
+        "PRE_COMMIT_HOME": str(tmp_path / "pre-commit-home"),
+    }
+    pre_commit = shutil.which("pre-commit")
+    assert pre_commit is not None
+    subprocess.run(
+        [pre_commit, "install"],
+        check=True,
+        capture_output=True,
+        cwd=repository,
+        env=environment,
+        text=True,
+    )
+
+    staged_file.write_text("def staged(a,b):return a+b\n")
+    _run_test_git(repository, "add", staged_file.name)
+    assert _test_git_output(repository, "diff", "--cached", "--name-only") == (
+        staged_file.name
+    )
+    failed_check = subprocess.run(
+        ["git", "hook", "run", "pre-commit"],
+        check=False,
+        capture_output=True,
+        cwd=repository,
+        env=environment,
+        text=True,
+    )
+
+    assert failed_check.returncode != 0, (
+        "ruff-format-check must reject an unstaged formatting defect"
+    )
+    assert "ruff-format-check" in failed_check.stdout + failed_check.stderr
+    assert "bad.py" in failed_check.stdout + failed_check.stderr
+    assert staged_file.read_text() == "def staged(a, b):\n    return a + b\n"
+    assert bad_file.read_text() == unformatted
+
+    ruff = shutil.which("ruff")
+    assert ruff is not None
+    subprocess.run(
+        [ruff, "format", "."],
+        check=True,
+        capture_output=True,
+        cwd=repository,
+        env=environment,
+        text=True,
+    )
+    _commit_repository_state(repository, "format complete tree")
+    changed_text = repository / "changed.txt"
+    changed_text.write_text("changed\n")
+    _run_test_git(repository, "add", changed_text.name)
+    assert _test_git_output(repository, "diff", "--cached", "--name-only") == (
+        changed_text.name
+    )
+
+    clean_check = subprocess.run(
+        ["git", "hook", "run", "pre-commit"],
+        check=False,
+        capture_output=True,
+        cwd=repository,
+        env=environment,
+        text=True,
+    )
+
+    assert clean_check.returncode == 0, clean_check.stdout + clean_check.stderr
+    assert "ruff format check" in clean_check.stdout + clean_check.stderr
+
+
 def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> None:
     """Test that generated projects syntax-check and lint shell scripts."""
     config = (generated_project / ".pre-commit-config.yaml").read_text()
@@ -348,25 +457,10 @@ def test_readability_hooks_and_root_ci_check_all_writing_without_diff_setup(
     assert "--scope files" not in readability_script
     assert "--base-ref" not in readability_script
     assert "--paths" not in readability_script
-
-
-def test_ruff_format_hooks_check_the_full_tree_without_diff_setup(
-    project_root: Path, template_dir: Path
-) -> None:
-    """Ruff formatting hooks inspect the full tree on every validation run."""
-    for root in (project_root, template_dir):
-        hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
-        format_hook = next(
-            hook
-            for repository in hooks["repos"]
-            for hook in repository["hooks"]
-            if hook["id"] == "ruff-format"
-        )
-
-        assert format_hook["entry"] == "uv run ruff format --check ."
-        assert format_hook["pass_filenames"] is False
-        assert format_hook["always_run"] is True
-        assert "types" not in format_hook
+    assert "git fetch" not in readability_script
+    assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" not in readability_script
+    assert "CI_COMMIT_BEFORE_SHA" not in readability_script
+    assert "CI_DEFAULT_BRANCH" not in readability_script
 
 
 def test_readability_dependency_and_generated_ci_helper_are_rendered_portably(
