@@ -580,6 +580,7 @@ class WorkerResultBrokerSession:
         self._artifact: bytes | None = None
         self._failure: WorkerProtocolError | None = None
         self._rejected_input_shape: str | None = None
+        self._rejected_json_objects = 0
         self._stop = threading.Event()
         self._active_connection: socket.socket | None = None
         self._connection_lock = threading.Lock()
@@ -678,25 +679,36 @@ class WorkerResultBrokerSession:
                             "worker_result_broker", "input is invalid"
                         )
                     self._requests += 1
-                    if self._requests > 2 or self._artifact is not None:
+                    if self._artifact is not None:
                         raise WorkerProtocolError(
-                            "worker_result_broker", "request is not permitted"
+                            "worker_result_broker", "request after acceptance"
+                        )
+                    if self._requests > 2:
+                        raise WorkerProtocolError(
+                            "worker_result_broker",
+                            "correction limit exceeded after rejected JSON object"
+                            if self._rejected_json_objects == 2
+                            else "request is not permitted",
                         )
                     try:
                         artifact = self._build_artifact(input_bytes.encode())
                     except WorkerProtocolError as error:
-                        if self._requests != 1:
-                            raise
                         try:
                             rejected_input = json.loads(input_bytes)
                         except (ValueError, RecursionError):
-                            self._rejected_input_shape = "invalid JSON"
+                            rejected_input_shape = "invalid JSON"
                         else:
-                            self._rejected_input_shape = (
+                            rejected_input_shape = (
                                 "JSON object"
                                 if isinstance(rejected_input, dict)
                                 else "other JSON"
                             )
+                        if self._requests == 1:
+                            self._rejected_input_shape = rejected_input_shape
+                        if rejected_input_shape == "JSON object":
+                            self._rejected_json_objects += 1
+                        if self._requests != 1:
+                            raise
                         _write_frame(
                             connection,
                             json.dumps(
@@ -1104,6 +1116,7 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             "correction absent after rejected JSON object",
             "correction absent after rejected other JSON",
             "correction absent after rejected invalid JSON",
+            "correction limit exceeded after rejected JSON object",
             "result was not accepted",
             "malformed artifact",
             "identity mismatch",
@@ -1114,6 +1127,7 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             "request identity mismatch",
             "input is invalid",
             "request is not permitted",
+            "request after acceptance",
             "malformed request",
             "request was not accepted",
             "cleanup failed",
@@ -1865,8 +1879,9 @@ def build_worker_prompt(
         "Store exactly one strict WorkerResultBuildInput JSON object in private scratch and invoke "
         f"`{worker_command} worker-result build --issue-iid "
         f"{issue_iid} --input-file PATH --broker-socket PATH --broker-nonce "
-        f"{worker_result_broker.nonce if worker_result_broker is not None else 'NONCE'} --apply --json`. The live broker returns one canonical rejection "
-        "for one corrected request and keeps acceptance in controller memory. "
+        f"{worker_result_broker.nonce if worker_result_broker is not None else 'NONCE'} --apply --json`. "
+        "An accepted receipt is terminal. After a rejected request, submit only one corrected request; "
+        "if that correction is rejected, stop. The broker keeps acceptance in controller memory. "
     )
     if worker_result_broker is not None:
         result_contract += (

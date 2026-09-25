@@ -1376,6 +1376,86 @@ def test_broker_rejects_a_request_after_success(tmp_path: Path) -> None:
             pass
 
 
+def test_broker_reports_correction_limit_after_two_rejected_json_objects(
+    tmp_path: Path,
+) -> None:
+    """A third request reports the exhausted correction without accepting it."""
+    worker = importlib.import_module("agent_work.worker")
+    submitted: list[bytes] = []
+
+    def reject(input_bytes: bytes) -> bytes:
+        submitted.append(input_bytes)
+        raise WorkerProtocolError("builder_input.change_summary", "is required")
+
+    session = worker.create_worker_result_broker(
+        _request(),
+        build_artifact=reject,
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+        clock=lambda: 0.0,
+    )
+    request_bytes = b'{"workflow_lane":"coding"}'
+
+    for _ in range(2):
+        with pytest.raises(
+            WorkerProtocolError, match="builder_input.change_summary: is required"
+        ):
+            worker.submit_worker_result_to_broker(
+                session.socket_path, _request(), request_bytes, timeout_seconds=10
+            )
+    with pytest.raises(WorkerProtocolError) as producer_failure:
+        worker.submit_worker_result_to_broker(
+            session.socket_path, _request(), request_bytes, timeout_seconds=10
+        )
+    assert str(producer_failure.value) == (
+        "worker_result_broker: correction limit exceeded after rejected JSON object"
+    )
+    with pytest.raises(WorkerProtocolError) as controller_failure:
+        session.close_and_capture()
+    assert str(controller_failure.value) == str(producer_failure.value)
+    assert submitted == [request_bytes, request_bytes]
+    assert not session.socket_path.parent.exists()
+
+
+@pytest.mark.parametrize("repeat_first_input", (True, False))
+def test_broker_reports_request_after_acceptance_and_preserves_capture_failure(
+    tmp_path: Path, *, repeat_first_input: bool
+) -> None:
+    """A duplicate result is terminal regardless of whether its input changes."""
+    worker = importlib.import_module("agent_work.worker")
+    submitted: list[bytes] = []
+
+    def build_artifact(input_bytes: bytes) -> bytes:
+        submitted.append(input_bytes)
+        return b'{"controller":"accepted"}'
+
+    session = worker.create_worker_result_broker(
+        _request(),
+        build_artifact=build_artifact,
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+        clock=lambda: 0.0,
+    )
+    first_input = b'{"workflow_lane":"coding"}'
+    second_input = first_input if repeat_first_input else b'{"workflow_lane":"content"}'
+
+    worker.submit_worker_result_to_broker(
+        session.socket_path, _request(), first_input, timeout_seconds=10
+    )
+    with pytest.raises(WorkerProtocolError) as producer_failure:
+        worker.submit_worker_result_to_broker(
+            session.socket_path, _request(), second_input, timeout_seconds=10
+        )
+    assert str(producer_failure.value) == (
+        "worker_result_broker: request after acceptance"
+    )
+    with pytest.raises(WorkerProtocolError) as controller_failure:
+        session.close_and_capture()
+    assert str(controller_failure.value) == str(producer_failure.value)
+    assert submitted == [first_input]
+    assert not session.socket_path.parent.exists()
+
+
 def test_broker_accepts_one_corrected_request_and_retains_no_worker_prose(
     tmp_path: Path,
 ) -> None:
