@@ -754,6 +754,7 @@ class FakeRepository:
         )
         self.dirty = False
         self.worktree_present = True
+        self.issue_branch_available = True
         self.worktree_exists_error: RepositoryError | None = None
         self.worktree_valid = True
         self.existing_worktree_error: RepositoryError | None = None
@@ -821,7 +822,7 @@ class FakeRepository:
 
     def fresh_issue_branch_available(self, issue_iid: int) -> bool:
         del issue_iid
-        return True
+        return self.issue_branch_available
 
     def create_issue_worktree(
         self,
@@ -10208,6 +10209,572 @@ def test_future_retry_wait_skips_recovery_inventory_and_preserves_retry_budget(
     assert outcome is None
     assert gitlab.open_branch_inventory_calls == 0
     assert ledger.load(waiting.issue_iid) == waiting
+
+
+def _reviewed_discovery_marker_issue(
+    *,
+    description: str | None = None,
+    labels: tuple[str, ...] = ("agent::blocked",),
+) -> GitLabIssue:
+    """Build the repaired #245-style marker from a merged review."""
+    marker = (
+        description
+        or """Repair the recovered review finding.
+<!-- agent-mr-remediation
+project_id: 310967
+merge_request_iid: 309
+source_branch: agent/issue-248
+source_sha: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+finding: judge-quality|src/agent_work/runtime.py|recover discovery marker
+-->"""
+    )
+    return _issue(iid=245, description=marker).model_copy(
+        update={"title": "Recover the repaired marker", "labels": labels}
+    )
+
+
+def _discovery_marker_invalid_record(tmp_path: Path) -> LedgerRecord:
+    """Model the untouched record created when the original marker was malformed."""
+    return _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY
+    ).model_copy(
+        update={
+            "issue_iid": 245,
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "source_branch": "agent/issue-245",
+            "worktree": tmp_path / "state" / "worktrees" / "245",
+            "source_sha": None,
+            "main_sha": None,
+            "error_code": ErrorCode.REMEDIATION_MARKER_INVALID,
+            "summary": "remediation marker is invalid",
+            "next_action": "Correct or remove the remediation marker.",
+        }
+    )
+
+
+def test_discovery_marker_recovery_reclassifies_an_untouched_blocked_record(
+    tmp_path: Path,
+) -> None:
+    """A repaired marker is reclassified before its clean missing worktree is resumed."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue()
+    gitlab = FakeGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=309,
+        state="merged",
+        source_branch="agent/issue-248",
+        sha="b" * 40,
+    )
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The repaired discovery marker was reviewed.",
+    )
+
+    inventory = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=245),
+        apply=False,
+        dependencies=dependencies,
+    )
+    assert inventory.recovery_candidates[0].classification == "safely_retryable"
+
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    evidence = preview.operational_plan.evidence
+    assert evidence["issue_title"] == issue.title
+    assert (
+        evidence["issue_description_sha256"]
+        == hashlib.sha256(issue.description.encode()).hexdigest()
+    )
+    assert evidence["classified_work_kind"] == WorkKind.EXISTING_MR_REMEDIATION.value
+    assert evidence["classified_merge_request_iid"] == 309
+    assert evidence["classified_source_branch"] == "agent/issue-248"
+    assert evidence["classified_source_sha"] == "b" * 40
+    assert evidence["expected_worktree_exists"] is False
+    assert evidence["expected_issue_branch_available"] is True
+    plan_file = tmp_path / "discovery-marker-recovery-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    applied = dispatch(
+        replace(request, plan_file=plan_file),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    recovered = ledger.load(245)
+    assert applied.applied
+    assert recovered is not None
+    assert recovered.state is RunnerState.PREPARING
+    assert recovered.phase is WorkflowPhase.WORKFLOW
+    assert recovered.work_kind is WorkKind.EXISTING_MR_REMEDIATION
+    assert recovered.merge_request_iid == 309
+    assert recovered.source_branch == "agent/issue-248"
+    assert recovered.source_sha == "b" * 40
+    assert recovered.worktree == original.worktree
+    assert recovered.intent is None
+    assert repository.prepared is False and repository.binds == repository.pushes == 0
+    assert gitlab.labels == ["agent::running"]
+
+
+def test_discovery_marker_recovery_reclassifies_removed_marker_without_worktree_probe(
+    tmp_path: Path,
+) -> None:
+    """A removed marker rebuilds a clean ordinary claim without probing its path."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue(description="Repair ordinary work.")
+    gitlab = FakeGitLab(issue)
+
+    class AbsentWorktreeRepository(FakeRepository):
+        def has_changes(self, worktree: Path) -> bool:
+            raise AssertionError(f"missing worktree was probed: {worktree}")
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            raise AssertionError(f"missing worktree was read: {worktree}")
+
+    repository = AbsentWorktreeRepository(config)
+    repository.worktree_present = False
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The invalid marker was removed.",
+    )
+
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.evidence["classified_work_kind"] == "ordinary"
+    plan_file = tmp_path / "removed-marker-recovery-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    applied = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    recovered = ledger.load(245)
+    assert applied.applied and recovered is not None
+    assert recovered.state is RunnerState.PREPARING
+    assert recovered.work_kind is WorkKind.ORDINARY
+    assert recovered.worktree == original.worktree
+
+
+def test_discovery_marker_recovery_replays_after_label_projection_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed lifecycle projection retains the exact reclassification intent."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue(description="Repair ordinary work.")
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The invalid marker was removed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "projection-replay-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    interrupted = ledger.load(245)
+    assert interrupted is not None
+    assert interrupted.state is RunnerState.PREPARING and interrupted.intent is not None
+
+    applied = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    recovered = ledger.load(245)
+    assert applied.applied and recovered is not None
+    assert recovered.state is RunnerState.PREPARING and recovered.intent is None
+    assert gitlab.labels == ["agent::running"]
+
+
+@pytest.mark.parametrize("drift", ("description", "labels", "owner", "revision"))
+def test_discovery_marker_recovery_replay_rechecks_current_metadata(
+    tmp_path: Path, drift: str
+) -> None:
+    """A projection replay refuses changed issue metadata before its label effect."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue(description="Repair ordinary work.")
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    owner = {"status": "stale"}
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, gitlab, repository), lambda _iid: owner["status"]
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The invalid marker was removed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "projection-recheck-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    interrupted = ledger.load(245)
+    assert interrupted is not None and interrupted.intent is not None
+    if drift == "description":
+        gitlab.issue = issue.model_copy(
+            update={"description": "Changed after failure."}
+        )
+    elif drift == "labels":
+        gitlab.issue = issue.model_copy(
+            update={"labels": ("agent::blocked", "external::changed")}
+        )
+    elif drift == "owner":
+        owner["status"] = "missing"
+    else:
+        interrupted = ledger.persist(interrupted)
+
+    with pytest.raises(RuntimeError, match="recovery evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(245) == interrupted
+    assert gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    "merge_request_update",
+    (
+        {"state": "closed"},
+        {"source_branch": "agent/issue-999"},
+        {"sha": "c" * 40},
+        {"source_project_id": 1},
+        {"target_project_id": 1},
+        {"target_branch": "release"},
+    ),
+    ids=(
+        "state",
+        "source-branch",
+        "sha",
+        "source-project",
+        "target-project",
+        "target-branch",
+    ),
+)
+def test_discovery_marker_recovery_replay_rechecks_remediation_mr(
+    tmp_path: Path, merge_request_update: dict[str, object]
+) -> None:
+    """A delayed remediation replay rejects every changed MR identity field."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue()
+    gitlab = FakeGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=309, state="merged", source_branch="agent/issue-248", sha="b" * 40
+    )
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve", issue_iid=245, choice="retry", reason="Reviewed."
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    plan_file = tmp_path / "remediation-replay-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.label_failures = 1
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    interrupted = ledger.load(245)
+    assert interrupted is not None and interrupted.intent is not None
+    gitlab.existing_mr = gitlab.existing_mr.model_copy(update=merge_request_update)
+    with pytest.raises(RuntimeError, match="recovery evidence changed"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    assert ledger.load(245) == interrupted
+    assert gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    "merge_request_update",
+    (
+        {"state": "closed"},
+        {"source_project_id": 1},
+        {"target_project_id": 1},
+        {"target_branch": "release"},
+    ),
+)
+def test_discovery_marker_recovery_rejects_invalid_remediation_identity(
+    tmp_path: Path, merge_request_update: dict[str, object]
+) -> None:
+    """A remediating marker needs an exact open or merged project MR."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    gitlab = FakeGitLab(_reviewed_discovery_marker_issue())
+    gitlab.existing_mr = _mr(
+        iid=309,
+        state="merged",
+        source_branch="agent/issue-248",
+        sha="b" * 40,
+    ).model_copy(update=merge_request_update)
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+
+    with pytest.raises(RuntimeError, match="merge-request evidence changed"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=245,
+                choice="retry",
+                reason="The marker was reviewed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert ledger.load(245) == original
+    assert gitlab.labels == [] and repository.prepared is False
+
+
+def test_discovery_marker_recovery_preserves_merge_conflict_classification(
+    tmp_path: Path,
+) -> None:
+    """A current merge-conflict marker retains its distinct remediation route."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue(
+        description=_reviewed_discovery_marker_issue().description.replace(
+            "recover discovery marker", "resolve merge conflict"
+        )
+    )
+    gitlab = FakeGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=309,
+        state="merged",
+        source_branch="agent/issue-248",
+        sha="b" * 40,
+    )
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The conflict marker was reviewed.",
+    )
+
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.evidence["classified_work_kind"] == (
+        WorkKind.MERGE_CONFLICT_REPAIR.value
+    )
+    plan_file = tmp_path / "conflict-marker-recovery-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    recovered = ledger.load(245)
+    assert recovered is not None
+    assert recovered.work_kind is WorkKind.MERGE_CONFLICT_REPAIR
+    assert recovered.merge_request_iid == 309
+
+
+@pytest.mark.parametrize("marker", ["invalid", "duplicate"])
+def test_discovery_marker_recovery_rejects_unclassifiable_current_metadata(
+    tmp_path: Path, marker: str
+) -> None:
+    """A discovery retry never clears a block when current marker parsing fails."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    description = (
+        "<!-- agent-mr-remediation -->"
+        if marker == "invalid"
+        else _reviewed_discovery_marker_issue().description
+        + "\n<!-- agent-mr-remediation -->"
+    )
+    gitlab = FakeGitLab(_reviewed_discovery_marker_issue(description=description))
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+
+    with pytest.raises(RuntimeError, match="marker|classification|recovery"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=245,
+                choice="retry",
+                reason="The marker was reviewed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert ledger.load(245) == original
+    assert gitlab.labels == [] and gitlab.comments == []
+    assert repository.prepared is False and repository.binds == repository.pushes == 0
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "title",
+        "description",
+        "labels",
+        "revision",
+        "worktree",
+        "branch",
+        "owner",
+        "marker_project",
+        "mr_branch",
+        "mr_sha",
+    ),
+)
+def test_discovery_marker_recovery_rechecks_every_reviewed_identity_before_effects(
+    tmp_path: Path, drift: str
+) -> None:
+    """Apply rejects any current marker, ledger, ownership, or clean-path drift."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = ledger.persist(_discovery_marker_invalid_record(tmp_path))
+    issue = _reviewed_discovery_marker_issue()
+    gitlab = FakeGitLab(issue)
+    gitlab.existing_mr = _mr(
+        iid=309,
+        state="merged",
+        source_branch="agent/issue-248",
+        sha="b" * 40,
+    )
+    repository = FakeRepository(config)
+    repository.worktree_present = False
+    owner = {"status": "stale"}
+    dependencies = _with_issue_owner_probe(
+        _dependencies(config, ledger, gitlab, repository), lambda _iid: owner["status"]
+    )
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=245,
+        choice="retry",
+        reason="The repaired discovery marker was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert (
+        preview.operational_plan.evidence["issue_description_sha256"]
+        == hashlib.sha256(issue.description.encode()).hexdigest()
+    )
+    plan_file = tmp_path / "discovery-marker-drift-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    if drift == "title":
+        gitlab.issue = issue.model_copy(update={"title": "Changed after preview"})
+    elif drift == "description":
+        gitlab.issue = issue.model_copy(
+            update={"description": issue.description + "\n"}
+        )
+    elif drift == "labels":
+        gitlab.issue = issue.model_copy(update={"labels": ("agent::running",)})
+    elif drift == "revision":
+        original = ledger.persist(original)
+    elif drift == "worktree":
+        repository.worktree_present = True
+    elif drift == "branch":
+        repository.issue_branch_available = False
+    elif drift == "owner":
+        owner["status"] = "active"
+    elif drift == "marker_project":
+        gitlab.issue = issue.model_copy(
+            update={
+                "description": issue.description.replace(
+                    "project_id: 310967", "project_id: 1"
+                )
+            }
+        )
+    elif drift == "mr_branch":
+        gitlab.existing_mr = gitlab.existing_mr.model_copy(
+            update={"source_branch": "agent/issue-999"}
+        )
+    else:
+        gitlab.existing_mr = gitlab.existing_mr.model_copy(update={"sha": "c" * 40})
+
+    with pytest.raises(RuntimeError, match="evidence changed|marker|classification"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(245) == original
+    assert gitlab.labels == [] and gitlab.comments == []
+    assert repository.prepared is False and repository.binds == repository.pushes == 0
+
+
+@pytest.mark.parametrize("retained", ["receipt", "intent", "worktree"])
+def test_discovery_marker_recovery_preserves_retained_work_without_effects(
+    tmp_path: Path, retained: str
+) -> None:
+    """Only an untouched discovery block may be rebuilt from repaired metadata."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    updates: dict[str, object] = {}
+    if retained == "receipt":
+        updates["receipts"] = (
+            WorkflowReceiptRecord(
+                phase=WorkflowPhase.WORKFLOW,
+                verdict="complete",
+                detail="Authored work must be retained.",
+            ),
+        )
+    elif retained == "intent":
+        updates["intent"] = TransitionIntentRecord(
+            operation_id="245:prepare:retained", kind="prepare_worktree"
+        )
+    record = _discovery_marker_invalid_record(tmp_path).model_copy(update=updates)
+    original = ledger.persist(record)
+    issue = _reviewed_discovery_marker_issue()
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.worktree_present = retained == "worktree"
+
+    with pytest.raises(RuntimeError, match="untouched|discovery|recovery"):
+        dispatch(
+            CommandRequest(
+                command="recovery.resolve",
+                issue_iid=245,
+                choice="retry",
+                reason="The marker was reviewed.",
+            ),
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert ledger.load(245) == original
+    assert gitlab.labels == [] and gitlab.comments == []
+    assert repository.prepared is False and repository.binds == repository.pushes == 0
 
 
 def test_malformed_remediation_is_recorded_as_an_actionable_block(
