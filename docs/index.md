@@ -17,5 +17,5 @@ Pick the section that fits your task. Start with its index. Use the
 
 - [Tutorials](tutorials/index.md) — Repeatable lessons for learning the template. (1)
 - [How-to guides](how-to/index.md) — Goal-oriented guidance for practical tasks. (9)
-- [Reference](reference/index.md) — Complete facts about the template and agent loop. (6)
+- [Reference](reference/index.md) — Complete facts about the template and agent loop. (7)
 - [Explanation](explanation/index.md) — Context, rationale, and design trade-offs. (6)

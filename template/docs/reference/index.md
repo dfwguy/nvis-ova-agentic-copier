@@ -12,9 +12,8 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Find facts here. This index is not a task guide. It lists a read-only revision
-check and the loop recovery facts.
-Use it to look up a fact.
+Use this page to find facts. It lists test times and rules. It also lists facts
+about the agent loop. Pick the page that fits your task.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -24,6 +23,7 @@ Use it to look up a fact.
 - [Template revision preview](template-revision-preview.md) — Compare the recorded template revision with a candidate revision.
 - [Template update](template-update.md) — Look up the guarded template update command and its recovery states.
 - [License compliance](license-compliance.md) — Look up license rules, checked files, and allowed exemptions.
+- [Testing strategy](testing-strategy.md) — Look up test layers, case timing targets, and the register of long-running tests.
 
 ### Writing
 - [Readability checking](readability.md) — Look up readability checks, scopes, and results.
