@@ -863,7 +863,7 @@ class LedgerRecord(BoundaryModel):
     state: RunnerState
     phase: WorkflowPhase
     workflow_lane: WorkflowLane = WorkflowLane.UNKNOWN
-    work_kind: WorkKind
+    work_kind: WorkKind = WorkKind.ORDINARY
     source_branch: str = Field(min_length=1)
     issue_title: str | None = Field(default=None, max_length=512)
     main_branch: str | None = Field(default=None, max_length=255)
@@ -873,11 +873,15 @@ class LedgerRecord(BoundaryModel):
     retry_at: datetime | None = None
     automatic_repair_count: int = Field(default=0, ge=0)
     automatic_repair_at: datetime | None = None
+    blocked_cause: str | None = Field(default=None, max_length=2_048)
     prior_state: RunnerState | None = None
     prior_phase: WorkflowPhase | None = None
     merge_request_iid: int | None = Field(default=None, gt=0)
     merge_request_url: str | None = None
     source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    worktree_dirty: bool = False
+    owner_status: str = "missing"
+    split_prerequisites: tuple[tuple[int, str], ...] = ()
     publication_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     merge_request_draft: MergeRequestDraft | None = None
     feedback_cursor: MergeRequestFeedbackCursor | None = None
