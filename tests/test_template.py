@@ -611,6 +611,24 @@ def test_generated_dev_environment_includes_local_tox_matrix(
     assert "tox-uv>=1.20" in config["dependency-groups"]["dev"]
 
 
+def test_generated_lock_does_not_depend_on_its_own_project(
+    generated_project: Path,
+) -> None:
+    """The generated dependency graph must not contain a project self-edge."""
+    lock = tomllib.loads((generated_project / "uv.lock").read_text())
+    project = next(
+        package for package in lock["package"] if package["source"] == {"editable": "."}
+    )
+    dependencies = project.get("dev-dependencies", {})
+    self_dependencies = [
+        group
+        for group, packages in dependencies.items()
+        if any(package["name"] == project["name"] for package in packages)
+    ]
+
+    assert not self_dependencies, "generated project must not depend on itself"
+
+
 def test_generated_package_directory(generated_project: Path) -> None:
     """Test that Python packages use the standard isolated ``src/`` layout."""
     package = generated_project / "src" / "my_test_project"
