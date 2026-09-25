@@ -243,6 +243,7 @@ def test_ci_tooling_group_excludes_test_dependencies_and_keeps_local_dev_tools(
 
     assert tooling == {"kingfisher-bin", "ruff", "textstat", "yamllint"}
     assert set(groups["typing"]) == {"ty>=0.0.1a11", "textstat>=0.7.4"}
+    assert {"pre-commit>=4.6.2", "ruff>=0.16.4"} <= set(groups["test"])
     assert {"include-group": "test"} in dev
     assert {"include-group": "tooling"} in dev
     assert {"include-group": "typing"} in dev
@@ -250,7 +251,7 @@ def test_ci_tooling_group_excludes_test_dependencies_and_keeps_local_dev_tools(
         re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0]
         for requirement in dev
         if isinstance(requirement, str)
-    } == {"pre-commit", "tox", "tox-uv"}
+    } == {"tox", "tox-uv"}
 
 
 def test_ci_tooling_group_is_locked_with_exact_members(project_root: Path) -> None:
