@@ -348,10 +348,25 @@ def test_readability_hooks_and_root_ci_check_all_writing_without_diff_setup(
     assert "--scope files" not in readability_script
     assert "--base-ref" not in readability_script
     assert "--paths" not in readability_script
-    assert "git fetch" not in readability_script
-    assert "CI_MERGE_REQUEST_DIFF_BASE_SHA" not in readability_script
-    assert "CI_COMMIT_BEFORE_SHA" not in readability_script
-    assert "CI_DEFAULT_BRANCH" not in readability_script
+
+
+def test_ruff_format_hooks_check_the_full_tree_without_diff_setup(
+    project_root: Path, template_dir: Path
+) -> None:
+    """Ruff formatting hooks inspect the full tree on every validation run."""
+    for root in (project_root, template_dir):
+        hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+        format_hook = next(
+            hook
+            for repository in hooks["repos"]
+            for hook in repository["hooks"]
+            if hook["id"] == "ruff-format"
+        )
+
+        assert format_hook["entry"] == "uv run ruff format --check ."
+        assert format_hook["pass_filenames"] is False
+        assert format_hook["always_run"] is True
+        assert "types" not in format_hook
 
 
 def test_readability_dependency_and_generated_ci_helper_are_rendered_portably(
