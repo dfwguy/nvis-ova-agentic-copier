@@ -288,10 +288,10 @@ def test_candidate_broker_extra_request_revokes_accepted_tree(
         session.close_and_capture()
 
 
-def test_candidate_broker_rejects_deleted_socket_after_acceptance(
+def test_candidate_broker_rejects_deleted_socket_after_staging(
     candidate_scratch: Path,
 ) -> None:
-    """A replaced or deleted socket cannot authorize a captured candidate."""
+    """A socket deleted after staging cannot authorize a captured candidate."""
     session = create_candidate_broker(
         lambda _action, _tree: {"candidate_tree": "b" * 40, "state": "staged"},
         request=_request(),
