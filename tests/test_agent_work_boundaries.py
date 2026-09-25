@@ -3768,8 +3768,12 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         if command[-1] == "--help":
             return SimpleNamespace(
                 returncode=0,
-                stdout=("usage: codex exec --add-dir DIR"),
+                stdout=("usage: codex exec --add-dir DIR --enable FEATURE"),
                 stderr="",
+            )
+        if command[-1] == "list":
+            return SimpleNamespace(
+                returncode=0, stdout="multi_agent stable true\n", stderr=""
             )
         diagnostic = " ".join((retained, *filtered))
         return SimpleNamespace(returncode=1, stdout=diagnostic, stderr=diagnostic)
@@ -3822,8 +3826,9 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
     assert [kwargs["environment"] for _, kwargs in calls] == [
         expected_environment,
         expected_environment,
+        expected_environment,
     ]
-    assert [kwargs["timeout_seconds"] for _, kwargs in calls] == [120, 10]
+    assert [kwargs["timeout_seconds"] for _, kwargs in calls] == [120, 120, 10]
     assert retained not in result.stdout + result.stderr
     assert all(value not in result.stdout + result.stderr for value in filtered)
     assert result.stdout == result.stderr
@@ -3844,6 +3849,8 @@ def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
         "workspace-write",
         "-c",
         "sandbox_workspace_write.network_access=true",
+        "--enable",
+        "multi_agent",
         "--add-dir",
         str(tmp_path / ".agents"),
         "--add-dir",
@@ -3906,8 +3913,12 @@ def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
     def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
         calls.append((command, kwargs))
         return SimpleNamespace(
-            returncode=(0),
-            stdout=("usage: codex exec --add-dir DIR"),
+            returncode=0,
+            stdout=(
+                "usage: codex exec --add-dir DIR --enable FEATURE"
+                if command[-1] == "--help"
+                else "multi_agent stable true\n"
+            ),
             stderr="",
         )
 
@@ -3920,6 +3931,178 @@ def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
 
     assert calls[0][0] == ("/codex", "exec", "--help")
     assert calls[0][1]["timeout_seconds"] == 120
+    assert calls[1][0] == ("/codex", "features", "list")
+
+
+def test_codex_preflight_requires_service_child_delegation_capability() -> None:
+    """The unattended launch proves multi-agent support before invocation."""
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        if command[-1] == "--help":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: codex exec --add-dir DIR --enable FEATURE",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout="multi_agent stable true\n",
+            stderr="",
+        )
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "GITLAB_TOKEN": "shared-token",
+            "SECRET_TOKEN": "filtered-token",
+            "GIT_CONFIG_COUNT": "1",
+        },
+    )
+
+    invoker.preflight()
+
+    assert [call[0] for call in calls] == [
+        ("/codex", "exec", "--help"),
+        ("/codex", "features", "list"),
+    ]
+    assert [call[1] for call in calls] == [
+        {
+            "stdin": None,
+            "timeout_seconds": 120,
+            "environment": {
+                "AGENT_WORK_AGENT": "codex",
+                "AGENT_WORK_AGENT_PATH": "/codex",
+                "GITLAB_TOKEN": "shared-token",
+            },
+        }
+    ] * 2
+
+
+def test_codex_preflight_defers_when_child_delegation_is_unavailable() -> None:
+    """An unavailable multi-agent feature fails before any worker invocation."""
+    calls: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[-1] == "--help":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: codex exec --add-dir DIR --enable FEATURE",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout="multi_agent stable false\n",
+            stderr="",
+        )
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+
+    with pytest.raises(WorkerProtocolError, match="multi-agent"):
+        invoker.preflight()
+
+    assert calls == [
+        ("/codex", "exec", "--help"),
+        ("/codex", "features", "list"),
+    ]
+
+
+def test_codex_preflight_rejects_missing_enable_support() -> None:
+    """The feature gate cannot authorize a launch without the enable flag."""
+    calls: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0, stdout="usage: codex exec --add-dir DIR", stderr=""
+        )
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+
+    with pytest.raises(WorkerProtocolError, match="--enable"):
+        invoker.preflight()
+
+    assert calls == [("/codex", "exec", "--help")]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, "multi_agent stable true\n"),
+        (0, ""),
+        (0, "multi_agent stable maybe\n"),
+        (0, "other_feature stable true\n"),
+    ],
+)
+def test_codex_preflight_rejects_unproven_child_delegation(
+    returncode: int, stdout: str
+) -> None:
+    """Failed or malformed feature output cannot authorize a worker launch."""
+    calls: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[-1] == "--help":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: codex exec --add-dir DIR --enable FEATURE",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+
+    with pytest.raises(WorkerProtocolError, match="multi-agent"):
+        invoker.preflight()
+
+    assert calls == [("/codex", "exec", "--help"), ("/codex", "features", "list")]
+
+
+def test_codex_preflight_retries_after_child_delegation_returns() -> None:
+    """A failed capability check does not cache an unavailable feature."""
+    calls: list[tuple[str, ...]] = []
+    feature_outputs = iter(("multi_agent stable false\n", "multi_agent stable true\n"))
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[-1] == "--help":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: codex exec --add-dir DIR --enable FEATURE",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout=next(feature_outputs), stderr="")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+
+    with pytest.raises(WorkerProtocolError, match="multi-agent"):
+        invoker.preflight()
+    invoker.preflight()
+
+    assert (
+        calls
+        == [
+            ("/codex", "exec", "--help"),
+            ("/codex", "features", "list"),
+        ]
+        * 2
+    )
 
 
 def test_default_activation_budget_remains_three_hours() -> None:

@@ -2318,6 +2318,8 @@ def _agent_command(
                 "workspace-write",
                 "-c",
                 "sandbox_workspace_write.network_access=true",
+                "--enable",
+                "multi_agent",
                 "--add-dir",
                 str(checkout / ".agents"),
                 "--add-dir",
@@ -2457,6 +2459,23 @@ class AgentInvoker:
             or re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout) is None
         ):
             raise WorkerProtocolError("codex exec does not support --add-dir")
+        if re.search(r"(?<!\S)--enable(?:\s|$)", result.stdout) is None:
+            raise WorkerProtocolError("codex exec does not support --enable")
+        features = self._run_command(
+            (executable, "features", "list"),
+            stdin=None,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            environment=_worker_environment(self._environment),
+        )
+        multi_agent_rows = [
+            line.split()
+            for line in features.stdout.splitlines()
+            if line.split()[:1] == ["multi_agent"]
+        ]
+        if features.returncode != 0 or multi_agent_rows != [
+            ["multi_agent", "stable", "true"]
+        ]:
+            raise WorkerProtocolError("codex multi-agent capability unavailable")
 
     def invoke(
         self,

@@ -16436,6 +16436,73 @@ def test_applied_run_preflight_failure_follows_locked_housekeeping_check(
     assert repository.prepared is False
 
 
+def test_unavailable_codex_delegation_retains_record_until_capability_returns(
+    tmp_path: Path,
+) -> None:
+    """The service capability gate preserves an existing record for retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.CODING_GREEN)
+    )
+    gitlab = FakeGitLab(_issue())
+    repository = FakeRepository(config)
+    calls: list[tuple[str, ...]] = []
+    feature_available = False
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        if command == ("/codex", "exec", "--help"):
+            return CommandResult(
+                0, "usage: codex exec --add-dir DIR --enable FEATURE", ""
+            )
+        if command == ("/codex", "features", "list"):
+            return CommandResult(
+                0, f"multi_agent stable {str(feature_available).lower()}\n", ""
+            )
+        raise WorkerProtocolError("worker invocation reached after preflight")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    )
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, repository), invoke=invoker
+    )
+
+    with pytest.raises(WorkerProtocolError, match="multi-agent"):
+        dispatch(
+            CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+        )
+
+    assert ledger.load(12) == record
+    assert gitlab.handoffs == []
+    assert gitlab.reconciled_drafts == []
+    assert gitlab.created_merge_requests == 0
+    assert repository.prepared is False
+    assert calls == [("/codex", "exec", "--help"), ("/codex", "features", "list")]
+
+    feature_available = True
+    with pytest.raises(WorkerProtocolError, match="worker invocation reached"):
+        dispatch(
+            CommandRequest(command="loop.run"), apply=True, dependencies=dependencies
+        )
+    assert ledger.load(12) == record
+    assert (
+        calls[:4]
+        == [
+            ("/codex", "exec", "--help"),
+            ("/codex", "features", "list"),
+        ]
+        * 2
+    )
+    assert calls[4][0:2] == ("/codex", "exec")
+    assert calls[4][calls[4].index("--enable") : calls[4].index("--enable") + 2] == (
+        "--enable",
+        "multi_agent",
+    )
+
+
 def test_applied_run_caps_injected_workflow_invocations_at_max_segments(
     tmp_path: Path,
 ) -> None:
