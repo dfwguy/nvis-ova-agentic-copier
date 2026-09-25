@@ -30,11 +30,21 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Get the Consistency Judge receipt or
    Architect's exact `$consistency-judge: not applicable — <reason>`.
-   In serial work, require the exact
-   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
-   An interactive receipt must approve the final staged tree and name its base
-   and tree
-   OID. In reconciliation, it also names source, target, and joined-tree proof.
+   In serial work, an applicable receipt must approve the final candidate tree
+   and cite a live controller-owned `candidate read` snapshot taken after Judge
+   validation. Check its immutable issue and session identity, base commit and
+   tree, candidate tree OID, and canonical changed-path manifest. A full inline
+   old/new response needs no `--complete`. For a paged
+   read, check proof of every old/new side byte. Chunks must be in order and
+   at most 128 KiB. Check that `candidate read --complete` passed before scope
+   or fact review. Restaging voids either mode's coverage. Require fresh stage/read
+   proof after each fix. If
+   the boundary is unavailable in the selected mode, require the exact
+   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+   with mode and capability evidence. A missing, rejected, failed, or stale
+   expected read is a block, not N/A. An interactive receipt must approve the
+   final staged tree and name its base and tree OID. In reconciliation, it also
+   names source, target, and joined-tree proof.
    Check the writer's final docs and README receipt. Check the Diátaxis and
    README Judge verdicts against the staged
    tree. Check that both writers stopped before the applicable staging

@@ -339,8 +339,30 @@ def test_candidate_cli_previews_and_forwards_live_identity(
         )
         return {
             "candidate_tree": tree,
-            "state": "staged" if action == "stage" else "terminal-failure",
+            "state": (
+                "staged"
+                if action == "stage"
+                else "read"
+                if action == "read"
+                else "terminal-failure"
+            ),
             "failed_tests": ["tests.test_example::test_failure"],
+            **(
+                {
+                    "changed_paths": ["docs/guide.md"],
+                    "files": [
+                        {
+                            "path": "docs/guide.md",
+                            "old_mode": "100644",
+                            "new_mode": "100644",
+                            "old_content": "before\n",
+                            "new_content": "after\n",
+                        }
+                    ],
+                }
+                if action == "read"
+                else {}
+            ),
         }
 
     output: list[str] = []
@@ -380,6 +402,29 @@ def test_candidate_cli_previews_and_forwards_live_identity(
     assert output.pop().startswith(f"candidate_tree={tree} state=staged")
     assert (
         main(
+            ["candidate", "read", *common, "--candidate-tree", tree, "--json"],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output.pop())["state"] == "read"
+    assert (
+        main(
+            ["candidate", "read", *common, "--candidate-tree", tree],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    human = output.pop()
+    assert "Candidate read" in human
+    assert "Path: docs/guide.md" in human
+    assert 'Old content: "before\\n"' in human
+    assert 'New content: "after\\n"' in human
+    assert not human.lstrip().startswith("{")
+    assert (
+        main(
             ["candidate", "validate", *common, "--candidate-tree", tree, "--json"],
             candidate_request=request,
             write_stdout=output.append,
@@ -391,8 +436,241 @@ def test_candidate_cli_previews_and_forwards_live_identity(
     ]
     assert calls == [
         (socket_path, nonce, 81, "stage", None),
+        (socket_path, nonce, 81, "read", tree),
+        (socket_path, nonce, 81, "read", tree),
         (socket_path, nonce, 81, "validate", tree),
     ]
+
+
+def test_candidate_read_apply_requires_live_identity() -> None:
+    errors: list[str] = []
+    assert (
+        main(
+            [
+                "candidate",
+                "read",
+                "--issue-iid",
+                "81",
+                "--candidate-tree",
+                "b" * 40,
+                "--apply",
+            ],
+            write_stderr=errors.append,
+        )
+        == 2
+    )
+    assert errors == ["--apply requires --candidate-socket and --broker-nonce"]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    ("flags", "mode", "chunk_fields"),
+    [
+        ([], "plain", {}),
+        (["--manifest"], "manifest", {}),
+        (["--complete"], "complete", {}),
+        (
+            [
+                "--path",
+                "docs/guide.md",
+                "--side",
+                "old",
+                "--offset",
+                "3",
+                "--length",
+                "5",
+            ],
+            "chunk",
+            {"path": "docs/guide.md", "side": "old", "offset": 3, "length": 5},
+        ),
+    ],
+)
+def test_candidate_read_preview_shows_exact_selector_without_request(
+    flags: list[str], mode: str, chunk_fields: dict[str, object], *, as_json: bool
+) -> None:
+    output: list[str] = []
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("dry-run preview must not contact the candidate broker")
+
+    args = [
+        "candidate",
+        "read",
+        "--issue-iid",
+        "81",
+        "--candidate-tree",
+        "b" * 40,
+        *flags,
+        *(("--json",) if as_json else ()),
+    ]
+    assert (
+        main(args, candidate_request=unexpected_request, write_stdout=output.append)
+        == 0
+    )
+    assert len(output) == 1
+    if as_json:
+        preview = json.loads(output[0])
+        assert preview["read_mode"] == mode
+        assert {key: preview[key] for key in chunk_fields} == chunk_fields
+    else:
+        assert f"read_mode={mode}" in output[0]
+        for key, value in chunk_fields.items():
+            expected = json.dumps(value) if key == "path" else value
+            assert f"{key}={expected}" in output[0]
+
+
+def test_candidate_read_cli_forwards_paged_selectors_and_rejects_invalid_shape(
+    tmp_path: Path,
+) -> None:
+    tree = "b" * 40
+    selectors: list[dict[str, object]] = []
+
+    def request(
+        _path: Path,
+        _identity: WorkerResultBrokerClientRequest,
+        *,
+        action: str,
+        candidate_tree: str | None,
+        selector: dict[str, object],
+    ) -> dict[str, object]:
+        assert action == "read" and candidate_tree == tree
+        selectors.append(selector)
+        return {"candidate_tree": tree, "state": "read-complete"}
+
+    common = [
+        "candidate",
+        "read",
+        "--issue-iid",
+        "81",
+        "--candidate-tree",
+        tree,
+        "--candidate-socket",
+        str(tmp_path / "candidate.sock"),
+        "--broker-nonce",
+        "a" * 32,
+        "--apply",
+        "--json",
+    ]
+    output: list[str] = []
+    for flags in (
+        ["--manifest"],
+        ["--path", "docs/guide.md", "--side", "old", "--offset", "0", "--length", "5"],
+        ["--complete"],
+    ):
+        assert (
+            main(
+                [*common, *flags], candidate_request=request, write_stdout=output.append
+            )
+            == 0
+        )
+        output.pop()
+    assert selectors == [
+        {"mode": "manifest"},
+        {
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 0,
+            "length": 5,
+        },
+        {"mode": "complete"},
+    ]
+    errors: list[str] = []
+    assert main([*common, "--manifest", "--complete"], write_stderr=errors.append) == 2
+    assert errors == ["candidate read selector is invalid"]
+
+
+def test_candidate_read_human_page_and_manifest_are_labeled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tree = "b" * 40
+
+    def request(
+        _path: Path,
+        _identity: WorkerResultBrokerClientRequest,
+        *,
+        action: str,
+        candidate_tree: str | None,
+        selector: dict[str, object],
+    ) -> dict[str, object]:
+        assert action == "read" and candidate_tree == tree
+        if selector["mode"] == "manifest":
+            return {
+                "candidate_tree": tree,
+                "paged": True,
+                "files": [
+                    {
+                        "path": "docs/guide.md",
+                        "old_mode": "100644",
+                        "old_oid": "c" * 40,
+                        "old_size": 6,
+                        "old_sha256": "d" * 64,
+                        "new_mode": None,
+                    }
+                ],
+            }
+        return {
+            "candidate_tree": tree,
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 0,
+            "length": 6,
+            "data_base64": "YmVmb3Jl",
+            "sha256": "d" * 64,
+        }
+
+    common = [
+        "candidate",
+        "read",
+        "--issue-iid",
+        "81",
+        "--candidate-tree",
+        tree,
+        "--candidate-socket",
+        str(tmp_path / "candidate.sock"),
+        "--broker-nonce",
+        "a" * 32,
+        "--apply",
+    ]
+    output: list[str] = []
+    assert (
+        main(
+            [*common, "--manifest"],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    manifest = output.pop()
+    assert "Paged manifest:" in manifest
+    assert "Old bytes: 6" in manifest
+    assert (
+        main(
+            [
+                *common,
+                "--path",
+                "docs/guide.md",
+                "--side",
+                "old",
+                "--offset",
+                "0",
+                "--length",
+                "6",
+            ],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    page = output.pop()
+    assert "Bytes (base64): YmVmb3Jl" in page
+    assert "Whole-side SHA-256:" in page
+    with pytest.raises(SystemExit) as help_exit:
+        main(["candidate", "read", "--help"])
+    assert help_exit.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "exclusive with --complete and chunk flags" in help_text
+    assert "chunk byte count" in help_text
 
 
 def test_validation_status_cli_never_treats_running_as_success() -> None:

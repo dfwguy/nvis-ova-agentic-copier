@@ -773,6 +773,7 @@ class FakeRepository:
         self.legacy_has_renames = False
         self.single_parent_result: str | None = None
         self.allow_base_ancestor_calls: list[bool] = []
+        self.candidate_reads: list[tuple[str, bool, tuple[str, ...]]] = []
         self.judged_paths: list[tuple[str, ...]] = []
         self.red_candidate_tree_calls: list[tuple[str, tuple[str, ...]]] = []
 
@@ -849,6 +850,41 @@ class FakeRepository:
         assert base_sha in {self.current_head, self.single_parent_result}
         assert allow_base_ancestor is (base_sha == self.single_parent_result)
         return self.candidate_tree
+
+    def read_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        allow_base_ancestor: bool = False,
+        changed_paths: tuple[str, ...],
+    ) -> dict[str, object]:
+        del worktree
+        self.candidate_reads.append((base_sha, allow_base_ancestor, changed_paths))
+        assert base_sha in {self.current_head, self.single_parent_result}
+        assert allow_base_ancestor is (base_sha == self.single_parent_result)
+        expected_paths = (
+            self.publication_paths
+            if allow_base_ancestor and self.publication_paths is not None
+            else self.paths
+        )
+        assert changed_paths == tuple(sorted(set(expected_paths)))
+        return {
+            "candidate_tree": candidate_tree,
+            "base_tree": "a" * 40,
+            "changed_paths": list(changed_paths),
+            "files": [
+                {
+                    "path": path,
+                    "old_mode": None,
+                    "new_mode": "100644",
+                    "old_content": None,
+                    "new_content": "content\n",
+                }
+                for path in changed_paths
+            ],
+        }
 
     def judge_candidate(
         self,
@@ -1147,23 +1183,28 @@ def _broker_invocation_from_intent(
     except (TypeError, ValueError, WorkerProtocolError) as error:
         return WorkerInvocation(0, "untrusted stdout", str(error), worker_result=None)
     candidate = None
+    reviewed = None
     if (
         candidate_action is not None
-        and payload.get("workflow_lane") == "coding"
+        and payload.get("workflow_lane") in {"coding", "content"}
         and payload.get("result_kind") == "ready_to_publish"
     ):
         staged = candidate_action("stage", None)
         tree = staged["candidate_tree"]
         assert isinstance(tree, str)
-        validated = candidate_action("validate", tree)
-        if validated["state"] == "terminal-success":
-            candidate = tree
+        if payload.get("workflow_lane") == "coding":
+            validated = candidate_action("validate", tree)
+            if validated["state"] == "terminal-success":
+                candidate = tree
+        candidate_action("read", tree)
+        reviewed = tree
     return WorkerInvocation(
         0,
         "untrusted stdout",
         "",
         worker_result=artifact,
         validated_candidate=candidate,
+        reviewed_candidate=reviewed,
     )
 
 
@@ -1478,6 +1519,7 @@ class SingleSessionInvoker:
         self.phases: list[str] = []
         self.checkouts: list[Path] = []
         self.prompts: list[str] = []
+        self.had_candidate_action = False
 
     def preflight(self) -> None:
         pass
@@ -1593,6 +1635,7 @@ class SingleSessionInvoker:
                     "next_action": "Review the unresolved finding.",
                 }
             )
+        self.had_candidate_action = candidate_action is not None
         return _broker_invocation_from_intent(
             json.dumps(payload),
             broker_request=broker_request,
@@ -2311,6 +2354,94 @@ def test_coding_publication_requires_controller_validated_candidate(
         timeout_seconds=10,
         now=NOW,
         load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    persisted = ledger.load_read_only(record.issue_iid)
+    assert outcome is not None and persisted is not None
+    assert outcome.state is not RunnerState.PUBLISHING
+    assert persisted.state is not RunnerState.PUBLISHING
+
+
+@pytest.mark.parametrize("lane", (WorkflowLane.CODING, WorkflowLane.UNKNOWN))
+def test_coding_candidate_read_requires_successful_validation(
+    tmp_path: Path, lane: WorkflowLane
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": lane})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("src/example.py",)
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+
+    class OrderInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            staged = candidate_action("stage", None)
+            tree = staged["candidate_tree"]
+            assert isinstance(tree, str)
+            with pytest.raises(
+                WorkerProtocolError, match="candidate request is invalid"
+            ):
+                candidate_action("read", tree)
+            return super().invoke(
+                checkout,
+                prompt,
+                timeout,
+                broker_request=broker_request,
+                build_artifact=build_artifact,
+                candidate_action=candidate_action,
+            )
+
+    invoker = OrderInvoker()
+    invoker.changed_paths = repository.paths
+    run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+
+def test_content_publication_requires_controller_reviewed_candidate(
+    tmp_path: Path,
+) -> None:
+    """A content result cannot publish a tree without a live controller review."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.CONTENT})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("docs/explanation.md",)
+    invoker = SingleSessionInvoker(lane="content", validate_candidate=False)
+    invoker.changed_paths = repository.paths
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
     )
 
     persisted = ledger.load_read_only(record.issue_iid)
@@ -3210,7 +3341,68 @@ def test_fresh_unknown_lane_content_result_bypasses_the_red_transaction(
     )
 
     assert invoker.phases == [WorkflowPhase.WORKFLOW.value]
+    assert invoker.had_candidate_action
     assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_first_unknown_lane_denies_candidate_validation_before_red(
+    tmp_path: Path,
+) -> None:
+    """The first segment cannot run Judge before a retained Red checkpoint."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+
+    class GuardInvoker(SingleSessionInvoker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.denied: list[str] = []
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            for action, tree in (
+                ("stage", None),
+                ("validate", repository.candidate_tree),
+            ):
+                with pytest.raises(
+                    WorkerProtocolError, match="candidate request is invalid"
+                ):
+                    candidate_action(action, tree)
+                self.denied.append(action)
+            return WorkerInvocation(1)
+
+    invoker = GuardInvoker()
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: None,
+        apply_red_checkpoint=lambda _issue_iid, _request, _tree: (_ for _ in ()).throw(
+            AssertionError("Red capture must not run")
+        ),
+    )
+
+    assert invoker.denied == ["stage", "validate"]
+    assert result is not None and result.state is RunnerState.RETRY_WAIT
 
 
 @pytest.mark.parametrize(
@@ -4674,7 +4866,38 @@ def test_authored_candidate_execution_uses_ancestor_validation_only(
         replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
     )
 
-    invoker = SingleSessionInvoker()
+    class ReadBaseInvoker(SingleSessionInvoker):
+        read_base_sha: str | None = None
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+
+            def observed(action: str, tree: str | None) -> dict[str, object]:
+                evidence = candidate_action(action, tree)
+                if action == "read":
+                    self.read_base_sha = cast(str, evidence["base_sha"])
+                return evidence
+
+            return super().invoke(
+                checkout,
+                prompt,
+                timeout,
+                broker_request=broker_request,
+                build_artifact=build_artifact,
+                candidate_action=observed,
+            )
+
+    invoker = ReadBaseInvoker()
     invoker.changed_paths = repository.publication_paths
     outcome = run_segment(
         ledger=ledger,
@@ -4687,10 +4910,14 @@ def test_authored_candidate_execution_uses_ancestor_validation_only(
     )
 
     assert repository.allow_base_ancestor_calls == [True, True]
+    assert repository.candidate_reads == [
+        (checkpoint.base_sha, True, ("authored.py", "recovery.py"))
+    ]
+    assert invoker.read_base_sha == checkpoint.base_sha
     assert repository.judged_paths == [("authored.py", "recovery.py")]
     assert (
         repository.red_candidate_tree_calls
-        == [(checkpoint.base_sha, ("authored.py", "recovery.py"))] * 3
+        == [(checkpoint.base_sha, ("authored.py", "recovery.py"))] * 5
     )
     assert outcome is not None and outcome.state is RunnerState.PUBLISHING
 
@@ -4721,6 +4948,9 @@ def test_ordinary_candidate_execution_keeps_exact_head_validation(
     )
 
     assert repository.allow_base_ancestor_calls == [False, False]
+    assert repository.candidate_reads == [
+        (record.source_sha or "", False, repository.paths)
+    ]
 
 
 def test_authored_candidate_recovery_rejects_unrelated_failure(
@@ -15981,8 +16211,13 @@ def test_apply_batches_the_complete_content_workflow_until_human_handoff(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
     )
     invoker = SingleSessionInvoker(lane="content")
+    repository = FakeRepository(config)
+    repository.paths = ("docs/explanation.md",)
+    invoker.changed_paths = repository.paths
     dependencies = replace(
-        _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
+        _dependencies(config, ledger, gitlab, repository),
+        invoke=invoker,
+        load_red_checkpoint=lambda *_args: None,
     )
 
     report = dispatch(

@@ -234,6 +234,16 @@ class RepositoryPort(Protocol):
         self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
     ) -> str: ...
 
+    def read_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        allow_base_ancestor: bool = False,
+        changed_paths: tuple[str, ...],
+    ) -> dict[str, object]: ...
+
     def judge_candidate(
         self,
         worktree: Path,

@@ -1,6 +1,6 @@
 ---
 name: consistency-judge
-description: Check changed facts in interactive work against authoritative definitions and copies on one exact staged tree.
+description: Check changed facts against authoritative definitions and copies on one exact candidate tree.
 metadata:
   model-tier: most-capable
 ---
@@ -16,9 +16,14 @@ metadata:
 
 # Consistency Judge
 
-Use this read-only skill in interactive work for a changed fact with copies.
-Also use it there when Architect cannot rule that out. In serial work, record
-exactly `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+Use this read-only skill when a changed fact has copies or Architect cannot
+rule that out. In serial work, require a live controller-owned `candidate read`
+for the exact candidate. A paged read needs all old/new side bytes and a
+successful `candidate read --complete` before applicability or review.
+Restaging voids that coverage. If the boundary is unavailable in the selected mode,
+record exactly `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+with mode and capability evidence. A missing, rejected, failed, or stale read
+from an expected boundary blocks finalization.
 Read [the role](../../agents/consistency-judge.md)
 before review. The [review examples](references/eval-scenarios.md) show the
 method. They are not tests or a source of truth.

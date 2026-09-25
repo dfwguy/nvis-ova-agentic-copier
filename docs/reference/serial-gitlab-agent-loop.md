@@ -88,6 +88,10 @@ agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
                            [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate read --issue-iid IID --candidate-tree TREE
+                          [--manifest | --complete |
+                           --path PATH --side old|new --offset N --length N]
+                          [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate validate --issue-iid IID --candidate-tree TREE
                               [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate status --issue-iid IID --candidate-tree TREE
@@ -119,6 +123,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
+| `candidate read` | Same identity and returned tree; optional manifest, chunk, or completion selector | Reads bounded, controller-derived base-to-tree file evidence for Consistency Judge. |
 | `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
 | `candidate status` | Same identity and returned tree | Reads the durable result without rerunning the hook. |
 | `migration preview` | None | Returns the planned migration actions. |
@@ -291,36 +296,82 @@ already verified labels. Callers, not the CLI boundary, must verify labels
 before supplying `--label`. It never assigns, approves, or merges an issue.
 `--json` returns the bounded publication result.
 
-### Candidate stage, validate, and status
+### Candidate stage, read, validate, and status
 
-For coding results, the serial worker uses private `candidate` commands in
-addition to its Red and worker-result boundaries. Each live request includes
-a nonce. A `stage` request has no model path list. The controller
-finds changed files, stages them outside the worker sandbox, and returns the
-tree ID and path count. `validate` requires that ID. It runs Judge while the
-producer is active. A failed result returns safe test names and JUnit digests
-when that evidence is available, so the producer can fix code and stage a new
-tree. `status` reads the saved
-result without another hook run. `validate` and `status` return an opaque
-evidence ID, test counts, digests, and hook time when available. For success,
-JUnit also gives
+For coding and content results, the serial worker uses private `candidate`
+commands in addition to its applicable checkpoint and worker-result
+boundaries. Each live request includes a nonce. A `stage` request has no model
+path list. The controller finds changed files, stages them outside the worker
+sandbox, and returns the tree ID and path count. `read` requires that tree ID.
+Every read response binds `project_id`, `issue_iid`, `ledger_revision`,
+`source_branch`, `base_sha`, and `nonce` to the current request. In coding
+work, `read` follows successful `validate` or `status` for that tree. Content
+work reads after staging. A correction requires a new stage, applicable
+coding validation, and read.
+
+For an exact, authorized authored-candidate recovery, the original baseline
+supplies the old tree and publication path set. The controller requires that
+baseline to be an ancestor of the current source commit. Other candidates
+use the source commit as their base and require it to be the current head.
+The read receipt's `base_sha` names that actual base. The broker requires a
+40-character lowercase hexadecimal SHA and the same value across paged reads.
+
+When the complete accepted JSON response, including identity fields, fits
+512 KiB, a plain `candidate read` receipt holds exact inline evidence:
+`base_tree`, `candidate_tree`, canonical `changed_paths`, and `files` with
+each path's old and new mode, OID, and UTF-8 content. An absent side of an
+addition or deletion is `null`.
+
+When that response exceeds 512 KiB, a plain read returns the same paged
+manifest as `candidate read --manifest`. It has `paged: true`, the base and
+candidate trees, changed paths, and per-file `path`, old and new mode, OID,
+byte size, and SHA-256. A mode is `100644` or `100755`; absent sides have null
+metadata. Use `candidate read --path PATH --side old|new --offset N
+--length N` to get each existing side in contiguous, base64-encoded chunks
+of at most 128 KiB. Empty existing sides need no chunks. After all bytes of
+every existing side are delivered, `candidate read --complete` marks the
+current tree reviewed. Incomplete coverage, drift, replay, and stale reads
+cannot satisfy finalization.
+
+In coding work, `validate` requires the tree ID and runs the Validation Judge
+while the producer is active. A failed result returns safe test names and
+JUnit digests when that evidence is available, so the producer
+can fix code and stage a new tree. `status` reads the saved result without
+another hook run. `validate` and `status` return an opaque evidence ID, test
+counts, digests, and hook time when available. For success, JUnit also gives
 total test time and the three slowest safe test names per Python version.
 These summaries remain in the saved record for later status reads. They
 contain no controller state or JUnit file path. After the worker exits, the
 controller checks the tree and changed files again before publication. It
 keeps no extra authorization ledger.
 
-The socket has a private directory and a fixed deadline. Frame size, total
-bytes, and request count have limits. Missing, replaced, malformed, late, or
-extra requests fail closed. A failed Judge result goes back to the same live
-producer for a fix within the worker budget. The worker must not run direct
+The socket has a private directory and a fixed deadline. A read permits at
+most 128 paths, 2 MiB per Git blob, and 16 MiB of combined old and new
+content. A session permits at most 512 requests, 4 MiB of incoming frames,
+and 32 MiB of outgoing frames. Each frame must fit 1 MiB. A read rejects
+symlinks, submodules, binary or invalid UTF-8 content, a changed tree or path
+set, replay after restaging, malformed content, and oversized evidence.
+Missing, replaced, malformed, late, or extra requests fail closed. A failed
+Judge result goes back to the same live producer for a fix within the worker
+budget. The worker must not run direct
 `validation` commands, stage through Git, or write controller state.
 
+The finalizer's existing workflow receipt carries the Consistency Judge
+verdict, or a specific not-applicable reason when copied facts did not change.
+There is no new workflow receipt slot. A missing, failed, or stale expected
+read blocks finalization; it is not a not-applicable result. Content
+finalization requires the read tree to match the current candidate. Coding
+also requires a trusted successful Validation Judge result for that tree.
+
 Without `--apply`, each candidate command previews its action on standard
-output and does not contact the socket. `--json` selects JSON output. Live
-requests need both the socket and nonce. `validate` and `status` exit nonzero
-unless the saved result is terminal success. The worker uses `--apply --json`
-so it can parse the bounded response, including a failed validation result.
+output and does not contact the socket. Applied `read` without `--json` prints
+labeled, terminal-safe evidence: inline content, manifest details, or base64
+chunks. `--json` returns the machine receipt with the field names above. Live
+requests need both the socket and nonce. `read` succeeds with exit code `0`,
+returns `1` on broker rejection, and returns `2` for invalid syntax.
+`validate` and `status` exit nonzero unless the saved result is terminal
+success. The worker uses `--apply --json` so it can parse bounded responses,
+including a failed validation result.
 
 ### `validation run` and `validation status`
 
@@ -810,12 +861,20 @@ Use this note to review the shown work.
 | New work | Uses `WORKFLOW`. |
 | Approved design | Architect gives it to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
 | Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
-| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. In serial work, Green requests controller staging through the private candidate socket and receives one tree ID for Judge validation. In interactive work, Main stages their combined work and records its tree ID. |
+| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. In serial work, Green requests controller staging through the private candidate socket and receives one tree ID for coding Judge validation, then Consistency Judge's read. In interactive work, Main stages their combined work and records its tree ID. |
 | Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
-| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. |
+| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. After successful coding validation, Consistency Judge uses the controller-owned read when copied facts changed. |
 | Findings | Green combines all initial findings. |
 | Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
 | Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |
+
+For content work, the Documentation Writer is the sole editor. After it stops,
+the controller stages and reads the candidate. Consistency Judge uses that
+evidence to check copied facts when they changed. A missing or rejected read
+blocks finalization. The Documentation Finalizer records the verdict or exact
+not-applicable reason in its existing receipt. Content work has no coding
+Judge hook or JUnit evidence. A correction requires another stage and read
+before the finalizer reviews the new tree.
 
 ### Preselection pipeline gate
 

@@ -39,9 +39,19 @@ clear outcomes. Name one safe next step.
    base-to-tree diff, and clean-tree proof. Get the Consistency Judge receipt
    for that OID or Architect's exact `$consistency-judge: not applicable —
    <reason>`. For a reconciliation, check source, target, and joined-tree
-   proof. In serial work, require the exact
-   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
-   Check Writer's edited paths and source comparisons; do not require staging.
+   proof. In serial work, an applicable receipt must approve the final
+   candidate tree using a live controller-owned `candidate read` snapshot made
+   before this review. Check its immutable issue and session identity, base
+   commit and tree, candidate tree OID, and canonical changed-path manifest.
+   A full inline old/new response needs no `--complete`.
+   For a paged read, check proof of every old/new side byte. Chunks must be in
+   order and at most 128 KiB. Check that `candidate read --complete` passed
+   before scope or fact review. Restaging voids either mode's coverage.
+   Require fresh stage/read proof after each fix. If the boundary is unavailable in the selected mode, require
+   the exact `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+   with mode and capability evidence. A missing, rejected, failed, or stale
+   expected read is a block, not N/A. Check Writer's edited paths and source
+   comparisons; do not require worker-side staging.
 3. Run `git diff --check` and non-test hooks for changed files.
 4. Check Markdown structure, fence languages, local links, and anchors.
 5. Apply `DIATAXIS.md` front-matter, landing-page, reciprocal-link, and audit

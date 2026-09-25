@@ -12,9 +12,11 @@
 
 import os
 import stat
+from base64 import b64encode
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 
 class CandidateBoundaryError(ValueError):
@@ -24,6 +26,101 @@ class CandidateBoundaryError(ValueError):
 _MAX_PATHS = 1024
 _DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+GIT_READ_MAX_PATHS = 128
+GIT_READ_MAX_FILE_BYTES = 2 * 1024 * 1024
+GIT_READ_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+GIT_READ_MAX_CHUNK_BYTES = 128 * 1024
+GIT_READ_INLINE_JSON_BYTES = 512 * 1024
+
+
+def git_read_manifest(evidence: dict[str, object]) -> dict[str, object]:
+    """Describe every immutable side without sending its text in one frame."""
+    files = cast(list[dict[str, str | None]], evidence["files"])
+    manifest: list[dict[str, object]] = []
+    for file in files:
+        entry: dict[str, object] = {"path": file["path"]}
+        for side in ("old", "new"):
+            value = file[f"{side}_content"]
+            data = value.encode("utf-8") if value is not None else None
+            entry.update(
+                {
+                    f"{side}_mode": file[f"{side}_mode"],
+                    f"{side}_oid": file[f"{side}_oid"],
+                    f"{side}_size": len(data) if data is not None else None,
+                    f"{side}_sha256": sha256(data).hexdigest()
+                    if data is not None
+                    else None,
+                }
+            )
+        manifest.append(entry)
+    return {
+        "candidate_tree": evidence["candidate_tree"],
+        "base_tree": evidence["base_tree"],
+        "changed_paths": evidence["changed_paths"],
+        "files": manifest,
+        "paged": True,
+    }
+
+
+def git_read_chunk(
+    evidence: dict[str, object], *, path: str, side: str, offset: int, length: int
+) -> dict[str, object]:
+    """Return one byte-exact page from a bounded controller snapshot."""
+    if (
+        side not in {"old", "new"}
+        or offset < 0
+        or not 0 < length <= GIT_READ_MAX_CHUNK_BYTES
+    ):
+        raise CandidateBoundaryError("candidate read chunk is invalid")
+    files = cast(list[dict[str, str | None]], evidence["files"])
+    matching = [file for file in files if file["path"] == path]
+    if len(matching) != 1:
+        raise CandidateBoundaryError("candidate read chunk is invalid")
+    content = matching[0][f"{side}_content"]
+    if content is None:
+        raise CandidateBoundaryError("candidate read chunk is invalid")
+    data = content.encode("utf-8")
+    if offset + length > len(data):
+        raise CandidateBoundaryError("candidate read chunk is invalid")
+    return {
+        "candidate_tree": evidence["candidate_tree"],
+        "path": path,
+        "side": side,
+        "offset": offset,
+        "length": length,
+        "data_base64": b64encode(data[offset : offset + length]).decode("ascii"),
+        "sha256": sha256(data).hexdigest(),
+    }
+
+
+def validate_git_read_paths(paths: tuple[str, ...]) -> None:
+    """Require canonical bounded changed paths before reading Git objects."""
+    if (
+        not paths
+        or len(paths) > GIT_READ_MAX_PATHS
+        or paths != tuple(sorted(set(paths)))
+        or any(
+            not path
+            or str(PurePosixPath(path)) != path
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or "\n" in path
+            or "\r" in path
+            for path in paths
+        )
+    ):
+        raise CandidateBoundaryError("candidate changed paths are invalid")
+
+
+def validate_git_read_size(size: int, total: int, *, per_blob: bool = True) -> int:
+    """Enforce the shared per-blob and aggregate read budgets."""
+    if (
+        size < 0
+        or (per_blob and size > GIT_READ_MAX_FILE_BYTES)
+        or total + size > GIT_READ_MAX_TOTAL_BYTES
+    ):
+        raise CandidateBoundaryError("candidate content is oversize or binary")
+    return total + size
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,14 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
+from typing import cast
 
+from .candidate_boundary import (
+    GIT_READ_INLINE_JSON_BYTES,
+    CandidateBoundaryError,
+    git_read_chunk,
+    git_read_manifest,
+)
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
     ACTIVE_STATES,
@@ -3082,6 +3089,206 @@ def _execute(
             gitlab=gitlab,
             summary=f"Feedback selection cannot be rendered safely: {error}",
         )
+    validated_candidate_paths: tuple[str, ...] | None = None
+    successfully_validated_tree: str | None = None
+    prepared_candidate: str | None = None
+    prepared_evidence: dict[str, object] | None = None
+    uses_authored_base = (
+        record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    )
+    candidate_base_sha = (
+        record.correction_identity.baseline_sha
+        if uses_authored_base and record.correction_identity is not None
+        else record.source_sha
+    )
+    if candidate_base_sha is None:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Candidate validation base is unavailable.",
+        )
+
+    def observed_candidate_paths() -> tuple[str, ...]:
+        """Return the candidate scope for its exact validation base."""
+        paths = (
+            repository.publication_changed_paths(record.worktree, candidate_base_sha)
+            if uses_authored_base
+            else repository.changed_paths(record.worktree)
+        )
+        return tuple(sorted(set(paths)))
+
+    def candidate_action(
+        action: str, tree: str | None, selector: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        nonlocal validated_candidate_paths, successfully_validated_tree
+        nonlocal prepared_candidate, prepared_evidence
+        early_content = (
+            record.state is RunnerState.EXECUTING
+            and record.phase is WorkflowPhase.WORKFLOW
+            and record.workflow_lane is WorkflowLane.UNKNOWN
+            and retained_checkpoint is None
+        )
+        if early_content and action not in {"stage", "read"}:
+            raise WorkerProtocolError(
+                "candidate_broker", "candidate request is invalid"
+            )
+        if early_content:
+            observed = repository.changed_paths(record.worktree)
+            if not observed or any(
+                not path.endswith((".md", ".md.jinja")) for path in observed
+            ):
+                raise WorkerProtocolError(
+                    "candidate_broker", "candidate request is invalid"
+                )
+        current = ledger.load(record.issue_iid)
+        if (
+            current is None
+            or current.revision != record.revision
+            or current.state is not record.state
+            or current.phase is not record.phase
+            or current.source_sha != record.source_sha
+            or record.source_sha is None
+            or repository.head(record.worktree) != record.source_sha
+        ):
+            raise WorkerProtocolError("candidate_broker", "identity changed")
+        try:
+            if action == "stage":
+                prepared_evidence = None
+                successfully_validated_tree = None
+                staged_tree = repository.stage_candidate(
+                    record.worktree,
+                    candidate_base_sha,
+                    allow_base_ancestor=uses_authored_base,
+                )
+                prepared_candidate = staged_tree
+                validated_candidate_paths = observed_candidate_paths()
+                return {
+                    "candidate_tree": staged_tree,
+                    "state": "staged",
+                    "changed_path_count": len(validated_candidate_paths),
+                }
+            if (
+                tree is None
+                or tree != prepared_candidate
+                or validated_candidate_paths is None
+                or validated_candidate_paths != observed_candidate_paths()
+                or repository.red_candidate_tree(
+                    record.worktree, candidate_base_sha, validated_candidate_paths
+                )
+                != tree
+            ):
+                raise WorkerProtocolError("candidate_broker", "candidate changed")
+            if action == "read":
+                if (
+                    record.phase is WorkflowPhase.WORKFLOW
+                    and (
+                        record.workflow_lane is WorkflowLane.CODING
+                        or retained_checkpoint is not None
+                    )
+                    and successfully_validated_tree != tree
+                ):
+                    raise WorkerProtocolError(
+                        "candidate_broker", "candidate request is invalid"
+                    )
+                mode = selector.get("mode") if selector is not None else None
+                evidence: dict[str, object]
+                if prepared_evidence is None:
+                    if mode in {"chunk", "complete"}:
+                        raise WorkerProtocolError(
+                            "candidate_broker", "candidate request is invalid"
+                        )
+                    prepared_evidence = repository.read_candidate(
+                        record.worktree,
+                        tree,
+                        base_sha=candidate_base_sha,
+                        allow_base_ancestor=uses_authored_base,
+                        changed_paths=validated_candidate_paths,
+                    )
+                if mode == "chunk":
+                    assert selector is not None
+                    try:
+                        evidence = git_read_chunk(
+                            prepared_evidence,
+                            path=cast(str, selector["path"]),
+                            side=cast(str, selector["side"]),
+                            offset=cast(int, selector["offset"]),
+                            length=cast(int, selector["length"]),
+                        )
+                    except (KeyError, CandidateBoundaryError) as error:
+                        raise WorkerProtocolError(
+                            "candidate_broker", "candidate read chunk is invalid"
+                        ) from error
+                elif mode == "complete":
+                    evidence = {"candidate_tree": tree, "state": "read-complete"}
+                elif (
+                    mode == "manifest"
+                    or len(json.dumps(prepared_evidence).encode())
+                    > GIT_READ_INLINE_JSON_BYTES
+                ):
+                    evidence = git_read_manifest(prepared_evidence)
+                else:
+                    evidence = prepared_evidence
+                refreshed = ledger.load(record.issue_iid)
+                if (
+                    refreshed is None
+                    or refreshed.revision != record.revision
+                    or refreshed.state is not record.state
+                    or refreshed.phase is not record.phase
+                    or refreshed.source_sha != record.source_sha
+                    or repository.head(record.worktree) != record.source_sha
+                    or validated_candidate_paths != observed_candidate_paths()
+                    or repository.red_candidate_tree(
+                        record.worktree, candidate_base_sha, validated_candidate_paths
+                    )
+                    != tree
+                ):
+                    raise WorkerProtocolError("candidate_broker", "identity changed")
+                return evidence | {"base_sha": candidate_base_sha}
+            report = repository.judge_candidate(
+                record.worktree,
+                tree,
+                base_sha=candidate_base_sha,
+                allow_base_ancestor=uses_authored_base,
+                changed_paths=validated_candidate_paths,
+                action=action,
+                timeout_seconds=worker_timeout,
+            )
+            if report.get("state") == "terminal-success":
+                successfully_validated_tree = tree
+            return report
+        except RepositoryError as error:
+            reason = str(error)
+            safe_reasons = {
+                "candidate changed paths are invalid",
+                "candidate tree is invalid",
+                "candidate changed paths changed during staging",
+                "candidate changed during staging",
+                "candidate action is invalid",
+                "candidate tree changed",
+                "candidate validation response is malformed",
+                "candidate validation response is invalid",
+                "candidate validation evidence is invalid",
+                "candidate validation state is invalid",
+                "candidate validation exit is inconsistent",
+                "candidate failure evidence is invalid",
+                "candidate timing evidence is invalid",
+                "candidate JUnit timing evidence is invalid",
+                "candidate changed during validation",
+                "candidate changed",
+                "candidate base tree is invalid",
+                "candidate read failed",
+                "candidate object is invalid",
+                "candidate content is oversize or binary",
+            }
+            raise WorkerProtocolError(
+                "candidate_broker",
+                reason
+                if reason in safe_reasons
+                else "trusted candidate operation failed",
+            ) from error
+
     lock_factory = issue_lock or (lambda _issue_iid: nullcontext())
     invocation = None
     if (
@@ -3106,6 +3313,7 @@ def _execute(
                     apply_red_checkpoint=apply_red_checkpoint,
                     load_red_checkpoint=load_red_checkpoint,
                 ),
+                candidate_action=candidate_action,
             )
         if red_invocation.protocol_error is not None:
             return _record_retry(
@@ -3271,112 +3479,6 @@ def _execute(
                 now=now,
                 stage=RedCheckpointFailureStage.RESULT_REQUEST_PATH,
             )
-    validated_candidate_paths: tuple[str, ...] | None = None
-    prepared_candidate: str | None = None
-    candidate_base_sha = (
-        record.correction_identity.baseline_sha
-        if record.correction_identity is not None
-        and record.correction_identity.mode == "authored_candidate_recovery"
-        else record.source_sha
-    )
-    if candidate_base_sha is None:
-        return _block_publication_identity(
-            record,
-            ledger=ledger,
-            gitlab=gitlab,
-            summary="Candidate validation base is unavailable.",
-        )
-    uses_authored_base = (
-        record.correction_identity is not None
-        and record.correction_identity.mode == "authored_candidate_recovery"
-    )
-
-    def observed_candidate_paths() -> tuple[str, ...]:
-        """Return the candidate scope for its exact validation base."""
-        paths = (
-            repository.publication_changed_paths(record.worktree, candidate_base_sha)
-            if uses_authored_base
-            else repository.changed_paths(record.worktree)
-        )
-        return tuple(sorted(set(paths)))
-
-    def candidate_action(action: str, tree: str | None) -> dict[str, object]:
-        nonlocal validated_candidate_paths, prepared_candidate
-        current = ledger.load(record.issue_iid)
-        if (
-            current is None
-            or current.revision != record.revision
-            or current.state is not record.state
-            or current.phase is not record.phase
-            or current.source_sha != record.source_sha
-            or record.source_sha is None
-            or repository.head(record.worktree) != record.source_sha
-        ):
-            raise WorkerProtocolError("candidate_broker", "identity changed")
-        try:
-            if action == "stage":
-                staged_tree = repository.stage_candidate(
-                    record.worktree,
-                    candidate_base_sha,
-                    allow_base_ancestor=uses_authored_base,
-                )
-                prepared_candidate = staged_tree
-                validated_candidate_paths = observed_candidate_paths()
-                return {
-                    "candidate_tree": staged_tree,
-                    "state": "staged",
-                    "changed_path_count": len(validated_candidate_paths),
-                }
-            if (
-                tree is None
-                or tree != prepared_candidate
-                or validated_candidate_paths is None
-                or validated_candidate_paths != observed_candidate_paths()
-                or repository.red_candidate_tree(
-                    record.worktree, candidate_base_sha, validated_candidate_paths
-                )
-                != tree
-            ):
-                raise WorkerProtocolError("candidate_broker", "candidate changed")
-            report = repository.judge_candidate(
-                record.worktree,
-                tree,
-                base_sha=candidate_base_sha,
-                allow_base_ancestor=(
-                    record.correction_identity is not None
-                    and record.correction_identity.mode == "authored_candidate_recovery"
-                ),
-                changed_paths=validated_candidate_paths,
-                action=action,
-                timeout_seconds=worker_timeout,
-            )
-            return report
-        except RepositoryError as error:
-            reason = str(error)
-            safe_reasons = {
-                "candidate changed paths are invalid",
-                "candidate tree is invalid",
-                "candidate changed paths changed during staging",
-                "candidate changed during staging",
-                "candidate action is invalid",
-                "candidate tree changed",
-                "candidate validation response is malformed",
-                "candidate validation response is invalid",
-                "candidate validation evidence is invalid",
-                "candidate validation state is invalid",
-                "candidate validation exit is inconsistent",
-                "candidate failure evidence is invalid",
-                "candidate timing evidence is invalid",
-                "candidate JUnit timing evidence is invalid",
-                "candidate changed during validation",
-            }
-            raise WorkerProtocolError(
-                "candidate_broker",
-                reason
-                if reason in safe_reasons
-                else "trusted candidate operation failed",
-            ) from error
-
     if invocation is None:
         with lock_factory(record.issue_iid):
             invocation = invoke.invoke(
@@ -3670,10 +3772,10 @@ def _execute(
                         ),
                     }
                 )
-    if (
-        outcome.state is RunnerState.PUBLISHING
-        and result.workflow_lane is WorkflowLane.CODING
-    ):
+    if outcome.state is RunnerState.PUBLISHING and result.workflow_lane in {
+        WorkflowLane.CODING,
+        WorkflowLane.CONTENT,
+    }:
         try:
             actual_tree = repository.red_candidate_tree(
                 record.worktree, candidate_base_sha, final_changed_paths
@@ -3681,9 +3783,13 @@ def _execute(
         except RepositoryError:
             actual_tree = None
         if (
-            invocation.validated_candidate is None
+            invocation.reviewed_candidate is None
+            or (
+                result.workflow_lane is WorkflowLane.CODING
+                and invocation.validated_candidate != invocation.reviewed_candidate
+            )
             or validated_candidate_paths != final_changed_paths
-            or actual_tree != invocation.validated_candidate
+            or actual_tree != invocation.reviewed_candidate
         ):
             return _record_retry(
                 record,

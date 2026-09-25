@@ -18,13 +18,16 @@ import socket
 import stat
 import threading
 import unicodedata
+from base64 import b64decode, b64encode
 from collections.abc import Callable
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Self, cast
 
 import pytest
 
+from agent_work.candidate_boundary import GIT_READ_INLINE_JSON_BYTES
 from agent_work.cli import build_parser, main
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
 from agent_work.models import LedgerRecord, WorkerResultEnvelope
@@ -114,6 +117,746 @@ def test_candidate_broker_returns_rejected_judge_evidence_then_accepts_correctio
         ("validate", "c" * 40),
         ("status", "c" * 40),
     ]
+
+
+def test_candidate_read_response_keeps_controller_observed_base(
+    candidate_scratch: Path,
+) -> None:
+    tree = "b" * 40
+    baseline = "f" * 40
+
+    def action(kind: str, _tree: str | None) -> dict[str, object]:
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        return {
+            "candidate_tree": tree,
+            "base_sha": baseline,
+            "base_tree": "c" * 40,
+            "changed_paths": ["docs/guide.md"],
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "old_mode": "100644",
+                    "new_mode": "100644",
+                    "old_content": "baseline\n",
+                    "new_content": "repaired\n",
+                }
+            ],
+        }
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    request_candidate_validation(session.socket_path, client, action="stage")
+    response = request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    assert response["base_sha"] == baseline
+    assert response["base_tree"] == "c" * 40
+    session.close_and_capture()
+
+
+@pytest.mark.parametrize("over_limit", [False, True])
+def test_candidate_broker_pages_at_final_inline_response_limit(
+    candidate_scratch: Path, *, over_limit: bool
+) -> None:
+    request = _request()
+    tree = "b" * 40
+    evidence: dict[str, object] = {
+        "candidate_tree": tree,
+        "base_sha": request.source_sha,
+        "base_tree": "c" * 40,
+        "changed_paths": ["docs/guide.md"],
+        "files": [
+            {
+                "path": "docs/guide.md",
+                "old_mode": None,
+                "old_oid": None,
+                "old_content": None,
+                "new_mode": "100644",
+                "new_oid": "d" * 40,
+                "new_content": "",
+            }
+        ],
+    }
+    identity = {
+        "accepted": True,
+        "nonce": request.nonce,
+        "issue_iid": request.issue_iid,
+        "project_id": request.project_id,
+        "ledger_revision": request.ledger_revision,
+        "source_branch": request.source_branch,
+        "base_sha": request.source_sha,
+    }
+    empty_size = len(json.dumps(evidence | identity).encode())
+    content_size = GIT_READ_INLINE_JSON_BYTES - empty_size + int(over_limit)
+    files = cast(list[dict[str, object]], evidence["files"])
+    files[0]["new_content"] = "x" * content_size
+    assert len(json.dumps(evidence).encode()) < GIT_READ_INLINE_JSON_BYTES
+
+    def action(kind: str, _tree: str | None) -> dict[str, object]:
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        return evidence
+
+    session = create_candidate_broker(
+        action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    request_candidate_validation(session.socket_path, client, action="stage")
+    response = request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    assert len(json.dumps(response).encode()) <= GIT_READ_INLINE_JSON_BYTES
+    if over_limit:
+        assert response["paged"] is True
+        assert session.reviewed_candidate is None
+        session.close_and_capture()
+    else:
+        assert "paged" not in response
+        assert len(json.dumps(response).encode()) == GIT_READ_INLINE_JSON_BYTES
+        assert session.reviewed_candidate == tree
+        session.close_and_capture()
+
+
+def test_candidate_broker_reads_controller_observed_base_to_tree_evidence(
+    candidate_scratch: Path,
+) -> None:
+    """A live read exposes exact changed content, including deletion evidence."""
+    base = "a" * 40
+    tree = "b" * 40
+    expected: dict[str, object] = {
+        "candidate_tree": tree,
+        "base_sha": base,
+        "base_tree": base,
+        "changed_paths": ["docs/guide.md", "docs/removed.md"],
+        "files": [
+            {
+                "path": "docs/guide.md",
+                "old_mode": "100644",
+                "new_mode": "100644",
+                "old_content": "before\n",
+                "new_content": "after\n",
+            },
+            {
+                "path": "docs/removed.md",
+                "old_mode": "100644",
+                "new_mode": None,
+                "old_content": "removed\n",
+                "new_content": None,
+            },
+        ],
+    }
+    calls: list[tuple[str, str | None]] = []
+
+    def action(kind: str, candidate_tree: str | None) -> dict[str, object]:
+        calls.append((kind, candidate_tree))
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        assert kind == "read" and candidate_tree == tree
+        return expected
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    staged = request_candidate_validation(session.socket_path, client, action="stage")
+    read = request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",  # type: ignore[arg-type]
+        candidate_tree=cast(str, staged["candidate_tree"]),
+    )
+
+    assert {key: read[key] for key in expected} == expected
+    assert calls == [("stage", None), ("read", tree)]
+    assert session.close_and_capture() is None
+
+
+def test_candidate_broker_rejects_read_of_old_tree_after_restage(
+    candidate_scratch: Path,
+) -> None:
+    """A correction invalidates the prior read identity even before review."""
+    trees = iter(("b" * 40, "c" * 40))
+    calls: list[tuple[str, str | None]] = []
+
+    def action(kind: str, candidate_tree: str | None) -> dict[str, object]:
+        calls.append((kind, candidate_tree))
+        if kind == "stage":
+            return {"candidate_tree": next(trees), "state": "staged"}
+        return {
+            "candidate_tree": candidate_tree,
+            "base_sha": "a" * 40,
+            "base_tree": "a" * 40,
+            "changed_paths": ["docs/guide.md"],
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "old_mode": "100644",
+                    "new_mode": "100644",
+                    "old_content": "before\n",
+                    "new_content": "after\n",
+                }
+            ],
+        }
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    first = request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",  # type: ignore[arg-type]
+        candidate_tree=cast(str, first["candidate_tree"]),
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",  # type: ignore[arg-type]
+            candidate_tree=cast(str, first["candidate_tree"]),
+        )
+    assert calls == [("stage", None), ("read", "b" * 40), ("stage", None)]
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_pages_escaped_content_before_frame_budget(
+    candidate_scratch: Path,
+) -> None:
+    """Escaped JSON content becomes a bounded manifest before frame delivery."""
+    tree = "b" * 40
+    content = "é" * 100_000
+
+    def action(kind: str, _tree: str | None) -> dict[str, object]:
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        return {
+            "candidate_tree": tree,
+            "base_sha": "a" * 40,
+            "base_tree": "a" * 40,
+            "changed_paths": ["docs/guide.md"],
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "old_mode": "100644",
+                    "old_oid": "c" * 40,
+                    "new_mode": "100644",
+                    "new_oid": "d" * 40,
+                    "old_content": content,
+                    "new_content": content,
+                }
+            ],
+        }
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    request_candidate_validation(session.socket_path, client, action="stage")
+    response = request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    assert response["paged"] is True
+    assert len(json.dumps(response).encode()) <= GIT_READ_INLINE_JSON_BYTES
+    assert session.reviewed_candidate is None
+    session.close_and_capture()
+
+
+def _paged_candidate_action(
+    kind: str, tree: str | None, selector: dict[str, object] | None = None
+) -> dict[str, object]:
+    candidate = "b" * 40
+    if kind == "stage":
+        return {"candidate_tree": candidate, "state": "staged"}
+    assert kind == "read" and tree == candidate
+    old = b"before"
+    new = b"after!"
+    if selector is not None and selector["mode"] == "chunk":
+        side = cast(str, selector["side"])
+        content = old if side == "old" else new
+        offset = cast(int, selector["offset"])
+        length = cast(int, selector["length"])
+        return {
+            "candidate_tree": candidate,
+            "base_sha": "a" * 40,
+            "path": "docs/guide.md",
+            "side": side,
+            "offset": offset,
+            "length": length,
+            "data_base64": b64encode(content[offset : offset + length]).decode(),
+            "sha256": sha256(content).hexdigest(),
+        }
+    if selector is not None and selector["mode"] == "complete":
+        return {
+            "candidate_tree": candidate,
+            "base_sha": "a" * 40,
+            "state": "read-complete",
+        }
+    return {
+        "candidate_tree": candidate,
+        "base_sha": "a" * 40,
+        "base_tree": "a" * 40,
+        "changed_paths": ["docs/guide.md"],
+        "paged": True,
+        "files": [
+            {
+                "path": "docs/guide.md",
+                "old_mode": "100644",
+                "old_oid": "c" * 40,
+                "old_size": len(old),
+                "old_sha256": sha256(old).hexdigest(),
+                "new_mode": "100644",
+                "new_oid": "d" * 40,
+                "new_size": len(new),
+                "new_sha256": sha256(new).hexdigest(),
+            }
+        ],
+    }
+
+
+def test_candidate_broker_completes_only_after_all_paged_bytes(
+    candidate_scratch: Path,
+) -> None:
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    manifest = request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    assert manifest["paged"] is True
+    for side in ("old", "new"):
+        page = request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={
+                "mode": "chunk",
+                "path": "docs/guide.md",
+                "side": side,
+                "offset": 0,
+                "length": 6,
+            },
+        )
+        assert page["length"] == 6
+        assert b64decode(cast(str, page["data_base64"])) == (
+            b"before" if side == "old" else b"after!"
+        )
+    assert session.reviewed_candidate is None
+    completed = request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",
+        candidate_tree=tree,
+        selector={"mode": "complete"},
+    )
+    assert completed["state"] == "read-complete"
+    assert session.close_and_capture() is None
+    assert session.reviewed_candidate == tree
+
+
+@pytest.mark.parametrize("invalid_page", [False, True])
+def test_candidate_broker_rejects_invalid_or_changed_read_base(
+    candidate_scratch: Path, *, invalid_page: bool
+) -> None:
+    def action(
+        kind: str, tree: str | None, selector: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        outcome = _paged_candidate_action(kind, tree, selector)
+        if kind == "read" and (not invalid_page or selector is not None):
+            outcome["base_sha"] = "f" * (40 if invalid_page else 39)
+        return outcome
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    if invalid_page:
+        request_candidate_validation(
+            session.socket_path, client, action="read", candidate_tree=tree
+        )
+    with pytest.raises(WorkerProtocolError, match="malformed candidate read"):
+        if invalid_page:
+            request_candidate_validation(
+                session.socket_path,
+                client,
+                action="read",
+                candidate_tree=tree,
+                selector={
+                    "mode": "chunk",
+                    "path": "docs/guide.md",
+                    "side": "old",
+                    "offset": 0,
+                    "length": 6,
+                },
+            )
+        else:
+            request_candidate_validation(
+                session.socket_path, client, action="read", candidate_tree=tree
+            )
+    assert session.reviewed_candidate is None
+
+
+def test_candidate_broker_rejects_same_length_tampered_page(
+    candidate_scratch: Path,
+) -> None:
+    def action(
+        kind: str, tree: str | None, selector: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        outcome = _paged_candidate_action(kind, tree, selector)
+        if selector is not None and selector["mode"] == "chunk":
+            outcome["data_base64"] = b64encode(b"damage").decode()
+        return outcome
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    with pytest.raises(WorkerProtocolError, match="malformed candidate read"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={
+                "mode": "chunk",
+                "path": "docs/guide.md",
+                "side": "old",
+                "offset": 0,
+                "length": 6,
+            },
+        )
+    assert session.reviewed_candidate is None
+
+
+def test_candidate_broker_rejects_complete_with_one_side_missing(
+    candidate_scratch: Path,
+) -> None:
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",
+        candidate_tree=tree,
+        selector={
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 0,
+            "length": 6,
+        },
+    )
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={"mode": "complete"},
+        )
+    assert session.reviewed_candidate is None
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"mode": "complete"},
+        {
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 1,
+            "length": 1,
+        },
+        {
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "new",
+            "offset": 3,
+            "length": 1,
+        },
+        {
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 0,
+            "length": 131073,
+        },
+    ],
+)
+def test_candidate_broker_rejects_incomplete_or_invalid_page(
+    candidate_scratch: Path, selector: dict[str, object]
+) -> None:
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector=selector,
+        )
+    assert session.reviewed_candidate is None
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_rejects_replayed_page(candidate_scratch: Path) -> None:
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    selector: dict[str, object] = {
+        "mode": "chunk",
+        "path": "docs/guide.md",
+        "side": "old",
+        "offset": 0,
+        "length": 3,
+    }
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",
+        candidate_tree=tree,
+        selector=selector,
+    )
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector=selector,
+        )
+    assert session.reviewed_candidate is None
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_empty_and_deleted_sides_need_no_chunks(
+    candidate_scratch: Path,
+) -> None:
+    tree = "b" * 40
+
+    def action(
+        kind: str, _tree: str | None, selector: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        if kind == "stage":
+            return {"candidate_tree": tree, "state": "staged"}
+        if selector is not None and selector["mode"] == "complete":
+            return {
+                "candidate_tree": tree,
+                "base_sha": "a" * 40,
+                "state": "read-complete",
+            }
+        empty_sha = sha256(b"").hexdigest()
+        return {
+            "candidate_tree": tree,
+            "base_sha": "a" * 40,
+            "base_tree": "a" * 40,
+            "paged": True,
+            "changed_paths": ["docs/deleted.md", "docs/empty.md"],
+            "files": [
+                {
+                    "path": "docs/deleted.md",
+                    "old_mode": "100644",
+                    "old_oid": "c" * 40,
+                    "old_size": 0,
+                    "old_sha256": empty_sha,
+                    "new_mode": None,
+                    "new_oid": None,
+                    "new_size": None,
+                    "new_sha256": None,
+                },
+                {
+                    "path": "docs/empty.md",
+                    "old_mode": None,
+                    "old_oid": None,
+                    "old_size": None,
+                    "old_sha256": None,
+                    "new_mode": "100644",
+                    "new_oid": "d" * 40,
+                    "new_size": 0,
+                    "new_sha256": empty_sha,
+                },
+            ],
+        }
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    assert session.reviewed_candidate is None
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",
+        candidate_tree=tree,
+        selector={"mode": "complete"},
+    )
+    assert session.close_and_capture() is None
+    assert session.reviewed_candidate == tree
+
+
+def test_candidate_broker_rejects_page_after_deadline(candidate_scratch: Path) -> None:
+    now = [1.0]
+
+    def action(
+        kind: str, tree: str | None, selector: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        if selector is not None and selector["mode"] == "chunk":
+            now[0] = 12.0
+        return _paged_candidate_action(kind, tree, selector)
+
+    session = create_candidate_broker(
+        action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+        clock=lambda: now[0],
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    with pytest.raises(WorkerProtocolError, match="request timed out"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={
+                "mode": "chunk",
+                "path": "docs/guide.md",
+                "side": "old",
+                "offset": 0,
+                "length": 6,
+            },
+        )
+    assert session.reviewed_candidate is None
+    with pytest.raises(WorkerProtocolError, match="request timed out"):
+        session.close_and_capture()
+
+
+def test_candidate_broker_restage_revokes_paged_coverage(
+    candidate_scratch: Path,
+) -> None:
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=_request(),
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
+    tree = "b" * 40
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    request_candidate_validation(
+        session.socket_path,
+        client,
+        action="read",
+        candidate_tree=tree,
+        selector={
+            "mode": "chunk",
+            "path": "docs/guide.md",
+            "side": "old",
+            "offset": 0,
+            "length": 6,
+        },
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={"mode": "complete"},
+        )
+    assert session.reviewed_candidate is None
+    with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
+        session.close_and_capture()
 
 
 def test_candidate_broker_rejects_malformed_frame_and_fails_closed(
@@ -224,8 +967,9 @@ def test_candidate_broker_rejects_callback_past_deadline(
 @pytest.mark.parametrize(
     ("counter", "limit", "diagnostic"),
     (
-        ("_requests", 256, "request is not permitted"),
+        ("_requests", 512, "request is not permitted"),
         ("_bytes_received", 4_194_304, "request byte budget exceeded"),
+        ("_bytes_sent", 33_554_432, "response byte budget exceeded"),
     ),
 )
 def test_candidate_broker_fails_closed_at_transport_budget(
@@ -251,7 +995,7 @@ def test_candidate_broker_fails_closed_at_transport_budget(
         request_candidate_validation(session.socket_path, client, action="stage")
     with pytest.raises(WorkerProtocolError, match=diagnostic):
         session.close_and_capture()
-    assert not called
+    assert called is (counter == "_bytes_sent")
     assert not session.socket_path.parent.exists()
 
 
@@ -276,7 +1020,7 @@ def test_candidate_broker_extra_request_revokes_accepted_tree(
         action="validate",
         candidate_tree=cast(str, staged["candidate_tree"]),
     )
-    session._requests = 256
+    session._requests = 512
     with pytest.raises(WorkerProtocolError, match="request is not permitted"):
         request_candidate_validation(
             session.socket_path,
