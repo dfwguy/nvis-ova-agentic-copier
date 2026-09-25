@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from pydantic import ValidationError
@@ -70,6 +70,30 @@ def _config(tmp_path: Path) -> AgentWorkConfig:
         glab_path=tmp_path / "bin" / "glab",
         base_branch="agent/work-base",
     )
+
+
+_GIT_TRANSPORT_CREDENTIAL_CONFIG = (
+    "-c",
+    "credential.helper=",
+    "-c",
+    'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+    "-c",
+    "credential.useHttpPath=true",
+    "-c",
+    "core.askPass=/bin/false",
+)
+
+
+def _git_arguments(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the Git operation args after validating a transport prefix."""
+    arguments = command[3:]
+    if arguments[:1] == ("-c",):
+        assert arguments[:8] == _GIT_TRANSPORT_CREDENTIAL_CONFIG
+        arguments = arguments[8:]
+        assert arguments[:1] in {("fetch",), ("pull",), ("push",), ("ls-remote",)}
+    if arguments[:1] in {("fetch",), ("pull",), ("push",), ("ls-remote",)}:
+        assert command[3:11] == _GIT_TRANSPORT_CREDENTIAL_CONFIG
+    return arguments
 
 
 @pytest.mark.parametrize("marker_is_member", (True, False))
@@ -360,7 +384,7 @@ def test_sync_feedback_worktree_uses_the_exact_fast_forward_command_seam(
         config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
     ).sync_feedback_worktree(worktree, "agent/issue-12", old_sha, new_sha)
 
-    assert [command[3:] for command in calls] == [
+    assert [_git_arguments(command) for command in calls] == [
         ("status", "--porcelain"),
         ("branch", "--show-current"),
         ("rev-parse", "HEAD"),
@@ -761,7 +785,7 @@ def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         nonlocal head, status
         calls.append(command)
-        arguments = command[3:]
+        arguments = _git_arguments(command)
         if arguments == ("branch", "--show-current"):
             return CommandResult(0, "agent/issue-12\n", "")
         if arguments == ("rev-parse", "HEAD"):
@@ -775,7 +799,10 @@ def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
             status = ""
             return CommandResult(0, "", "")
         if arguments[:1] == ("push",):
-            if len([call for call in calls if call[3:4] == ("push",)]) == 1:
+            if (
+                len([call for call in calls if _git_arguments(call)[:1] == ("push",)])
+                == 1
+            ):
                 return CommandResult(1, "", raw_failure)
             return CommandResult(0, "", "")
         if arguments == ("rev-parse", "origin/agent/issue-12"):
@@ -797,8 +824,10 @@ def test_failed_push_records_only_safe_diagnostic_and_replays_retained_commit(
     replayed = repository.push_prepared(worktree, "agent/issue-12", prepared)
 
     assert replayed == "b" * 40
-    assert len([call for call in calls if call[3:4] == ("commit",)]) == 1
-    assert [call[3:] for call in calls if call[3:4] == ("push",)] == [
+    assert len([call for call in calls if _git_arguments(call)[:1] == ("commit",)]) == 1
+    assert [
+        _git_arguments(call) for call in calls if _git_arguments(call)[:1] == ("push",)
+    ] == [
         ("push", "origin", f"{'b' * 40}:refs/heads/agent/issue-12"),
         ("push", "origin", f"{'b' * 40}:refs/heads/agent/issue-12"),
     ]
@@ -840,6 +869,84 @@ def test_git_credential_environment_disables_prompts_and_uses_only_repository_he
     assert environment["SSH_ASKPASS"] == "/bin/false"
     assert environment["GITLAB_TOKEN"] == "secret-value"
     assert "GIT_CONFIG_PARAMETERS" not in environment
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("fetch", "origin", "main"),
+        ("pull", "origin", "main"),
+        ("push", "origin", f"{'a' * 40}:refs/heads/agent/issue-12"),
+        ("ls-remote", "origin"),
+    ),
+)
+def test_remote_git_invocations_use_only_the_repository_credential_helper(
+    tmp_path: Path, arguments: tuple[str, ...]
+) -> None:
+    """Network Git commands carry the helper configuration at the command seam."""
+    config = _config(tmp_path)
+    token = "token-must-not-appear-in-argv"
+    credential_helper = config.checkout / "src" / "agent-work-git-credential.sh"
+    calls: list[tuple[tuple[str, ...], Mapping[str, str]]] = []
+    expected_command = (
+        str(config.git_path),
+        "-C",
+        str(config.checkout),
+        "-c",
+        "credential.helper=",
+        "-c",
+        'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+        "-c",
+        "credential.useHttpPath=true",
+        "-c",
+        "core.askPass=/bin/false",
+        *arguments,
+    )
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        environment = cast(Mapping[str, str], kwargs["environment"])
+        assert isinstance(environment, Mapping)
+        calls.append((command, environment))
+        if (
+            command != expected_command
+            or token in command
+            or str(credential_helper) in command
+            or environment.get("GITLAB_TOKEN") != token
+            or environment.get("AGENT_WORK_GIT_CREDENTIAL_HELPER")
+            != str(credential_helper)
+            or environment.get("GIT_TERMINAL_PROMPT") != "0"
+            or environment.get("GCM_INTERACTIVE") != "never"
+            or environment.get("GIT_ASKPASS") != "/bin/false"
+            or environment.get("SSH_ASKPASS") != "/bin/false"
+            or "GIT_CONFIG_COUNT" in environment
+            or "GIT_CONFIG_PARAMETERS" in environment
+            or any(
+                key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+                for key in environment
+            )
+        ):
+            return CommandResult(1, "", "credential helper was not configured")
+        return CommandResult(0, "", "")
+
+    GitRepository(
+        config,
+        run,
+        service_environment={
+            "GITLAB_TOKEN": token,
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "!hostile-helper",
+            "GIT_CONFIG_KEY_1": "core.askPass",
+            "GIT_CONFIG_VALUE_1": "/hostile/askpass",
+            "GIT_CONFIG_PARAMETERS": "credential.helper=hostile",
+            "GIT_ASKPASS": "/hostile/askpass",
+            "SSH_ASKPASS": "/hostile/ssh-askpass",
+        },
+    )._git(*arguments)
+
+    assert calls == [(expected_command, calls[0][1])]
+    assert token not in " ".join(calls[0][0])
+    assert str(credential_helper) not in " ".join(calls[0][0])
 
 
 @pytest.mark.parametrize("token", (None, ""))
@@ -2990,7 +3097,7 @@ def test_refresh_retained_worktree_fast_forwards_or_replays_exact_default(
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         nonlocal head
         calls.append(command)
-        arguments = command[3:]
+        arguments = _git_arguments(command)
         if arguments == ("branch", "--show-current"):
             return CommandResult(0, "agent/issue-12\n", "")
         if arguments == ("status", "--porcelain"):
@@ -3047,7 +3154,7 @@ def test_refresh_retained_worktree_rejects_inexact_replay_or_merge_result(
 
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         calls.append(command)
-        arguments = command[3:]
+        arguments = _git_arguments(command)
         if arguments == ("branch", "--show-current"):
             return CommandResult(0, "agent/issue-12\n", "")
         if arguments == ("status", "--porcelain"):
@@ -3092,7 +3199,7 @@ def test_refresh_retained_worktree_rejects_an_unrelated_recorded_replay_chain(
 
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         calls.append(command)
-        arguments = command[3:]
+        arguments = _git_arguments(command)
         if arguments == ("branch", "--show-current"):
             return CommandResult(0, "agent/issue-12\n", "")
         if arguments == ("status", "--porcelain"):
@@ -3178,7 +3285,7 @@ def test_refresh_retained_worktree_rejects_non_exact_or_authored_state(
 
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         calls.append(command)
-        arguments = command[3:]
+        arguments = _git_arguments(command)
         if arguments == ("branch", "--show-current"):
             return CommandResult(0, f"{branch}\n", "")
         if arguments == ("status", "--porcelain"):
@@ -3753,7 +3860,7 @@ def test_repository_reconciles_current_default_or_recovers_only_exact_pending_me
     )
 
     assert result == (None if candidate == "b" * 40 else "b" * 40)
-    assert any(call[3:5] == ("fetch", "origin") for call in calls)
+    assert any(_git_arguments(call)[:2] == ("fetch", "origin") for call in calls)
     assert any(
         call[3:] == ("rev-parse", "-q", "--verify", "MERGE_HEAD") for call in calls
     )
@@ -4263,4 +4370,4 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
             )
             == prepared
         )
-        assert any(call[3:5] == ("fetch", "origin") for call in calls)
+        assert any(_git_arguments(call)[:2] == ("fetch", "origin") for call in calls)

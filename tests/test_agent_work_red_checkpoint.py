@@ -592,10 +592,24 @@ def test_checkpoint_ref_never_changes_one_commit_final_publication_history(
     publication_sha = "d" * 40
     commands: list[tuple[str, ...]] = []
     committed = False
+    transport_credential_config = (
+        "-c",
+        "credential.helper=",
+        "-c",
+        'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+        "-c",
+        "credential.useHttpPath=true",
+        "-c",
+        "core.askPass=/bin/false",
+    )
 
     def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         nonlocal committed
         arguments = command[3:]
+        if arguments[:1] == ("-c",):
+            assert arguments[:8] == transport_credential_config
+            arguments = arguments[8:]
+            assert arguments[:1] == ("push",)
         commands.append(arguments)
         if arguments == ("write-tree",):
             return CommandResult(0, f"{TREE_OID}\n", "")

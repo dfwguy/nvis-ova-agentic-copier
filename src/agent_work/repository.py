@@ -209,6 +209,7 @@ def _git_environment_controls(
 ) -> dict[str, str]:
     """Scrub ambient Git controls without adding a credential value."""
     environment = dict(service_environment)
+    environment.pop("GIT_CONFIG_COUNT", None)
     environment.pop("GIT_CONFIG_PARAMETERS", None)
     for key in tuple(environment):
         if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
@@ -435,20 +436,32 @@ class GitRepository:
     def _git(
         self, *arguments: str, cwd: Path | None = None, transient: bool = False
     ) -> str:
-        if arguments[:1] in {
+        transport_operation = arguments[:1] in {
             ("fetch",),
             ("pull",),
             ("push",),
             ("ls-remote",),
-        } and not self._environment.get("GITLAB_TOKEN"):
+        }
+        if transport_operation and not self._environment.get("GITLAB_TOKEN"):
             raise RepositoryError("GitLab token is required for Git operations")
+        command = (
+            str(self.config.git_path),
+            "-C",
+            str(cwd or self.config.checkout),
+        )
+        if transport_operation:
+            command += (
+                "-c",
+                "credential.helper=",
+                "-c",
+                'credential.helper=!exec "$AGENT_WORK_GIT_CREDENTIAL_HELPER"',
+                "-c",
+                "credential.useHttpPath=true",
+                "-c",
+                "core.askPass=/bin/false",
+            )
         result = self._bounded_command(
-            (
-                str(self.config.git_path),
-                "-C",
-                str(cwd or self.config.checkout),
-                *arguments,
-            ),
+            (*command, *arguments),
             environment=self._environment,
             timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
