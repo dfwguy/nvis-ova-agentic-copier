@@ -126,13 +126,21 @@ with Pi. The unattended path requires exactly Developer access (`30`) for the
 `glab` identity. This fail-closed readiness check does not claim that a role
 alone proves repository policy.
 
-For Codex, also verify that `codex exec --help` advertises `--add-dir` before
-enabling `--apply`. The worker grants the prepared issue checkout's `.agents`
-and `template/.agents` directories through that option. During one invocation,
+For Codex, verify that `codex exec --help` advertises both `--add-dir` and
+`--enable` before enabling `--apply`. Also confirm that
+`codex features list` reports exactly `multi_agent stable true`. The worker
+starts Codex with `--enable multi_agent` so Architect can delegate its required
+proposal and reviewer roles. It grants the prepared issue checkout's `.agents`
+and `template/.agents` directories through `--add-dir`. During one invocation,
 it also grants a fresh private broker directory. The producer writes its bounded
 input there. It then connects to the controller-owned socket. No controller
-state directory is granted. Upgrade Codex or select another supported agent if
-the option is absent.
+state directory is granted.
+
+If the `multi_agent` feature is unavailable, the controller gate stops before
+claiming new work and retains an existing record for retry. Upgrade Codex or
+select another supported agent, then run the loop again after the capability is
+available. The gate reports `codex multi-agent capability unavailable` when
+the feature check fails.
 
 The worker cannot write the linked checkout's Git data. It asks the controller
 to stage changed files through a private socket. The controller then validates
@@ -142,6 +150,11 @@ the saved worktree and controller evidence before retrying.
 
 ```bash
 codex exec --help | grep -Eq '(^|[[:space:]])--add-dir([[:space:]]|$)'
+codex exec --help | grep -Eq '(^|[[:space:]])--enable([[:space:]]|$)'
+feature_output="$(codex features list)" &&
+  test "$(grep -Ec '^[[:space:]]*multi_agent([[:space:]]|$)' <<<"$feature_output")" = 1 &&
+  grep -Eq '^[[:space:]]*multi_agent[[:space:]]+stable[[:space:]]+true[[:space:]]*$' \
+    <<<"$feature_output"
 ```
 
 ### Verify Developer-readable safeguards.
