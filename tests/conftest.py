@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import copier
 import pytest
 
 
@@ -50,10 +51,33 @@ def template_source(
 def generated_project(
     tmp_path_factory: pytest.TempPathFactory,
     template_source: Path,
+) -> Path:
+    """Render project files without running setup tasks."""
+    output_dir = tmp_path_factory.mktemp("generated") / "my_project"
+    copier.run_copy(
+        str(template_source),
+        output_dir,
+        data={
+            "project_name": "My Test Project",
+            "project_slug": "my_test_project",
+            "description": "A test project",
+        },
+        defaults=True,
+        overwrite=True,
+        quiet=True,
+        skip_tasks=True,
+    )
+    return output_dir
+
+
+@pytest.fixture(scope="session")
+def trusted_generated_project(
+    tmp_path_factory: pytest.TempPathFactory,
+    template_source: Path,
     project_root: Path,
 ) -> Path:
     """Generate a project through Copier's real trusted-task orchestration."""
-    output_dir = tmp_path_factory.mktemp("generated") / "my_project"
+    output_dir = tmp_path_factory.mktemp("trusted_generated") / "my_project"
     commands = tmp_path_factory.mktemp("copier_commands")
     for command in ("glab", "uv"):
         _write_noop_command(commands / command)
