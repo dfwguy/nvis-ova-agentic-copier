@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
@@ -510,7 +511,6 @@ class FakeGitLab:
         return reconciled
 
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
-        del mr_iid, issue_iid
         self.closing_checks += 1
         if self.closing_errors:
             error = self.closing_errors.pop(0)
@@ -518,7 +518,37 @@ class FakeGitLab:
                 raise error
         if self.closing_error is not None:
             raise self.closing_error
-        return self.closing_results.pop(0) if self.closing_results else True
+        if self.closing_results:
+            return self.closing_results.pop(0)
+        merge_request = next(
+            (item for item in self.open_merge_request_inventory if item.iid == mr_iid),
+            None,
+        )
+        return (
+            merge_request is None or f"Closes #{issue_iid}" in merge_request.description
+        )
+
+    def closing_issue_iids(self, mr_iid: int) -> frozenset[int]:
+        """Return one fake validated projection for an open merge request."""
+        self.closing_checks += 1
+        if self.closing_errors:
+            error = self.closing_errors.pop(0)
+            if error is not None:
+                raise error
+        if self.closing_error is not None:
+            raise self.closing_error
+        if self.closing_results:
+            return frozenset({12}) if self.closing_results.pop(0) else frozenset()
+        merge_request = next(
+            (item for item in self.open_merge_request_inventory if item.iid == mr_iid),
+            None,
+        )
+        if merge_request is None:
+            return frozenset()
+        return frozenset(
+            int(iid)
+            for iid in re.findall(r"Closes #([1-9][0-9]*)", merge_request.description)
+        )
 
     def latest_pipeline_for_sha(self, mr_iid: int, sha: str) -> PipelineEvidence | None:
         if self.pipeline_error is not None:
@@ -9050,6 +9080,131 @@ def test_future_retry_wait_does_not_reserve_the_serial_slot(tmp_path: Path) -> N
     assert ledger.load(13) is None
 
 
+def test_ordinary_selection_skips_issue_with_validated_open_closing_mr(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (_mr(source_branch="human/fix"),)
+    repository = FakeRepository(config)
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+
+    assert (selected, issue) == (None, None)
+    assert ledger.load(12) is None
+    assert not repository.prepared
+
+
+def test_ordinary_selection_continues_after_owned_issue(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = ClosedInventoryGitLab(_issue(iid=12), _issue(iid=13))
+    gitlab.open_merge_request_inventory = (_mr(source_branch="human/fix"),)
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=FakeRepository(config),  # type: ignore[arg-type]
+    )
+
+    assert selected is not None and selected.issue_iid == 13
+    assert issue is not None and issue.iid == 13
+    assert gitlab.closing_checks == 1
+
+
+def test_ordinary_selection_filters_mr_identity_before_closing_suppression(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (
+        _mr(iid=80, target_project_id=999),
+        _mr(iid=81, target_branch="release"),
+        _mr(iid=82, state="closed"),
+    )
+    repository = FakeRepository(config)
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+    assert selected is not None and issue is not None and issue.iid == 12
+
+    gitlab.open_merge_request_inventory += (
+        _mr(iid=83, source_project_id=999, source_branch="fork/fix"),
+    )
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+    assert (selected, issue) == (None, None)
+
+
+def test_ordinary_selection_checks_project_scoped_closing_issue_identity(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.open_merge_request_inventory = (_mr(source_branch="human/fix"),)
+    gitlab.closing_results = [False, True]
+    repository = FakeRepository(config)
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+    assert selected is not None and issue is not None and issue.iid == 12
+
+    selected, issue = select_record(
+        ledger,
+        gitlab,
+        now=NOW,
+        repository=repository,  # type: ignore[arg-type]
+    )
+    assert (selected, issue) == (None, None)
+
+
+@pytest.mark.parametrize("failure", ("transport", "malformed-projection"))
+def test_ordinary_selection_fails_closed_when_closing_projection_unavailable(
+    tmp_path: Path, failure: str
+) -> None:
+    class FailingProjectionGitLab(FakeGitLab):
+        def closing_issue_iids(self, mr_iid: int) -> frozenset[int]:
+            del mr_iid
+            raise GitLabError(f"{failure} closing issue projection")
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FailingProjectionGitLab()
+    gitlab.open_merge_request_inventory = (_mr(source_branch="human/fix"),)
+    repository = FakeRepository(config)
+
+    with pytest.raises(GitLabError, match="closing issue projection"):
+        select_record(
+            ledger,
+            gitlab,
+            now=NOW,
+            repository=repository,  # type: ignore[arg-type]
+        )
+    assert ledger.load(12) is None
+    assert not repository.prepared
+
+
 def test_suggest_close_precedes_future_retry_wait_without_inventory(
     tmp_path: Path,
 ) -> None:
@@ -13988,6 +14143,65 @@ def test_policy_canary_completes_workflow_and_runner_creates_merge_request(
     assert gitlab.created_merge_requests == 1
 
 
+@pytest.mark.parametrize("publication_bound", (False, True))
+@pytest.mark.parametrize("projection_failure", (False, True))
+def test_new_closing_mr_after_discovery_prevents_publication_and_retains_local_work(
+    tmp_path: Path, *, publication_bound: bool, projection_failure: bool
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = FakeRepository(config)
+    repository.paths = ("README.md",)
+    gitlab = FakeGitLab(_issue(description="Update README.md safely."))
+    invoker = SingleSessionInvoker(lane="content")
+    invoker.changed_paths = ("README.md",)
+
+    prepared = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    ready = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert prepared is not None and prepared.state is RunnerState.EXECUTING
+    assert ready is not None and ready.state is RunnerState.PUBLISHING
+    if publication_bound:
+        ready = ledger.persist(ready.model_copy(update={"publication_sha": "a" * 40}))
+
+    gitlab.open_merge_request_inventory = (_mr(source_branch="human/fix"),)
+    if projection_failure:
+        gitlab.closing_error = GitLabError("closing issue projection unavailable")
+    stopped = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        invoke=invoker,  # type: ignore[arg-type]
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert stopped is not None
+    if projection_failure:
+        assert stopped.state is RunnerState.RETRY_WAIT
+        assert stopped.error_code is ErrorCode.GITLAB_RETRYABLE
+    else:
+        assert stopped.state is RunnerState.BLOCKED
+        assert stopped.error_code is ErrorCode.EXTERNAL_OWNER
+        assert "!88" in stopped.next_action
+    assert repository.pushes == 0 and gitlab.created_merge_requests == 0
+    assert repository.worktree_exists(ready.worktree)
+    assert ledger.load(12) is not None
+
+
 def test_workflow_audit_repository_failure_is_durably_retried(tmp_path: Path) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -17042,11 +17256,14 @@ def test_loop_run_checks_clear_pipeline_inventory_before_ordinary_selection(
     )
 
     assert report.outcome in {"eligible", "activation_complete"}
-    assert gitlab.preselection_calls == [
+    expected_calls = [
         "pipeline_for_ref:main",
         "open_merge_requests",
         "list_eligible",
     ]
+    if apply:
+        expected_calls.append("open_merge_requests")
+    assert gitlab.preselection_calls == expected_calls
 
 
 @pytest.mark.parametrize(
@@ -17280,7 +17497,7 @@ def test_loop_run_skips_failed_merge_request_pipeline_without_safe_owner(
         )
         ledger.persist(owner)
     gitlab = FakeGitLab()
-    merge_request = _mr(sha="a" * 40)
+    merge_request = _mr(sha="a" * 40, description="Change without issue closure")
     gitlab.open_merge_request_inventory = (merge_request,)
     gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
         PipelineEvidence(

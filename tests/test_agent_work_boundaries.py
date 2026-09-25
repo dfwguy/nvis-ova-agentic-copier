@@ -1880,6 +1880,66 @@ def test_gitlab_manual_tracker_marker_excludes_only_exact_open_issue_from_select
     assert gateway.list_closed_projected() == ()
 
 
+@pytest.mark.parametrize(
+    "closing_issues",
+    (
+        [{}],
+        [{"project_id": 310967}],
+        [{"iid": 12}],
+        [{"iid": "12", "project_id": 310967}],
+        [{"iid": 12, "project_id": "310967"}],
+        [
+            {"iid": 12, "project_id": 310967},
+            {"iid": "unknown", "project_id": 310967},
+        ],
+    ),
+)
+@pytest.mark.parametrize("projection_method", ("set", "single"))
+def test_gitlab_rejects_malformed_closing_issue_projection(
+    tmp_path: Path, closing_issues: list[dict[str, object]], projection_method: str
+) -> None:
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert command[command.index("-X") + 2] == (
+            "projects/310967/merge_requests/88/closes_issues"
+        )
+        return CommandResult(0, json.dumps(closing_issues), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    with pytest.raises(GitLabError):
+        if projection_method == "set":
+            gateway.closing_issue_iids(88)
+        else:
+            gateway.mr_closes_issue(88, 12)
+
+
+def test_gitlab_reads_validated_closing_issue_set_once(tmp_path: Path) -> None:
+    calls = 0
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        assert command[command.index("-X") + 2] == (
+            "projects/310967/merge_requests/88/closes_issues"
+        )
+        return CommandResult(
+            0,
+            json.dumps(
+                [
+                    {"iid": 12, "project_id": 310967},
+                    {"iid": 13, "project_id": 310967},
+                    {"iid": 9, "project_id": 999},
+                ]
+            ),
+            "",
+        )
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    assert gateway.closing_issue_iids(88) == frozenset({12, 13})
+    assert calls == 1
+
+
 def test_gitlab_gateway_enforces_eligible_selection_and_exact_evidence(
     tmp_path: Path,
 ) -> None:

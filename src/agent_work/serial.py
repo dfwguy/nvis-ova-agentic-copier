@@ -1986,6 +1986,17 @@ def select_record(
     )
     if not eligible:
         return None, None
+    closing_issue_owners = _open_closing_issue_owners(
+        gitlab,
+        project_id=project.id,
+        default_branch=repository.config.default_branch,
+        issue_iids=tuple(issue.iid for issue in eligible),
+    )
+    eligible = tuple(
+        issue for issue in eligible if issue.iid not in closing_issue_owners
+    )
+    if not eligible:
+        return None, None
     issue = eligible[0]
     return (
         _new_record(
@@ -2000,6 +2011,30 @@ def select_record(
 
 class IdentityVerificationTransportError(GitLabError):
     """Mark an ordinary transport failure that leaves identity unverified."""
+
+
+def _open_closing_issue_owners(
+    gitlab: GitLabPort,
+    *,
+    project_id: int,
+    default_branch: str,
+    issue_iids: tuple[int, ...],
+) -> dict[int, int]:
+    """Map eligible issues to exact open closing merge requests."""
+    closing_issue_owners: dict[int, int] = {}
+    eligible_iids = frozenset(issue_iids)
+    for merge_request in gitlab.open_merge_requests():
+        if not (
+            merge_request.state == "opened"
+            and merge_request.target_project_id == project_id
+            and merge_request.target_branch == default_branch
+        ):
+            continue
+        for issue_iid in eligible_iids.intersection(
+            gitlab.closing_issue_iids(merge_request.iid)
+        ):
+            closing_issue_owners[issue_iid] = merge_request.iid
+    return closing_issue_owners
 
 
 def _verify_authenticated_user(gitlab: GitLabPort) -> None:
@@ -2438,13 +2473,19 @@ def _mr_evidence_is_exact(
 
 
 def _block_publication_identity(
-    record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort, summary: str
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    summary: str,
+    error_code: ErrorCode = ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+    next_action: str = "Review the exact MR, branch, target, SHA, and closing evidence.",
 ) -> LedgerRecord:
     """Persist and project one actionable publication-identity block."""
     updates = {
-        "error_code": ErrorCode.PUBLICATION_IDENTITY_MISMATCH,
+        "error_code": error_code,
         "summary": summary,
-        "next_action": "Review the exact MR, branch, target, SHA, and closing evidence.",
+        "next_action": next_action,
     }
     blocked = ledger.persist(
         record.model_copy(update=updates)
@@ -4335,6 +4376,55 @@ def _publish(
                     ledger=ledger,
                     gitlab=gitlab,
                     summary="Feedback publication MR evidence is not exact.",
+                )
+        elif already_published:
+            if record.merge_request_iid is None:
+                raise SegmentError("retained ordinary merge request IID is missing")
+            retained_mr = gitlab.fetch_merge_request(record.merge_request_iid)
+            if not _mr_evidence_is_exact(
+                record,
+                retained_mr,
+                gitlab=gitlab,
+                repository=repository,
+                source_sha=publication_sha,
+            ):
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Retained ordinary merge request evidence is not exact.",
+                )
+        if not remediation and not already_published:
+            try:
+                competing_owner = _open_closing_issue_owners(
+                    gitlab,
+                    project_id=gitlab.verify_project().id,
+                    default_branch=repository.config.default_branch,
+                    issue_iids=(record.issue_iid,),
+                ).get(record.issue_iid)
+            except GitLabError:
+                return _record_retry(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    error_code=ErrorCode.GITLAB_RETRYABLE,
+                    detail="pre-publication closing-MR ownership check",
+                )
+            if competing_owner is not None:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary=(
+                        f"Open merge request !{competing_owner} now closes this issue; "
+                        "local work was retained."
+                    ),
+                    error_code=ErrorCode.EXTERNAL_OWNER,
+                    next_action=(
+                        f"Review merge request !{competing_owner} and the retained "
+                        "worktree before deciding whether to resume this issue."
+                    ),
                 )
         if already_published:
             repository.verify_worktree(

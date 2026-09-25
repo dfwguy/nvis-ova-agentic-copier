@@ -1698,15 +1698,30 @@ class GitLabGateway:
 
     def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
         """Return whether GitLab reports the closing relationship."""
-        return any(
-            item.get("iid") == issue_iid
-            and item.get("project_id") == self._config.project_id
-            for item in self._items(
-                self._call(
-                    f"projects/{self._config.project_id}/merge_requests/{mr_iid}/closes_issues"
-                ),
-                "closing issue list",
-            )
+        return issue_iid in self.closing_issue_iids(mr_iid)
+
+    def closing_issue_iids(self, mr_iid: int) -> frozenset[int]:
+        """Read one validated closing-issue projection for this project."""
+        closing_issues = self._items(
+            self._call(
+                f"projects/{self._config.project_id}/merge_requests/{mr_iid}/closes_issues"
+            ),
+            "closing issue list",
+        )
+        for item in closing_issues:
+            iid = item.get("iid")
+            project_id = item.get("project_id")
+            if not (
+                type(iid) is int
+                and iid > 0
+                and type(project_id) is int
+                and project_id > 0
+            ):
+                raise GitLabError("GitLab returned invalid closing issue projection")
+        return frozenset(
+            cast(int, item["iid"])
+            for item in closing_issues
+            if item["project_id"] == self._config.project_id
         )
 
     def latest_pipeline_for_sha(self, mr_iid: int, sha: str) -> PipelineEvidence | None:
