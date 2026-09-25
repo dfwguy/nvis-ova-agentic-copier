@@ -106,6 +106,56 @@ class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
 
 
+def _blocked_recovery_rejection(record: LedgerRecord, *, now: datetime) -> str | None:
+    """Return the precise reason a blocked record cannot resume."""
+    if record.state is not RunnerState.BLOCKED:
+        return "record is not blocked"
+    if record.retry_at is not None and record.retry_at > now:
+        return "recovery cooldown is active"
+    if record.worktree_dirty:
+        return "retained worktree is dirty"
+    if record.owner_status != "missing":
+        return "worktree lease is not missing"
+    if record.merge_request_iid is not None:
+        return "publication merge request evidence must be replayed"
+    if record.intent is not None:
+        return "retained transition intent must be replayed"
+    if any(state != "closed" for _, state in record.split_prerequisites):
+        return "split prerequisite is still open"
+    cause = (record.blocked_cause or "").lower()
+    if not cause:
+        return "blocked cause is missing"
+    if not any(
+        marker in cause
+        for marker in ("transient", "capacity", "runtime", "worker", "broker")
+    ):
+        return "blocked cause is not an automatic recovery failure"
+    return None
+
+
+def _blocked_recovery_proof(record: LedgerRecord, *, now: datetime) -> bool:
+    """Evaluate the shared exact proof used by selection and resumption."""
+    return _blocked_recovery_rejection(record, now=now) is None
+
+
+def recover_blocked_records(
+    records: tuple[LedgerRecord, ...], *, now: datetime
+) -> tuple[LedgerRecord, ...]:
+    """Select at most one blocked record whose recovery proof is complete.
+
+    This is deliberately non-mutating.  The caller must repeat the evidence
+    checks while holding the project lock before changing the record or its
+    GitLab label.  In particular, an existing intent or merge request is
+    retained as replay state, never treated as permission to resume.
+    """
+    eligible = [
+        record
+        for record in sorted(records, key=lambda item: item.issue_iid)
+        if _blocked_recovery_proof(record, now=now)
+    ]
+    return tuple(eligible[:1])
+
+
 def _broker_artifact_builder(
     record: LedgerRecord,
     request: WorkerResultBrokerRequest,
@@ -4877,16 +4927,43 @@ def run_segment(
     ) = None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
+    automatically_recovered = False
+    if issue_iid is None:
+        recovered = recover_blocked_records(ledger.list_records(), now=now)
+        if recovered:
+            issue_iid = recovered[0].issue_iid
+            automatically_recovered = True
     record, issue = select_record(
         ledger,
         gitlab,
         now=now,
         issue_iid=issue_iid,
-        allow_pinned_conflict=allow_pinned_conflict,
+        allow_pinned_conflict=allow_pinned_conflict or automatically_recovered,
         repository=repository,
     )
     if record is None or issue is None:
         return None
+    if record.state is RunnerState.BLOCKED and issue_iid == record.issue_iid:
+        lock = nullcontext() if issue_lock is None else issue_lock(record.issue_iid)
+        with lock:
+            current = ledger.load(record.issue_iid)
+            if current is None or current.revision != record.revision:
+                return None
+            if not _blocked_recovery_proof(current, now=now):
+                return current
+            record = ledger.persist(
+                current.model_copy(
+                    update={
+                        "state": current.prior_state or RunnerState.EXECUTING,
+                        "phase": current.prior_phase or current.phase,
+                        "error_code": None,
+                        "retry_at": None,
+                        "summary": "Automatically resumed after exact recovery checks.",
+                        "next_action": "Continue the retained workflow segment.",
+                    }
+                )
+            )
+            issue = gitlab.transition_labels(issue.iid, label_for_state(record.state))
     if (
         record.state is RunnerState.BLOCKED
         and record.error_code is ErrorCode.RETRY_EXHAUSTED

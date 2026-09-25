@@ -61,6 +61,7 @@ class WorkflowPhase(StrEnum):
     """Resumable repository-workflow phases."""
 
     WORKFLOW = "workflow"
+    PREPARING = "workflow"
     DISCOVERY = "discovery"
     CODING_RED_DOCS = "coding-red-docs"
     CODING_GREEN = "coding-green"

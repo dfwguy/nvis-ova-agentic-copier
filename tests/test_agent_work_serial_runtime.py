@@ -18864,6 +18864,48 @@ def test_retry_replays_retained_publication_intent_without_restarting_workflow(
     assert gitlab.labels == ["agent::running"]
 
 
+def test_run_segment_transitions_one_eligible_blocked_record(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    class RecoveryLedger(JsonLedger):
+        def __init__(self) -> None:
+            super().__init__(config.state_root, clock=lambda: NOW)
+            self.states: list[RunnerState] = []
+
+        def persist(self, record: LedgerRecord) -> LedgerRecord:
+            persisted = super().persist(record)
+            self.states.append(persisted.state)
+            return persisted
+
+    ledger = RecoveryLedger()
+    record = _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(
+        update={
+            "blocked_cause": "transient runtime failure",
+            "prior_state": RunnerState.AWAITING_HUMAN,
+            "error_code": ErrorCode.RETRY_EXHAUSTED,
+        }
+    )
+    ledger.persist(record)
+    gitlab = FakeGitLab()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=cast(Any, None),
+        timeout_seconds=1,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    assert ledger.states.count(RunnerState.AWAITING_HUMAN) == 1
+    assert gitlab.labels[0] == "agent::awaiting-human"
+
+
 def test_explicit_retry_of_blocked_issue_87_preserves_its_retained_worktree(
     tmp_path: Path,
 ) -> None:
