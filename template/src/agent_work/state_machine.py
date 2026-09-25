@@ -274,8 +274,8 @@ def plan_retry(
                 error_code=ErrorCode.RETRY_EXHAUSTED,
                 summary="Automatic retry budget exhausted.",
                 next_action=(
-                    "Resolve the blocker, then run agent-work loop retry --issue-iid "
-                    f"{record.issue_iid} --apply."
+                    "Resolve the blocker, then preview agent-work loop retry "
+                    f"--issue-iid {record.issue_iid} and apply its exact --plan-file."
                 ),
             )
         )

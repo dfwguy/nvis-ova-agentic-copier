@@ -41,7 +41,7 @@ agent-work loop run [--apply] [--max-segments COUNT]
                     [--max-activation-seconds SECONDS]
                     [--json] [--debug]
 agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
-agent-work loop retry --issue-iid IID [--apply] [--json] [--debug]
+agent-work loop retry --issue-iid IID [--apply --plan-file PATH] [--json] [--debug]
 agent-work loop canary [--apply --plan-file PATH] [--json] [--debug]
 agent-work loop recover --issue-iid IID [--apply --plan-file PATH]
                         [--max-segments COUNT]
@@ -105,7 +105,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | --- | --- | --- |
 | `loop run` | None | `--apply` performs one activation; segment and activation-time limits bound it. |
 | `loop status` | Optional exact `--issue-iid` | Read-only status; `--apply` is accepted for consistency. |
-| `loop retry` | Exact `--issue-iid` | `--apply` resets one reviewed item's retry budget. |
+| `loop retry` | Exact `--issue-iid`; the exact reviewed `--plan-file PATH` when applying | Reuses recovery checks and requires exactly one `safely_retryable` inventory result. |
 | `loop canary` | `--plan-file PATH` when applying | Bare invocation creates the immutable plan. |
 | `loop recover` | Exact `--issue-iid`; reviewed `--plan-file PATH` when applying | Segment and activation-time limits retain `loop run` controls. |
 | `recovery inventory` | Optional exact `--issue-iid` | Read-only reconciliation; `--apply` changes nothing. |
@@ -539,7 +539,7 @@ work.
 | --- | --- |
 | `loop run` without `--apply` | Reports the next safe action once. It does not change GitLab, the ledger, worktrees, branches, labels, or services, simulate a complete activation, or poll. |
 | `loop status` | Read-only. It reports durable ledger records with verified configured-project identity and best-effort live corroboration. Without `--issue-iid`, it returns at most 100 records in fixed order and reports the total and whether the result was truncated. With `--issue-iid`, it looks up that item exactly. |
-| `loop retry` | Previews one recorded blocked item. With `--apply`, it resets that item's retry budget and moves it to resumable preparation after explicit human direction. |
+| `loop retry` | Reuses the evidence-bound recovery checks for one recorded blocked item and also requires exactly one `safely_retryable` inventory result. A successful preview returns `retry_preview` with an evidence-bound retry plan. `--apply` needs that exact plan file and rechecks current evidence under the project lock before it returns `retry_scheduled` or, for an eligible retained correction, `correction_activated`. A valid retry needs no new human unblocking approval. |
 | Immediate owner set | `PREPARING`, `EXECUTING`, `PUBLISHING`, `OBSERVING`, and `REPAIR`. |
 | `BLOCKED` | Not an immediate owner. It needs action and is not runnable. |
 | `RETRY_WAIT` | Queued, not a competing immediate owner when an exact IID is selected. |
@@ -550,11 +550,39 @@ work.
 | --- | --- |
 | `loop canary` | An operational checkpoint, not an issue run. Bare invocation creates a redacted, immutable plan. The plan verifies public service and project identity, durable recovery evidence, and current pipeline evidence. It names the expected checkpoint and next action. It never selects an eligible issue, claims work, changes a lifecycle label, creates a ledger record or worktree, or invokes a worker. |
 | `loop canary --apply --plan-file PATH` | After review, rechecks the plan's exact evidence while holding the project lock before taking its bounded checkpoint action. Changed identity or evidence needs a new preview. |
-| `loop recover --issue-iid IID` | Targets one interrupted, ambiguous, or otherwise unsafe retained item. Bare invocation creates a redacted recovery plan without changing anything. |
+| `loop recover --issue-iid IID` | Targets one interrupted, ambiguous, or otherwise unsafe retained item. For a `BLOCKED` target, preview and apply reuse the recovery checks, require exactly one `safely_retryable` inventory result, and return the retry outcomes below. For a nonblocked target, bare invocation creates the usual redacted recovery plan without changing anything. |
 | Exact failed current-source MR pipeline with one uniquely corroborated retained owner | Does not need `loop recover`: an applied ordinary loop activation moves that owner directly to `repair`. |
-| `loop recover` apply | Needs both `--apply` and the reviewed `--plan-file`. Before changing anything, it rechecks the configured project, default branch, authenticated username, ledger revision and state, lifecycle label, fixed branch, retained-worktree HEAD and cleanliness, merge-request project/source/target/source-SHA identity, and the current exact-SHA pipeline. It cannot advance another IID. |
+| `loop recover` apply | Needs both `--apply` and the reviewed `--plan-file`. For a blocked target, it rechecks current recovery evidence and the `safely_retryable` inventory result; ineligible evidence changes nothing. For a nonblocked target, it rechecks the configured project, default branch, authenticated username, ledger revision and state, lifecycle label, fixed branch, retained-worktree HEAD and cleanliness, merge-request project/source/target/source-SHA identity, and the current exact-SHA pipeline. It cannot advance another IID. |
 | `loop recover` limits | `--max-segments` and `--max-activation-seconds` retain `loop run`'s bounded activation controls. |
 | Plans | Bind the command and action to public service identity, configured project and default branch, ledger revision, and the exact target, issue, repository, merge-request, and pipeline evidence the action needs. They never contain secrets. Apply fails closed with the safe next action when the plan is stale, tampered, for another identity, or no longer matches evidence. |
+
+### Retry outcomes
+
+`loop retry` and `loop recover` for a blocked target report these outcomes. They
+use shared recovery checks plus the `safely_retryable` inventory gate. Each
+retains its invoked command name. A manual `recovery resolve --choice retry`
+preview can present evidence for human judgment that these commands reject.
+
+If automatic apply is interrupted, rerun the same original `loop retry` or
+blocked `loop recover` command with `--apply --plan-file PATH` and the same
+exact reviewed plan. If its matching intent remains `BLOCKED`, apply rebuilds
+inventory and checks the full plan under the project lock before any effect.
+If that exact intent reached `PREPARING` or authored `EXECUTING`, apply resumes
+it idempotently. Stale or mismatched evidence still fails. The outcomes below
+still apply.
+
+| Outcome | Meaning | Operator action |
+| --- | --- | --- |
+| `retry_preview` | Current evidence is eligible and the report contains the exact retry plan. | Review and save that plan, then apply it with the same IID. |
+| `retry_scheduled` | The reviewed plan passed again and the retained record returned to its resumable state. | Continue the reported retained workflow. |
+| `correction_activated` | The reviewed plan activated an eligible retained correction. | Complete the reported correction and validation before publication. |
+| `retry_ineligible` | The preview found known retry evidence ineligibility. It changes no ledger, GitLab, worktree, branch, or retry budget. | Correct the evidence, then use the exact `recovery resolve --choice retry` procedure. Do not apply the ineligible preview. |
+
+`retry_ineligible` is only for known evidence ineligibility. An unavailable,
+ambiguous, stale, or otherwise operationally uncertain check exits with an
+error. It does not report `retry_ineligible` and changes nothing.
+
+See [How to resolve factory issue recovery](../how-to/resolve-factory-issues.md#5-resume-a-safely-retryable-blocked-issue) for the retry procedure and its retained-correction route.
 
 ### `recovery inventory` and `recovery resolve`
 
@@ -684,7 +712,7 @@ This table gives the safe diagnostic rules.
 | Third request after two rejected JSON objects | `worker_result_broker: correction limit exceeded after rejected JSON object`. |
 | Request after acceptance | `worker_result_broker: request after acceptance`. |
 | Controller record | The controller carries the same safe diagnostic in condition history, status, recovery inventory, and the GitLab handoff. |
-| Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. The operator corrects the condition, then runs `agent-work loop retry --issue-iid IID --apply`. |
+| Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. After correcting the condition, the operator creates and applies the exact `loop retry` plan for that IID. |
 | Changed evidence | A changed error code, diagnostic, or phase is changed evidence and follows the existing bounded retry path. |
 
 ### Upstream-finding manifest v1
@@ -1361,10 +1389,11 @@ still check this exact completion path.
 
 The first workflow attempt and at most three retries are bounded.
 `retry-wait` records its deadline. Exhaustion becomes `agent::blocked`, never
-`agent::failed`. Labels never make a blocked item eligible. After the recorded
-human action, `loop retry --issue-iid IID --apply` resumes that IID from its
-retained worktree and durable record. It does not select a replacement issue or
-discard retained recovery evidence.
+`agent::failed`. Labels never make a blocked item eligible. A valid exact retry
+plan lets `loop retry --issue-iid IID --apply --plan-file PATH` resume that IID
+from its retained worktree and durable record without a new human unblocking
+approval. It does not select a replacement issue or discard retained recovery
+evidence.
 
 Worker exits, timeouts, malformed worker protocol, and an explicit `retryable`
 worker result are due at once. Legacy records may also retain an invalid-receipt
@@ -1396,8 +1425,10 @@ the issue at once without using another retry. It keeps the worktree, phase, and
 safe cause. It publishes the usual blocked projection and comment. A changed
 code, diagnostic, or phase is changed evidence and follows the usual bounded
 retry path. This does not change retries for non-protocol transient failures.
-After correcting the condition, run `agent-work loop retry --issue-iid IID
---apply`. That explicit human retry resets the automatic retry budget.
+After correcting the condition, create and apply an exact `loop retry` plan for
+that IID. Its preview must pass the shared recovery checks and the
+`safely_retryable` inventory gate before the command resets the automatic
+retry budget.
 
 Automatic exact-pipeline repair has its own budget: at most three repair
 workflows for one exact retained owner. After each failed attempt, the ledger

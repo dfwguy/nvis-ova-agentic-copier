@@ -2001,6 +2001,22 @@ def test_recovery_resolve_apply_requires_the_exact_reviewed_plan_file() -> None:
     assert raised.value.code == 2
 
 
+def test_loop_retry_apply_requires_the_exact_reviewed_plan_file() -> None:
+    """The retry command must not dispatch an unreviewed activation."""
+    errors: list[str] = []
+
+    result = main(
+        ["loop", "retry", "--issue-iid", "12", "--apply"],
+        dispatch=lambda _request, *, apply: pytest.fail(
+            f"unexpected dispatch with apply={apply}"
+        ),
+        write_stderr=errors.append,
+    )
+
+    assert result == 2
+    assert errors == ["--apply requires --plan-file"]
+
+
 def test_lock_contention_returns_temporary_exit_75() -> None:
     def dispatch(_request: object, *, apply: bool) -> CommandReport:
         del apply

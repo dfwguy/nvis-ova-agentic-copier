@@ -60,14 +60,17 @@ untargeted inventory lists settled closed items, while `--issue-iid` gives
 exact evidence.
 
 Treat stale running work as `needs_human_decision`, never as a retry target.
-Use `agent-work loop recover` for retained state. Retry only a retained
-`BLOCKED` record after inventory marks it `safely_retryable` and the explicit
-retry preview accepts its current evidence. Inventory checks dirty retained
-artifacts, including eligible legacy forms, against rules shared with retry
-preview. Its classification alone does not pass the remaining preview guards.
-When it reports `needs_human_decision`, inspect the retained worktree and ledger.
-Review the bounded reason before choosing a resolution. An eligible retry
-keeps retained publication replay and retry history.
+Use `agent-work loop recover` for retained state. Retry a retained `BLOCKED`
+record only when inventory marks it `safely_retryable` and an explicit retry
+preview accepts its current evidence. Automatic retry uses shared recovery
+checks. It also needs exactly one `safely_retryable` inventory result.
+Inventory checks dirty retained artifacts, including eligible legacy forms.
+It shares those rules with retry preview. Its result alone does not pass all
+preview checks. For `needs_human_decision`, inspect the retained worktree and
+ledger. Read the bounded reason before choosing a resolution. Manual
+`recovery resolve --choice retry` can preview evidence for human review even
+when `loop retry` rejects it. A valid retry keeps retained publication
+replay and retry history.
 
 The supervisor finds recovery that requires action and
 `$software-factory-supervisor` hands one IID to `$resolve-factory-issues`.
@@ -184,7 +187,51 @@ It remains review history.
 Return to the inventory step.
 Never manually change labels, branches, pipelines, or artifacts.
 
-## 5. Recover a clean interrupted claim for issue #35.
+## 5. Resume a safely retryable blocked issue.
+
+Use this route only when inventory marks the exact blocked issue as
+`safely_retryable`. `loop retry` runs the shared recovery checks. It also
+requires exactly one `safely_retryable` inventory result. A passed preview
+needs no new human approval to unblock it. An ineligible preview changes no
+local or GitLab state.
+
+First save and review the exact retry plan:
+
+```bash
+uv run agent-work loop retry --issue-iid 89 --json \
+  >agent-work-loop-retry-89-plan.json
+```
+
+Continue only after `retry_preview`. It contains the exact eligible plan.
+`retry_ineligible` means known evidence is ineligible and changes no local or
+GitLab state. Correct that evidence, then use `recovery resolve --choice retry`
+to make a new preview. An unavailable, ambiguous, stale, or otherwise
+operationally uncertain check exits with an error instead of
+`retry_ineligible`; stop without applying a plan.
+
+Apply only that reviewed plan. A valid plan may schedule a blocked record.
+It may also activate an eligible saved candidate or other retained correction.
+Follow the evidence steps above for `retry_ineligible` or an error. Use
+`recovery resolve --choice retry` when an explicit resolution is needed.
+
+```bash
+uv run agent-work loop retry --issue-iid 89 --apply \
+  --plan-file agent-work-loop-retry-89-plan.json --json
+```
+
+If apply stops midway, rerun the same `loop retry` command with `--apply` and
+the same `--plan-file`. If the original blocked command was `loop recover`,
+rerun that command with its same plan. While the matching intent is `BLOCKED`,
+apply rebuilds inventory and checks the full plan under the lock before any
+effect. If that exact intent reached `PREPARING` or authored `EXECUTING`, apply
+resumes it idempotently. Stale or mismatched evidence still fails.
+
+`retry_scheduled` means the record is resumable; follow its reported retained
+workflow. `correction_activated` means the command activated an eligible
+retained correction; complete the reported correction and validation before
+publication. See the [retry outcome reference](../reference/serial-gitlab-agent-loop.md#retry-outcomes) before taking either next action.
+
+## 6. Recover a clean interrupted claim for issue #35.
 
 Use this route only with exact evidence.
 Issue #35 needs a clean interrupted `EXECUTING`/`WORKFLOW` claim.
@@ -224,7 +271,7 @@ Stop for human review without verified normalization.
 This route never approves a merge request.
 This route never merges a merge request.
 
-## 6. Resume a saved candidate after a failed publish check.
+## 7. Resume a saved candidate after a failed publish check.
 
 Use this route only when the inventory finds a staged-only candidate held after
 an eligible `worker_protocol_invalid`, or the exact
