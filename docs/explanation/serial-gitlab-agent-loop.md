@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -100,8 +100,8 @@ become controller state.
 
 | Lane | What runs, and when |
 | --- | --- |
-| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging through the private candidate socket. Green coordinates review and routes documentation findings to the writer before returning final validation to Architect. |
-| Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator, then the Documentation Finalizer. Architect records `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`; no staged-tree review is claimed. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
+| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging, successful coding validation, then a bounded candidate read through the private socket. Green coordinates review and routes documentation findings to the writer before returning final validation to Architect. |
+| Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator. After the writer stops editing, the controller stages the candidate and gives Consistency Judge bounded, read-only evidence from that tree. The judge checks copied facts when applicable, and the Documentation Finalizer records the verdict. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
 The Red-first coding session ends after the trusted checkpoint. A fresh session
 then handles policy preparation, concurrent Green and documentation work,
@@ -111,15 +111,20 @@ internal workflow stage after a crash.
 
 After Green and the Diátaxis Writer finish, Green asks the private controller
 socket to stage their combined changes. The controller returns the tree ID.
-The Validation Judge uses that socket to ask the controller to run the hook
-against the tree and return bounded evidence. The Non-functional Reviewer then
-checks the JUnit summary and the same staged tree. Green waits for both
-receipts before it starts the parallel specialist review. This review includes
+The Validation Judge first uses the socket to ask the controller to run the
+hook against that tree and return bounded evidence. Once validation succeeds,
+Consistency Judge uses a separate read through that socket to compare changed
+copied facts against their source. The read is bound to the current issue and
+session. It gives the exact base and candidate trees, changed paths, file
+modes, and old and new file content or deletion evidence. Large reads use a
+manifest and ordered chunks; the controller requires full coverage before
+review. The Non-functional
+Reviewer then checks the JUnit summary and the same staged tree. Green waits
+for both receipts before it starts the parallel specialist review. This review includes
 the Diátaxis, Quality, Test, and CI/CD Judges, the read-only README Reviewer,
 and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy
-Judges join when their topics apply. The Consistency Judge is N/A in this
-serial workflow. Each active specialist sees the same staged
-tree, diff, and Judge evidence. Green waits for every receipt and routes
+Judges join when their topics apply. Each active specialist sees the same
+staged tree, diff, and Judge evidence. Green waits for every receipt and routes
 findings to their file owners. The Architect then gets the full result and
 asks the Finalizer to act. Final validation uses current license evidence.
 

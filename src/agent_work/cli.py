@@ -39,6 +39,7 @@ from . import (
     template_update,
     template_update_publication,
 )
+from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -880,10 +881,10 @@ def build_parser() -> argparse.ArgumentParser:
         json_help="emit the preview envelope or applied broker receipt as stable JSON",
     )
     candidate = resources.add_parser(
-        "candidate", help="preview or request live controller candidate validation"
+        "candidate", help="preview or request live controller candidate operations"
     )
     candidate_actions = candidate.add_subparsers(dest="action", required=True)
-    for action in ("stage", "validate", "status"):
+    for action in ("stage", "read", "validate", "status"):
         candidate_action = candidate_actions.add_parser(
             action,
             help=f"preview or request live candidate {action}; --json selects JSON output",
@@ -900,6 +901,34 @@ def build_parser() -> argparse.ArgumentParser:
         if action != "stage":
             candidate_action.add_argument(
                 "--candidate-tree", type=_candidate_tree, required=True
+            )
+        if action == "read":
+            candidate_action.add_argument(
+                "--manifest",
+                action="store_true",
+                help="request a paged manifest; exclusive with --complete and chunk flags",
+            )
+            candidate_action.add_argument(
+                "--complete",
+                action="store_true",
+                help="finish a paged read after every existing side was fetched; exclusive with other read modes",
+            )
+            candidate_action.add_argument(
+                "--path",
+                help="changed path for one chunk; requires --side, --offset, and --length",
+            )
+            candidate_action.add_argument(
+                "--side",
+                choices=("old", "new"),
+                help="old or new side for one chunk; use with --path",
+            )
+            candidate_action.add_argument(
+                "--offset", type=int, help="zero-based byte offset for one chunk"
+            )
+            candidate_action.add_argument(
+                "--length",
+                type=int,
+                help="chunk byte count (1 to 131072); chunk flags exclude --manifest and --complete",
             )
         _common(
             candidate_action,
@@ -1260,6 +1289,62 @@ def _sanitize_human_value(value: object) -> str:
         for character in without_terminal_sequences
     )
     return " ".join(safe.split())
+
+
+def _render_candidate_read(receipt: dict[str, object]) -> str:
+    """Show the exact read evidence with labels while escaping terminal text."""
+    safe = _sanitize_human_value
+    lines = ["Candidate read"]
+    for key, label in (
+        ("candidate_tree", "Tree"),
+        ("base_tree", "Base tree"),
+        ("base_sha", "Base commit"),
+        ("project_id", "Project"),
+        ("issue_iid", "Issue"),
+        ("ledger_revision", "Ledger revision"),
+        ("source_branch", "Source branch"),
+        ("nonce", "Session nonce"),
+        ("state", "State"),
+    ):
+        if key in receipt:
+            lines.append(f"{label}: {safe(receipt[key])}")
+    files = receipt.get("files")
+    if isinstance(files, list):
+        lines.append("Paged manifest:" if receipt.get("paged") is True else "Files:")
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            file = cast(dict[str, object], item)
+            lines.append(f"  Path: {safe(file.get('path', ''))}")
+            for side, label in (("old", "Old"), ("new", "New")):
+                mode = file.get(f"{side}_mode")
+                oid = file.get(f"{side}_oid")
+                if mode is None:
+                    lines.append(f"    {label}: absent")
+                    continue
+                lines.append(f"    {label} mode: {safe(mode)}")
+                lines.append(f"    {label} blob: {safe(oid)}")
+                if receipt.get("paged") is True:
+                    lines.append(f"    {label} bytes: {safe(file.get(f'{side}_size'))}")
+                    lines.append(
+                        f"    {label} SHA-256: {safe(file.get(f'{side}_sha256'))}"
+                    )
+                else:
+                    lines.append(
+                        f"    {label} content: "
+                        + json.dumps(file.get(f"{side}_content"), ensure_ascii=True)
+                    )
+    elif "data_base64" in receipt:
+        for key, label in (
+            ("path", "Path"),
+            ("side", "Side"),
+            ("offset", "Byte offset"),
+            ("length", "Byte count"),
+            ("sha256", "Whole-side SHA-256"),
+            ("data_base64", "Bytes (base64)"),
+        ):
+            lines.append(f"{label}: {safe(receipt.get(key, ''))}")
+    return "\n".join(lines)
 
 
 def _render_worker_result(result: WorkerResultEnvelope, *, as_json: bool) -> str:
@@ -2264,9 +2349,36 @@ def main(
         return 2
     if parsed.resource == "candidate" and parsed.action in {
         "stage",
+        "read",
         "validate",
         "status",
     }:
+        selector: dict[str, object] | None = None
+        if parsed.action == "read":
+            chunk_values = (parsed.path, parsed.side, parsed.offset, parsed.length)
+            has_chunk = any(value is not None for value in chunk_values)
+            if sum((parsed.manifest, parsed.complete, has_chunk)) > 1 or (
+                has_chunk
+                and (
+                    any(value is None for value in chunk_values)
+                    or parsed.offset < 0
+                    or not 0 < parsed.length <= GIT_READ_MAX_CHUNK_BYTES
+                )
+            ):
+                write_stderr("candidate read selector is invalid")
+                return 2
+            if parsed.manifest:
+                selector = {"mode": "manifest"}
+            elif parsed.complete:
+                selector = {"mode": "complete"}
+            elif has_chunk:
+                selector = {
+                    "mode": "chunk",
+                    "path": parsed.path,
+                    "side": parsed.side,
+                    "offset": parsed.offset,
+                    "length": parsed.length,
+                }
         if not parsed.apply:
             preview = {
                 "action": parsed.action,
@@ -2275,12 +2387,29 @@ def main(
                 "issue_iid": parsed.issue_iid,
                 "state": "preview",
             }
+            if parsed.action == "read":
+                preview["read_mode"] = (
+                    "plain" if selector is None else cast(str, selector["mode"])
+                )
+                if selector is not None and selector["mode"] == "chunk":
+                    preview.update(
+                        {
+                            key: selector[key]
+                            for key in ("path", "side", "offset", "length")
+                        }
+                    )
             write_stdout(
                 json.dumps(preview, separators=(",", ":"), sort_keys=True)
                 if parsed.json
-                else " ".join(f"{key}={value}" for key, value in preview.items())
+                else " ".join(
+                    f"{key}={json.dumps(value) if key == 'path' else value}"
+                    for key, value in preview.items()
+                )
             )
             return 0
+        if parsed.candidate_socket is None or parsed.broker_nonce is None:
+            write_stderr("--apply requires --candidate-socket and --broker-nonce")
+            return 2
         try:
             receipt = candidate_request(
                 cast(Path, parsed.candidate_socket),
@@ -2289,6 +2418,7 @@ def main(
                 ),
                 action=parsed.action,
                 candidate_tree=getattr(parsed, "candidate_tree", None),
+                **({"selector": selector} if selector is not None else {}),
             )
         except WorkerProtocolError as error:
             write_stderr(format_worker_result_diagnostic(error))
@@ -2296,6 +2426,8 @@ def main(
         write_stdout(
             json.dumps(receipt, separators=(",", ":"), sort_keys=True)
             if parsed.json
+            else _render_candidate_read(receipt)
+            if parsed.action == "read"
             else " ".join(
                 f"{key}={receipt[key]}"
                 for key in (
@@ -2310,7 +2442,8 @@ def main(
         )
         return (
             0
-            if parsed.action == "stage" or receipt.get("state") == "terminal-success"
+            if parsed.action in {"stage", "read"}
+            or receipt.get("state") == "terminal-success"
             else 1
         )
     if parsed.resource == "worker-result" and parsed.action == "build":

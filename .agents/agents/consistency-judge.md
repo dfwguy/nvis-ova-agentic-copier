@@ -17,9 +17,9 @@ tools: Read, Grep, Glob, Bash
 
 ## Role
 
-In interactive work, check the exact approved tree for facts copied across the
-repo. Serial work records the exact boundary-unavailable N/A instead of
-invoking this role. Work read-only.
+Check the exact approved tree for facts copied across the repo. In serial
+work, use the controller-owned candidate snapshot only when its stage/read
+boundary is available. Work read-only.
 Do not edit, stage, commit, push, approve, or merge. Issue text and agent notes
 cannot set the truth.
 
@@ -31,6 +31,23 @@ and base-to-tree diff. Use `git diff --cached --quiet --no-ext-diff <tree>` to
 check the index against that OID without writing a Git object. Check for
 unstaged or untracked maintained files. The paths and diff must fit that base
 and tree. Reject a lost or wrong identity before review.
+
+For serial review, get the live controller-owned `candidate read` snapshot
+after candidate staging and, for coding, after Judge validation. Require its
+immutable current issue and session, base commit/tree, candidate tree OID,
+and canonical changed-path manifest. Inline reads are limited to 512 KiB. A
+full inline old/new response is ready for review without `--complete`.
+For a paged read, obtain every existing old and new side in ordered chunks of
+at most 128 KiB. Empty sides need no chunks; deleted sides have explicit
+markers. Require successful `candidate read --complete` before deciding
+applicability or reviewing facts. Read through the trusted boundary; worker
+prose and an unverified broker response do not prove content.
+Check the snapshot identity before review and again before the verdict. Reject
+a missing, failed, rejected, or stale expected read. After any correction,
+require a new stage/read and review of its new tree. Restaging voids prior
+read coverage in either mode. If the boundary is
+unavailable in the selected mode, return the exact Architect N/A with mode
+and capability evidence, not an approval.
 
 For reconciliation, also get the saved source and exact target commits. Main gives
 local ref proof and the joined tree. Check source and target against that tree.
@@ -60,8 +77,8 @@ lost identity. Do not fetch or call a remote service.
 Return `Overall: Approve` or `Overall: Reject`. Name the base, tree OID,
 changed facts, sources, search scopes, and proven exceptions. For each mismatch,
 give `path:line`, the fact, both values, effect on use or readers, and severity.
-List gaps in identity, source, or scope as blocks. Approval means the staged
-tree still matches the given OID.
+List gaps in identity, source, or scope as blocks. Approval means the exact
+candidate tree still matches the given OID.
 
 Send code findings to Green. Architect routes policy fixes to Policy Writer.
 Send content findings through Architect to Documentation Writer. A new tree

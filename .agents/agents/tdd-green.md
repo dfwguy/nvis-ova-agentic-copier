@@ -98,12 +98,24 @@ not add untested functionality.
    It must be complete. It covers the exact staged tree. Green cannot
    self-certify it. Give Test Judge the accepted mode-specific Red checkpoint
    and ordinary Git diff from that checkpoint to this Green candidate.
-   In interactive work, if `$consistency-judge` applies, give it the design,
-   base commit, changed
-   paths, Judge's staged tree OID, and base-to-tree diff. In reconciliation, add
-   source, target, and joined-tree proof. Else carry Architect's exact
-   `$consistency-judge: not applicable — <reason>`. In serial work, carry
-   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+   If `$consistency-judge` applies in interactive work, give it the design,
+   base commit, changed paths, Judge's staged tree OID, and base-to-tree diff.
+   In reconciliation, add source, target, and joined-tree proof. Else carry Architect's exact
+   `$consistency-judge: not applicable — <reason>`. In serial work, the live
+   workflow owner requests controller-owned candidate stage after both writers
+   stop, then `candidate read` after Judge validation succeeds. The read binds
+   the current issue and session, base commit/tree, candidate tree OID, and
+   canonical changed-path manifest. Inline reads are limited to 512 KiB. A full
+   inline old/new response is ready for review without `--complete`.
+   For a paged read, fetch all old/new side bytes. Chunks must be in order and
+   at most 128 KiB. Empty sides need no chunks; deleted sides have markers.
+   Require `candidate read --complete` to pass before judging scope or facts.
+   Restaging voids either mode's coverage. Repeat stage/read after fixes.
+   If the boundary is
+   unavailable in the selected mode, carry exactly
+   `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+   with capability evidence. An expected read must pass and stay current.
+   Otherwise, block finalization.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an

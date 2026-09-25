@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import select
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
@@ -22,10 +23,17 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
+from typing import IO
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from .candidate_boundary import (
+    CandidateBoundaryError,
+    validate_git_read_paths,
+    validate_git_read_size,
+)
 from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS, ErrorCode, sanitize_diagnostic
 from .ledger import project_state_path
 from .models import AgentWorkConfig
@@ -257,6 +265,74 @@ def run_subprocess(
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+def _stdout_readable(stream: IO[bytes], timeout_seconds: float) -> bool:
+    readable, _, _ = select.select((stream,), (), (), timeout_seconds)
+    return bool(readable)
+
+
+def run_subprocess_bytes(
+    command: tuple[str, ...],
+    *,
+    max_output_bytes: int,
+    timeout_seconds: float,
+    environment: Mapping[str, str] | None = None,
+    current_directory: Path | None = None,
+    open_process: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    stream_readable: Callable[[IO[bytes], float], bool] = _stdout_readable,
+    read_bytes: Callable[[int, int], bytes] = os.read,
+    clock: Callable[[], float] = monotonic,
+) -> bytes:
+    """Capture at most a prechecked Git blob size without text conversion."""
+    if max_output_bytes < 0 or timeout_seconds <= 0:
+        raise RepositoryError("candidate read failed")
+    try:
+        process = open_process(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=None if environment is None else dict(environment),
+            cwd=current_directory,
+        )
+    except OSError as error:
+        raise RepositoryError("candidate read failed") from error
+    deadline = clock() + timeout_seconds
+    try:
+        assert process.stdout is not None
+        output = bytearray()
+        while True:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise CommandTimeoutError("a required command timed out")
+            if not stream_readable(process.stdout, remaining):
+                raise CommandTimeoutError("a required command timed out")
+            chunk = read_bytes(
+                process.stdout.fileno(),
+                min(65_536, max_output_bytes - len(output) + 1),
+            )
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > max_output_bytes:
+                raise RepositoryError("candidate content is oversize or binary")
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise CommandTimeoutError("a required command timed out")
+        try:
+            if process.wait(timeout=remaining) != 0:
+                raise RepositoryError("candidate read failed")
+        except subprocess.TimeoutExpired as error:
+            raise CommandTimeoutError("a required command timed out") from error
+        return bytes(output)
+    except OSError as error:
+        raise RepositoryError("candidate read failed") from error
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
 def _confirmed(
     run_command: CommandRunner, command: tuple[str, ...], failure: str
 ) -> str:
@@ -396,6 +472,7 @@ class GitRepository:
         *,
         service_environment: Mapping[str, str] | None = None,
         diagnostic_sink: Callable[[dict[str, object]], None] | None = None,
+        read_git_blob: Callable[..., bytes] | None = None,
     ) -> None:
         self.config = config
         self._run_command = run_command
@@ -404,6 +481,7 @@ class GitRepository:
             config.checkout / "src" / "agent-work-git-credential.sh",
         )
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
+        self._read_git_blob = read_git_blob or run_subprocess_bytes
 
     def _bounded_command(
         self,
@@ -1044,6 +1122,150 @@ class GitRepository:
         if self.red_candidate_tree(worktree, base_sha, paths) != tree:
             raise RepositoryError("candidate changed during staging")
         return tree
+
+    def read_candidate(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        allow_base_ancestor: bool = False,
+        changed_paths: tuple[str, ...],
+    ) -> dict[str, object]:
+        """Read bounded exact base-to-tree text from controller-owned Git objects."""
+        if (
+            self.head(worktree) != base_sha
+            and not (
+                allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+            )
+        ) or self._git("write-tree", cwd=worktree) != candidate_tree:
+            raise RepositoryError("candidate changed")
+
+        def git_output(*args: str) -> str:
+            try:
+                result = self._bounded_command(
+                    (str(self.config.git_path), "-C", str(worktree), *args),
+                    environment=self._environment,
+                    timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+                )
+            except UnicodeError as error:
+                raise RepositoryError(
+                    "candidate content is oversize or binary"
+                ) from error
+            if result.returncode != 0:
+                raise RepositoryError("candidate read failed")
+            return result.stdout
+
+        base_tree = self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
+        if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
+            raise RepositoryError("candidate base tree is invalid")
+        names = git_output(
+            "diff", "--name-only", "-z", "--no-renames", base_tree, candidate_tree
+        )
+        paths = tuple(sorted(name for name in names.split("\0") if name))
+        try:
+            validate_git_read_paths(paths)
+        except CandidateBoundaryError as error:
+            raise RepositoryError(str(error)) from error
+        if paths != changed_paths:
+            raise RepositoryError("candidate changed paths are invalid")
+
+        def content(tree: str, path: str) -> tuple[str | None, str | None, str | None]:
+            entry = git_output("ls-tree", "-z", tree, "--", path)
+            if not entry:
+                return None, None, None
+            fields = entry.removesuffix("\0").split("\t", 1)
+            if len(fields) != 2 or fields[1] != path:
+                raise RepositoryError("candidate object is invalid")
+            metadata = fields[0].split(" ")
+            if (
+                len(metadata) != 3
+                or metadata[0] not in {"100644", "100755"}
+                or metadata[1] != "blob"
+                or re.fullmatch(r"[0-9a-f]{40}", metadata[2]) is None
+            ):
+                raise RepositoryError("candidate object is invalid")
+            size_text = git_output("cat-file", "-s", metadata[2]).strip()
+            if not size_text.isdecimal():
+                raise RepositoryError("candidate content is oversize or binary")
+            try:
+                validate_git_read_size(int(size_text), 0)
+            except CandidateBoundaryError as error:
+                raise RepositoryError(str(error)) from error
+            blob = self._read_git_blob(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "cat-file",
+                    "blob",
+                    metadata[2],
+                ),
+                max_output_bytes=int(size_text),
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+                environment=self._environment,
+            )
+            if len(blob) != int(size_text) or b"\0" in blob:
+                raise RepositoryError("candidate content is oversize or binary")
+            try:
+                value = blob.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise RepositoryError(
+                    "candidate content is oversize or binary"
+                ) from error
+            return metadata[0], metadata[2], value
+
+        files: list[dict[str, str | None]] = []
+        total = 0
+        for path in paths:
+            old_mode, old_oid, old = content(base_tree, path)
+            new_mode, new_oid, new = content(candidate_tree, path)
+            if old is None and new is None:
+                raise RepositoryError("candidate object is invalid")
+            try:
+                total = validate_git_read_size(
+                    len((old or "").encode()) + len((new or "").encode()),
+                    total,
+                    per_blob=False,
+                )
+            except CandidateBoundaryError as error:
+                raise RepositoryError(str(error)) from error
+            files.append(
+                {
+                    "path": path,
+                    "old_mode": old_mode,
+                    "new_mode": new_mode,
+                    "old_oid": old_oid,
+                    "new_oid": new_oid,
+                    "old_content": old,
+                    "new_content": new,
+                }
+            )
+        if (
+            (
+                self.head(worktree) != base_sha
+                and not (
+                    allow_base_ancestor
+                    and self._is_ancestor(base_sha, "HEAD", worktree)
+                )
+            )
+            or (
+                self.publication_changed_paths(worktree, base_sha)
+                if allow_base_ancestor
+                else tuple(sorted(set(self.changed_paths(worktree))))
+            )
+            != changed_paths
+            or self._git("write-tree", cwd=worktree) != candidate_tree
+            or self.red_candidate_tree(worktree, base_sha, changed_paths)
+            != candidate_tree
+        ):
+            raise RepositoryError("candidate changed")
+        return {
+            "candidate_tree": candidate_tree,
+            "base_tree": base_tree,
+            "changed_paths": list(paths),
+            "files": files,
+        }
 
     def judge_candidate(
         self,

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -22,9 +23,39 @@ from pydantic import ValidationError
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase
 from agent_work.models import GitLabIssueNote, GitLabNoteAuthor, WorkerResultEnvelope
 from agent_work.worker import (
+    WorkerResultBrokerRequest,
     build_worker_prompt,
     parse_worker_result_build_input,
 )
+
+
+def test_workflow_prompt_requires_live_candidate_read_for_both_lanes() -> None:
+    request = WorkerResultBrokerRequest(
+        nonce="a" * 32,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=3,
+        expected_state=RunnerState.EXECUTING,
+        expected_phase=WorkflowPhase.WORKFLOW,
+        source_branch="agent/issue-12",
+        source_sha="b" * 40,
+    )
+    prompt = build_worker_prompt(
+        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+        worker_result_broker=request,
+        worker_result_builder=Path("/trusted/agent-work"),
+    )
+    assert "For a content or coding result that requests publication" in prompt
+    assert prompt.index("candidate stage") < prompt.index("candidate validate")
+    assert prompt.index("candidate validate") < prompt.index("candidate read")
+    assert (
+        "After successful coding validation, or directly after content staging"
+        in prompt
+    )
+
 
 _CONTEXT_PREFIX = "Untrusted issue context JSON:\n"
 _CONTEXT_SUFFIX = "\nEnd untrusted issue context."

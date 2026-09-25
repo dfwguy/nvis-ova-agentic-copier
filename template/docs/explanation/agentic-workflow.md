@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -112,11 +112,12 @@ tests. At the same time, the Diátaxis Writer updates `docs/` and `README.md`.
 Agent-policy Writer handles portable policy when it applies. Green never edits
 docs, README, or agent-policy paths.
 
-Some changed facts have copies in the repo. In interactive work, Consistency
-Judge checks those copies against their source on the staged tree. Architect
-also runs it there when unsure. In serial work, Architect records
-`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
-No staged-tree review is claimed there. An interactive skip needs a reason.
+Some changed facts have copies in the repo. Consistency Judge checks those
+copies against their source on the staged tree when the review applies.
+In serial coding work, the Validation Judge first accepts that staged tree.
+The controller then supplies bounded, read-only candidate evidence to
+Consistency Judge. The finalizer records the judge's verdict or exact
+not-applicable reason in its existing receipt. A skip needs a specific reason.
 
 Red keeps a verified failing-test boundary. In an interactive workflow, Main
 creates one approved checkpoint commit and local ref after Red proves the
@@ -154,19 +155,35 @@ rerunning the hook. See the [validation command
 reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status).
 
 In serial work, Green asks a private controller socket to stage the changed
-paths the controller observes. It returns the exact Git tree ID. The worker
-cannot write the linked checkout's Git administrative data or controller state.
-Judge uses the same socket to validate that tree and read its durable status.
-The trusted controller runs one hook for each tree and records fixed JUnit
-snapshots, digests, test counts, and elapsed time. It returns an opaque
-evidence ID and bounded results without private snapshot paths. A failed
-result gives the same live worker safe test names and digests when available;
-the worker can correct the code, stage a new tree, and validate it. Status
-recovers the saved result without rerunning the hook. The separate result
-broker accepts final workflow intent. After worker exit, the controller checks
-the tree, changed paths, and identity again before publication. The normal
-ledger transition records that authorization. See the [candidate command
-reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-validate-and-status).
+paths the controller observes. The content workflow uses that boundary too.
+It returns the exact Git tree ID. The worker cannot write the linked
+checkout's Git administrative data or controller state.
+
+For coding work, the Validation Judge first uses that socket to validate the
+staged tree and read its durable status. The trusted controller runs one hook
+for each tree and records fixed JUnit snapshots, digests, test counts, and
+elapsed time. It returns an opaque evidence ID and bounded results without
+private snapshot paths. A failed result gives the same live worker safe test
+names and digests when available; the worker can correct the code, stage a
+new tree, and validate it. Status recovers the saved result without rerunning
+the hook.
+
+After successful coding validation, the controller reads that same staged
+tree for Consistency Judge. Content work reads its tree after staging without
+a coding validation step. The controller binds the read to the current
+project, issue, ledger revision, branch, base commit, and private nonce.
+Consistency Judge gets bounded, read-only evidence for the base and candidate
+trees: changed paths, file modes, and old and new content or deletion. Small
+reads return inline text; larger ones use a manifest and ordered chunks. The
+controller requires full coverage before marking the tree reviewed. The read
+rejects drift, replay, timeout, and oversized evidence. A correction
+needs a new staged tree, coding validation when applicable, and a new
+consistency review.
+
+The separate result broker accepts final workflow intent. After worker exit,
+the controller checks the tree, changed paths, and identity again before
+publication. The normal ledger transition records that authorization. See
+the [candidate command reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-read-validate-and-status).
 
 Long review cycles use context. In interactive work, Green saves its full,
 bounded correction ledger through the trusted controller checkout while Green
@@ -270,7 +287,7 @@ flowchart TD
         cli["$cli-syntax-judge (conditional)"]
         filesystem["$filesystem-structure-judge (conditional)"]
         policy["$agent-policy-judge (conditional)"]
-        consistency["$consistency-judge (interactive, conditional)"]
+        consistency["$consistency-judge (conditional)"]
         license["$license-checker"]
     end
     judge --> nonfunctional
@@ -331,7 +348,7 @@ flowchart TD
     docfastone --> docsynthesis
     docfasttwo --> docsynthesis
     docsynthesis --> docwriter["$documentation-writer"]
-    docwriter --> docconsistency["$consistency-judge (interactive, conditional)"]
+    docwriter --> docconsistency["$consistency-judge (conditional)"]
     docconsistency --> docfinalizer["$documentation-finalizer"]
     docwriter -- "exact not-applicable record" --> docfinalizer
     docconsistency -- "finding" --> doccorrection["Live Architect routes correction"]
@@ -424,11 +441,15 @@ Green never edits docs, README, or agent-policy paths.
 In the documentation and agent-policy lane,
 Architect delegates one Documentation Writer. That writer alone may edit.
 In interactive work, the writer stages the candidate and Architect runs the
-Consistency Judge when copied facts change. In serial work, the worker does
-not stage and records the exact boundary-unavailable N/A. Architect then
-delegates one consolidated Documentation Finalizer. Repair cycles need material progress. A
-repeated finding returns to Architect for human direction. Unchanged evidence
-also returns to Architect. Scope expansion does too. Neither lane has a fixed
+Consistency Judge when copied facts change. In serial work, the live workflow
+owner asks the controller to stage the candidate and provide a bounded
+read-only snapshot for Consistency Judge. Large snapshots use a manifest and
+chunks, with full coverage required. The judge checks copied facts when
+applicable.
+Architect then delegates one consolidated Documentation Finalizer. Repair
+cycles need material progress. A repeated finding returns to Architect for
+human direction. Unchanged evidence also returns to Architect. Scope
+expansion does too. Neither lane has a fixed
 repair count.
 
 The writer checks its prose against the final code, configuration, and
@@ -606,7 +627,7 @@ visible and preserves the human approval and merge boundary.
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
 | Agent Policy Judge | Reviews agent routing, portable skills, mirrors, and authority boundaries | Edit instructions, code, tests, or README.md |
-| Consistency Judge | In interactive work, checks changed repeated facts against authoritative definitions on an exact staged tree | Edit, stage, approve, merge, or infer exceptions without evidence |
+| Consistency Judge | Checks changed repeated facts against authoritative definitions on an exact staged tree, using a bounded controller read in serial work | Edit, stage, approve, merge, or infer exceptions without evidence |
 | Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |

@@ -148,7 +148,7 @@ role is N/A only when facts show it does not apply.
 | Red and policy preparation | `$tdd-red`, conditional `$agent-policy-writer` | Red establishes the exact mode-specific checkpoint first. Serial work runs only Red before the producer-owned trusted result boundary. Policy preparation finishes before implementation. |
 | Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. After both stop editing, interactive Main stages their combined candidate; serial Green requests controller-owned staging. |
 | Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
-| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, interactive-only `$consistency-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
+| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, conditional `$consistency-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
@@ -239,16 +239,32 @@ Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
 not be waived.
 
-In interactive work, use `$consistency-judge` when a copied fact changes.
+Use `$consistency-judge` when a copied fact changes.
 This includes a capability map, count, enum, limit, name, path, schema,
 command, version, or root/template
 contract. Run it if unsure. Else record exactly
-`$consistency-judge: not applicable — <reason>`. Give it the design, base
-commit, staged tree OID, changed paths, and base-to-tree diff. Get its receipt
-for that tree before finalization. A new tree voids approval. In reconciliation,
-give it the source, target, and joined tree too. In serial work, record exactly
-`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
-Do not claim exact-tree review from worker prose or a broker response.
+`$consistency-judge: not applicable — <reason>`. In interactive work, give it
+the design, base commit, staged tree OID, changed paths, and base-to-tree diff.
+Get its receipt for that tree before finalization. A new tree voids approval.
+In reconciliation, give it the source, target, and joined tree too. In serial
+work, the live workflow owner requests controller-owned candidate staging
+after the writers stop. Coding Judge validation succeeds before the owner
+requests `candidate read`; content work reads before Finalizer. The immutable
+read must bind the current issue and session, base commit and tree, candidate
+tree OID, and canonical changed paths. An inline read is limited to 512 KiB.
+Its full old/new response is ready for review without `--complete`.
+For a paged read, the owner gets the fixed manifest and all old and new side
+bytes. Chunks must be in order and at most 128 KiB. Empty sides need no chunks.
+Deleted sides have clear markers. The judge waits for a successful
+`candidate read --complete` before it decides if review applies or checks facts.
+The judge reads that snapshot through the trusted boundary while live and
+checks its identity again before returning a verdict. Repeat stage and read
+after every correction; restaging voids either read mode's coverage and verdict. Do not claim an
+exact-tree review from worker prose or an unverified broker response. If the
+boundary is unavailable in the selected mode, record exactly
+`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+with the mode and capability evidence. Once that boundary is expected, a
+missing, rejected, failed, or stale read blocks finalization; it is not N/A.
 
 Keep the Consistency Judge verdict or exact N/A as an internal review receipt.
 For guarded template updates, `WORKFLOW_RECEIPTS` in
@@ -412,7 +428,7 @@ and merge. The timer remains irrelevant. Keep each proof. Check each result.
 | Publication setup | `$git-flow` | Main owns branch and publication preflight. |
 | Design | `$architect` | Content/mirror design and final decision. |
 | Writing | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
-| Consistency review | Interactive-only conditional `$consistency-judge` | Read-only comparison of changed repeated facts on Writer's exact staged tree. Serial work records the exact boundary-unavailable N/A. |
+| Consistency review | Conditional `$consistency-judge` | Read-only comparison of changed repeated facts on the exact candidate tree, using controller-owned stage/read proof in serial work. |
 | Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, and source-of-truth verdict. |
 | Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
 | Pipeline review | `$pipeline-performance-judge` | Main delegates after every MR update. |
@@ -425,16 +441,29 @@ No maintained file may be unstaged or untracked. Writer records `git write-tree`
 The review gets that tree, the design, base commit, changed paths, and
 base-to-tree diff. In reconciliation, it also gets the source, target, and
 joined tree. In serial work, Writer neither stages nor calls `git write-tree`;
-the controller checks changed paths after worker exit. Scope growth returns
-here for coding reclassification.
+the live workflow owner requests the controller-owned candidate stage/read
+boundary after editing, and the controller checks changed paths again after
+worker exit. Scope growth returns here for coding reclassification.
 
-In interactive work, use the same judge rule as in coding. If unsure, run it.
+Use the same judge rule as in coding. If unsure, run it.
 If false, record
-exactly `$consistency-judge: not applicable — <reason>`. Its receipt must name
-Writer's staged tree. Architect sends content findings to Writer. After a fix,
-Writer stages a new tree. The judge checks it again before finalization. In
-serial work, record exactly
-`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`.
+exactly `$consistency-judge: not applicable — <reason>`. In interactive work,
+its receipt must name Writer's staged tree. Architect sends content findings
+to Writer. After a fix, the applicable staging boundary makes a new tree. The
+judge checks it again before finalization. In serial work, the live workflow
+owner requests controller-owned candidate stage and `candidate read` after
+Writer stops editing and before Finalizer. The judge checks the live boundary's
+issue and session proof and the immutable manifest's base commit/tree,
+candidate tree OID, and canonical changed paths. A full inline old/new response
+is ready for review. For a paged read, the owner
+gets all old/new side bytes in order. Chunks may be at most 128 KiB. The owner
+must get a successful `candidate read --complete` before judging scope or facts.
+Restaging voids either mode's
+coverage; repeat stage/read after every fix. If that boundary is
+unavailable in the selected mode, record exactly
+`$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
+with the mode and capability evidence. A missing, rejected, failed, or stale
+expected read blocks finalization.
 
 For guarded template updates, put the judge verdict or exact N/A and its
 evidence inside the existing `$documentation-finalizer:` completion receipt
