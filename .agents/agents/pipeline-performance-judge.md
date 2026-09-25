@@ -192,6 +192,23 @@ split it. Keep it whole:
   suspicion. These are not loop-ready repository work. Report `No pipeline
   feedback issue required`.
 
+Hard-limit breaches use one cross-pipeline key: the verified project label
+`agent::pipeline-performance`. Use this label only for a hard-limit breach.
+Before creating feedback, run two searches. Search every open labeled issue,
+including lifecycle-blocked issues. Search for the exact stable marker.
+
+First, if the exact marker finds an issue without this label, return `unfiled`
+and `needs verification`. State that label repair is needed. Do not create a
+second issue. Do not update it through the issue-publish boundary. Its update
+replaces the title, body, and full label set. It cannot preserve the existing
+issue fields and labels.
+
+Then count the open labeled issues. If the label is unavailable or the search
+has multiple matches, return `unfiled` and `needs verification`. If exactly
+one exists, reuse it regardless of its per-job marker. If none exists, create
+one only with the verified label and no legacy exact-marker match. Do not
+create a follow-on hard-limit issue until the open labeled issue is closed.
+
 For deferred feedback, build a stable problem marker. Keep it stable:
 
 ```text
@@ -208,7 +225,8 @@ identity there. Keep observed MR/source/pipeline/job evidence outside the
 marker in the issue body.
 
 Search open GitLab issues for the stable marker. Compare the full marker text.
-Reuse an exact open match. Reuse needs no new-issue audit.
+For feedback other than a hard-limit breach, reuse an exact open match. Reuse
+needs no new-issue audit.
 
 For a new issue, use only the checkout CLI. Run
 `<checkout>/bin/agent-work-from-checkout issue publish --feedback-audit --apply`.
@@ -230,7 +248,9 @@ Supply scalar
 `--title`, `--problem`, and `--outcome`. Supply optional scalar `--impact` and
 `--additional-context`. Supply repeated `--acceptance`; scalar `--priority`
 and `--severity`; and repeated `--label` only for verified existing labels.
-Supply the marker through scalar `--marker`. Do not change any marker bytes.
+When creating hard-limit feedback, supply the verified existing
+`agent::pipeline-performance` label. Supply the marker through scalar
+`--marker`. Do not change any marker bytes.
 Use `--additional-context` only for ordinary context or evidence. Use `--json`
 for the machine-readable receipt. New automatic feedback needs audited
 `--apply` to persist the issue.
