@@ -8078,6 +8078,27 @@ def test_worker_prompt_omits_controller_private_paths_in_workflow_and_recovery(
             assert "refs/agent-work/red/issue196" in prompt
 
 
+def test_worker_prompt_assigns_main_advance_reconciliation_to_controller_boundary(
+    tmp_path: Path,
+) -> None:
+    """A workspace-write worker cannot administer the shared Git worktree."""
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "work_kind": "ordinary",
+            "summary": "Reconcile retained publication after main advances.",
+            "next_action": "Resolve the retained merge and rerun the workflow.",
+        },
+        project_id=310967,
+        issue_iid=225,
+        effective_worker_budget_seconds=1800,
+    )
+
+    assert "controller-owned reconciliation" in prompt
+    assert "worker must not write shared .git administration" in prompt
+
+
 def test_agent_invoker_worker_exit_redacts_prompt_credentials_and_controls(
     tmp_path: Path,
 ) -> None:
