@@ -5,7 +5,7 @@ summary: Run local tests and CI checks for a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -45,8 +45,8 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
 the root pipeline has eight single validation jobs: `ruff-check`,
 `ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
-`readability-check`, and `shellcheck`. Seventeen native pytest shards run on
-Python 3.11, and six run on Python 3.14. Three BuildKit jobs produce
+`readability-check`, and `shellcheck`. Twenty-four native pytest shards run on
+Python 3.11, and 10 run on Python 3.14. Three BuildKit jobs produce
 commit-specific candidates:
 
 | Build job and target | Dependency scope | Validation work |
@@ -75,8 +75,8 @@ For each supported Python, its native pytest shards form one deterministic,
 exhaustive full-suite partition. Each validates `CI_NODE_INDEX` and
 `CI_NODE_TOTAL` before pytest; invalid metadata fails before tests begin. Each
 shard publishes a unique JUnit report and raw coverage file. One aggregation
-job waits for its matching shards. `coverage-py311` combines exactly 17 raw
-coverage files; `coverage-py314` combines exactly six. Both jobs measure only
+job waits for its matching shards. `coverage-py311` combines exactly 24 raw
+coverage files; `coverage-py314` combines exactly 10. Both jobs measure only
 maintained `src/agent_work` code, enforce the existing 85% floor, and publish
 Cobertura. Any shard, combine, coverage-floor, report, or aggregation failure
 fails the pipeline. For a failed job, inspect the shard

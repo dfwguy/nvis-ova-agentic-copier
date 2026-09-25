@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -74,12 +74,12 @@ dependencies, not a stale fixed digest, and do not install dependencies again.
 The readability job imports the root package from `src` with `PYTHONPATH` and
 runs without a dependency sync.
 
-The root pytest work is a simple DAG, not a state machine. Seventeen Python
-3.11 shards and six Python 3.14 shards each make one deterministic, exhaustive
+The root pytest work is a simple DAG, not a state machine. Twenty-four Python
+3.11 shards and 10 Python 3.14 shards each make one deterministic, exhaustive
 partition of the full suite. Each validates `CI_NODE_INDEX` and
 `CI_NODE_TOTAL` before pytest. Each writes a JUnit report and raw coverage
 file. A per-Python aggregation job waits for its matching shards. Python 3.11
-combines exactly 17 coverage files; Python 3.14 combines exactly six. Both jobs
+combines exactly 24 coverage files; Python 3.14 combines exactly 10. Both jobs
 measure `src/agent_work`, enforce the 85% floor, and publish Cobertura. Invalid
 shard metadata, a shard failure, or an aggregation failure fails the pipeline.
 Queue time stays outside the unchanged 60-second preference and 120-second

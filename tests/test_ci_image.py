@@ -847,23 +847,25 @@ def test_root_ci_exposes_each_gate_as_a_native_merge_request_job(
         "expected_message",
     ),
     (
-        ("py311", "1", "17", "/opt/ci/py311", 0, None),
-        ("py311", "7", "17", "/opt/ci/py311", 0, None),
-        ("py311", "10", "17", "/opt/ci/py311", 0, None),
-        ("py311", "16", "17", "/opt/ci/py311", 0, None),
-        ("py311", "17", "17", "/opt/ci/py311", 0, None),
-        ("py314", "1", "6", "/opt/ci/py314", 0, None),
-        ("py314", "6", "6", "/opt/ci/py314", 0, None),
-        ("unknown", "1", "17", None, 2, "Unknown test environment"),
-        ("py311", None, "17", None, 2, "CI_NODE_INDEX"),
+        ("py311", "1", "24", "/opt/ci/py311", 0, None),
+        ("py311", "17", "24", "/opt/ci/py311", 0, None),
+        ("py311", "18", "24", "/opt/ci/py311", 0, None),
+        ("py311", "20", "24", "/opt/ci/py311", 0, None),
+        ("py311", "24", "24", "/opt/ci/py311", 0, None),
+        ("py314", "1", "10", "/opt/ci/py314", 0, None),
+        ("py314", "6", "10", "/opt/ci/py314", 0, None),
+        ("py314", "7", "10", "/opt/ci/py314", 0, None),
+        ("py314", "10", "10", "/opt/ci/py314", 0, None),
+        ("unknown", "1", "24", None, 2, "Unknown test environment"),
+        ("py311", None, "24", None, 2, "CI_NODE_INDEX"),
         ("py311", "1", None, None, 2, "CI_NODE_TOTAL"),
-        ("py311", "one", "17", None, 2, "CI_NODE_INDEX"),
+        ("py311", "one", "24", None, 2, "CI_NODE_INDEX"),
         ("py311", "1", "six", None, 2, "CI_NODE_TOTAL"),
-        ("py311", "0", "17", None, 2, "CI_NODE_INDEX"),
-        ("py311", "18", "17", None, 2, "CI_NODE_INDEX"),
-        ("py311", "1", "6", None, 2, "CI_NODE_TOTAL"),
-        ("py314", "7", "6", None, 2, "CI_NODE_INDEX"),
-        ("py314", "1", "17", None, 2, "CI_NODE_TOTAL"),
+        ("py311", "0", "24", None, 2, "CI_NODE_INDEX"),
+        ("py311", "25", "24", None, 2, "CI_NODE_INDEX"),
+        ("py311", "1", "17", None, 2, "CI_NODE_TOTAL"),
+        ("py314", "11", "10", None, 2, "CI_NODE_INDEX"),
+        ("py314", "1", "6", None, 2, "CI_NODE_TOTAL"),
     ),
 )
 def test_root_pytest_job_validates_gitlab_parallel_metadata_and_runs_one_native_shard(
@@ -955,7 +957,7 @@ def test_root_pytest_jobs_use_environment_specific_native_shards_with_unique_art
         "when": "always",
     }
     assert "coverage combine" not in pytest_template["script"][0]
-    for environment, shard_count in (("py311", 17), ("py314", 6)):
+    for environment, shard_count in (("py311", 24), ("py314", 10)):
         job = configuration[f"pytest-{environment}"]
         assert job["extends"] == ".pytest"
         assert job["parallel"] == shard_count
@@ -975,7 +977,7 @@ def test_root_coverage_job_combines_matching_native_shard_artifacts(
     coverage_template = configuration[".pytest_coverage"]
     coverage_job = configuration[f"coverage-{environment}"]
     script = "\n".join(coverage_template["script"])
-    shard_count = 17 if environment == "py311" else 6
+    shard_count = 24 if environment == "py311" else 10
     expected_raw_files = [
         f".coverage.{environment}-shard-{index}" for index in range(1, shard_count + 1)
     ]

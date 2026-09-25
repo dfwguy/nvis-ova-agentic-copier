@@ -132,12 +132,12 @@ ruff-format:
   script:
     - |
       case "$TEST_ENVIRONMENT" in
-          py311) python_environment="$CI_PY311_ENVIRONMENT"; shard_count=17 ;;
-          py314) python_environment="$CI_PY314_ENVIRONMENT"; shard_count=6 ;;
+          py311) python_environment="$CI_PY311_ENVIRONMENT"; shard_count=24 ;;
+          py314) python_environment="$CI_PY314_ENVIRONMENT"; shard_count=10 ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
       case "${CI_NODE_INDEX-}" in
-          [1-9]|1[0-7]) ;;
+          [1-9]|1[0-9]|2[0-4]) ;;
           *) printf 'Invalid CI_NODE_INDEX: %s\n' "${CI_NODE_INDEX-}" >&2; exit 2 ;;
       esac
       if [ "$CI_NODE_INDEX" -gt "$shard_count" ]; then
@@ -191,7 +191,14 @@ ruff-format:
                   .coverage.py311-shard-14 \
                   .coverage.py311-shard-15 \
                   .coverage.py311-shard-16 \
-                  .coverage.py311-shard-17
+                  .coverage.py311-shard-17 \
+                  .coverage.py311-shard-18 \
+                  .coverage.py311-shard-19 \
+                  .coverage.py311-shard-20 \
+                  .coverage.py311-shard-21 \
+                  .coverage.py311-shard-22 \
+                  .coverage.py311-shard-23 \
+                  .coverage.py311-shard-24
               ;;
           py314)
               python_environment="$CI_PY314_ENVIRONMENT"
@@ -201,7 +208,11 @@ ruff-format:
                   .coverage.py314-shard-3 \
                   .coverage.py314-shard-4 \
                   .coverage.py314-shard-5 \
-                  .coverage.py314-shard-6
+                  .coverage.py314-shard-6 \
+                  .coverage.py314-shard-7 \
+                  .coverage.py314-shard-8 \
+                  .coverage.py314-shard-9 \
+                  .coverage.py314-shard-10
               ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
@@ -235,7 +246,7 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
-  parallel: 17
+  parallel: 24
   needs:
     - job: ci-image:pytest-py311
       artifacts: false
@@ -246,7 +257,7 @@ pytest-py311:
 
 pytest-py314:
   extends: .pytest
-  parallel: 6
+  parallel: 10
   needs:
     - job: ci-image:pytest-py314
       artifacts: false
