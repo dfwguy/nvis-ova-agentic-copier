@@ -1363,23 +1363,7 @@ def test_agent_loop_wrapper_continues_after_prerequisite_label_reconciliation_wh
 ) -> None:
     """Label reconciliation uses fresh eligibility and refreshes before another apply."""
     checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
-    writer = checkout.parent / "future-writer"
-    subprocess.run(
-        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (writer / "version").write_text("two\n")
-    _commit_repository_state(writer, "prepare future default branch")
-    _run_test_git(writer, "push", "origin", "HEAD:future")
-    advance = tmp_path / "advance-default-branch"
-    _write_command(
-        advance,
-        'sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/future)"\n'
-        'exec "$REAL_GIT" --git-dir "$LOCAL_ORIGIN" update-ref refs/heads/main "$sha"',
-    )
-    environment["UV_ADVANCE"] = str(advance)
+    _prepare_future_default_branch(checkout, tmp_path, environment)
     report = json.dumps(
         {
             "schema_version": 1,
@@ -1642,23 +1626,7 @@ def test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activa
 ) -> None:
     """A continuation verifies and fast-forwards the configured base before applying."""
     checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
-    writer = checkout.parent / "future-writer"
-    subprocess.run(
-        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (writer / "version").write_text("two\n")
-    _commit_repository_state(writer, "prepare future default branch")
-    _run_test_git(writer, "push", "origin", "HEAD:future")
-    advance = tmp_path / "advance-default-branch"
-    _write_command(
-        advance,
-        'sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/future)"\n'
-        'exec "$REAL_GIT" --git-dir "$LOCAL_ORIGIN" update-ref refs/heads/main "$sha"',
-    )
-    environment["UV_ADVANCE"] = str(advance)
+    _prepare_future_default_branch(checkout, tmp_path, environment)
     calls = _scripted_wrapper_worker(
         tmp_path,
         environment,
@@ -2463,6 +2431,29 @@ def _advance_wrapper_default_branch(checkout: Path, content: str) -> None:
     (writer / "version").write_text(f"{content}\n")
     _commit_repository_state(writer, f"advance to {content}")
     _run_test_git(writer, "push", "origin", "main")
+
+
+def _prepare_future_default_branch(
+    checkout: Path, tmp_path: Path, environment: dict[str, str]
+) -> None:
+    """Prepare a default-branch advance for the first applied worker call."""
+    writer = checkout.parent / "future-writer"
+    subprocess.run(
+        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (writer / "version").write_text("two\n")
+    _commit_repository_state(writer, "prepare future default branch")
+    _run_test_git(writer, "push", "origin", "HEAD:future")
+    advance = tmp_path / "advance-default-branch"
+    _write_command(
+        advance,
+        'sha="$("$REAL_GIT" --git-dir "$LOCAL_ORIGIN" rev-parse refs/heads/future)"\n'
+        'exec "$REAL_GIT" --git-dir "$LOCAL_ORIGIN" update-ref refs/heads/main "$sha"',
+    )
+    environment["UV_ADVANCE"] = str(advance)
 
 
 def _run_wrapper(
