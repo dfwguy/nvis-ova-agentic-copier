@@ -141,6 +141,7 @@ class ErrorCode(StrEnum):
     RETRY_EXHAUSTED = "retry_exhausted"
     PUBLICATION_COMMIT_REJECTED = "publication_commit_rejected"
     PUBLICATION_IDENTITY_MISMATCH = "publication_identity_mismatch"
+    EXTERNAL_OWNER = "external_owner"
     PIPELINE_PENDING = "pipeline_pending"
     PIPELINE_REJECTED = "pipeline_rejected"
     MERGE_CONFLICT = "merge_conflict"
