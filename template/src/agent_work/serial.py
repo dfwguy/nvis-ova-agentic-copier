@@ -124,13 +124,30 @@ def _broker_artifact_builder(
     ):
         raise WorkerProtocolError("worker_result_broker", "identity mismatch")
 
+    uses_authored_base = (
+        record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    )
+    candidate_base_sha = (
+        record.correction_identity.baseline_sha
+        if uses_authored_base and record.correction_identity is not None
+        else record.source_sha
+    )
     candidate_identity: tuple[str, tuple[str, ...], str] | None = None
 
     def build(input_bytes: bytes) -> bytes:
         nonlocal candidate_identity
         try:
             changed_paths = tuple(
-                sorted(set(repository.changed_paths(record.worktree)))
+                sorted(
+                    set(
+                        repository.publication_changed_paths(
+                            record.worktree, candidate_base_sha or ""
+                        )
+                        if uses_authored_base
+                        else repository.changed_paths(record.worktree)
+                    )
+                )
             )
         except RepositoryError as error:
             raise WorkerProtocolError(
@@ -142,7 +159,7 @@ def _broker_artifact_builder(
                 record.source_sha
                 if not changed_paths
                 else repository.red_candidate_tree(
-                    record.worktree, record.source_sha or "", changed_paths
+                    record.worktree, candidate_base_sha or "", changed_paths
                 )
             )
         except RepositoryError as error:
@@ -262,23 +279,155 @@ def build_publication_correction_identity(
     )
 
 
+def build_authored_candidate_correction_identity(
+    record: LedgerRecord,
+    candidate: LegacyPublicationCandidate,
+    *,
+    original_base_sha: str | None,
+    checkpoint: RedCheckpointEvidence | None,
+    bootstrap: bool = True,
+) -> PublicationCorrectionIdentity:
+    """Bind a reviewed committed candidate to its original Red provenance."""
+    if (
+        record.source_sha is None
+        or record.work_kind is not WorkKind.ORDINARY
+        or record.workflow_lane is not WorkflowLane.CODING
+        or record.source_branch != f"agent/issue-{record.issue_iid}"
+        or record.publication_sha is not None
+        or record.pending_feedback is not None
+        or record.repair_attempt is not None
+        or record.worker_exit is not None
+        or candidate.branch != record.source_branch
+        or candidate.head != record.source_sha
+        or candidate.merge_head is not None
+        or not candidate.staged_paths
+        or candidate.unstaged_paths
+        or candidate.has_untracked
+        or candidate.has_unmerged
+        or candidate.has_renames
+        or original_base_sha is None
+        or checkpoint is None
+        or checkpoint.project_id != record.project_id
+        or checkpoint.issue_iid != record.issue_iid
+        or checkpoint.source_branch != record.source_branch
+        or checkpoint.base_sha != original_base_sha
+        or not checkpoint.test_paths
+        or (
+            bootstrap
+            and (
+                record.state is not RunnerState.BLOCKED
+                or record.phase is not WorkflowPhase.WORKFLOW
+                or record.prior_state is not RunnerState.EXECUTING
+                or record.prior_phase is not WorkflowPhase.WORKFLOW
+                or record.intent is not None
+                or record.audit_evidence != "unknown"
+                or record.merge_request_draft is None
+                or record.error_code
+                not in {
+                    ErrorCode.WORKER_PROTOCOL_INVALID,
+                    ErrorCode.STATE_RECONCILIATION_FAILED,
+                }
+                or not record.condition_history
+                or (
+                    record.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+                    and (
+                        not any(
+                            item.code == ErrorCode.WORKER_PROTOCOL_INVALID.value
+                            for item in record.condition_history
+                        )
+                        or not all(
+                            item.code
+                            in {
+                                ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                                ErrorCode.RETRY_EXHAUSTED.value,
+                            }
+                            for item in record.condition_history
+                        )
+                    )
+                )
+                or (
+                    record.error_code is ErrorCode.STATE_RECONCILIATION_FAILED
+                    and not any(
+                        item.code == ErrorCode.STATE_RECONCILIATION_FAILED.value
+                        and item.detail == "candidate_broker: submission failed"
+                        for item in record.condition_history
+                    )
+                )
+            )
+        )
+    ):
+        raise SegmentError("authored candidate recovery evidence is not exact")
+    return PublicationCorrectionIdentity(
+        mode="authored_candidate_recovery",
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        worktree=record.worktree,
+        source_branch=record.source_branch,
+        baseline_sha=original_base_sha,
+        head_sha=candidate.head,
+        merge_head=None,
+        index_fingerprint=candidate.index_fingerprint,
+        staged_paths=tuple(sorted(candidate.staged_paths)),
+        unstaged_paths=(),
+        workflow_lane=record.workflow_lane,
+        red_checkpoint=checkpoint,
+    )
+
+
 def correction_identity_matches(
     record: LedgerRecord,
     candidate: LegacyPublicationCandidate,
     *,
     checkpoint: RedCheckpointEvidence | None,
+    original_base_sha: str | None = None,
 ) -> bool:
     """Return whether a fresh read-only observation equals the frozen identity."""
     identity = record.correction_identity
     if identity is None:
         return False
     try:
-        observed = build_publication_correction_identity(
-            record, candidate, checkpoint=checkpoint
+        observed = (
+            build_authored_candidate_correction_identity(
+                record,
+                candidate,
+                original_base_sha=original_base_sha,
+                checkpoint=checkpoint,
+                bootstrap=False,
+            )
+            if identity.mode == "authored_candidate_recovery"
+            else build_publication_correction_identity(
+                record, candidate, checkpoint=checkpoint
+            )
         )
     except SegmentError:
         return False
     return observed == identity
+
+
+def _observed_correction_identity(
+    record: LedgerRecord,
+    *,
+    repository: RepositoryPort,
+    checkpoint: RedCheckpointEvidence | None,
+) -> PublicationCorrectionIdentity:
+    """Rebuild one correction identity using its retained provenance mode."""
+    candidate = repository.observe_legacy_publication_candidate(record.worktree)
+    if (
+        record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    ):
+        return build_authored_candidate_correction_identity(
+            record,
+            candidate,
+            original_base_sha=repository.single_parent(
+                record.worktree, record.source_sha or ""
+            ),
+            checkpoint=checkpoint,
+            bootstrap=False,
+        )
+    return build_publication_correction_identity(
+        record, candidate, checkpoint=checkpoint
+    )
 
 
 def refresh_publication_correction_identity(
@@ -292,10 +441,8 @@ def refresh_publication_correction_identity(
         return record
     checkpoint = _retained_red_checkpoint(record, load_red_checkpoint)
     try:
-        identity = build_publication_correction_identity(
-            record,
-            repository.observe_legacy_publication_candidate(record.worktree),
-            checkpoint=checkpoint,
+        identity = _observed_correction_identity(
+            record, repository=repository, checkpoint=checkpoint
         )
     except (RepositoryError, SegmentError):
         return None
@@ -309,6 +456,20 @@ def _retained_red_checkpoint(
     """Resolve trusted Red provenance across an existing-MR source update."""
     if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None:
         return None
+    if (
+        record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    ):
+        checkpoint = load_red_checkpoint(
+            record.project_id,
+            record.issue_iid,
+            record.correction_identity.baseline_sha,
+        )
+        return (
+            checkpoint
+            if checkpoint == record.correction_identity.red_checkpoint
+            else None
+        )
     if record.source_sha is not None:
         current = load_red_checkpoint(
             record.project_id, record.issue_iid, record.source_sha
@@ -2822,7 +2983,13 @@ def _execute(
                 or retained_checkpoint.project_id != record.project_id
                 or retained_checkpoint.issue_iid != record.issue_iid
                 or retained_checkpoint.source_branch != record.source_branch
-                or retained_checkpoint.base_sha != record.source_sha
+                or retained_checkpoint.base_sha
+                != (
+                    record.correction_identity.baseline_sha
+                    if record.correction_identity is not None
+                    and record.correction_identity.mode == "authored_candidate_recovery"
+                    else record.source_sha
+                )
                 or not retained_checkpoint.test_paths
             )
         ):
@@ -2839,6 +3006,14 @@ def _execute(
                     record,
                     repository.observe_legacy_publication_candidate(record.worktree),
                     checkpoint=retained_checkpoint,
+                    original_base_sha=(
+                        repository.single_parent(
+                            record.worktree, record.source_sha or ""
+                        )
+                        if record.correction_identity.mode
+                        == "authored_candidate_recovery"
+                        else None
+                    ),
                 )
             except RepositoryError:
                 exact_correction = False
@@ -3098,6 +3273,32 @@ def _execute(
             )
     validated_candidate_paths: tuple[str, ...] | None = None
     prepared_candidate: str | None = None
+    candidate_base_sha = (
+        record.correction_identity.baseline_sha
+        if record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+        else record.source_sha
+    )
+    if candidate_base_sha is None:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Candidate validation base is unavailable.",
+        )
+    uses_authored_base = (
+        record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    )
+
+    def observed_candidate_paths() -> tuple[str, ...]:
+        """Return the candidate scope for its exact validation base."""
+        paths = (
+            repository.publication_changed_paths(record.worktree, candidate_base_sha)
+            if uses_authored_base
+            else repository.changed_paths(record.worktree)
+        )
+        return tuple(sorted(set(paths)))
 
     def candidate_action(action: str, tree: str | None) -> dict[str, object]:
         nonlocal validated_candidate_paths, prepared_candidate
@@ -3115,12 +3316,12 @@ def _execute(
         try:
             if action == "stage":
                 staged_tree = repository.stage_candidate(
-                    record.worktree, record.source_sha
+                    record.worktree,
+                    candidate_base_sha,
+                    allow_base_ancestor=uses_authored_base,
                 )
                 prepared_candidate = staged_tree
-                validated_candidate_paths = tuple(
-                    sorted(set(repository.changed_paths(record.worktree)))
-                )
+                validated_candidate_paths = observed_candidate_paths()
                 return {
                     "candidate_tree": staged_tree,
                     "state": "staged",
@@ -3130,10 +3331,9 @@ def _execute(
                 tree is None
                 or tree != prepared_candidate
                 or validated_candidate_paths is None
-                or validated_candidate_paths
-                != tuple(sorted(set(repository.changed_paths(record.worktree))))
+                or validated_candidate_paths != observed_candidate_paths()
                 or repository.red_candidate_tree(
-                    record.worktree, record.source_sha, validated_candidate_paths
+                    record.worktree, candidate_base_sha, validated_candidate_paths
                 )
                 != tree
             ):
@@ -3141,7 +3341,11 @@ def _execute(
             report = repository.judge_candidate(
                 record.worktree,
                 tree,
-                base_sha=record.source_sha,
+                base_sha=candidate_base_sha,
+                allow_base_ancestor=(
+                    record.correction_identity is not None
+                    and record.correction_identity.mode == "authored_candidate_recovery"
+                ),
                 changed_paths=validated_candidate_paths,
                 action=action,
                 timeout_seconds=worker_timeout,
@@ -3252,9 +3456,7 @@ def _execute(
         )
     else:
         try:
-            final_changed_paths = tuple(
-                sorted(set(repository.changed_paths(record.worktree)))
-            )
+            final_changed_paths = observed_candidate_paths()
             result = parse_worker_result_artifact(
                 invocation.worker_result,
                 request=broker_request,
@@ -3474,7 +3676,7 @@ def _execute(
     ):
         try:
             actual_tree = repository.red_candidate_tree(
-                record.worktree, record.source_sha or "", final_changed_paths
+                record.worktree, candidate_base_sha, final_changed_paths
             )
         except RepositoryError:
             actual_tree = None
@@ -3512,7 +3714,7 @@ def _execute(
                     kind="publish_merge_request",
                     expected_evidence={
                         "branch": record.source_branch,
-                        "baseline_sha": record.source_sha,
+                        "baseline_sha": candidate_base_sha,
                     }
                     | _validated_path_evidence(validated_paths),
                 )
@@ -3609,7 +3811,7 @@ def _execute(
                         kind="publish_merge_request",
                         expected_evidence={
                             "branch": record.source_branch,
-                            "baseline_sha": record.source_sha,
+                            "baseline_sha": candidate_base_sha,
                         }
                         | _validated_path_evidence(validated_paths),
                     ),

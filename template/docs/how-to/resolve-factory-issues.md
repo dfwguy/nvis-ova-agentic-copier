@@ -1,11 +1,11 @@
 ---
 title: How to resolve factory issue recovery
 type: how-to
-summary: Fix one issue.
+summary: Recover saved work.
 audience: maintainer
 tags: [agent-workflow]
 status: draft
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-25
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the recovery inventory and resolution command contract.
@@ -218,3 +218,42 @@ Multi-segment continuation remains pinned to #35.
 Stop for human review without verified normalization.
 This route never approves a merge request.
 This route never merges a merge request.
+
+## 6. Resume a saved candidate after a failed publish check.
+
+Use this route only when the inventory finds a staged-only candidate held after
+an eligible `worker_protocol_invalid`, or the exact
+`state_reconciliation_failed` candidate-broker condition. Keep it in its
+worktree. Do not make a new candidate. Do not replace its original Red check.
+Do not run Red again.
+
+Make a retry preview for the exact issue.
+
+```bash
+uv run agent-work recovery resolve --issue-iid 221 --choice retry \
+  --reason "The retained authored candidate was reviewed after publication reconciliation failed" \
+  --json >agent-work-recovery-221-plan.json
+```
+
+Read the plan before you apply it. If the candidate, original Red check, or
+other saved proof changed, do not apply it. Make and review a new plan from the
+current inventory.
+
+Apply only the reviewed plan. The controller checks the saved proof under the
+project lock before it resumes the issue.
+
+```bash
+uv run agent-work recovery resolve --issue-iid 221 --choice retry \
+  --reason "The retained authored candidate was reviewed after publication reconciliation failed" \
+  --plan-file agent-work-recovery-221-plan.json --apply --json
+```
+
+Before resume, the controller checks the branch, head, staged index, one
+original parent, and Red check. It also requires an `unknown` audit marker and
+a saved merge request draft. It keeps the test scope from the Red check. The
+workflow completes validation before publication. Stop for human review if
+proof is missing, changed, or unclear.
+
+You can replay the same plan after an interrupted apply. The controller checks
+the same identity and returns the saved recovery. It does not publish the
+candidate.

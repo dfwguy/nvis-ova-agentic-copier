@@ -113,6 +113,7 @@ from .serial import (
     AUTOMATIC_REPAIR_MAX_ATTEMPTS,
     SegmentError,
     activate_exact_pipeline_repair,
+    build_authored_candidate_correction_identity,
     build_publication_correction_identity,
     collect_exact_failed_job_diagnostic,
     correction_identity_matches,
@@ -759,9 +760,18 @@ def _recovery_plan(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
     )
-    affected = (
+    authored = (
         None
         if legacy is not None or _precheckpoint_test_only_red_family(record)
+        else _authored_candidate_recovery_evidence(
+            record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        )
+    )
+    affected = (
+        None
+        if authored is not None
+        or legacy is not None
+        or _precheckpoint_test_only_red_family(record)
         else _affected_dirty_correction_evidence(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
@@ -813,6 +823,8 @@ def _recovery_plan(
     )
     if legacy is not None:
         evidence.update(legacy)
+    if authored is not None:
+        evidence.update(authored)
     if affected is not None:
         evidence.update(affected)
     if _precheckpoint_test_only_red_family(record) and precheckpoint is None:
@@ -845,16 +857,30 @@ def _legacy_dirty_publication_evidence(
     if record is not None and record.correction_identity is not None:
         if repository is None or record.source_sha is None:
             raise RuntimeError("correction recovery evidence is incomplete")
+        checkpoint_base = (
+            record.correction_identity.baseline_sha
+            if record.correction_identity.mode == "authored_candidate_recovery"
+            else record.source_sha
+        )
         checkpoint = (
             None
             if record.correction_identity.workflow_lane is WorkflowLane.CONTENT
             or load_red_checkpoint is None
             else load_red_checkpoint(
-                record.project_id, record.issue_iid, record.source_sha
+                record.project_id, record.issue_iid, checkpoint_base
             )
         )
         candidate = repository.observe_legacy_publication_candidate(record.worktree)
-        if not correction_identity_matches(record, candidate, checkpoint=checkpoint):
+        if not correction_identity_matches(
+            record,
+            candidate,
+            checkpoint=checkpoint,
+            original_base_sha=(
+                repository.single_parent(record.worktree, record.source_sha)
+                if record.correction_identity.mode == "authored_candidate_recovery"
+                else None
+            ),
+        ):
             raise RuntimeError("correction recovery evidence changed")
         return {"correction_identity": record.correction_identity.model_dump_json()}
     if (
@@ -979,6 +1005,41 @@ def _affected_dirty_correction_evidence(
     return {
         "correction_identity": identity.model_dump_json(),
         "affected_correction": "true",
+    }
+
+
+def _authored_candidate_recovery_evidence(
+    record: LedgerRecord | None,
+    *,
+    repository: RepositoryPort | None,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> dict[str, str] | None:
+    """Bind one reviewed committed candidate to its original Red checkpoint."""
+    if record is None or repository is None or record.correction_identity is not None:
+        return None
+    if not repository.has_changes(record.worktree) or record.source_sha is None:
+        return None
+    original_base_sha = repository.single_parent(record.worktree, record.source_sha)
+    checkpoint = (
+        None
+        if load_red_checkpoint is None or original_base_sha is None
+        else load_red_checkpoint(record.project_id, record.issue_iid, original_base_sha)
+    )
+    try:
+        identity = build_authored_candidate_correction_identity(
+            record,
+            repository.observe_legacy_publication_candidate(record.worktree),
+            original_base_sha=original_base_sha,
+            checkpoint=checkpoint,
+        )
+    except SegmentError:
+        return None
+    assert record.merge_request_draft is not None
+    return {
+        "correction_identity": identity.model_dump_json(),
+        "authored_candidate": "true",
+        "retained_audit_evidence": "unknown",
+        "retained_merge_request_draft": record.merge_request_draft.model_dump_json(),
     }
 
 
@@ -2188,6 +2249,14 @@ def _matches_recovery_intent(
         if choice is ResolutionChoice.RETRY
         else None
     )
+    if (
+        choice is ResolutionChoice.RETRY
+        and record.state is RunnerState.EXECUTING
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.correction_identity is not None
+        and record.correction_identity.mode == "authored_candidate_recovery"
+    ):
+        target = RunnerState.EXECUTING
     expected = _recovery_intent(plan, choice=choice, target=target)
     return (
         record.intent.operation_id == expected.operation_id
@@ -2549,6 +2618,54 @@ def dispatch(
                 except EvidenceDriftError as error:
                     raise RuntimeError(str(error)) from error
             before_state = gitlab.fetch_issue(request.issue_iid or 0).state
+            if (
+                choice is ResolutionChoice.RETRY
+                and replaying
+                and current_record is not None
+                and current_record.state is RunnerState.EXECUTING
+                and current_record.phase is WorkflowPhase.WORKFLOW
+                and current_record.correction_identity is not None
+                and current_record.correction_identity.mode
+                == "authored_candidate_recovery"
+            ):
+                checkpoint = (
+                    None
+                    if wired.load_red_checkpoint is None
+                    else wired.load_red_checkpoint(
+                        current_record.project_id,
+                        current_record.issue_iid,
+                        current_record.correction_identity.baseline_sha,
+                    )
+                )
+                if not correction_identity_matches(
+                    current_record,
+                    repository.observe_legacy_publication_candidate(
+                        current_record.worktree
+                    ),
+                    checkpoint=checkpoint,
+                    original_base_sha=repository.single_parent(
+                        current_record.worktree, current_record.source_sha or ""
+                    ),
+                ):
+                    raise RuntimeError("correction recovery evidence changed")
+                return CommandReport(
+                    command=request.command,
+                    applied=True,
+                    outcome="applied",
+                    project=identity,
+                    items=(
+                        _item(
+                            current_record,
+                            corroboration={
+                                "before_state": before_state,
+                                "after_state": before_state,
+                            },
+                        ),
+                    ),
+                    operational_plan=reviewed,
+                    summary="Reviewed authored-candidate recovery was already applied.",
+                    next_action="Continue complete correction and validation.",
+                )
             if choice is ResolutionChoice.RETRY:
                 if current_record is None:
                     raise RuntimeError("recovery record disappeared")
@@ -2585,10 +2702,15 @@ def dispatch(
                             "correction recovery Red evidence is unavailable"
                         )
                     else:
+                        checkpoint_base = (
+                            correction_identity.baseline_sha
+                            if correction_identity.mode == "authored_candidate_recovery"
+                            else current_record.source_sha or ""
+                        )
                         checkpoint = wired.load_red_checkpoint(
                             current_record.project_id,
                             current_record.issue_iid,
-                            current_record.source_sha or "",
+                            checkpoint_base,
                         )
                     if (
                         not correction_identity_matches(
@@ -2597,6 +2719,15 @@ def dispatch(
                                 current_record.worktree
                             ),
                             checkpoint=checkpoint,
+                            original_base_sha=(
+                                repository.single_parent(
+                                    current_record.worktree,
+                                    current_record.source_sha or "",
+                                )
+                                if correction_identity.mode
+                                == "authored_candidate_recovery"
+                                else None
+                            ),
                         )
                         and current_record.correction_identity is not None
                     ):
@@ -2608,7 +2739,16 @@ def dispatch(
                             current_record,
                             RunnerState.EXECUTING,
                             phase=WorkflowPhase.WORKFLOW,
-                            intent=None,
+                            intent=(
+                                _recovery_intent(
+                                    reviewed,
+                                    choice=choice,
+                                    target=RunnerState.EXECUTING,
+                                )
+                                if correction_identity.mode
+                                == "authored_candidate_recovery"
+                                else None
+                            ),
                             publication_sha=None,
                             merge_request_draft=None,
                             worker_exit=None,

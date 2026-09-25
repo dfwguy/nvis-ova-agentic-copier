@@ -31,6 +31,6 @@ to learn the facts and rules that help you make a good change.
 
 ### Agent Workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Set live-agent capacity for a workflow lane.
-- [How to resolve factory issue recovery](resolve-factory-issues.md) — Fix one issue.
+- [How to resolve factory issue recovery](resolve-factory-issues.md) — Recover saved work.
 - [How to set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Set up a recoverable serial agent loop.
 <!-- END GENERATED -->
