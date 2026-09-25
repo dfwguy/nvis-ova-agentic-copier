@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-25
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -566,7 +566,7 @@ It takes one request. It may take one fix. It keeps its own state.
 | --- | --- |
 | Input and evidence | Reads one strict `WorkerResultBuildInput` JSON object from private scratch owned by the live workflow owner. The input is untrusted. The broker injects the record, changed paths, and checkpoint dependencies. |
 | Private broker | `AgentInvoker` creates a private Unix-socket broker in a fresh `/tmp` directory for each invocation. It gives the worker the socket for the live builder request only. The worker receives no ledger directory, state-root path, or writable handoff artifact. |
-| Request limit | The broker accepts one request. A standard rejection returns to the live producer for at most one corrected request in the worker budget. A third request fails closed. |
+| Request limit | The broker accepts one request. A standard rejection returns to the live producer for at most one corrected request in the worker budget. Acceptance is terminal. A request after acceptance or a third request after two rejected JSON objects rejects the result, including any earlier accepted receipt. |
 | Builder time bound | Each request has the worker time still remaining. The builder cannot extend the worker budget. Timeout, deletion, race, oversize input, malformed framing, or an extra request fails closed. |
 | Trusted result | The broker builds the accepted result in controller memory. It writes no saved acceptance record and exposes no accepted artifact to the worker. Model output and raw input are never controller state. |
 | Controller verification | After exit, the controller verifies the nonce, project, issue, ledger revision, branch, source SHA, state, phase, envelope, and changed paths. Missing, malformed, stale, or mismatched evidence fails closed. |
@@ -628,6 +628,8 @@ This table gives the safe diagnostic rules.
 | Rejected JSON object without correction | `worker_result_broker: correction absent after rejected JSON object`. |
 | Rejected other JSON without correction | `worker_result_broker: correction absent after rejected other JSON`. |
 | Rejected invalid JSON without correction | `worker_result_broker: correction absent after rejected invalid JSON`. |
+| Third request after two rejected JSON objects | `worker_result_broker: correction limit exceeded after rejected JSON object`. |
+| Request after acceptance | `worker_result_broker: request after acceptance`. |
 | Controller record | The controller carries the same safe diagnostic in condition history, status, recovery inventory, and the GitLab handoff. |
 | Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. The operator corrects the condition, then runs `agent-work loop retry --issue-iid IID --apply`. |
 | Changed evidence | A changed error code, diagnostic, or phase is changed evidence and follows the existing bounded retry path. |

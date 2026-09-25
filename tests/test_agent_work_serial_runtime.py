@@ -8369,6 +8369,47 @@ def test_worker_timeout_and_supplied_retry_reason_are_recorded(tmp_path: Path) -
         assert outcome is not None and outcome.error_code is expected
 
 
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "worker_result_broker: correction limit exceeded after rejected JSON object",
+        "worker_result_broker: request after acceptance",
+    ),
+)
+def test_recovery_inventory_shows_canonical_terminal_broker_detail(
+    tmp_path: Path, detail: str
+) -> None:
+    """A retained terminal broker failure gives the operator its safe retry cause."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(
+            update={
+                "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+                "condition_history": (
+                    ConditionEvidence(
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail=detail,
+                    ),
+                ),
+            }
+        )
+    )
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=12),
+        apply=False,
+        dependencies=_dependencies(
+            config, ledger, FakeGitLab(), FakeRepository(config)
+        ),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.blocked_cause == detail
+    assert "retry --issue-iid 12 --apply" in candidate.next_action
+
+
 def test_recovery_inventory_hides_noncanonical_retained_protocol_detail(
     tmp_path: Path,
 ) -> None:
