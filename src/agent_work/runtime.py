@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from .classification import ClassificationError, classify_work
 from .domain import (
     ACTIVE_STATES,
     IMMEDIATE_OWNER_STATES,
@@ -117,6 +118,7 @@ from .serial import (
     build_publication_correction_identity,
     collect_exact_failed_job_diagnostic,
     correction_identity_matches,
+    new_record,
     reconcile_closed_issues,
     record_failed_job_diagnostic_unavailable,
     resume_candidates,
@@ -571,12 +573,32 @@ def _recovery_observation(
         split_dependencies=split_dependencies,
     )
     retry_ineligible_reason = None
+    discovery_marker_shape = _is_untouched_discovery_marker_record(
+        record,
+        issue=observed_issue,
+        project=project,
+        repository=repository,
+        owner_status=owner_status,
+    )
+    if discovery_marker_shape and project is not None:
+        try:
+            _discovery_marker_recovery_evidence(
+                record,
+                issue=observed_issue,
+                project=project,
+                repository=repository,
+                gitlab=gitlab,
+                owner_status=owner_status,
+            )
+        except RecoveryIneligibleError:
+            retry_ineligible_reason = "discovery marker recovery evidence is ineligible"
     dirty = None if exists is None else bool(paths)
     if (
         record is not None
         and record.state is RunnerState.BLOCKED
         and repository is not None
         and not _precheckpoint_test_only_red_family(record)
+        and not discovery_marker_shape
     ):
         try:
             dirty = repository.has_changes(record.worktree)
@@ -802,10 +824,18 @@ def _recovery_plan(
         state_root=config.state_root,
         split_dependencies=split_dependencies,
     )
+    discovery_shape = _is_untouched_discovery_marker_record(
+        record,
+        issue=issue,
+        project=project,
+        repository=repository,
+        owner_status=owner_status,
+    )
     dirty_evidence = (
         None
         if choice is not ResolutionChoice.RETRY
         or _precheckpoint_test_only_red_family(record)
+        or discovery_shape
         else _retained_dirty_recovery_evidence(
             record, repository=repository, load_red_checkpoint=load_red_checkpoint
         )
@@ -869,6 +899,20 @@ def _recovery_plan(
         )
     if precheckpoint is not None:
         evidence.update(precheckpoint)
+    discovery_marker = (
+        _discovery_marker_recovery_evidence(
+            record,
+            issue=issue,
+            project=project,
+            repository=repository,
+            gitlab=gitlab,
+            owner_status=owner_status,
+        )
+        if choice is ResolutionChoice.RETRY
+        else None
+    )
+    if discovery_marker is not None:
+        evidence.update(discovery_marker)
     return OperationalPlan(
         command=request.command,
         action=choice.value,
@@ -881,6 +925,231 @@ def _recovery_plan(
         target_iid=request.issue_iid,
         evidence=evidence,
     ), observation
+
+
+def _discovery_marker_recovery_evidence(
+    record: LedgerRecord | None,
+    *,
+    issue: GitLabIssue | None,
+    project: GitLabProject,
+    repository: RepositoryPort | None,
+    gitlab: GitLabPort,
+    owner_status: str,
+) -> dict[str, str | int | bool] | None:
+    """Bind the sole clean discovery-marker repair before reclassification.
+
+    The original blocked record contains no authored work.  Current issue and
+    merged-MR evidence therefore supplies the only classification input, while
+    every fact that makes replacing that empty record safe is plan-bound.
+    """
+    if record is None or record.error_code is not ErrorCode.REMEDIATION_MARKER_INVALID:
+        return None
+    if not _is_untouched_discovery_marker_record(
+        record,
+        issue=issue,
+        project=project,
+        repository=repository,
+        owner_status=owner_status,
+    ):
+        raise RecoveryIneligibleError(
+            "discovery marker recovery requires untouched evidence"
+        )
+    assert issue is not None
+    try:
+        classification = classify_work(issue, project_id=project.id)
+    except ClassificationError as error:
+        raise RecoveryIneligibleError(
+            "discovery marker recovery classification is invalid"
+        ) from error
+    evidence: dict[str, str | int | bool] = {
+        "discovery_marker_reclassification": True,
+        "issue_title": issue.title,
+        "issue_description_sha256": hashlib.sha256(
+            issue.description.encode()
+        ).hexdigest(),
+        "issue_labels": json.dumps(issue.labels),
+        "ledger_revision": record.revision,
+        "expected_worktree_exists": False,
+        "expected_issue_branch_available": True,
+        "expected_owner_status": owner_status,
+        "classified_work_kind": classification.kind.value,
+        "classified_merge_request_iid": classification.merge_request_iid or 0,
+        "classified_source_branch": classification.source_branch or "",
+        "classified_source_sha": classification.source_sha or "",
+    }
+    if classification.kind is WorkKind.ORDINARY:
+        if gitlab.open_merge_requests_by_branch(record.source_branch):
+            raise RecoveryIneligibleError(
+                "discovery marker recovery branch is occupied"
+            )
+        evidence["open_branch_merge_request_count"] = 0
+        return evidence
+    if (
+        classification.kind
+        not in {WorkKind.EXISTING_MR_REMEDIATION, WorkKind.MERGE_CONFLICT_REPAIR}
+        or classification.merge_request_iid is None
+        or classification.source_branch is None
+        or classification.source_sha is None
+    ):
+        raise RecoveryIneligibleError(
+            "discovery marker recovery classification is unsafe"
+        )
+    merge_request = gitlab.fetch_merge_request(classification.merge_request_iid)
+    if not (
+        merge_request.iid == classification.merge_request_iid
+        and merge_request.state in {"opened", "merged"}
+        and merge_request.source_project_id == project.id
+        and merge_request.target_project_id == project.id
+        and merge_request.target_branch == project.default_branch
+        and merge_request.source_branch == classification.source_branch
+        and merge_request.sha == classification.source_sha
+    ):
+        raise RecoveryIneligibleError(
+            "discovery marker recovery merge-request evidence changed"
+        )
+    evidence.update(
+        {
+            "remediation_mr_state": merge_request.state,
+            "remediation_mr_source_branch": merge_request.source_branch,
+            "remediation_mr_sha": merge_request.sha,
+        }
+    )
+    return evidence
+
+
+def _is_untouched_discovery_marker_record(
+    record: LedgerRecord | None,
+    *,
+    issue: GitLabIssue | None,
+    project: GitLabProject | None,
+    repository: RepositoryPort | None,
+    owner_status: str,
+) -> bool:
+    """Return whether an invalid discovery record contains no retained work."""
+    if record is None or issue is None or repository is None or project is None:
+        return False
+    return (
+        record.project_id == project.id
+        and record.issue_iid == issue.iid
+        and issue.state == "opened"
+        and set(issue.labels).intersection(LIFECYCLE_LABELS) == {"agent::blocked"}
+        and record.state is RunnerState.BLOCKED
+        and record.phase is WorkflowPhase.DISCOVERY
+        and record.error_code is ErrorCode.REMEDIATION_MARKER_INVALID
+        and record.workflow_lane is WorkflowLane.UNKNOWN
+        and record.work_kind is WorkKind.ORDINARY
+        and record.source_branch == f"agent/issue-{record.issue_iid}"
+        and record.worktree
+        == repository.config.state_root / "worktrees" / str(record.issue_iid)
+        and record.source_sha is None
+        and record.main_sha is None
+        and record.retry_count == 0
+        and record.retry_at is None
+        and record.automatic_repair_count == 0
+        and record.automatic_repair_at is None
+        and record.blocked_cause is None
+        and record.prior_state is None
+        and record.prior_phase is None
+        and record.merge_request_iid is None
+        and record.merge_request_url is None
+        and record.publication_sha is None
+        and record.intent is None
+        and not record.receipts
+        and record.feedback_cursor is None
+        and record.pending_feedback is None
+        and record.merge_request_draft is None
+        and record.repair_attempt is None
+        and record.suggest_close_evidence is None
+        and record.outcome_projection is None
+        and record.audit_evidence in {None, "unknown"}
+        and record.correction_identity is None
+        and record.worker_exit is None
+        and record.activation_started_at is not None
+        and record.completed_at is None
+        and not record.split_prerequisites
+        and not record.condition_history
+        and not record.phase_timings
+        and not repository.worktree_exists(record.worktree)
+        and repository.fresh_issue_branch_available(record.issue_iid)
+        and owner_status in {"missing", "stale"}
+    )
+
+
+def _discovery_marker_replay_is_exact(
+    record: LedgerRecord,
+    plan: OperationalPlan,
+    *,
+    issue: GitLabIssue,
+    project: GitLabProject,
+    repository: RepositoryPort,
+    gitlab: GitLabPort,
+    owner_status: str,
+) -> bool:
+    """Recheck a pre-projection reclassification before replaying its label."""
+    evidence = plan.evidence
+    expected_labels = evidence.get("issue_labels")
+    expected_revision = evidence.get("ledger_revision")
+    if not isinstance(expected_labels, str) or type(expected_revision) is not int:
+        return False
+    try:
+        original_labels = tuple(json.loads(expected_labels))
+    except (TypeError, ValueError):
+        return False
+    projected_labels = tuple(
+        label for label in original_labels if label not in LIFECYCLE_LABELS
+    ) + ("agent::running",)
+    if not (
+        record.state is RunnerState.PREPARING
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.project_id == project.id
+        and record.issue_iid == issue.iid
+        and record.revision == expected_revision + 2
+        and record.worktree
+        == repository.config.state_root / "worktrees" / str(record.issue_iid)
+        and not repository.worktree_exists(record.worktree)
+        and repository.fresh_issue_branch_available(record.issue_iid)
+        and owner_status == evidence.get("expected_owner_status")
+        and issue.state == "opened"
+        and issue.labels in {original_labels, projected_labels}
+        and evidence.get("issue_title") == issue.title
+        and evidence.get("issue_description_sha256")
+        == hashlib.sha256(issue.description.encode()).hexdigest()
+    ):
+        return False
+    try:
+        classification = classify_work(issue, project_id=project.id)
+    except ClassificationError:
+        return False
+    if not (
+        evidence.get("classified_work_kind") == classification.kind.value
+        and evidence.get("classified_merge_request_iid")
+        == (classification.merge_request_iid or 0)
+        and evidence.get("classified_source_branch")
+        == (classification.source_branch or "")
+        and evidence.get("classified_source_sha") == (classification.source_sha or "")
+        and record.work_kind is classification.kind
+        and record.merge_request_iid == classification.merge_request_iid
+        and record.source_branch
+        == (classification.source_branch or f"agent/issue-{record.issue_iid}")
+        and record.source_sha == classification.source_sha
+    ):
+        return False
+    if classification.kind is WorkKind.ORDINARY:
+        return not gitlab.open_merge_requests_by_branch(record.source_branch)
+    if classification.merge_request_iid is None:
+        return False
+    merge_request = gitlab.fetch_merge_request(classification.merge_request_iid)
+    return (
+        merge_request.iid == classification.merge_request_iid
+        and merge_request.state == evidence.get("remediation_mr_state")
+        and merge_request.source_project_id == project.id
+        and merge_request.target_project_id == project.id
+        and merge_request.target_branch == project.default_branch
+        and merge_request.source_branch == classification.source_branch
+        and merge_request.sha == classification.source_sha
+        and evidence.get("remediation_mr_source_branch") == merge_request.source_branch
+        and evidence.get("remediation_mr_sha") == merge_request.sha
+    )
 
 
 def _require_safely_retryable_automatic_retry(
@@ -2928,6 +3197,81 @@ def dispatch(
                 if current_record is None:
                     raise RuntimeError("recovery record disappeared")
                 _raise_for_immediate_owner_conflict(current_record, ledger=ledger)
+                if reviewed.evidence.get("discovery_marker_reclassification") is True:
+                    if replaying and current_record.state is RunnerState.PREPARING:
+                        if not _discovery_marker_replay_is_exact(
+                            current_record,
+                            reviewed,
+                            issue=current_issue,
+                            project=project,
+                            repository=repository,
+                            gitlab=gitlab,
+                            owner_status=_issue_owner_status(
+                                wired, request.issue_iid or 0
+                            ),
+                        ):
+                            raise RuntimeError(
+                                "recovery evidence changed; create a new preview"
+                            )
+                        updated = current_record
+                    else:
+                        prepared = ledger.persist(
+                            current_record.model_copy(
+                                update={
+                                    "intent": _recovery_intent(
+                                        reviewed,
+                                        choice=choice,
+                                        target=RunnerState.PREPARING,
+                                    )
+                                }
+                            )
+                        )
+                        rebuilt = new_record(
+                            current_issue,
+                            project_id=project.id,
+                            state_root=config.state_root,
+                            main_branch=repository.config.default_branch,
+                        ).model_copy(
+                            update={
+                                # Reclassification replaces only the empty discovery
+                                # projection.  Keep the durable revision sequence and
+                                # worktree location, plus replay evidence until the
+                                # GitLab projection has completed.
+                                "revision": prepared.revision,
+                                "worktree": prepared.worktree,
+                                "intent": _recovery_intent(
+                                    reviewed,
+                                    choice=choice,
+                                    target=RunnerState.PREPARING,
+                                ),
+                            }
+                        )
+                        updated = ledger.persist(rebuilt)
+                    gitlab.transition_labels(current_record.issue_iid, "agent::running")
+                    if updated.intent is not None:
+                        updated = ledger.persist(
+                            updated.model_copy(update={"intent": None})
+                        )
+                    return CommandReport(
+                        command=request.command,
+                        applied=True,
+                        outcome="applied",
+                        project=identity,
+                        items=(
+                            _item(
+                                updated,
+                                corroboration={
+                                    "before_state": before_state,
+                                    "after_state": gitlab.fetch_issue(
+                                        request.issue_iid or 0
+                                    ).state,
+                                },
+                            ),
+                        ),
+                        operational_plan=reviewed,
+                        summary="Reviewed discovery marker reclassification applied.",
+                        next_action="Prepare the newly classified durable worktree.",
+                    )
                 retained_publication = (
                     current_record.intent is not None
                     and current_record.intent.kind == "publish_merge_request"

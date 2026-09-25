@@ -1218,7 +1218,7 @@ def _draft_handoff_is_valid(draft: MergeRequestDraft) -> bool:
     )
 
 
-def _new_record(
+def new_record(
     issue: GitLabIssue, *, project_id: int, state_root: Path, main_branch: str
 ) -> LedgerRecord:
     try:
@@ -2049,7 +2049,7 @@ def select_record(
         return None, None
     issue = eligible[0]
     return (
-        _new_record(
+        new_record(
             issue,
             project_id=project.id,
             state_root=ledger.state_root,

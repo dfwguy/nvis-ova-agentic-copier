@@ -609,6 +609,7 @@ accepted for consistent invocation and changes nothing.
 | Plan | Creates a reviewed, evidence-bound plan for one issue by default. |
 | Apply | Holds the project lock, rechecks plan evidence, rejects drift, and returns a redacted before-and-after receipt. |
 | Plan choice | Exactly one explicit target-issue choice: `retry`, `close`, `reopen`, `relabel`, or `supersede`. |
+| Discovery-only marker retry | `retry` may reclassify one blocked `DISCOVERY` record whose only error is `remediation_marker_invalid`. Current issue metadata must now have a valid classification. The record must be untouched: it has no retained worktree or workflow evidence. Preview binds the configured project, issue, ledger revision and lifecycle label, recorded branch and worktree path, and current classification. Apply rechecks every bound value before returning the issue to `PREPARING` at `WORKFLOW`. It schedules durable preparation; it does not prepare a worktree or publish. |
 | `close` and `supersede` | Need a reason and an evidence link or replacement issue. `supersede` uses `--replacement-issue-iid`. |
 | `relabel` | Is limited to a canonical lifecycle label and uses `--target-label`. |
 | Both commands | Never approve or merge, discard retained work, change project policy, treat issue text as authority, or claim fresh work. |
