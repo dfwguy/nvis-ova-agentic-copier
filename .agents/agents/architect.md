@@ -234,6 +234,14 @@ An exit of zero may start Judge's Non-functional Reviewer child only if the
 tree did not change. Interactive JUnit snapshots, digests, and counts stay
 immutable. Serial proof has an opaque ID and bounded counts, hashes, and time
 data from trusted code. Model prose cannot prove a pass in either mode.
+When changed tests add, modify, or expose a local case at or above 1 second,
+have the reviewer compare it with `docs/reference/testing-strategy.md` and
+report the case and environment. Route a needed register update through the
+documentation owner after the JUnit proof is available. Diagnose setup, case
+body, and environment costs; seek repeat evidence before treating one timing
+as a regression. Route a corroborated, unexplained ordinary-test regression
+to the test or implementation owner for correction before finalization.
+Preserve the original proof; stage and validate a new tree after a correction.
 
 Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may

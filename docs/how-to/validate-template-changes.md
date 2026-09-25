@@ -13,6 +13,8 @@ related:
     why: Explains the commit-specific images used for these checks.
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the merge-request publication command.
+  - path: ../reference/testing-strategy.md
+    why: Defines per-test timing targets and records long-running cases.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -82,6 +84,10 @@ Cobertura. Any shard, combine, coverage-floor, report, or aggregation failure
 fails the pipeline. For a failed job, inspect the shard
 JUnit reports and the matching Cobertura report when it exists; otherwise, use
 the job log. Root coverage excludes the generated Copier payload.
+
+The [testing strategy](../reference/testing-strategy.md) records per-case
+timing targets and the long-running test register. Use the JUnit case times to
+review changed tests; job duration measures a different limit.
 
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
 unrelated work. They do not guarantee a run time. Measure the longest terminal
