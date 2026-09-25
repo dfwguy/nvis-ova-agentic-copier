@@ -292,6 +292,21 @@ def _issue_has_marker(item: dict[str, object], marker: str) -> bool:
     return isinstance(candidate_description, str) and marker in candidate_description
 
 
+def _reject_duplicate_remediation_markers(
+    *, additional_context: str | None, marker: str
+) -> None:
+    """Reject issue input that would publish more than one remediation marker."""
+    marker_count = sum(
+        value.count("agent-mr-remediation")
+        for value in (additional_context, marker)
+        if value is not None
+    )
+    if marker_count > 1:
+        raise IssuePublicationError(
+            "issue publication contains duplicate remediation marker"
+        )
+
+
 def publish_issue(
     *,
     project_id: int,
@@ -318,6 +333,9 @@ def publish_issue(
         or marker == "<!-- agent-work-issue-publication:v1 -->"
     ):
         raise IssuePublicationError("issue publication marker is invalid")
+    _reject_duplicate_remediation_markers(
+        additional_context=additional_context, marker=marker
+    )
     values = (
         title,
         problem,
