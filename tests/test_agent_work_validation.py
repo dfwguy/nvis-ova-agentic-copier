@@ -27,6 +27,7 @@ from hypothesis import strategies as st
 from agent_work import validation
 from agent_work.cli import _read_validation_artifact
 from agent_work.ledger import state_home
+from agent_work.ports import CommandResult as PortCommandResult
 from agent_work.repository import CommandResult
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
@@ -775,6 +776,89 @@ def test_failed_junit_names_and_digests_survive_source_artifact_cleanup() -> Non
     )
     assert status.failed_junit_digests == (hashlib.sha256(artifact).hexdigest(),)
     assert "secret detail" not in str(state.records[_CANDIDATE])
+
+
+def test_failed_junit_names_remain_bounded_across_both_artifacts() -> None:
+    state = ValidationStateFake()
+    first_path = Path("test-results-py311.xml")
+    second_path = Path("test-results-py314.xml")
+    names = tuple(f"tests.test_module::test_failure_{index}" for index in range(16))
+    first = (
+        "<testsuite failures='16' errors='0'>"
+        + "".join(
+            f"<testcase classname='tests.test_module' name='test_failure_{index}'>"
+            "<failure/></testcase>"
+            for index in range(16)
+        )
+        + "</testsuite>"
+    ).encode()
+    second = (
+        b"<testsuite failures='1' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_extra_failure'>"
+        b"<failure/></testcase></testsuite>"
+    )
+    artifacts: dict[Path, bytes | OSError] = {}
+    dependencies, calls, _reads = _diagnostic_dependencies(
+        state, artifacts=artifacts, returncode=7
+    )
+    original_run = dependencies.run_command
+    removals: list[Path] = []
+
+    def run_with_artifacts(
+        command: tuple[str, ...],
+        *,
+        stdin: str | None = None,
+        timeout_seconds: float | None = None,
+        environment: Mapping[str, str] | None = None,
+        current_directory: Path | None = None,
+    ) -> PortCommandResult:
+        artifacts.update({first_path: first, second_path: second})
+        return original_run(
+            command,
+            stdin=stdin,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+            current_directory=current_directory,
+        )
+
+    def remove_artifact(path: Path) -> None:
+        removals.append(path)
+        artifacts.pop(path, None)
+
+    dependencies = replace(
+        dependencies,
+        run_command=run_with_artifacts,
+        remove_junit_artifact=remove_artifact,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == status.state == "terminal-failure"
+    assert report.failed_tests == status.failed_tests == names
+    assert (
+        report.failed_junit_digests
+        == status.failed_junit_digests
+        == (
+            hashlib.sha256(first).hexdigest(),
+            hashlib.sha256(second).hexdigest(),
+        )
+    )
+    assert (
+        report.diagnostic
+        == status.diagnostic
+        == (
+            "git hook run pre-commit failed with exit code 7; "
+            "JUnit py311 failures=16 errors=0; py314 failures=1 errors=0"
+        )
+    )
+    assert removals == [first_path, second_path, first_path, second_path]
+    assert artifacts == {}
 
 
 def test_success_timing_is_durable_and_status_does_not_rerun_hook() -> None:
