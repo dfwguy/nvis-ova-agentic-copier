@@ -50,11 +50,13 @@ At each fresh launch or session, read repo facts. Before the first child that
 may edit, start exactly three independent read-only proposal children
 concurrently: one exact `$architect-proposal-balanced` and two separate exact
 `$architect-proposal-fast` children. This gate covers coding, content, the
-serial first and resumed checkpoint segments, and reconciliation. Each child
+serial first and resumed checkpoint segments, and reconciliation, except the
+bounded content resolution and narrow route below. Each child
 works alone and sends its plan directly to the same live Architect. A child
 may not see a peer's plan, delegate, edit files, or call a trusted boundary.
 
-All three valid plans must return before any child may edit. If a child fails,
+All three valid plans must return before any child may edit, except the bounded
+Documentation Writer in reconciliation below. If a child fails,
 check why. Each slot may get at most one fresh same-skill, same-tier replacement.
 The replacement works alone and may not see its peers' plans. If a replacement
 fails or any slot still lacks a valid plan, stop before edits. Check each plan
@@ -429,9 +431,42 @@ ref, and clean state. Any failure stops publication.
 ### Reconciliation mode
 
 First select the exact project, merge request, source, and target. Then prepare
-the pending target merge and conflict manifest. Architect freshly routes the
-complete joined diff. Coding reconciliation recovers complete post-policy
-source work. It does not start a new Red cycle. It mechanically re-proves the
+the pending target trial merge and complete three-way conflict manifest. If
+all conflict paths are clearly content-only and intent is clear, Architect may
+send only those paths to Documentation Writer before the proposal gate. Writer
+edits only those conflict paths. The manifest and joined tree also include all
+clean auto-merged paths. Writer stages the exact joined tree with no unrelated
+dirty paths. Then the read-only `$conflict-judge` checks that tree, the captured
+IDs, and the manifest once. It returns either a
+`narrow_validation_plan` or `full_workflow_required` with reasons. Architect
+checks its evidence and owns the route. An executable or policy conflict or
+unclear intent goes straight to the full workflow and proposal gate. A full
+verdict after the trial also requires that gate on the staged candidate.
+
+The narrow route covers a content-only merge request or a coding merge
+request whose conflicts are all content-only. A coding source also requires
+authentic retained Red provenance and its saved full-hook validation receipt
+bound to the exact captured source tree. Require a
+successful source pipeline for its exact SHA and current target proof from
+every required CI job. Inspect both sides' hunks and callers: cleanly merged
+executable or policy changes must be semantically
+independent, even when they share files. Bound targeted tests to affected
+shared executable behavior and callers. Require no new behavior from the
+resolution and exact root/template parity. A behavior change, uncertain
+independence, missing proof, or failed CI excludes this route. Source or target
+drift restarts exact selection and preparation.
+
+Only for an accepted `narrow_validation_plan`, skip the three-proposal gate
+and fresh local full hook and specialist cycle. Require fresh three-way
+semantic proof and all non-test checks for changed files. Documentation
+Finalizer approves the exact joined tree. Main makes the ordered two-parent
+pending-merge commit, rechecks both leases, and requires full GitLab CI on the
+new source SHA before handoff to a human. The exception does not waive any
+stated proof or the human approval and merge boundary. Otherwise Architect
+uses the ordinary full route below.
+
+On the full route, coding reconciliation recovers complete post-policy source
+work. It does not start a new Red cycle. It mechanically re-proves the
 exact retained authentic Red checkpoint against the unchanged captured source.
 A missing pre-checkpoint merge request routes to issue #158. A missing or
 mismatched post-policy checkpoint stops safely for recovery.
@@ -443,7 +478,8 @@ reconciliation needs historical Red-to-source provenance and fresh three-way
 source-plus-target-to-candidate evidence. Fresh Judge and review receipts cover
 the joined candidate and name both proofs.
 
-In coding reconciliation, Finalizer directly commits the exact Judge-approved
+On the full coding route, TDD Finalizer directly commits the exact
+Judge-approved
 staged tree from the still-pending merge state. This creates one ordered
 two-parent commit. The captured old source is first. The captured
 target/`MERGE_HEAD` is second. The commit consumes `MERGE_HEAD` and atomically
@@ -452,7 +488,8 @@ sole-parent compaction. Finalizer checks cleared merge state, a clean index and
 worktree, exact parents, tree, message, and unchanged Red ref. Main supplies
 freshly fetched exact source and target ref proof before finalization. Finalizer
 checks that proof and local identities. It makes no remote or GitLab calls. In
-content-only reconciliation, Documentation Finalizer approves the tree. Main
+content-only reconciliation, including the accepted narrow route,
+Documentation Finalizer approves the tree. Main
 makes the matching direct pending-merge commit and the same postchecks. Any
 source or target ref drift invalidates every receipt. Restart exact selection
 and preparation. Main fetches and rechecks both refs just before publishing

@@ -32,7 +32,10 @@ clear outcomes. Name one safe next step.
 ## Validation
 
 1. Reclassify the full diff. Use the coding workflow for an executable, mixed,
-   or uncertain file.
+   or uncertain file. The only exception is Architect's accepted
+   `narrow_validation_plan` for content-only conflicts in a content-only or
+   coding merge request. Check the Conflict Judge evidence on the exact staged
+   joined tree and every plan obligation.
 2. Check the content boundary and documentation-writer receipt. In interactive
    work, check that Writer staged only exact approved paths and stopped for
    unrelated work. Get its base commit, changed paths, staged tree OID,
@@ -52,7 +55,20 @@ clear outcomes. Name one safe next step.
    with mode and capability evidence. A missing, rejected, failed, or stale
    expected read is a block, not N/A. Check Writer's edited paths and source
    comparisons; do not require worker-side staging.
-3. Run `git diff --check` and non-test hooks for changed files.
+   On the narrow route, verify the captured source, target, and merge-base IDs;
+   authentic Red provenance and the saved full-hook receipt bound to the exact
+   captured source tree for a coding source; source and target exact-SHA CI
+   proof; fresh three-way semantic proof; no new behavior; bounded tests for
+   shared executable behavior and callers; and exact root/template parity.
+   Reject ref drift or a failed obligation. Architect then takes the full
+   workflow or blocks safely.
+   On this route, the Conflict Judge receipt and its tree OID are mandatory.
+   Check that Writer's OID and Judge's OID match the current index with
+   `git diff --cached --quiet --no-ext-diff <tree>`. Reject absent, mismatched,
+   or stale proof. A restage needs a new Judge verdict.
+3. Run `git diff --check` and non-test hooks for changed files. On the narrow
+   route, run every such check named by the accepted plan; fresh local full
+   hooks and specialist reviews are waived only by that plan.
 4. Check Markdown structure, fence languages, local links, and anchors.
 5. Apply `DIATAXIS.md` front-matter, landing-page, reciprocal-link, and audit
    rules to documentation changes.
