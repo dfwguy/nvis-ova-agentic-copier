@@ -5,7 +5,7 @@ summary: Build and check three root CI images and clean up old tags.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-26
 related:
   - path: validate-template-changes.md
     why: Verifies the checks served by the images.
@@ -38,8 +38,8 @@ three rootless BuildKit candidates from the current `Dockerfile`,
 | Target | Locked dependency scope | Candidate tag | Jobs |
 | --- | --- | --- | --- |
 | `tooling` | Only the `tooling` group | `$CI_REGISTRY_IMAGE/validation-tooling:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `ruff-check`, `ruff-format`, `yamllint`, `kingfisher`, `readability-check`, and `shellcheck` |
-| `pytest-py311` | Project defaults, `test` group, and `typing` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The 17 `pytest-py311` shards, `coverage-py311`, `type-check`, and `license-check` |
-| `pytest-py314` | Project default dependencies and the `test` group on Python 3.14.3 | `$CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | The six `pytest-py314` shards and `coverage-py314` |
+| `pytest-py311` | Project defaults, `test` group, and `typing` group on Python 3.11 | `$CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `pytest-py311`, `type-check`, and `license-check` |
+| `pytest-py314` | Project default dependencies and the `test` group on Python 3.14.3 | `$CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID` | `pytest-py314` |
 
 The `tooling` group has Kingfisher, Ruff, textstat, and yamllint. The `typing`
 group has ty and textstat. Ty needs textstat to check the readability code.
@@ -55,9 +55,8 @@ install fallback. Validation jobs use `uv run --no-sync`.
 `readability-check` also uses the prepared tooling image, with `src` on
 `PYTHONPATH` so it can import `agent_work` without installing dependencies at
 runtime. `type-check` and `license-check` use the Python 3.11 image to resolve
-test and project imports.
-Test and coverage jobs select the environment already prepared in their
-Python-specific image.
+test and project imports. The pytest jobs select the environment already
+prepared in their Python-specific image.
 
 The tooling image build runs the locked Kingfisher version as its non-root
 user. It compiles Kingfisher's unchanged built-in Vectorscan rules once. It
@@ -127,23 +126,17 @@ validation candidates.
 
 ## 4. Verify the root validation jobs.
 
-Inspect the eight named root validation jobs: `ruff-check`, `ruff-format`,
-`yamllint`, `kingfisher`, `type-check`, `license-check`, `readability-check`,
-and `shellcheck`, plus all 17 Python 3.11 shards, all six Python 3.14 shards,
-and both aggregation jobs. Confirm that each job uses the target shown in the
-mapping table. None may run `apt-get`, `uv python install`, `uv sync`, or an
-install fallback.
+Check the eight root validation jobs: `ruff-check`, `ruff-format`, `yamllint`,
+`kingfisher`, `type-check`, `license-check`, `readability-check`, and
+`shellcheck`. Check `pytest-py311` and `pytest-py314` too. Match each job's
+image to the table. No job may run `apt-get`, `uv python install`, `uv sync`,
+or an install fallback.
 
 Inspect those jobs directly. The root has no aggregate validation job or
-aggregate JUnit gate suite. The 17 Python 3.11 shards and six Python 3.14
-shards each use validated `CI_NODE_INDEX` and `CI_NODE_TOTAL` values to make
-one deterministic, exhaustive full-suite partition per version. Invalid
-metadata must fail before pytest. Each shard publishes a unique JUnit report
-and raw coverage file. Each aggregation job waits for its matching shards.
-`coverage-py311` combines exactly 17 files; `coverage-py314` combines exactly
-six. Both jobs measure only maintained `src/agent_work` code, enforce the 85%
-floor, and publish Cobertura. A shard, coverage combine, coverage floor,
-report, or aggregation failure fails the pipeline.
+aggregate JUnit gate suite. Each Python job runs the complete pytest suite
+once. It publishes a JUnit report and Cobertura coverage for maintained
+`src/agent_work` code and enforces the 85% coverage floor. A test, coverage
+floor, or report failure fails the pipeline.
 
 For the exact MR source SHA, verify at least one current required job and
 success from every current required job. Report skipped, canceled, and manual jobs separately when

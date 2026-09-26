@@ -5,7 +5,7 @@ summary: Learn why templates and projects differ.
 audience: maintainer
 tags: [template-architecture]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/customize-a-generated-project.md
     why: Applies this boundary while changing a generated project.
@@ -63,7 +63,7 @@ pre-commit, and tox. Two pytest images contain pinned Git and jq, the project's
 locked default dependencies, and the test group for Python 3.11 or 3.14.3.
 The Python 3.11 image also contains ty for the full type check and the
 dependencies needed by the license check. Other tooling checks use the tooling
-image. Each Python's pytest shards and coverage job use its matching image.
+image. Each Python's full-suite pytest job uses its matching image.
 
 Each target has its own commit-and-pipeline tag, registry cache, build
 metadata, and digest evidence. This keeps unrelated tools out of the pytest
@@ -74,17 +74,12 @@ dependencies, not a stale fixed digest, and do not install dependencies again.
 The readability job imports the root package from `src` with `PYTHONPATH` and
 runs without a dependency sync.
 
-The root pytest work is a simple DAG, not a state machine. Seventeen Python
-3.11 shards and six Python 3.14 shards each make one deterministic, exhaustive
-partition of the full suite. Each validates `CI_NODE_INDEX` and
-`CI_NODE_TOTAL` before pytest. Each writes a JUnit report and raw coverage
-file. A per-Python aggregation job waits for its matching shards. Python 3.11
-combines exactly 17 coverage files; Python 3.14 combines exactly six. Both jobs
-measure `src/agent_work`, enforce the 85% floor, and publish Cobertura. Invalid
-shard metadata, a shard failure, or an aggregation failure fails the pipeline.
-Job and queue time remain useful diagnostics, but neither is a publication
-gate. The image split does not change each version's full-suite partition,
-coverage floor, or reports.
+The root pytest work is a simple DAG. One job per Python version runs the
+full suite and writes its own JUnit and Cobertura reports. Each measures
+`src/agent_work` and enforces the 85% coverage floor. A test or coverage
+failure fails the pipeline. Removing the shards reduces the number of jobs
+waiting for runners. Job and queue time remain useful diagnostics, but neither
+is a publication gate. The image split and coverage floor remain in place.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 

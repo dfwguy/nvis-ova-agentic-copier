@@ -209,8 +209,6 @@ def test_generated_pre_commit_lints_shell_scripts(generated_project: Path) -> No
 _VALIDATION_JOBS = {
     "kingfisher",
     "license-check",
-    "coverage-py311",
-    "coverage-py314",
     "pytest-py311",
     "readability-check",
     "pytest-py314",
@@ -254,21 +252,9 @@ def test_ci_exposes_each_validation_gate_as_a_parallel_job(
     assert "validation (10 gates)" not in configuration
     for job_name in _VALIDATION_JOBS:
         job = configuration[job_name]
-        expected_base = (
-            ".pytest"
-            if job_name.startswith("pytest-")
-            else ".pytest_coverage"
-            if job_name.startswith("coverage-")
-            else ".base_uv"
-        )
+        expected_base = ".pytest" if job_name.startswith("pytest-") else ".base_uv"
         assert job["extends"] == expected_base
-        if job_name.startswith("coverage-"):
-            environment = job_name.removeprefix("coverage-")
-            assert job["needs"] == [
-                {"job": f"ci-image:pytest-{environment}", "artifacts": False},
-                {"job": f"pytest-{environment}", "artifacts": True},
-            ]
-        elif job_name.startswith("pytest-"):
+        if job_name.startswith("pytest-"):
             assert job["needs"] == [{"job": f"ci-image:{job_name}", "artifacts": False}]
         elif job_name in {"license-check", "type-check"}:
             assert job["needs"] == [
@@ -515,28 +501,25 @@ def test_ci_jobs_publish_independent_reports(
     configuration = _ci_configuration(project_root)
     pytest_template = configuration[".pytest"]
     assert pytest_template["artifacts"] == {
-        "reports": {"junit": "test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml"},
-        "paths": [".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX"],
+        "reports": {
+            "junit": "test-results-$TEST_ENVIRONMENT.xml",
+            "coverage_report": {
+                "coverage_format": "cobertura",
+                "path": "coverage-$TEST_ENVIRONMENT.xml",
+            },
+        },
+        "paths": ["coverage-$TEST_ENVIRONMENT.xml"],
         "when": "always",
     }
-    for environment, shard_count in (("py311", 17), ("py314", 6)):
+    for environment in ("py311", "py314"):
         pytest_job = configuration[f"pytest-{environment}"]
-        assert pytest_job["parallel"] == shard_count
+        assert "parallel" not in pytest_job
         assert pytest_job["variables"] == {
             "TEST_ENVIRONMENT": environment,
         }
-        coverage_job = configuration[f"coverage-{environment}"]
-        assert coverage_job["extends"] == ".pytest_coverage"
-        assert coverage_job["needs"] == [
-            {"job": f"ci-image:pytest-{environment}", "artifacts": False},
-            {"job": f"pytest-{environment}", "artifacts": True},
-        ]
-    assert configuration[".pytest_coverage"]["artifacts"]["reports"] == {
-        "coverage_report": {
-            "coverage_format": "cobertura",
-            "path": "coverage-$TEST_ENVIRONMENT.xml",
-        }
-    }
+    assert ".pytest_coverage" not in configuration
+    assert "coverage-py311" not in configuration
+    assert "coverage-py314" not in configuration
     assert configuration["ruff-check"]["artifacts"]["reports"] == {
         "codequality": "ruff-code-quality-report.json"
     }

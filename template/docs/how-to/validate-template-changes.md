@@ -47,15 +47,15 @@ uv run kingfisher scan . --git-history none --no-validate --no-update-check --ex
 The local `tox` command remains the supported-matrix test runner. In GitLab CI,
 the root pipeline has eight single validation jobs: `ruff-check`,
 `ruff-format`, `yamllint`, `kingfisher`, `type-check`, `license-check`,
-`readability-check`, and `shellcheck`. Seventeen native pytest shards run on
-Python 3.11, and six run on Python 3.14. Three BuildKit jobs produce
+`readability-check`, and `shellcheck`. One full pytest job runs on Python 3.11,
+and one runs on Python 3.14. Three BuildKit jobs produce
 commit-specific candidates:
 
 | Build job and target | Dependency scope | Validation work |
 | --- | --- | --- |
 | `ci-image:tooling` / `tooling` | Only the locked `tooling` group, plus pinned system tools | Six single validation jobs |
-| `ci-image:pytest-py311` / `pytest-py311` | Pinned Git and jq, plus locked project defaults, `test` group, and `typing` group on Python 3.11 | `pytest-py311` shards, `coverage-py311`, `type-check`, and `license-check` |
-| `ci-image:pytest-py314` / `pytest-py314` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.14.3 | `pytest-py314` shards and `coverage-py314` |
+| `ci-image:pytest-py311` / `pytest-py311` | Pinned Git and jq, plus locked project defaults, `test` group, and `typing` group on Python 3.11 | `pytest-py311`, `type-check`, and `license-check` |
+| `ci-image:pytest-py314` / `pytest-py314` | Pinned Git and jq, plus locked project defaults and `test` group on Python 3.14.3 | `pytest-py314` |
 
 Each validation job waits for and runs in its lane's image. The tags are
 `validation-tooling`, `validation-pytest-py311`, and
@@ -65,24 +65,19 @@ Each validation job waits for and runs in its lane's image. The tags are
 `readability-check` sets `PYTHONPATH` to the checkout's `src` directory so
 the prepared image can import `agent_work` without installing dependencies at
 runtime. `type-check` and `license-check` run in the Python 3.11 image so they
-can resolve test and project imports. Test and coverage jobs use the prepared environment in their
-Python-specific image.
+can resolve test and project imports. The pytest jobs use the prepared
+environment in their Python-specific image.
 
 Each target has a separate registry cache. Its name has the target name and a
 `-cache` suffix. Each build keeps its own metadata and digest environment file
 as evidence. Inspect all three build jobs and every named validation job. The
 root has no aggregate validation job or aggregate JUnit suite.
 
-For each supported Python, its native pytest shards form one deterministic,
-exhaustive full-suite partition. Each validates `CI_NODE_INDEX` and
-`CI_NODE_TOTAL` before pytest; invalid metadata fails before tests begin. Each
-shard publishes a unique JUnit report and raw coverage file. One aggregation
-job waits for its matching shards. `coverage-py311` combines exactly 17 raw
-coverage files; `coverage-py314` combines exactly six. Both jobs measure only
-maintained `src/agent_work` code, enforce the existing 85% floor, and publish
-Cobertura. Any shard, combine, coverage-floor, report, or aggregation failure
-fails the pipeline. For a failed job, inspect the shard
-JUnit reports and the matching Cobertura report when it exists; otherwise, use
+For each supported Python, the matching pytest job runs the complete suite
+once. Each job publishes its own JUnit report and Cobertura coverage, measures
+only maintained `src/agent_work` code, and enforces the existing 85% floor.
+Any test, coverage-floor, or report failure fails the pipeline. For a failed
+job, inspect its JUnit and Cobertura reports when they exist; otherwise, use
 the job log. Root coverage excludes the generated Copier payload.
 
 The [testing strategy](../reference/testing-strategy.md) records per-case
