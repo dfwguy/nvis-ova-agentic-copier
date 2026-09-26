@@ -132,100 +132,22 @@ ruff-format:
   script:
     - |
       case "$TEST_ENVIRONMENT" in
-          py311) python_environment="$CI_PY311_ENVIRONMENT"; shard_count=17 ;;
-          py314) python_environment="$CI_PY314_ENVIRONMENT"; shard_count=6 ;;
+          py311) python_environment="$CI_PY311_ENVIRONMENT" ;;
+          py314) python_environment="$CI_PY314_ENVIRONMENT" ;;
           *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
       esac
-      case "${CI_NODE_INDEX-}" in
-          [1-9]|1[0-7]) ;;
-          *) printf 'Invalid CI_NODE_INDEX: %s\n' "${CI_NODE_INDEX-}" >&2; exit 2 ;;
-      esac
-      if [ "$CI_NODE_INDEX" -gt "$shard_count" ]; then
-          printf 'Invalid CI_NODE_INDEX: %s\n' "$CI_NODE_INDEX" >&2
-          exit 2
-      fi
-      if [ "${CI_NODE_TOTAL-}" != "$shard_count" ]; then
-          printf 'Invalid CI_NODE_TOTAL: %s\n' "${CI_NODE_TOTAL-}" >&2
-          exit 2
-      fi
-      shard_index=$((CI_NODE_INDEX - 1))
       PYTHONPATH="$CI_PROJECT_DIR:$CI_PROJECT_DIR/src" \
-          COVERAGE_FILE=".coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX" \
           UV_PROJECT_ENVIRONMENT="$python_environment" \
           uv run --no-sync env -u UV_PROJECT_ENVIRONMENT pytest \
-          -p tests.helpers.serial_runtime_shard \
-          --serial-runtime-shard-index="$shard_index" \
-          --serial-runtime-shard-count="$shard_count" \
           --cov=src/agent_work \
-          --junitxml="test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml" \
+          --cov-fail-under=85 \
+          --cov-report="xml:coverage-$TEST_ENVIRONMENT.xml" \
+          --junitxml="test-results-$TEST_ENVIRONMENT.xml" \
           -o "junit_suite_name=$TEST_ENVIRONMENT" \
-          -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT/shard-$CI_NODE_INDEX"
+          -o "cache_dir=.cache/pytest/$TEST_ENVIRONMENT"
   artifacts:
     reports:
-      junit: test-results-$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX.xml
-    paths:
-      - .coverage.$TEST_ENVIRONMENT-shard-$CI_NODE_INDEX
-    when: always
-
-.pytest_coverage:
-  extends: .base_uv
-  script:
-    - |
-      case "$TEST_ENVIRONMENT" in
-          py311)
-              python_environment="$CI_PY311_ENVIRONMENT"
-              set -- \
-                  .coverage.py311-shard-1 \
-                  .coverage.py311-shard-2 \
-                  .coverage.py311-shard-3 \
-                  .coverage.py311-shard-4 \
-                  .coverage.py311-shard-5 \
-                  .coverage.py311-shard-6 \
-                  .coverage.py311-shard-7 \
-                  .coverage.py311-shard-8 \
-                  .coverage.py311-shard-9 \
-                  .coverage.py311-shard-10 \
-                  .coverage.py311-shard-11 \
-                  .coverage.py311-shard-12 \
-                  .coverage.py311-shard-13 \
-                  .coverage.py311-shard-14 \
-                  .coverage.py311-shard-15 \
-                  .coverage.py311-shard-16 \
-                  .coverage.py311-shard-17
-              ;;
-          py314)
-              python_environment="$CI_PY314_ENVIRONMENT"
-              set -- \
-                  .coverage.py314-shard-1 \
-                  .coverage.py314-shard-2 \
-                  .coverage.py314-shard-3 \
-                  .coverage.py314-shard-4 \
-                  .coverage.py314-shard-5 \
-                  .coverage.py314-shard-6
-              ;;
-          *) printf 'Unknown test environment: %s\n' "$TEST_ENVIRONMENT" >&2; exit 2 ;;
-      esac
-      coverage_combine_status=0
-      UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage combine "$@" \
-          || coverage_combine_status=$?
-      if [ "$coverage_combine_status" -ne 0 ]; then
-          exit "$coverage_combine_status"
-      fi
-      coverage_status=0
-      UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage report --fail-under=85 \
-          || coverage_status=$?
-      coverage_xml_status=0
-      UV_PROJECT_ENVIRONMENT="$python_environment" \
-          uv run --no-sync env -u UV_PROJECT_ENVIRONMENT coverage xml -o "coverage-$TEST_ENVIRONMENT.xml" \
-          || coverage_xml_status=$?
-      if [ "$coverage_status" -ne 0 ]; then
-          exit "$coverage_status"
-      fi
-      exit "$coverage_xml_status"
-  artifacts:
-    reports:
+      junit: test-results-$TEST_ENVIRONMENT.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage-$TEST_ENVIRONMENT.xml
@@ -235,7 +157,6 @@ ruff-format:
 
 pytest-py311:
   extends: .pytest
-  parallel: 17
   needs:
     - job: ci-image:pytest-py311
       artifacts: false
@@ -246,7 +167,6 @@ pytest-py311:
 
 pytest-py314:
   extends: .pytest
-  parallel: 6
   needs:
     - job: ci-image:pytest-py314
       artifacts: false
@@ -254,30 +174,6 @@ pytest-py314:
     name: $CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID
   variables:
     TEST_ENVIRONMENT: py314
-
-coverage-py311:
-  extends: .pytest_coverage
-  needs:
-    - job: ci-image:pytest-py311
-      artifacts: false
-    - job: pytest-py311
-      artifacts: true
-  variables:
-    TEST_ENVIRONMENT: py311
-  image:
-    name: $CI_REGISTRY_IMAGE/validation-pytest-py311:$CI_COMMIT_SHA-$CI_PIPELINE_ID
-
-coverage-py314:
-  extends: .pytest_coverage
-  needs:
-    - job: ci-image:pytest-py314
-      artifacts: false
-    - job: pytest-py314
-      artifacts: true
-  variables:
-    TEST_ENVIRONMENT: py314
-  image:
-    name: $CI_REGISTRY_IMAGE/validation-pytest-py314:$CI_COMMIT_SHA-$CI_PIPELINE_ID
 
 yamllint:
   extends: .base_uv

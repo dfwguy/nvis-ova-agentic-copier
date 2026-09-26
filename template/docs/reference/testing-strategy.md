@@ -33,7 +33,7 @@ known long-running cases.
 | --- | --- |
 | Focused tests | Run the relevant behavior tests while developing a change. Keep setup small enough that one failure can be diagnosed quickly. |
 | Full supported matrix | Run the complete pytest suite on Python 3.11 and 3.14 through tox and the validation hooks. The Judge's JUnit files provide case counts and durations for each environment. |
-| CI | Run the supported matrix in native pytest shards and the other validation jobs. Shards distribute work but do not shorten an individual test or fixture. |
+| CI | Run the full pytest suite once per supported Python version, alongside the other validation jobs. Each run publishes its own test and coverage reports. |
 
 The local goal is **100 ms or less** per test case in each supported Python
 environment. Exactly 100 ms meets the goal. Use the JUnit `testcase` `time`,
