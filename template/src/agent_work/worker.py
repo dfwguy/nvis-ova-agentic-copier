@@ -404,6 +404,12 @@ class CandidateBrokerSession:
             except OSError:
                 return
             with connection:
+                action: str | None = None
+                selector: object = None
+                supplied_tree: object = None
+                request_ordinal = self._requests + 1
+                selector_state = False
+                request_limit_reached = False
                 try:
                     payload = _read_frame(
                         connection, deadline=self._deadline, clock=self._clock
@@ -414,6 +420,11 @@ class CandidateBrokerSession:
                             "candidate_broker", "request byte budget exceeded"
                         )
                     message = json.loads(payload)
+                    if isinstance(message, dict):
+                        raw_action = message.get("action")
+                        action = raw_action if isinstance(raw_action, str) else None
+                        selector = message.get("selector")
+                        supplied_tree = message.get("candidate_tree")
                     if not isinstance(message, dict) or {
                         key: value
                         for key, value in message.items()
@@ -425,9 +436,6 @@ class CandidateBrokerSession:
                         raise WorkerProtocolError(
                             "candidate_broker", "request identity mismatch"
                         )
-                    action = message.get("action")
-                    supplied_tree = message.get("candidate_tree")
-                    selector = message.get("selector")
                     if (
                         action not in {"stage", "read", "validate", "status"}
                         or (action != "read" and selector is not None)
@@ -445,6 +453,7 @@ class CandidateBrokerSession:
                         )
                     self._requests += 1
                     if self._requests > 512:
+                        request_limit_reached = True
                         raise WorkerProtocolError(
                             "candidate_broker", "request is not permitted"
                         )
@@ -466,11 +475,15 @@ class CandidateBrokerSession:
                             )
                         selection = cast(dict[str, object], selector)
                         mode_value = selection.get("mode")
-                        if mode_value not in {"manifest", "chunk", "complete"}:
+                        if not isinstance(mode_value, str) or mode_value not in {
+                            "manifest",
+                            "chunk",
+                            "complete",
+                        }:
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate request is invalid"
                             )
-                        mode = cast(str, mode_value)
+                        mode = mode_value
                         if mode in {"manifest", "complete"} and set(selection) != {
                             "mode"
                         }:
@@ -478,6 +491,7 @@ class CandidateBrokerSession:
                                 "candidate_broker", "candidate request is invalid"
                             )
                         if mode == "manifest" and self._manifest is not None:
+                            selector_state = True
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate request is invalid"
                             )
@@ -492,6 +506,7 @@ class CandidateBrokerSession:
                                 for key, (_, digest) in self._manifest.items()
                             )
                         ):
+                            selector_state = True
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate request is invalid"
                             )
@@ -512,23 +527,30 @@ class CandidateBrokerSession:
                             length = selection.get("length")
                             if (
                                 not isinstance(path, str)
+                                or not isinstance(side, str)
                                 or side not in {"old", "new"}
                                 or not isinstance(offset, int)
                                 or isinstance(offset, bool)
+                                or offset < 0
                                 or not isinstance(length, int)
                                 or isinstance(length, bool)
                                 or not 0 < length <= GIT_READ_MAX_CHUNK_BYTES
-                                or self._manifest is None
                             ):
                                 raise WorkerProtocolError(
                                     "candidate_broker", "candidate request is invalid"
                                 )
-                            chunk_key = (path, cast(str, side))
+                            if self._manifest is None:
+                                selector_state = True
+                                raise WorkerProtocolError(
+                                    "candidate_broker", "candidate request is invalid"
+                                )
+                            chunk_key = (path, side)
                             if (
                                 chunk_key not in self._manifest
                                 or offset != self._next_offset[chunk_key]
                                 or offset + length > self._manifest[chunk_key][0]
                             ):
+                                selector_state = True
                                 raise WorkerProtocolError(
                                     "candidate_broker", "candidate request is invalid"
                                 )
@@ -697,6 +719,15 @@ class CandidateBrokerSession:
                         failure = WorkerProtocolError(
                             "candidate_broker", "malformed request"
                         )
+                    failure = _candidate_rejection_with_context(
+                        failure,
+                        action=action,
+                        selector=selector,
+                        supplied_tree=supplied_tree,
+                        request_ordinal=request_ordinal,
+                        selector_state=selector_state,
+                        request_limit_reached=request_limit_reached,
+                    )
                     if failure.reason in {
                         "request identity mismatch",
                         "request is not permitted",
@@ -708,7 +739,10 @@ class CandidateBrokerSession:
                         "malformed candidate read",
                         "candidate read response is oversize",
                         "response byte budget exceeded",
-                    }:
+                    } or (
+                        failure.field == "candidate_broker"
+                        and " [reason=" in failure.reason
+                    ):
                         self._failure = failure
                     if failure.field == "worker_result_broker":
                         self._failure = WorkerProtocolError(
@@ -1393,6 +1427,102 @@ def _safe_validation_path(model: type[BaseModel], location: tuple[object, ...]) 
     return _schema_path(model, location)[0]
 
 
+def _candidate_selector_mode(selector: object) -> str | None:
+    """Return a fixed mode only for a structurally valid selector."""
+    if selector is None:
+        return "none"
+    if not isinstance(selector, dict):
+        return None
+    selection = cast(dict[str, object], selector)
+    mode = selection.get("mode")
+    if isinstance(mode, str) and mode in {"manifest", "complete"}:
+        return mode if set(selection) == {"mode"} else None
+    if mode != "chunk" or set(selection) != {
+        "mode",
+        "path",
+        "side",
+        "offset",
+        "length",
+    }:
+        return None
+    offset = selection["offset"]
+    length = selection["length"]
+    if (
+        not isinstance(selection["path"], str)
+        or not isinstance(selection["side"], str)
+        or selection["side"] not in {"old", "new"}
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(length, int)
+        or isinstance(length, bool)
+        or not 0 < length <= GIT_READ_MAX_CHUNK_BYTES
+    ):
+        return None
+    return "chunk"
+
+
+def _candidate_rejection_code(
+    reason: str, *, selector_state: bool, request_limit_reached: bool = False
+) -> str:
+    """Map known failure families to fixed context codes."""
+    if reason == "candidate request is invalid":
+        return "invalid_selector_state" if selector_state else "invalid_request"
+    if reason == "request is not permitted":
+        return "request_limit" if request_limit_reached else "candidate_rejected"
+    return {
+        "request identity mismatch": "identity_mismatch",
+        "request timed out": "timeout",
+        "request byte budget exceeded": "request_byte_budget",
+        "candidate identity changed": "candidate_drift",
+        "invalid candidate identity": "invalid_candidate_identity",
+        "malformed candidate read": "invalid_read_response",
+        "candidate read response is oversize": "read_response_oversize",
+        "response byte budget exceeded": "response_byte_budget",
+    }.get(reason, "candidate_rejected")
+
+
+def _candidate_rejection_with_context(
+    failure: WorkerProtocolError,
+    *,
+    action: object,
+    selector: object,
+    supplied_tree: object,
+    request_ordinal: int,
+    selector_state: bool,
+    request_limit_reached: bool,
+) -> WorkerProtocolError:
+    """Attach bounded request shape to a parsed candidate rejection."""
+    if failure.field == "candidate_broker" and (
+        " [reason=" in failure.reason
+        or not is_safe_worker_result_diagnostic(str(failure))
+    ):
+        return WorkerProtocolError("candidate_broker", "malformed request")
+    if (
+        failure.field != "candidate_broker"
+        or not isinstance(action, str)
+        or action not in {"stage", "read", "validate", "status"}
+        or failure.reason == "malformed request"
+        or (action == "stage" and supplied_tree is not None)
+        or (action != "stage" and not isinstance(supplied_tree, str))
+    ):
+        return failure
+    mode = _candidate_selector_mode(selector)
+    if mode is None or (action != "read" and mode != "none"):
+        return failure
+    count = str(request_ordinal) if request_ordinal <= 513 else "513+"
+    code = _candidate_rejection_code(
+        failure.reason,
+        selector_state=selector_state,
+        request_limit_reached=request_limit_reached,
+    )
+    return WorkerProtocolError(
+        "candidate_broker",
+        f"{failure.reason} [reason={code} action={action} "
+        f"selector={mode} request={count}]",
+    )
+
+
 def is_safe_worker_result_diagnostic(value: str) -> bool:
     """Recognize only diagnostics the worker's canonical translator can emit."""
     if value in {
@@ -1409,6 +1539,37 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
     ):
         return False
     origin, dot, path = field.partition(".")
+    if origin == "candidate_broker" and not dot and " [reason=" in reason:
+        base, _, suffix = reason.rpartition(" [reason=")
+        context = re.fullmatch(
+            r"([a-z_]+) action=(stage|read|validate|status) "
+            r"selector=(none|manifest|chunk|complete) "
+            r"request=([1-9][0-9]{0,2}|513\+)\]",
+            suffix,
+        )
+        if context is None or not is_safe_worker_result_diagnostic(
+            f"candidate_broker: {base}"
+        ):
+            return False
+        code, action, mode, ordinal = context.groups()
+        if mode != "none" and action != "read":
+            return False
+        if ordinal != "513+" and int(ordinal) > 513:
+            return False
+        if code == "request_limit":
+            return base == "request is not permitted" and ordinal in {"513", "513+"}
+        if code == "invalid_selector_state":
+            return (
+                base == "candidate request is invalid"
+                and mode in {"manifest", "chunk", "complete"}
+                and ordinal != "513+"
+                and int(ordinal) <= 512
+            )
+        if code not in {"invalid_request", "identity_mismatch"} and (
+            ordinal == "513+" or int(ordinal) > 512
+        ):
+            return False
+        return code == _candidate_rejection_code(base, selector_state=False)
     if origin in {"builder_input", "final_envelope"}:
         model = (
             WorkerResultBuildInput
