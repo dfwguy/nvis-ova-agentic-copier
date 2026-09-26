@@ -131,6 +131,67 @@ Pytest's duration report can show setup, call, and teardown as separate
 phases. The current JUnit `testcase` time combines them. Keep the combined
 time for the review trigger and use phase evidence to diagnose a slow case.
 
+### Local timing observation on 2026-09-26
+
+The full-suite runs below used committed baseline
+`75cfe541b2c671cb4b32cb11a9773cdfbbbda5b7` (Git tree
+`9a60ecaf6ac175a1fd5a665373d91400946d18cc`) between 02:30 and
+02:35 UTC. Unstaged documentation edits were present during measurement;
+host load was not quantified, although no other issue checkout was known to
+be running full tox. The commands were
+`PYTEST_ADDOPTS='--randomly-seed=262' uv run tox -e py311` and the same
+command with `py314`, but tox did not pass that value to isolated pytest.
+Pytest reported seed `895328052` for Python 3.11 and `1546474014` for
+Python 3.14. Both ran on the prepared tox environments. All 2,787
+cases passed in each environment, with no failures or errors. This is one
+local full-suite observation, not a stable baseline. An earlier Python 3.11
+run overlapped other host tests and is excluded from this inventory.
+
+| Python | Full JUnit SHA-256 | Cases above 100 ms | Cases at or above 1 s |
+| --- | --- | ---: | ---: |
+| 3.11 | `5dde105e59f274006a8a256b4b17bffeaf7feb3fadbfbe84743b9f74e4626bfa` | 114 | 7 |
+| 3.14 | `54fbfc3d3b8c085ed288ef31e1ca4e252e68ecb67da807a0c637fe42fee47e85` | 110 | 6 |
+
+Every case at or above 1 second in those full JUnit files appears below.
+No test case was changed by this documentation-only work, so the changed-case
+100 ms rule selected no additional cases. The two focused repeats used all
+listed node IDs in each environment and the same prepared interpreter. Both
+used explicit seed 262, `--no-cov`, and `--durations=0`; the full tox runs
+used the seeds reported above. Focused times diagnose phases; they do not
+replace the full JUnit inventory. The focused JUnit SHA-256 digests were
+`a8a9715999f5973e7a65d5611f3c32a7f2a6074baa0c9faccf827e860e5abd50`
+and `7a20552c0b96353a8aacc078a789215340855d543bad7fa8541c21bb21ade47b`
+for Python 3.11, then
+`8d5e4d383ec80ad0e42c19da6723445a4bc2225b525e8a6e53757fd287fb4efb`
+and `f826cfcc14a6dc13cadd084500931c70d69b7818e146b9485f56e64e3d6c6462`
+for Python 3.14.
+
+| Python | Case (pytest node ID) | Full JUnit | Focused 1 / 2 | Phase finding | Owner and reduction or exception plan |
+| --- | --- | ---: | ---: | --- | --- |
+| 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: review the needed Copier integration work and reduce avoidable update cost. |
+| 3.11 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 1.979 s | 1.979 / 2.007 s | Setup is 1.59 / 1.62 s; call is about 0.39 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
+| 3.11 | `tests/test_agent_work_state_machine.py::test_decision_review_draft_bounds_the_fully_rendered_description` | 1.894 s | 0.404 / 0.394 s | Focused call is about 0.40 s. | Test maintainers: repeat under comparable full-suite load before assigning a regression. |
+| 3.11 | `tests/test_template.py::test_agent_loop_wrapper_fast_forwards_before_applied_worker` | 1.125 s | 0.544 / 0.528 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
+| 3.11 | `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/repository.py]` | 1.056 s | 0.643 / 0.649 s | Focused setup is 0.64 / 0.65 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
+| 3.11 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.013 s | 1.012 / 1.012 s | Call holds near 1.01 s. | Test maintainers: review the controlled wait and preserve its behavior while reducing cost if possible. |
+| 3.11 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s | 1.003 / 1.003 s | Call holds near 1.00 s. | Test maintainers: review the controlled wait and preserve its behavior while reducing cost if possible. |
+| 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: repeat under quiet conditions and inspect Copier update work before claiming a regression. |
+| 3.14 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 2.211 s | 1.999 / 1.979 s | Setup is 1.59 / 1.55 s; call is 0.41 / 0.43 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
+| 3.14 | `tests/test_template.py::test_readability_dependency_and_generated_ci_helper_are_rendered_portably` | 1.084 s | 0.680 / 0.686 s | Focused setup is about 0.68 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
+| 3.14 | `tests/test_template.py::test_agent_loop_wrapper_stops_on_refresh_command_failure[merge]` | 1.039 s | 0.484 / 0.560 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
+| 3.14 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.012 s | 1.012 / 1.013 s | Call holds near 1.01 s. | Test maintainers: review the controlled wait and preserve its behavior while reducing cost if possible. |
+| 3.14 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s | 1.003 / 1.003 s | Call holds near 1.00 s. | Test maintainers: review the controlled wait and preserve its behavior while reducing cost if possible. |
+
+The full-suite outliers that fell below 1 second in both focused repeats need
+more comparable runs before anyone calls them regressions. Issue
+[#255](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/255)
+records nested outer UV fixture work, issue
+[#260](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/260)
+records the fixture split, and issue
+[#263](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/263)
+will automate the repair loop and queue follow-up diagnosis. The [local timing method](../how-to/validate-template-changes.md#investigate-local-test-timing)
+explains how to collect the next observation.
+
 ## CI timing context
 
 This is **one CI observation** from merge request !314, pipeline
