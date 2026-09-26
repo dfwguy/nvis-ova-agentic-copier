@@ -134,6 +134,7 @@ class ErrorCode(StrEnum):
     RED_CHECKPOINT_FAILED = "red_checkpoint_failed"
     AGENT_CAPACITY_UNAVAILABLE = "agent_capacity_unavailable"
     GIT_TRANSPORT_RETRYABLE = "git_transport_retryable"
+    TIMING_ADMISSION_BUSY = "timing_admission_busy"
     GIT_AUTHENTICATION = "git_authentication"
     GIT_AUTHORIZATION = "git_authorization"
     GIT_POLICY = "git_policy"

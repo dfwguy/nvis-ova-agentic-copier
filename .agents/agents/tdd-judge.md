@@ -24,14 +24,23 @@ You review one exact tree. Do not edit files.
 1. For interactive work, record `git write-tree` for the staged files. For
    serial work, use the tree ID from the trusted stage step. Do not run
    `git add` or `git write-tree` in the worker.
-2. In interactive work, run one mutation-gated `agent-work validation run
-   --candidate-tree TREE --apply`. If its handle is lost, use read-only
-   `agent-work validation status --candidate-tree TREE --wait-seconds 30`.
-   For serial work, call the trusted validation and status boundary while
-   you are still active. Bind each call to the exact tree and checked worker
-   identity. Do not call the old validation CLI. In both modes, one saved
-   session runs the fixed hook. Its tree lock stops a second run. Do not run
-   the hook yourself.
+2. In interactive work, enter one project-scoped `agent-work validation window
+   --apply -- bash` before the full hook. From that child shell, run one
+   mutation-gated `agent-work validation run --candidate-tree TREE --apply`.
+   Keep the window open through any required paired baseline and candidate
+   focused timing measurements, then exit the shell to close it. If its
+   validation handle is lost, use read-only `agent-work validation status
+   --candidate-tree TREE --wait-seconds 30` while the window remains open.
+   On admission contention, defer validation and record the contention. Never
+   treat overlapping timing measurements as clean evidence. For serial work,
+   call the trusted validation and status boundary while you are still active.
+   The trusted controller holds the same project admission for the hook and
+   report within that validation call, including any paired timing measurements
+   made inside the call. It does not hold a window over later independent
+   measurements. Bind each call to the exact tree and checked worker identity.
+   Do not call the old validation CLI. In both
+   modes, one saved session runs the fixed hook. Its tree lock stops a second
+   run. Do not run the hook yourself.
    A pending, missing, or lost result is no pass. Use the right status step
    for the same tree. If that fails, return to Green. A nonzero exit goes to
    Green. Only exit zero lets you go on.
@@ -49,8 +58,9 @@ You review one exact tree. Do not edit files.
    `py311` and `py314` as the complete timing inventory. Obtain the read-only
    local timing comparator report for the exact baseline and candidate trees.
    Require artifact paths, SHA-256 digests, test counts, command, interpreter,
-   and seed for at least two focused runs on each tree in every environment
-   where timing impact needs attribution. Each focused run needs JUnit and
+   and seed for equal baseline and candidate focused run counts, with at least
+   two per tree in every environment where timing impact needs attribution.
+   Each focused run needs JUnit and
    setup, call, and teardown phase logs. Keep the full-hook JUnit unchanged;
    focused runs are evidence for comparison, not a replacement validation
    suite. Missing, mismatched, or partial proof returns to the evidence owner

@@ -44,6 +44,12 @@ from .template_update import (
     TemplateUpdateState,
     TemplateUpdateWorktree,
 )
+from .timing_admission import (
+    TimingAdmissionBusy,
+    TimingAdmissionLease,
+    project_timing_admission,
+    run_supervised_command,
+)
 from .validation import (
     FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
@@ -337,6 +343,10 @@ def publish_ready_template_update(
                 iid,
                 getattr(merge_request, "web_url", None),
             )
+    except TimingAdmissionBusy:
+        return TemplateUpdatePublicationReport(
+            "deferred", "ready", "retry after the project timing window clears"
+        )
     except (
         OSError,
         RuntimeError,
@@ -370,6 +380,9 @@ class _DefaultDependencies:
     service_environment: Mapping[str, str]
     run_command: CommandRunner
     run_process: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run
+    run_supervised_hook: Callable[..., subprocess.CompletedProcess[str]] = (
+        run_supervised_command
+    )
 
     def project(self) -> TemplateUpdateProject:
         """Return the already verified numeric project and target."""
@@ -553,29 +566,36 @@ class _DefaultDependencies:
 
         def run_hook(
             command: tuple[str, ...],
-            *,
-            stdin: str | None = None,
-            timeout_seconds: float | None = None,
-            environment: Mapping[str, str] | None = None,
-            current_directory: Path | None = None,
+            lease: TimingAdmissionLease | None,
         ) -> CommandResult:
             if command != ("git", "hook", "run", "pre-commit"):
                 raise RuntimeError("unexpected template update validation command")
-            result = self.run_process(
-                (
-                    str(self.config.git_path),
-                    "-C",
-                    str(path),
-                    "hook",
-                    "run",
-                    "pre-commit",
-                ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=safe_environment,
-                check=False,
-                timeout=11_400,
+            actual = (
+                str(self.config.git_path),
+                "-C",
+                str(path),
+                "hook",
+                "run",
+                "pre-commit",
             )
+            if lease is None:
+                result = self.run_process(
+                    actual,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=safe_environment,
+                    check=False,
+                    timeout=11_400,
+                )
+            else:
+                result = self.run_supervised_hook(
+                    actual,
+                    lease=lease,
+                    environment=safe_environment,
+                    current_directory=path,
+                    timeout_seconds=11_400,
+                    capture_output=False,
+                )
             return CommandResult(result.returncode, "", "")
 
         dependencies = JudgeValidationDependencies(
@@ -585,7 +605,16 @@ class _DefaultDependencies:
             candidate_lock=lambda candidate: XdgProjectLock(
                 state / f"{candidate}.lock"
             ),
-            run_command=run_hook,
+            project_admission=lambda: project_timing_admission(
+                host=self.config.host,
+                project_id=self.config.project_id,
+                environment=self.service_environment,
+                wait_seconds=30.0,
+                monotonic_clock=time.monotonic,
+                sleeper=time.sleep,
+            ),
+            run_command=self.run_command,
+            run_hook=run_hook,
             monotonic_clock=time.monotonic,
             sleeper=time.sleep,
             read_artifact=lambda artifact: self._read_junit(path / artifact),

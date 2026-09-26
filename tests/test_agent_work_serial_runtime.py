@@ -2427,6 +2427,208 @@ def test_coding_publication_requires_controller_validated_candidate(
     assert persisted.state is not RunnerState.PUBLISHING
 
 
+@pytest.mark.parametrize("initial_state", (RunnerState.EXECUTING, RunnerState.REPAIR))
+def test_project_timing_contention_requeues_without_spending_retry_budget(
+    tmp_path: Path,
+    initial_state: RunnerState,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=initial_state,
+            phase=WorkflowPhase.WORKFLOW,
+            repair_attempt=(
+                RepairAttemptEvidence(fingerprint="a" * 64, started_at=NOW.isoformat())
+                if initial_state is RunnerState.REPAIR
+                else None
+            ),
+        )
+    )
+
+    class DeferredRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": "deferred"}
+
+    class DeferredInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            tree = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(tree, str)
+            assert candidate_action("validate", tree)["state"] == "deferred"
+            return WorkerInvocation(1, "", "timing admission busy")
+
+    repository = DeferredRepository(config)
+    repository.paths = ("src/example.py",)
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+    for attempt in range(2):
+        attempt_started = NOW + timedelta(minutes=attempt * 2)
+        completed_at = attempt_started + timedelta(seconds=31)
+        result = run_segment(
+            ledger=ledger,
+            gitlab=FakeGitLab(),
+            repository=repository,
+            invoke=DeferredInvoker(),
+            timeout_seconds=10,
+            now=attempt_started,
+            clock=lambda completed_at=completed_at: completed_at,
+            load_red_checkpoint=lambda *_args: checkpoint,
+        )
+        assert result is not None
+        assert result.state is RunnerState.RETRY_WAIT
+        assert result.error_code is ErrorCode.TIMING_ADMISSION_BUSY
+        assert result.retry_count == 0
+        assert result.retry_at == completed_at + timedelta(seconds=30)
+        assert result.worktree == record.worktree
+        if initial_state is RunnerState.REPAIR:
+            assert result.repair_attempt == record.repair_attempt
+
+
+@pytest.mark.parametrize(
+    ("states", "expected_code"),
+    [
+        (("terminal-success", "deferred"), ErrorCode.TIMING_ADMISSION_BUSY),
+        (("deferred", "terminal-success"), ErrorCode.WORKER_EXIT),
+    ],
+)
+def test_latest_exact_tree_validation_controls_timing_deferral(
+    tmp_path: Path, states: tuple[str, str], expected_code: ErrorCode
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class SequencedRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": observed.pop(0)}
+
+    class SequencedInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            tree = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(tree, str)
+            for expected in states:
+                assert candidate_action("validate", tree)["state"] == expected
+            return WorkerInvocation(1, "", "worker stopped")
+
+    observed = list(states)
+    repository = SequencedRepository(config)
+    repository.paths = ("src/example.py",)
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=SequencedInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
+    )
+    assert result is not None
+    assert result.error_code is expected_code
+
+
+def test_staging_new_tree_discards_prior_timing_deferral(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class DeferredRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": "deferred"}
+
+    class RestagingInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            first = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(first, str)
+            assert candidate_action("validate", first)["state"] == "deferred"
+            repository.candidate_tree = "c" * 40
+            second = candidate_action("stage", None)["candidate_tree"]
+            assert second == repository.candidate_tree
+            return WorkerInvocation(1, "", "worker stopped after restaging")
+
+    repository = DeferredRepository(config)
+    repository.paths = ("src/example.py",)
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=RestagingInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
+    )
+
+    assert result is not None
+    assert result.error_code is ErrorCode.WORKER_EXIT
+    assert result.retry_count == 1
+
+
 @pytest.mark.parametrize("lane", (WorkflowLane.CODING, WorkflowLane.UNKNOWN))
 def test_coding_candidate_read_requires_successful_validation(
     tmp_path: Path, lane: WorkflowLane

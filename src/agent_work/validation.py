@@ -26,7 +26,8 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .ports import CommandRunner
+from .ports import CommandResult, CommandRunner
+from .timing_admission import TimingAdmissionLease
 
 _TREE = re.compile(r"^[0-9a-f]{40}$")
 _NONNEGATIVE_INTEGER = re.compile(r"^[0-9]+$")
@@ -464,6 +465,10 @@ class JudgeValidationDependencies:
     run_command: CommandRunner
     monotonic_clock: Callable[[], float]
     sleeper: Callable[[float], None]
+    run_hook: (
+        Callable[[tuple[str, ...], TimingAdmissionLease | None], CommandResult] | None
+    ) = None
+    project_admission: Callable[[], AbstractContextManager[object]] = nullcontext
     read_artifact: Callable[[Path], bytes | None] = lambda _path: None
     remove_junit_artifact: Callable[[Path], None] = lambda _path: None
     capture_junit_artifacts: Callable[
@@ -1053,7 +1058,10 @@ def run_judge_validation(
         )
     if dependencies.current_staged_tree() != candidate_tree:
         raise JudgeValidationError("candidate tree is not the current staged tree")
-    with dependencies.candidate_lock(candidate_tree):
+    with (
+        dependencies.project_admission() as lease,
+        dependencies.candidate_lock(candidate_tree),
+    ):
         record = _record(candidate_tree, dependencies.read_record(candidate_tree))
         if record is not None:
             return _report(
@@ -1083,7 +1091,15 @@ def run_judge_validation(
                 dependencies,
             )
         started = dependencies.monotonic_clock()
-        result = dependencies.run_command(("git", "hook", "run", "pre-commit"))
+        hook_command = ("git", "hook", "run", "pre-commit")
+        result = (
+            dependencies.run_command(hook_command)
+            if dependencies.run_hook is None
+            else dependencies.run_hook(
+                hook_command,
+                lease if isinstance(lease, TimingAdmissionLease) else None,
+            )
+        )
         elapsed = round(
             min(10_800.0, max(0.0, dependencies.monotonic_clock() - started)), 3
         )
@@ -1326,7 +1342,10 @@ def retry_judge_validation(
         return JudgeValidationReport(
             candidate_tree, False, "retry_preview", "preview", False, None, None
         )
-    with dependencies.candidate_lock(candidate_tree):
+    with (
+        dependencies.project_admission() as lease,
+        dependencies.candidate_lock(candidate_tree),
+    ):
         current = dependencies.read_record(candidate_tree)
         if current != original_raw:
             raise JudgeValidationError(
@@ -1365,6 +1384,7 @@ def retry_judge_validation(
             read_record=read_retry,
             atomic_write_record=write_retry,
             candidate_lock=lambda _tree: nullcontext(),
+            project_admission=lambda: nullcontext(lease),
         )
         result = run_judge_validation(
             candidate_tree=candidate_tree, apply=True, dependencies=retry_dependencies

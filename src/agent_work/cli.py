@@ -27,7 +27,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -71,6 +71,7 @@ from .models import (
     MergeRequestEvidence,
     WorkerResultEnvelope,
 )
+from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointEvidence,
@@ -112,6 +113,14 @@ from .template_comparison import (
     compare_template_revisions as default_compare_template_revisions,
 )
 from .timing import summarize_phase_timings
+from .timing_admission import (
+    TimingAdmissionBusy,
+    TimingAdmissionLease,
+    project_timing_admission,
+    run_project_timing_window,
+    run_subprocess_child,
+    run_supervised_command,
+)
 from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
 from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
 from .upstream_gitlab import (
@@ -147,6 +156,17 @@ def _package_checkout_root() -> Path:
 def _account_home() -> Path:
     """Return the operating-system home for this effective user."""
     return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+
+
+def _validation_project_identity(environment: Mapping[str, str]) -> tuple[str, int]:
+    """Require an explicit numeric project for applied timing work."""
+    host = environment.get("GITLAB_HOST", "")
+    project_text = environment.get("GITLAB_PROJECT_ID", "")
+    if not host or "://" in host or "/" in host:
+        raise JudgeValidationError("GITLAB_HOST must be a bare hostname")
+    if not project_text.isdigit() or int(project_text) <= 0:
+        raise JudgeValidationError("GITLAB_PROJECT_ID must be numeric")
+    return host, int(project_text)
 
 
 class _PreviewUpstream(Protocol):
@@ -1011,6 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
         "validation", help="run, retry, or observe one durable Judge validation"
     )
     validation_actions = validation.add_subparsers(dest="action", required=True)
+    validation_window = validation_actions.add_parser(
+        "window", help="hold project timing admission while a child runs"
+    )
+    _common(validation_window, apply_help="run the child inside the timing window")
+    validation_window.add_argument("command", nargs=argparse.REMAINDER)
     validation_run = validation_actions.add_parser(
         "run", help="preview or apply one exact candidate validation"
     )
@@ -1777,9 +1802,15 @@ def main(
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
     validation_retry: _ValidationRetryAction | None = None,
+    run_validation_window: Callable[[tuple[str, ...], bool], int] | None = None,
+    run_validation_hook: (
+        Callable[[tuple[str, ...], TimingAdmissionLease | None], CommandResultProtocol]
+        | None
+    ) = None,
     read_validation_artifact: Callable[[Path], bytes | None] = (
         _read_validation_artifact
     ),
+    remove_validation_artifact: Callable[[Path], None] = _remove_validation_artifact,
     registry_cleanup_action: _RegistryCleanupAction | None = None,
     slow_root_reconcile_action: Callable[..., SlowRootReport] | None = None,
     slow_root_manifest_reader: Callable[[Path], bytes] | None = None,
@@ -2174,6 +2205,53 @@ def main(
         return assessment.exit_code
     if parsed.resource == "validation":
         try:
+            if parsed.action == "window":
+                command = tuple(parsed.command)
+                if command and command[0] == "--":
+                    command = command[1:]
+                if not command:
+                    build_parser().error("validation window requires a child command")
+                if not parsed.apply:
+                    write_stdout(
+                        json.dumps(
+                            {
+                                "action": "window",
+                                "applied": False,
+                                "command": list(command),
+                            }
+                        )
+                        if parsed.json
+                        else "[dry-run] project timing window preview"
+                    )
+                    return 0
+                if run_validation_window is not None:
+                    exit_code = run_validation_window(command, True)
+                else:
+                    host, project_id = _validation_project_identity(environment)
+                    exit_code = run_project_timing_window(
+                        command=command,
+                        run_child=partial(
+                            run_subprocess_child, json_output=parsed.json
+                        ),
+                        host=host,
+                        project_id=project_id,
+                        environment=environment,
+                        wait_seconds=30.0,
+                        monotonic_clock=time.monotonic,
+                        sleeper=sleeper,
+                    )
+                if parsed.json:
+                    write_stdout(
+                        json.dumps(
+                            {
+                                "action": "window",
+                                "applied": True,
+                                "exit_code": exit_code,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                return 0 if exit_code == 0 else 1
             if (
                 (parsed.action == "run" and validation_run is None)
                 or (parsed.action == "status" and validation_status is None)
@@ -2240,16 +2318,51 @@ def main(
                         yield
 
                 snapshot_store = FilesystemJUnitSnapshotStore(root=state_root)
+                project_identity = (
+                    _validation_project_identity(environment)
+                    if parsed.action in {"run", "retry"} and parsed.apply
+                    else None
+                )
+
+                def project_admission() -> AbstractContextManager[object]:
+                    if project_identity is None:
+                        return nullcontext()
+                    host, project_id = project_identity
+                    return project_timing_admission(
+                        host=host,
+                        project_id=project_id,
+                        environment=environment,
+                        wait_seconds=30.0,
+                        monotonic_clock=time.monotonic,
+                        sleeper=sleeper,
+                    )
+
+                def validation_hook(
+                    command: tuple[str, ...], lease: TimingAdmissionLease | None
+                ) -> CommandResultProtocol:
+                    if run_validation_hook is not None:
+                        return run_validation_hook(command, lease)
+                    if lease is None:
+                        return run_command(command)
+                    result = run_supervised_command(
+                        command, lease=lease, environment=environment
+                    )
+                    return CommandResult(
+                        result.returncode, result.stdout, result.stderr
+                    )
+
                 validation_dependencies = JudgeValidationDependencies(
                     current_staged_tree=lambda: git_read(("git", "write-tree")),
                     read_record=read_record,
                     atomic_write_record=write_record,
                     candidate_lock=candidate_lock,
+                    project_admission=project_admission,
                     run_command=run_command,
+                    run_hook=validation_hook,
                     monotonic_clock=time.monotonic,
                     sleeper=time.sleep,
                     read_artifact=read_validation_artifact,
-                    remove_junit_artifact=_remove_validation_artifact,
+                    remove_junit_artifact=remove_validation_artifact,
                     capture_junit_artifacts=lambda tree, artifacts: (
                         snapshot_store.capture(candidate_tree=tree, artifacts=artifacts)
                     ),
@@ -2286,6 +2399,33 @@ def main(
                     candidate_tree=parsed.candidate_tree,
                     apply=getattr(parsed, "apply", False),
                 )
+        except TimingAdmissionBusy:
+            if parsed.action == "window" and parsed.json and parsed.apply:
+                write_stdout(
+                    json.dumps(
+                        {
+                            "action": "window",
+                            "applied": True,
+                            "state": "deferred",
+                            "reason": "project_timing_admission_busy",
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+            elif parsed.action in {"run", "retry"} and parsed.json and parsed.apply:
+                write_stdout(
+                    json.dumps(
+                        {
+                            "candidate_tree": parsed.candidate_tree,
+                            "state": "deferred",
+                            "reason": "project_timing_admission_busy",
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                write_stderr("project timing admission busy")
+            return 1
         except (JudgeValidationError, OSError, RuntimeError, ValueError) as error:
             write_stderr(str(error))
             return 1

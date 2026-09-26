@@ -404,6 +404,47 @@ def test_trusted_candidate_judge_response_strips_state_paths(
         assert observed["junit_timings"] == report["junit_timings"]
 
 
+def test_judge_candidate_returns_bounded_deferred_admission(tmp_path: Path) -> None:
+    tree = "b" * 40
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        return CommandResult(
+            1,
+            json.dumps(
+                {
+                    "candidate_tree": tree,
+                    "state": "deferred",
+                    "reason": "project_timing_admission_busy",
+                }
+            ),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            return ("src/example.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            return tree
+
+    report = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path / "worktree",
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("src/example.py",),
+        action="validate",
+        timeout_seconds=30,
+    )
+    assert report == {"candidate_tree": tree, "state": "deferred"}
+
+
 @pytest.mark.parametrize(
     "case",
     [

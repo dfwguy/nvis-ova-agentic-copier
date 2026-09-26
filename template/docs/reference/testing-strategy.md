@@ -50,8 +50,8 @@ corroborated slowdown attributable to the changed test, fixture, or code.
 Include identifiable cases affected by a changed shared fixture or helper.
 If the impact map is unclear, resolve it before approval. An inherited case
 above 100 ms remains visible, but unchanged or faster cost alone does not
-reject the change. Compare at least two focused runs on each exact baseline
-and candidate tree in the same environment. A regression claim needs
+reject the change. Compare at least two focused runs per tree, with equal
+baseline and candidate run counts in each environment. A regression claim needs
 consistent candidate slowdown, setup, call, or teardown evidence, comparable
 environments, and a supporting diff. One run or a comparator review flag
 alone does not establish a code-caused regression. Missing, mismatched, or

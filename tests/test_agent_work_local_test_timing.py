@@ -212,6 +212,22 @@ def test_modified_existing_slow_case_that_improves_remains_visible_without_rejec
     assert _case(result, SLOW).changed is True
 
 
+def test_focused_candidate_case_missing_from_full_junit_is_inconclusive() -> None:
+    baseline = ({SLOW: (0.010, 0.240, 0.010), OTHER: (0.010, 0.180, 0.010)},) * 2
+    candidate = ({SLOW: (0.010, 0.170, 0.010), OTHER: (0.010, 0.080, 0.010)},) * 2
+    manifest, files = _bundle(
+        baseline=baseline,
+        candidate=candidate,
+        full_times={SLOW: 0.190},
+        changed=(),
+    )
+
+    result = _compare(manifest, files)
+
+    assert result.status == "inconclusive"
+    assert result.reasons and "full JUnit" in result.reasons[0]
+
+
 def test_new_case_above_100ms_requires_review_even_without_baseline_case() -> None:
     baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
     candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.140, 0.010)},) * 2
@@ -270,6 +286,21 @@ def test_noisy_repeats_are_inconclusive_instead_of_a_regression() -> None:
 
     assert result.status == "inconclusive"
     assert _case(result, SLOW).classification == "inconclusive"
+
+
+def test_unequal_repeat_counts_cannot_hide_a_mixed_direction() -> None:
+    baseline = ({SLOW: (0.010, 0.080, 0.010)},) * 2
+    candidate = (
+        {SLOW: (0.010, 0.280, 0.010)},
+        {SLOW: (0.010, 0.280, 0.010)},
+        {SLOW: (0.010, 0.030, 0.010)},
+    )
+    manifest, files = _bundle(baseline=baseline, candidate=candidate)
+
+    result = _compare(manifest, files)
+
+    assert result.status == "inconclusive"
+    assert result.reasons and "equal" in result.reasons[0]
 
 
 @pytest.mark.parametrize("missing_side", ["baseline_runs", "candidate_runs"])
@@ -347,8 +378,8 @@ def test_inventory_is_complete_for_both_supported_versions_and_preserves_paramet
 
 
 def test_full_inventory_can_exceed_focused_run_case_bound() -> None:
-    full_times = {
-        f"tests/test_scale.py::test_case_{index}": 0.101 for index in range(1025)
+    full_times = {SLOW: 0.190} | {
+        f"tests/test_scale.py::test_case_{index}": 0.101 for index in range(1024)
     }
     manifest, files = _bundle(full_times=full_times, other_full_times={SLOW: 0.190})
 
