@@ -592,7 +592,6 @@ After an ordinary interactive MR create or update, the publisher makes one
 bounded check of the pipeline for that MR's exact source SHA and its required
 jobs. A failed required job goes back for diagnosis and approved-scope repair.
 Pending or unverifiable evidence stays reported as such, with a retry point.
-Job duration is not a publication or review gate.
 
 ### Serial flow
 
