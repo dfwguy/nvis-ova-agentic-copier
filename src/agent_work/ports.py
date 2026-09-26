@@ -30,7 +30,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from .repository import LegacyPublicationCandidate
+    from .repository import LegacyPublicationCandidate, WorktreeStatus
     from .worker import WorkerInvocation, WorkerResultBrokerRequest
 
 
@@ -228,6 +228,8 @@ class RepositoryPort(Protocol):
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]: ...
 
+    def observe_worktree_status(self, worktree: Path) -> WorktreeStatus: ...
+
     def red_candidate_tree(
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str: ...
@@ -259,7 +261,7 @@ class RepositoryPort(Protocol):
     ) -> dict[str, object]: ...
 
     def observe_legacy_publication_candidate(
-        self, worktree: Path
+        self, worktree: Path, *, status: WorktreeStatus | None = None
     ) -> LegacyPublicationCandidate: ...
 
     def single_parent(self, worktree: Path, candidate_sha: str) -> str | None: ...

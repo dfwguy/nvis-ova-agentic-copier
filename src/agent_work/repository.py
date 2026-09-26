@@ -111,6 +111,15 @@ class LegacyPublicationCandidate:
     has_renames: bool
 
 
+@dataclass(frozen=True)
+class WorktreeStatus:
+    """One immutable porcelain observation for retained recovery."""
+
+    dirty: bool
+    changed_paths: tuple[str, ...]
+    porcelain: str
+
+
 def _publication_commit_diagnostic(failures: tuple[HookFailure, ...]) -> str:
     """Render bounded allowlisted evidence from installed pre-commit output."""
     details = "; ".join(
@@ -791,6 +800,18 @@ class GitRepository:
 
     def changed_paths(self, worktree: Path) -> tuple[str, ...]:
         """Return paths changed relative to the index, including untracked paths."""
+        return self._worktree_status(
+            worktree, error_message="could not inspect changed paths"
+        ).changed_paths
+
+    def observe_worktree_status(self, worktree: Path) -> WorktreeStatus:
+        """Observe dirty state and paths from one bounded NUL-safe Git status."""
+        return self._worktree_status(
+            worktree, error_message="could not inspect worktree status"
+        )
+
+    def _worktree_status(self, worktree: Path, *, error_message: str) -> WorktreeStatus:
+        """Read and parse one bounded porcelain result for either public boundary."""
         result = self._bounded_command(
             (
                 str(self.config.git_path),
@@ -804,15 +825,23 @@ class GitRepository:
             timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
-            raise RepositoryError("could not inspect changed paths")
-        return parse_porcelain_paths(result.stdout)
+            raise RepositoryError(error_message)
+        return WorktreeStatus(
+            dirty=bool(result.stdout),
+            changed_paths=parse_porcelain_paths(result.stdout),
+            porcelain=result.stdout,
+        )
 
     def observe_legacy_publication_candidate(
-        self, worktree: Path
+        self, worktree: Path, *, status: WorktreeStatus | None = None
     ) -> LegacyPublicationCandidate:
         """Read the complete dirty candidate identity without changing Git state."""
-        status = self._git("status", "--porcelain=v1", "-z", cwd=worktree)
-        entries = status.split("\0")
+        porcelain = (
+            status.porcelain
+            if status is not None
+            else self._git("status", "--porcelain=v1", "-z", cwd=worktree)
+        )
+        entries = porcelain.split("\0")
         flags = [entry[:2] for entry in entries if entry]
         return LegacyPublicationCandidate(
             branch=self._git("branch", "--show-current", cwd=worktree),

@@ -171,6 +171,64 @@ def test_changed_paths_parses_raw_porcelain_without_losing_initial_characters(
     assert len(calls) == 1
 
 
+def test_worktree_status_observes_dirty_and_paths_from_one_porcelain_result(
+    tmp_path: Path,
+) -> None:
+    """One NUL-safe Git status result supplies both retained recovery facts."""
+    config = _config(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        assert command[3:] == ("status", "--porcelain=v1", "-z")
+        return CommandResult(
+            0,
+            " M README.md\0?? docs/with space.md\0R  new name.py\0old name.py\0",
+            "",
+        )
+
+    observed = GitRepository(config, run).observe_worktree_status(tmp_path / "worktree")
+
+    assert observed.dirty is True
+    assert observed.changed_paths == (
+        "README.md",
+        "docs/with space.md",
+        "new name.py",
+        "old name.py",
+    )
+    assert len(calls) == 1
+
+
+def test_legacy_candidate_reuses_recovery_status_porcelain(tmp_path: Path) -> None:
+    """Legacy identity reads reuse the status result already held by recovery."""
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        commands.append(arguments)
+        if arguments == ("status", "--porcelain=v1", "-z"):
+            return CommandResult(0, " M src/example.py\0", "")
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, "a" * 40, "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("diff", "--name-only", "-z"):
+            return CommandResult(0, "src/example.py\0", "")
+        if arguments[:2] == ("diff", "--cached"):
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    repository = GitRepository(_config(tmp_path), run)
+    worktree = tmp_path / "worktree"
+    status = repository.observe_worktree_status(worktree)
+    candidate = repository.observe_legacy_publication_candidate(worktree, status=status)
+
+    assert candidate.unstaged_paths == ("src/example.py",)
+    assert commands.count(("status", "--porcelain=v1", "-z")) == 1
+
+
 def test_stage_candidate_normalizes_observed_git_order(tmp_path: Path) -> None:
     """Controller staging accepts stable tracked/untracked porcelain groups."""
     base = "a" * 40
