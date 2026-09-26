@@ -177,6 +177,57 @@ costs are unmeasured.
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_portable_ci_keeps_one_shared_setup_job` | 3.11 | 1.101 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable work. |
 
+The issue #271 Judge snapshot for tree
+`b5329cf41ba1def31b1b02efaab6f75237daf672` has 2,866 cases in each
+supported environment. Its Python 3.11 and 3.14 JUnit SHA-256 digests are
+`896d5e4282546371119723d00c072a6c5aede004b620099b0b7fdc8b18c9c3e8`
+and `4fc89a84a30f26c5b189b557788d59ef2631bf71fd92ede3a72b22e6ff36a7ed`.
+The three new entries below are single observations from 2026-09-26. A
+concurrent issue #270 tox run confounded host load; neither a cause nor a
+regression is confirmed.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_portable_ci_is_mirrored_without_the_private_root_image` | 3.11 | 1.812 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+| `tests.test_agent_work_serial_runtime::test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing` | 3.11 | 1.032 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/state_machine.py]` | 3.14 | 1.541 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+
+The later issue #271 Judge snapshot for tree
+`b300459b5077160061f000691d20f07c8cd92ec3` recorded 2,875 Python
+3.11 cases. Its JUnit SHA-256 digest is
+`633e056ce0d6bab46dd79be8f12ce358b85eafc4b38a47551f883780f10fa739`.
+The case below is one observation from 2026-09-26. Its cause and phase costs
+are unconfirmed; this run does not establish shared-fixture attribution.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/serial.py]` | 3.11 | 1.306 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, body, and teardown under issue #263. |
+
+The issue #271 Judge snapshot for staged tree
+`686a80568b85139bca69be969766742eab83cbfd` has Python 3.11 JUnit
+SHA-256 `38985735a7c958b50bcc3f2e8f7310e9ea33e1f906974c9fc7d76b0d47fc539d`.
+The entry below is one observation from 2026-09-26; its cause and phase costs
+are unconfirmed, and it does not establish a regression.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_ci_trusts_only_the_exact_checkout_directory[root]` | 3.11 | 1.311 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, call, and teardown under issue #272. |
+
+The later issue #271 full-hook JUnit for tree
+`9321a35bf7f911f5edc7fee5ce6edb0596021101` has Python 3.11 and 3.14
+SHA-256 digests
+`7157ecc093a0468eda0548382aea75e2a27b3bb41da8b5a3a52a364a9525fc30`
+and `c5f35c0f025a03f84a0f956de83e5addc8bec03a9342091bc9f6045db772d732`.
+The quiet-repeat JUnit digests are
+`704d201220d79c2d6591681d1a0678d5e22d3d5502022313a4b4404f875334f7`
+and `fd4f228a0acccbeeda89a30e2a65bea5ec93268fc3297416c6ae83fa679754ea`,
+respectively. These are observations from 2026-09-26, not a regression claim.
+
+| Case | Python | Full-hook duration | Quiet repeat | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_ci_trusts_only_the_exact_checkout_directory[rendered]` | 3.11 | 1.452 s | 0.662 s | Issue #271 JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Measure setup, call, and teardown under issue #272. |
+| `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.14 | 1.172 s | 5.914 s | Issue #271 JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Measure setup, call, and teardown under issue #272. |
+
 Pytest's duration report can show setup, call, and teardown as separate
 phases. The current JUnit `testcase` time combines them. Keep the combined
 time for the review trigger and use phase evidence to diagnose a slow case.
