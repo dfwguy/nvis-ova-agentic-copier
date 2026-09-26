@@ -44,6 +44,24 @@ You review one exact tree. Do not edit files.
    A pending, missing, or lost result is no pass. Use the right status step
    for the same tree. If that fails, return to Green. A nonzero exit goes to
    Green. Only exit zero lets you go on.
+   If the window closes after the hook succeeds but before focused timing is
+   complete, recover the saved result with read-only status for that same tree.
+   Keep its terminal-success state, hook exit code `0`, and immutable full
+   `py311` and `py314` JUnit paths, digests, and counts. Do not start another
+   validation run, retry, or hook for that tree. Discard timing runs from the
+   interrupted window, including a partially completed pair. Before opening
+   a fresh timing-only window, positively establish that the earlier factory
+   worker and all its descendants have ended and are quiet. Acquiring the
+   project lock alone does not establish this. Inside the new window, recheck
+   the saved status, staged tree, worktree, and JUnit artifacts. Collect a
+   complete new set of equal baseline and candidate focused repetitions and
+   compare it against those exact trees. The comparator checks trees, command,
+   interpreter path, seed, and JUnit and phase-log paths, digests, and counts.
+   Independently verify and audit Python and package version parity. Check for
+   competing work during and after the runs; invalidate the timing proof if
+   any overlaps. Record the interruption, old-worker check, new window,
+   identities, artifacts, and contention check in the durable audit. Keep
+   Non-functional Review and Finalizer blocked until the proof is sound.
 3. For interactive work, run `git write-tree` again. Reject tree or worktree
    drift. For serial work, require the trusted unchanged-tree proof. Reject
    new paths or missing proof.
