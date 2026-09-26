@@ -337,6 +337,7 @@ class CandidateBrokerSession:
         *,
         request: WorkerResultBrokerRequest,
         timeout_seconds: int,
+        close_join_timeout_seconds: float,
         temporary_directory: Path | None,
         clock: Callable[[], float],
     ) -> None:
@@ -344,6 +345,7 @@ class CandidateBrokerSession:
         self._request = request
         self._clock = clock
         self._deadline = clock() + timeout_seconds
+        self._close_join_timeout_seconds = close_join_timeout_seconds
         self._stop = threading.Event()
         self._failure: WorkerProtocolError | None = None
         self._candidate: str | None = None
@@ -784,7 +786,7 @@ class CandidateBrokerSession:
         """Stop the channel and return only a successfully delivered identity."""
         self._stop.set()
         self._socket.close()
-        self._thread.join(timeout=1)
+        self._thread.join(timeout=self._close_join_timeout_seconds)
         if self._thread.is_alive():
             threading.Thread(target=self._finish_deferred_cleanup, daemon=False).start()
             raise WorkerProtocolError("candidate_broker", "cleanup failed")
@@ -805,6 +807,7 @@ def create_candidate_broker(
     *,
     request: WorkerResultBrokerRequest,
     timeout_seconds: int,
+    close_join_timeout_seconds: float = 1.0,
     temporary_directory: Path | None = None,
     clock: Callable[[], float] = monotonic,
 ) -> CandidateBrokerSession:
@@ -813,6 +816,7 @@ def create_candidate_broker(
         candidate_action,
         request=request,
         timeout_seconds=timeout_seconds,
+        close_join_timeout_seconds=close_join_timeout_seconds,
         temporary_directory=temporary_directory,
         clock=clock,
     )
@@ -902,12 +906,14 @@ class WorkerResultBrokerSession:
         *,
         build_artifact: Callable[[bytes], bytes],
         timeout_seconds: int,
+        close_join_timeout_seconds: float,
         temporary_directory: Path | None,
         clock: Callable[[], float],
         connection_accepted: Callable[[], None] | None = None,
     ) -> None:
         self.request, self._build_artifact, self._clock = request, build_artifact, clock
         self._deadline = clock() + timeout_seconds
+        self._close_join_timeout_seconds = close_join_timeout_seconds
         self._requests = 0
         self._artifact: bytes | None = None
         self._failure: WorkerProtocolError | None = None
@@ -1169,7 +1175,7 @@ class WorkerResultBrokerSession:
             except OSError:
                 pass
             connection.close()
-        self._thread.join(timeout=1)
+        self._thread.join(timeout=self._close_join_timeout_seconds)
         if self._thread.is_alive():
             self._root_fd = None
             self._cleanup_thread = threading.Thread(
@@ -1200,6 +1206,7 @@ def create_worker_result_broker(
     *,
     build_artifact: Callable[[bytes], bytes],
     timeout_seconds: int,
+    close_join_timeout_seconds: float = 1.0,
     temporary_directory: Path | None = None,
     clock: Callable[[], float] = monotonic,
     connection_accepted: Callable[[], None] | None = None,
@@ -1208,6 +1215,7 @@ def create_worker_result_broker(
         request,
         build_artifact=build_artifact,
         timeout_seconds=timeout_seconds,
+        close_join_timeout_seconds=close_join_timeout_seconds,
         temporary_directory=temporary_directory,
         clock=clock,
         connection_accepted=connection_accepted,

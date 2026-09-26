@@ -1221,6 +1221,7 @@ def test_candidate_broker_deferred_cleanup_waits_for_blocked_callback(
         action,
         request=_request(),
         timeout_seconds=10,
+        close_join_timeout_seconds=0.01,
         temporary_directory=candidate_scratch,
     )
     client = WorkerResultBrokerClientRequest(nonce=_request().nonce, issue_iid=81)
@@ -2723,6 +2724,7 @@ def test_broker_eventually_cleans_up_after_blocked_builder_returns(
         _request(),
         build_artifact=blocked_builder,
         timeout_seconds=30,
+        close_join_timeout_seconds=0.01,
         temporary_directory=tmp_path,
     )
     private_root = session.socket_path.parent
