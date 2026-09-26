@@ -1340,6 +1340,18 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         sha=published.source_sha,
         web_url="https://gitlab.example/pipelines/1",
     )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "retried": False,
+            "allow_failure": False,
+            "pipeline_id": 1,
+            "pipeline_sha": published.source_sha,
+        },
+    )
     assessed = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -1348,20 +1360,10 @@ def test_changed_feedback_reuses_recorded_mr_preserves_metadata_and_acknowledges
         timeout_seconds=30,
         now=NOW,
     )  # type: ignore[arg-type]
-    assert assessed is not None and assessed.state is RunnerState.EXECUTING
-    assert assessed.phase is WorkflowPhase.POST_PUBLICATION
-    final = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=SingleSessionInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-    assert final is not None and final.state is RunnerState.AWAITING_HUMAN
-    assert final.pending_feedback is None
-    assert final.feedback_cursor is not None
-    assert final.feedback_cursor.feedback_source_sha == published.source_sha
+    assert assessed is not None and assessed.state is RunnerState.AWAITING_HUMAN
+    assert assessed.pending_feedback is None
+    assert assessed.feedback_cursor is not None
+    assert assessed.feedback_cursor.feedback_source_sha == published.source_sha
     assert len(gitlab.feedback_outcomes) == 1
 
 
@@ -1767,6 +1769,18 @@ def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
     gitlab.pipeline = PipelineEvidence(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
     )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "retried": False,
+            "allow_failure": False,
+            "pipeline_id": 4,
+            "pipeline_sha": "a" * 40,
+        },
+    )
     repository = FakeRepository(config)
     repository.paths = ("src/review_fix.py",)
     changed_feedback = SingleSessionInvoker()
@@ -1804,6 +1818,7 @@ def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
         now=NOW,
     )  # type: ignore[arg-type]
     assert observed is not None and observed.state is RunnerState.OBSERVING
+    repository.dirty = True
     post_publication = run_segment(
         ledger=ledger,
         gitlab=gitlab,
@@ -1813,24 +1828,10 @@ def test_dirty_feedback_post_publication_reroutes_before_acknowledgement(
         now=NOW,
     )  # type: ignore[arg-type]
     assert post_publication is not None
-    assert post_publication.state is RunnerState.EXECUTING
-    assert post_publication.phase is WorkflowPhase.POST_PUBLICATION
-    repository.dirty = True
-
-    rerouted = run_segment(
-        ledger=ledger,
-        gitlab=gitlab,
-        repository=repository,
-        invoke=SingleSessionInvoker(),
-        timeout_seconds=30,
-        now=NOW,
-    )  # type: ignore[arg-type]
-
-    assert rerouted is not None
-    assert rerouted.state is RunnerState.PUBLISHING
-    assert rerouted.phase is WorkflowPhase.READY_TO_PUBLISH
-    assert rerouted.pending_feedback is not None
-    assert rerouted.pending_feedback.acknowledgement_ready is False
+    assert post_publication.state is RunnerState.REPAIR
+    assert post_publication.phase is WorkflowPhase.WORKFLOW
+    assert post_publication.pending_feedback is not None
+    assert post_publication.pending_feedback.acknowledgement_ready is False
     assert gitlab.feedback_outcomes == []
     assert gitlab.created_merge_requests == 0
 

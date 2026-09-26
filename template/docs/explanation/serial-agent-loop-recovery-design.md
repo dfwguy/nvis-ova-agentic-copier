@@ -84,10 +84,10 @@ stateDiagram-v2
     Executing --> Publishing: worker result is ready_to_publish
     Publishing --> Observing: exact MR evidence verified
     Observing --> Repair: eligible exact failed current-source MR pipeline has one corroborated retained owner
+    Observing --> NeedsRepair: success proof absent after three bounded reobservations
     Observing --> Complete: human merge has fresh exact-success evidence
-    Observing --> Executing: terminal exact-SHA pipeline starts fresh assessment
     Repair --> Publishing: repair result is ready_to_publish
-    Executing --> AwaitingHuman: Exact source pipeline and handoff are verified
+    Observing --> AwaitingHuman: exact source required jobs succeeded and handoff verified
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
     Repair --> Blocked: retained owner or pipeline evidence is ambiguous or unsafe
@@ -102,8 +102,9 @@ GitLab labels stay broad:
   actionable issue handoff await human review.
 - `agent::blocked`: documented human action is needed.
 - `agent::failed`: a rare, fatal state prevented safe checking or recording.
-- `agent::needs_repair`: legacy or manually checkpointed repair awaits exact
-  recovery. Ordinary exact pipeline failures never enter it.
+- `agent::needs_repair`: legacy or reviewed repair, or exhausted required-job
+  proof after a successful exact-source pipeline, awaits exact recovery. An
+  ordinary failed pipeline uses its diagnostic repair path.
 - `agent::repair_failed`: auto or reviewed repair failed, or exact proof
   changed. It keeps follow-up proof.
 - `agent::suggest_close`: confirmed proof asks a human to close duplicate,
@@ -161,8 +162,9 @@ The scheduler treats each saved state as follows:
 - `OBSERVING`: the exact MR SHA has a live pipeline. Wait or resume. A safe
   owned terminal fault can enter repair.
 - `REPAIR`: exact failed current-source proof and one owner permit repair.
-- `NEEDS_REPAIR`: old or reviewed proof defers new work. Show exact-IID
-  reviewed recovery and keep scanning.
+- `NEEDS_REPAIR`: old or reviewed proof, or exhausted required-job proof after
+  a successful exact-source pipeline, defers new work. Show exact-IID reviewed
+  recovery and keep scanning.
 - `REPAIR_FAILED`: resume only when due and safe. Else defer or quarantine,
   then keep scanning.
 - `SUGGEST_CLOSE`: proved duplicate, replacement, or poor fit skips work and
@@ -284,7 +286,7 @@ The table maps each invariant to the required control or evidence.
 | Issue identity | One issue has one durable worktree and one authoritative source branch. |
 | MR uniqueness | Existing-MR remediation uses the verified MR source branch. It never makes a second MR. |
 | Durable transitions | A transition is replayable. Its intent is durable before an external write. Reconciliation is safe after interruption on either side of that write. |
-| Exact-source observation | During exact-source pipeline observation, a human merge completes the record only after fresh evidence corroborates the configured project and recorded MR IID. It must also corroborate both MR project identities and branches, the recorded exact source SHA, the closing relationship, the closed issue, and that SHA's successful pipeline. Mismatched, unrelated, ambiguous, missing, or non-successful evidence fails closed. |
+| Exact-source observation | During exact-source pipeline observation, a human merge completes the record only after fresh evidence corroborates the configured project and recorded MR IID. It must also corroborate both MR project identities and branches, the recorded exact source SHA, the closing relationship, the closed issue, and that SHA's successful pipeline with at least one current required job and success from every current required job. Identity mismatches block. For a closed merged issue, missing or non-successful current required-job proof preserves its closed wrapper for a later recheck; it cannot complete the record. |
 | Completion projection | The controller persists `COMPLETE` before clearing lifecycle labels. A restart then retries only label projection after the durable completion record exists. A `BLOCKED` or `RETRY_WAIT` wrapper keeps verified publication identity. Later closed-issue reconciliation can make the same exact completion decision. For an open issue, the controller repairs the `OBSERVING` lifecycle-label projection before observation continues. |
 | Publication | Publication is idempotent. It needs exact GitLab and Git evidence. |
 | Protected-policy applicability | Protected-policy applicability uses the prospective publication tree against the durable verified reconciliation target, not raw worktree status. This assigns target-branch-only policy changes to the target branch. It keeps review evidence for issue-owned changes and merge resolutions that differ from the target tree. |
@@ -316,7 +318,7 @@ against the current record and Git evidence. A deliberate stop is not a failure.
 | Malformed protocol or legacy receipt condition | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. Historical receipt prose cannot authorize the retry. |
 | Architecture through Green | Architect gives the approved design to Red, completes any policy preparation, then starts Green and the Diátaxis Writer after the accepted checkpoint | Green implements code and tests while the writer aligns docs and README with the final interface. After both stop editing, Green asks the controller to stage one candidate. |
 | Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out, corrects code and tests from evidence, routes prose findings to the writer, consolidates feedback, and returns it to Architect. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
-| Publication and assessment | Architect, finalizer, then runner; complete finalizer evidence | `observing`, exact-MR-conflict `repair`, and fresh `post-publication` assessment are durable. Publication does not end assessment. |
+| Publication and required-job proof | Architect, finalizer, then runner; complete finalizer evidence | `observing` and exact-MR-conflict `repair` are durable. The controller verifies current required jobs before human handoff. |
 
 The installed pre-commit hook checks the proposed change. The runner sends the
 work back for a fix only when standard pre-commit output identifies a failed
@@ -400,11 +402,11 @@ transition.
 | A durable worktree is dirty. | Keep it for its next workflow attempt. Normal shutdown does not clean or stash it. |
 | An orphan worktree, branch, label, or stash has unproved ownership. | Inventory it and block it for a human decision. |
 | An applied activation starts with closed lifecycle projections. | Reconcile them in one bounded IID-ordered inventory before resuming or selecting open work. |
-| A closed issue has a ledger. | First normalize it to `COMPLETE`, clearing transient retry, intent, error, worker-exit, and pending-feedback state. Then remove lifecycle labels through the existing authenticated GitLab identity boundary. |
+| A closed issue has a ledger. | For a published candidate, retain its wrapper and lifecycle label until fresh exact MR, successful exact-source pipeline, and current required-job proof permit `COMPLETE`. For other closed records, normalize to `COMPLETE`, clear transient retry, intent, error, worker-exit, and pending-feedback state, then remove lifecycle labels through the authenticated GitLab identity boundary. |
 | A closed issue has no ledger. | Remove only stale lifecycle labels. Reconciliation creates no complete, blocked, journal, or worktree record. |
 | A partial failure occurs in persist-before-label order. | This makes partial failure resumable: keep the label after a ledger failure. Keep the canonical `COMPLETE` record and stale label for the next activation after a recorded issue's label failure. |
 | An orphan label-removal attempt fails. | Keep only its stale label. Earlier IID-ordered successes remain valid. |
-| Closed-projection housekeeping runs. | Use no open-work budget, worker, repository, branch, worktree, push, or merge-request operation. |
+| Closed-projection housekeeping runs. | Use no open-work budget or worker. A published candidate reads repository configuration, MR, pipeline, and jobs to verify completion. It does not mutate Git, a worktree, branch, or MR. |
 | An open orphan projection remains. | Keep its blocked recovery path. |
 | Work is retryable. | Use at most three bounded automatic attempts. On exhaustion, move it to `agent::blocked`, not `agent::failed`. |
 
@@ -459,8 +461,8 @@ to bypass a stop in an earlier one.
 The implementation stays in reviewable slices: ledger and reconciliation;
 deterministic selection and classification; durable worktrees and versioned
 workflow sessions; idempotent publication and existing-MR remediation;
-post-publication observation, exact-conflict repair, and fresh pipeline
-assessment; then wrapper, timer, status, and operational-documentation
+post-publication observation, exact-conflict repair, and required-job
+verification; then wrapper, timer, status, and operational-documentation
 updates. Each slice follows the full coding workflow.
 
 
@@ -477,7 +479,7 @@ the proof does not match. It does not send or save a secret.
 | --- | --- | --- |
 | Credential source and Git readiness | A regular checkout-local `.envrc`, executable absolute `AGENT_WORK_DIRENV`, directory-scoped Developer `GITLAB_TOKEN`, captured project identity, repository-owned credential-protocol helper, prompts disabled, and a dry-run push. | Use the token for the API, Git transport, readiness, controller, workflow, and nested agents; do not use or retain ambient, interactive, or saved helpers. |
 | New or existing-MR publication | A durable publication intent and either a nonempty `merge_request_draft` or the verified existing MR. | Publish idempotently; retry or reuse the recorded intent and MR rather than duplicate a commit or MR. |
-| MR and source verification | The configured project, MR IID and both project identities, source and target branches, closing issue, and recorded exact source SHA agree. | Observe only the exact source pipeline. Missing, mismatched, ambiguous, unrelated, or non-successful evidence fails closed. |
-| Exact-source success | The exact SHA's successful pipeline and controller-owned publication evidence are fresh and corroborated. | Write or reuse the factory-authored handoff before projecting `agent::awaiting-human`. |
+| MR and source verification | The configured project, MR IID and both project identities, source and target branches, closing issue, and recorded exact source SHA agree. | Observe only the exact source pipeline. Identity mismatch blocks. Missing or non-successful job proof cannot authorize handoff; use bounded observation. |
+| Exact-source success | The exact SHA's successful pipeline, at least one current required job, success from every current required job, and controller-owned publication evidence are fresh and corroborated. | Write or reuse the factory-authored handoff before projecting `agent::awaiting-human`. |
 | Human handoff | The handoff links the verified MR and names its exact source commit. | A human may review, approve, and merge; the worker never assigns a reviewer, approves, or merges. |
 | Permanent or transient failure | The retained ledger, worktree, publication intent, and observed failure distinguish authentication, authorization, policy, or configuration from a known short-lived transport failure. | Preserve evidence. Block permanent or unsafe cases; retain retry state for a transient. After the recorded action or retry, resume `publishing`, not implementation. |

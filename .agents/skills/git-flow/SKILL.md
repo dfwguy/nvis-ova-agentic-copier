@@ -34,7 +34,7 @@ For coding work, Finalizer may use `git commit --no-verify`. First, it
 must mechanically match the staged tree and supported-version JUnit
 digests/counts to the validation Judge receipt. This avoids rerunning the recorded
 hook. The serial runner still uses ordinary `git commit -m`. It has no Judge
-identity shortcut. Pipeline review after push is another defense.
+identity shortcut. Exact-source pipeline checks after push are another defense.
 It never replaces Judge.
 
 **A readiness or policy audit is not publication permission.** A Developer may
@@ -431,9 +431,13 @@ Keep the same branch. Keep the same project. Keep the read-back.
 
 ## Step 4: Hand off without waiting for merge
 
-After publication, ordinary interactive work delegates and completes the
-Fast `$pipeline-performance-judge` before reporting `awaiting_human`; serial
-work invokes that judge in a fresh context after its cheap exact-SHA gate.
+After publication, ordinary interactive work makes one bounded check of the
+pipeline for the exact published source SHA. Verify the required jobs and
+their terminal results. If a required job fails, diagnose and repair it within
+approved scope, validate again, and update the same MR. If results are pending
+or cannot be verified, report the check and retry point without claiming
+pipeline success. Serial work uses the trusted controller's exact-source
+pipeline observation and required-job checks. Job duration is not a gate.
 AI must never approve or merge the MR itself, so human review and merge
 determine whether the change lands. They do not prevent unrelated work.
 

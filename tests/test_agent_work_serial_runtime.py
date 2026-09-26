@@ -277,6 +277,7 @@ class FakeGitLab:
                 "stage": "test",
                 "status": "failed",
                 "retried": False,
+                "allow_failure": False,
                 "pipeline_id": 4,
                 "pipeline_sha": "a" * 40,
             },
@@ -288,7 +289,7 @@ class FakeGitLab:
     ) -> tuple[PipelineJobEvidence, ...]:
         return tuple(
             PipelineJobEvidence.model_validate(
-                job | {"pipeline_id": pipeline_id, "pipeline_sha": source_sha}
+                {"pipeline_id": pipeline_id, "pipeline_sha": source_sha} | job
             )
             for job in self.pipeline_jobs
         )
@@ -617,6 +618,24 @@ class FakeGitLab:
         self.reopened_issues.append(iid)
         self.issue = self.issue.model_copy(update={"state": "opened", "labels": ()})
         return self.issue
+
+
+def _set_success_pipeline_jobs(
+    gitlab: FakeGitLab, *, pipeline_id: int = 4, source_sha: str = "a" * 40
+) -> None:
+    """Configure one explicit required success job for a successful pipeline."""
+    gitlab.pipeline_jobs = (
+        {
+            "id": 1,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "retried": False,
+            "allow_failure": False,
+            "pipeline_id": pipeline_id,
+            "pipeline_sha": source_sha,
+        },
+    )
 
 
 class FakeGitLabWithEligibleIssues(FakeGitLab):
@@ -1184,12 +1203,13 @@ class SequencedPipelineGitLab(FakeGitLab):
 
     def latest_pipeline_for_sha(self, mr_iid: int, sha: str) -> PipelineEvidence | None:
         super().latest_pipeline_for_sha(mr_iid, sha)
-        return PipelineEvidence(
+        self.pipeline = PipelineEvidence(
             id=4,
             status=self._next_status(self.merge_request_statuses),
             sha=sha,
             web_url="https://pipeline/4",
         )
+        return self.pipeline
 
 
 _CONTROLLER_ENVELOPE_FIELDS = {
@@ -1440,7 +1460,6 @@ class BatchingInvoker:
             "$agent-policy-judge: approved",
         ),
         "content-finalize": ("$documentation-finalizer: approved",),
-        "post-publication": ("$pipeline-performance-judge: approved",),
     }
 
     def __init__(
@@ -1592,9 +1611,7 @@ class SingleSessionInvoker:
             ("src/example.py",) if record["pending_feedback"] is None else ()
         )
         self.phases.append(phase)
-        if phase == "post-publication":
-            receipts = ("$pipeline-performance-judge: approved",)
-        elif self.lane == "content":
+        if self.lane == "content":
             receipts = (
                 "$architect: approved",
                 "$documentation-writer: complete",
@@ -7639,6 +7656,7 @@ def test_ordinary_run_prioritizes_failed_pipeline_owner_before_an_active_claim_w
     gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
         id=76, status="failed", sha="a" * 40, web_url="https://pipeline/76"
     )
+    gitlab.pipeline_jobs = (gitlab.pipeline_jobs[0] | {"pipeline_id": 76},)
     repository = FakeRepository(config)
 
     report = dispatch(
@@ -7749,6 +7767,7 @@ def test_ordinary_run_repairs_exact_owner_beside_retained_failure(
     gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
         id=76, status="failed", sha="a" * 40, web_url="https://pipeline/76"
     )
+    gitlab.pipeline_jobs = (gitlab.pipeline_jobs[0] | {"pipeline_id": 76},)
     invoker = FakeInvoker()
 
     report = dispatch(
@@ -10998,7 +11017,7 @@ finding: review
 @pytest.mark.parametrize(
     "status", ["success", "failed", "canceled", "skipped", "manual"]
 )
-def test_terminal_exact_pipeline_starts_post_publication_worker(
+def test_terminal_exact_pipeline_uses_controller_handoff_or_repair(
     tmp_path: Path, status: str
 ) -> None:
     config = _config(tmp_path)
@@ -11014,6 +11033,9 @@ def test_terminal_exact_pipeline_starts_post_publication_worker(
     )
     ledger.persist(publishing)
     gitlab = FakeGitLab()
+    if status == "success":
+        _set_success_pipeline_jobs(gitlab)
+
     observed = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -11037,11 +11059,20 @@ def test_terminal_exact_pipeline_starts_post_publication_worker(
         now=NOW,
     )
     assert post is not None
-    assert post.state is (
-        RunnerState.REPAIR if status == "failed" else RunnerState.EXECUTING
+    expected_state = (
+        RunnerState.REPAIR
+        if status == "failed"
+        else RunnerState.AWAITING_HUMAN
+        if status == "success"
+        else RunnerState.NEEDS_REPAIR
     )
+    assert post.state is expected_state
     assert post.phase is (
-        WorkflowPhase.WORKFLOW if status == "failed" else WorkflowPhase.POST_PUBLICATION
+        WorkflowPhase.WORKFLOW
+        if status == "failed"
+        else WorkflowPhase.PIPELINE_WAIT
+        if status == "success"
+        else WorkflowPhase.POST_PUBLICATION
     )
 
 
@@ -11066,6 +11097,8 @@ def test_controller_clock_records_publication_and_pipeline_observation_boundarie
     publication_finished = NOW + timedelta(seconds=2)
     publication_moments = iter((NOW, publication_finished))
     gitlab = FakeGitLab()
+
+    _set_success_pipeline_jobs(gitlab)
 
     published = run_segment(
         ledger=ledger,
@@ -11106,14 +11139,14 @@ def test_controller_clock_records_publication_and_pipeline_observation_boundarie
         clock=lambda: next(pipeline_moments),
     )
 
-    assert observed is not None and observed.phase is WorkflowPhase.POST_PUBLICATION
+    assert observed is not None and observed.phase is WorkflowPhase.PIPELINE_WAIT
     assert observed.phase_timings[-1].model_dump() == {
         "phase_or_role": "pipeline-wait",
         "attempt": 1,
         "started_at": publication_finished,
         "finished_at": pipeline_finished,
         "elapsed_seconds": 5.0,
-        "outcome": "success",
+        "outcome": "awaiting-human",
         "classification": "wait",
     }
 
@@ -11196,7 +11229,7 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
         ),
     ],
 )
-def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_assessment(
+def test_recovery_of_published_ordinary_work_reobserves_exact_pipeline(
     tmp_path: Path,
     state: RunnerState,
     phase: WorkflowPhase,
@@ -11228,6 +11261,8 @@ def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_asses
     repository = FakeRepository(config)
     invoker = FakeInvoker()
 
+    _set_success_pipeline_jobs(gitlab, source_sha="b" * 40)
+
     recovered = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -11237,8 +11272,8 @@ def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_asses
         now=NOW,
     )
 
-    assert recovered is not None and recovered.state is RunnerState.EXECUTING
-    assert recovered.phase is WorkflowPhase.POST_PUBLICATION
+    assert recovered is not None and recovered.state is RunnerState.AWAITING_HUMAN
+    assert recovered.phase is WorkflowPhase.PIPELINE_WAIT
     assert recovered.source_sha == "b" * 40
     assert recovered.merge_request_iid == 88
     assert recovered.retry_count == 0
@@ -11250,7 +11285,7 @@ def test_recovery_of_published_ordinary_work_starts_fresh_post_publication_asses
     assert gitlab.created_merge_requests == 0
 
 
-def test_recovery_of_published_draft_starts_post_publication_without_downgrading_it(
+def test_recovery_of_published_draft_reobserves_pipeline_without_downgrading_it(
     tmp_path: Path,
 ) -> None:
     """Recovery keeps durable decision-review Draft metadata on the existing MR."""
@@ -11279,6 +11314,8 @@ def test_recovery_of_published_draft_starts_post_publication_without_downgrading
     )
     repository = FakeRepository(config)
 
+    _set_success_pipeline_jobs(gitlab)
+
     recovered = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -11288,12 +11325,12 @@ def test_recovery_of_published_draft_starts_post_publication_without_downgrading
         now=NOW,
     )
 
-    assert recovered is not None and recovered.state is RunnerState.EXECUTING
-    assert recovered.phase is WorkflowPhase.POST_PUBLICATION
+    assert recovered is not None and recovered.state is RunnerState.AWAITING_HUMAN
+    assert recovered.phase is WorkflowPhase.PIPELINE_WAIT
     assert gitlab.reconciled_drafts == [draft]
     assert gitlab.existing_mr is not None and gitlab.existing_mr.is_draft
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
-    assert repository.verified_heads == ["a" * 40, "a" * 40]
+    assert repository.verified_heads == ["a" * 40, "a" * 40, "a" * 40]
 
 
 @pytest.mark.parametrize("changed_field", ["iid", "web_url", "sha"])
@@ -12370,6 +12407,8 @@ def test_recovery_of_bound_mr_waits_for_a_stale_closing_projection(
     )
     repository = FakeRepository(config)
 
+    _set_success_pipeline_jobs(gitlab)
+
     outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -12394,8 +12433,8 @@ def test_recovery_of_bound_mr_waits_for_a_stale_closing_projection(
         now=NOW,
     )
 
-    assert progressed is not None and progressed.state is RunnerState.EXECUTING
-    assert progressed.phase is WorkflowPhase.POST_PUBLICATION
+    assert progressed is not None and progressed.state is RunnerState.AWAITING_HUMAN
+    assert progressed.phase is WorkflowPhase.PIPELINE_WAIT
     assert "pipeline_for_sha:88:" + "a" * 40 in gitlab.preselection_calls
     assert repository.pushes == 0 and gitlab.created_merge_requests == 0
 
@@ -12692,7 +12731,7 @@ def test_postpublication_handoff_revalidates_mr_after_worker_returns(
         "result_kind": "ready_to_publish",
         "phase_status": "complete",
         "completed_phase": "post-publication",
-        "receipts": ["$pipeline-performance-judge"],
+        "receipts": [],
         "change_summary": "Post-publication review complete.",
         "next_action": "Review the merge request.",
     }
@@ -15433,6 +15472,8 @@ def test_new_publication_reconciles_closing_evidence_on_third_immediate_retry(
     gitlab = FakeGitLab()
     gitlab.closing_results = [False, False, False, True]
 
+    _set_success_pipeline_jobs(gitlab)
+
     outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -15468,8 +15509,8 @@ def test_new_publication_reconciles_closing_evidence_on_third_immediate_retry(
         now=NOW,
     )
 
-    assert terminal is not None and terminal.state is RunnerState.EXECUTING
-    assert terminal.phase is WorkflowPhase.POST_PUBLICATION
+    assert terminal is not None and terminal.state is RunnerState.AWAITING_HUMAN
+    assert terminal.phase is WorkflowPhase.PIPELINE_WAIT
 
 
 def test_new_publication_stops_after_three_missing_closing_projection_retries(
@@ -16156,6 +16197,8 @@ def test_closed_published_issue_completes_only_after_fresh_exact_success(
         web_url="https://pipeline/91",
     )
 
+    _set_success_pipeline_jobs(gitlab, pipeline_id=91, source_sha=source_sha)
+
     outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -16170,6 +16213,420 @@ def test_closed_published_issue_completes_only_after_fresh_exact_success(
     assert gitlab.labels == [None]
     completed = ledger.load(12)
     assert completed is not None and completed.state is RunnerState.COMPLETE
+
+
+def test_closed_published_issue_waits_when_success_pipeline_has_failed_required_job(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    source_sha = "c" * 40
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "merge_request_iid": 88,
+                "merge_request_url": _mr(sha=source_sha).web_url,
+                "source_sha": source_sha,
+                "publication_sha": source_sha,
+            }
+        )
+    )
+    gitlab = FakeGitLab(
+        _issue(state="closed").model_copy(update={"labels": ("agent::running",)})
+    )
+    gitlab.existing_mr = _mr(state="merged", sha=source_sha)
+    gitlab.pipeline_by_merge_request[(88, source_sha)] = PipelineEvidence(
+        id=91, status="success", sha=source_sha, web_url="https://pipeline/91"
+    )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "failed",
+            "retried": False,
+            "allow_failure": False,
+        },
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is not RunnerState.COMPLETE
+    assert gitlab.labels != [None]
+
+
+@pytest.mark.parametrize(
+    ("jobs", "expected_handoff"),
+    [
+        (
+            (
+                {
+                    "id": 101,
+                    "name": "unit",
+                    "stage": "test",
+                    "status": "success",
+                    "retried": False,
+                    "allow_failure": False,
+                },
+                {
+                    "id": 102,
+                    "name": "optional",
+                    "stage": "test",
+                    "status": "failed",
+                    "retried": False,
+                    "allow_failure": True,
+                },
+            ),
+            True,
+        ),
+        (
+            (
+                {
+                    "id": 101,
+                    "name": "unit",
+                    "stage": "test",
+                    "status": "success",
+                    "retried": False,
+                    "allow_failure": False,
+                },
+                {
+                    "id": 102,
+                    "name": "unit",
+                    "stage": "test",
+                    "status": "failed",
+                    "retried": True,
+                    "allow_failure": False,
+                },
+            ),
+            True,
+        ),
+        ((), False),
+        (
+            (
+                {
+                    "id": 101,
+                    "name": "unit",
+                    "stage": "test",
+                    "status": "failed",
+                    "retried": False,
+                    "allow_failure": False,
+                },
+            ),
+            False,
+        ),
+    ],
+)
+def test_success_pipeline_handoff_requires_complete_current_required_job_success(
+    tmp_path: Path,
+    jobs: tuple[dict[str, object], ...],
+    expected_handoff: bool,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.pipeline_jobs = jobs
+    invoker = FakeInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None
+    if expected_handoff:
+        assert outcome.state is RunnerState.AWAITING_HUMAN
+        assert gitlab.handoffs == [(12, 88, "a" * 40)]
+        assert gitlab.labels[-1] == "agent::awaiting-human"
+        assert invoker.prompts == []
+    else:
+        assert outcome.state is RunnerState.OBSERVING
+        assert gitlab.handoffs == []
+        assert "agent::awaiting-human" not in gitlab.labels
+
+
+@pytest.mark.parametrize(
+    "job_status", ("pending", "running", "manual", "failed", "canceled", "skipped")
+)
+@pytest.mark.parametrize("prior_observations", (0, 3))
+def test_success_pipeline_with_incomplete_required_job_stops_after_bounded_observation(
+    tmp_path: Path, job_status: str, prior_observations: int
+) -> None:
+    """Contradictory job evidence never starts a worker or exposes a handoff."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={"merge_request_iid": 88, "retry_count": prior_observations}
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": job_status,
+            "allow_failure": False,
+            "pipeline_id": 4,
+            "pipeline_sha": "a" * 40,
+        },
+    )
+    invoker = FakeInvoker()
+
+    observed = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+    )
+    if prior_observations == 0:
+        assert observed is not None and observed.state is RunnerState.OBSERVING
+        assert observed.retry_count == 1
+    else:
+        assert observed is not None and observed.state is RunnerState.NEEDS_REPAIR
+        assert observed.error_code is ErrorCode.PIPELINE_REJECTED
+        assert "required job" in observed.summary
+    assert gitlab.handoffs == [] and invoker.prompts == []
+    assert "agent::awaiting-human" not in gitlab.labels
+
+
+@pytest.mark.parametrize("optional_only", (False, True))
+def test_success_pipeline_without_current_required_job_exhausts_observation(
+    tmp_path: Path, optional_only: bool
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88, "retry_count": 3})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.pipeline_jobs = (
+        (
+            {
+                "id": 101,
+                "name": "optional",
+                "stage": "test",
+                "status": "success",
+                "allow_failure": True,
+                "pipeline_id": 4,
+                "pipeline_sha": "a" * 40,
+            },
+        )
+        if optional_only
+        else ()
+    )
+    invoker = FakeInvoker()
+
+    exhausted = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert exhausted is not None and exhausted.state is RunnerState.NEEDS_REPAIR
+    assert exhausted.error_code is ErrorCode.PIPELINE_REJECTED
+    assert "lacks current required job evidence" in exhausted.summary
+    assert gitlab.handoffs == [] and invoker.prompts == []
+
+
+@pytest.mark.parametrize("wrong_field", ("pipeline_id", "pipeline_sha"))
+def test_success_pipeline_rejects_job_identity_drift_before_handoff(
+    tmp_path: Path, wrong_field: str
+) -> None:
+    """A job from another pipeline cannot prove the exact MR source commit."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    job: dict[str, object] = {
+        "id": 101,
+        "name": "unit",
+        "stage": "test",
+        "status": "success",
+        "allow_failure": False,
+        "pipeline_id": 4,
+        "pipeline_sha": "a" * 40,
+    }
+    job[wrong_field] = 5 if wrong_field == "pipeline_id" else "b" * 40
+    gitlab.pipeline_jobs = (job,)
+    invoker = FakeInvoker()
+
+    blocked = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+    assert gitlab.handoffs == [] and invoker.prompts == []
+    assert "agent::awaiting-human" not in gitlab.labels
+
+
+def test_retained_post_publication_record_reobserves_pipeline_without_worker(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.EXECUTING,
+            phase=WorkflowPhase.POST_PUBLICATION,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "retried": False,
+            "allow_failure": False,
+        },
+    )
+    invoker = FakeInvoker()
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.AWAITING_HUMAN
+    assert gitlab.handoffs == [(12, 88, "a" * 40)]
+    assert invoker.prompts == []
+
+
+def test_pending_feedback_waits_for_required_job_proof_before_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    cursor = MergeRequestFeedbackCursor(
+        last_processed_general_note_id=31, feedback_source_sha="a" * 40
+    )
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(
+            update={
+                "work_kind": WorkKind.EXISTING_MR_REMEDIATION,
+                "merge_request_iid": 88,
+                "pending_feedback": PendingMergeRequestFeedback(
+                    target_cursor=cursor,
+                    source_sha="a" * 40,
+                    source="general",
+                    note_id=31,
+                    outcome="The reviewed fix is ready.",
+                    acknowledgement_ready=True,
+                ),
+            }
+        )
+    )
+
+    class FeedbackGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(
+                _issue().model_copy(update={"labels": ("agent::running",)})
+            )
+            self.acknowledgements: list[tuple[int, int]] = []
+
+        def comment_feedback_outcome(
+            self,
+            iid: int,
+            *,
+            issue_iid: int,
+            source: str,
+            note_id: int,
+            discussion_id: str | None,
+            selection_sha: str,
+            summary: str,
+        ) -> None:
+            del source, discussion_id, selection_sha, summary
+            self.acknowledgements.append((iid, note_id))
+            assert issue_iid == 12
+
+    gitlab = FeedbackGitLab()
+    gitlab.pipeline = PipelineEvidence(
+        id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
+    )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "failed",
+            "retried": False,
+            "allow_failure": False,
+        },
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is not RunnerState.AWAITING_HUMAN
+    assert outcome.pending_feedback is not None
+    assert gitlab.acknowledgements == []
+    assert gitlab.handoffs == []
 
 
 @pytest.mark.parametrize("wrapped_state", (RunnerState.BLOCKED, RunnerState.RETRY_WAIT))
@@ -16249,6 +16706,8 @@ def test_closed_published_completion_persists_before_label_clear_failure(
         web_url="https://pipeline/96",
     )
     gitlab.label_failures = 1
+
+    _set_success_pipeline_jobs(gitlab, pipeline_id=96, source_sha=source_sha)
 
     with pytest.raises(GitLabError, match="temporary label failure"):
         run_segment(
@@ -16383,6 +16842,8 @@ def test_observing_merge_race_repairs_label_before_fresh_closed_completion(
         web_url="https://pipeline/94",
     )
 
+    _set_success_pipeline_jobs(gitlab, pipeline_id=94, source_sha=source_sha)
+
     outcome = run_segment(
         ledger=ledger,
         gitlab=gitlab,  # type: ignore[arg-type]
@@ -16432,6 +16893,8 @@ def test_observing_merge_race_completes_with_a_current_lifecycle_label(
         sha=source_sha,
         web_url="https://pipeline/95",
     )
+
+    _set_success_pipeline_jobs(gitlab, pipeline_id=95, source_sha=source_sha)
 
     outcome = run_segment(
         ledger=ledger,
@@ -17597,6 +18060,8 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
         _dependencies(config, ledger, gitlab, repository), invoke=invoker
     )
 
+    _set_success_pipeline_jobs(gitlab)
+
     report = dispatch(
         CommandRequest(
             command="loop.run", max_segments=16, max_activation_seconds=3600
@@ -17607,10 +18072,10 @@ def test_apply_batches_the_complete_coding_workflow_until_human_handoff(
 
     assert report.outcome == "activation_complete"
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 4
-    assert len(report.items) == 4
+    assert report.segments_run == 3
+    assert len(report.items) == 3
     assert report.items[-1].state is RunnerState.AWAITING_HUMAN
-    assert invoker.phases == ["workflow", "post-publication"]
+    assert invoker.phases == ["workflow"]
     assert gitlab.created_merge_requests == 1
 
 
@@ -17628,6 +18093,8 @@ def test_awaiting_human_persists_handoff_before_projecting_awaiting_label(
         _dependencies(config, ledger, gitlab, FakeRepository(config)),
         invoke=SingleSessionInvoker(),
     )
+
+    _set_success_pipeline_jobs(gitlab)
 
     report = dispatch(
         CommandRequest(
@@ -17651,27 +18118,39 @@ def test_handoff_failure_retries_without_projecting_awaiting_human_label(
     """A transient note failure leaves the awaiting label absent until recovery."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    gitlab = FakeGitLab(_issue())
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.OBSERVING, phase=WorkflowPhase.PIPELINE_WAIT
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
     gitlab.pipeline = PipelineEvidence(
         id=4, status="success", sha="a" * 40, web_url="https://pipeline/4"
     )
+    gitlab.pipeline_jobs = (
+        {
+            "id": 101,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "retried": False,
+            "allow_failure": False,
+        },
+    )
     gitlab.handoff_failures = 1
     repository = FakeRepository(config)
-    dependencies = replace(
-        _dependencies(config, ledger, gitlab, repository),
-        invoke=SingleSessionInvoker(),
-    )
-
-    dispatch(
-        CommandRequest(
-            command="loop.run", max_segments=16, max_activation_seconds=3600
-        ),
-        apply=True,
-        dependencies=dependencies,
+    first = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
     )
 
     persisted = ledger.load(12)
-    assert persisted is not None
+    assert first is not None and persisted is not None
+    assert first == persisted
     assert persisted.state is RunnerState.RETRY_WAIT
     assert persisted.prior_state is RunnerState.AWAITING_HUMAN
     assert "agent::awaiting-human" not in gitlab.labels
@@ -18117,6 +18596,8 @@ def test_apply_batches_the_complete_content_workflow_until_human_handoff(
         load_red_checkpoint=lambda *_args: None,
     )
 
+    _set_success_pipeline_jobs(gitlab)
+
     report = dispatch(
         CommandRequest(
             command="loop.run", max_segments=16, max_activation_seconds=3600
@@ -18126,8 +18607,8 @@ def test_apply_batches_the_complete_content_workflow_until_human_handoff(
     )
 
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 4
-    assert invoker.phases == ["workflow", "post-publication"]
+    assert report.segments_run == 3
+    assert invoker.phases == ["workflow"]
 
 
 def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
@@ -18555,8 +19036,10 @@ def test_apply_segment_limit_yields_and_next_activation_recovers(
         _dependencies(config, ledger, gitlab, repository), invoke=invoker
     )
 
+    _set_success_pipeline_jobs(gitlab)
+
     first = dispatch(
-        CommandRequest(command="loop.run", max_segments=3, max_activation_seconds=3600),
+        CommandRequest(command="loop.run", max_segments=2, max_activation_seconds=3600),
         apply=True,
         dependencies=dependencies,
     )
@@ -18570,10 +19053,10 @@ def test_apply_segment_limit_yields_and_next_activation_recovers(
 
     persisted = ledger.load(12)
     assert first.stop_reason == "segment_limit"
-    assert first.segments_run == 3
-    assert first.items[-1].phase is WorkflowPhase.POST_PUBLICATION
+    assert first.segments_run == 2
+    assert first.items[-1].phase is WorkflowPhase.READY_TO_PUBLISH
     assert resumed.stop_reason == "awaiting_human"
-    assert invoker.phases == ["workflow", "post-publication"]
+    assert invoker.phases == ["workflow"]
     assert persisted is not None and persisted.state is RunnerState.AWAITING_HUMAN
 
 
@@ -18698,6 +19181,8 @@ def test_apply_continues_after_pending_pipeline_observation(tmp_path: Path) -> N
     gitlab.issue = _issue().model_copy(update={"labels": ("agent::running",)})
     clock = AdvancingMonotonicClock()
 
+    _set_success_pipeline_jobs(gitlab)
+
     report = dispatch(
         CommandRequest(
             command="loop.run", max_segments=16, max_activation_seconds=3600
@@ -18712,10 +19197,9 @@ def test_apply_continues_after_pending_pipeline_observation(tmp_path: Path) -> N
     )
 
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 3
+    assert report.segments_run == 2
     assert [item.state for item in report.items] == [
         RunnerState.OBSERVING,
-        RunnerState.EXECUTING,
         RunnerState.AWAITING_HUMAN,
     ]
     assert clock.delays == [5]
@@ -18765,6 +19249,8 @@ def test_apply_polls_retained_observing_record_until_terminal_pipeline(
     gitlab.issue = _issue().model_copy(update={"labels": ("agent::running",)})
     clock = AdvancingMonotonicClock()
 
+    _set_success_pipeline_jobs(gitlab)
+
     report = dispatch(
         CommandRequest(command="loop.run", max_segments=4, max_activation_seconds=60),
         apply=True,
@@ -18779,7 +19265,6 @@ def test_apply_polls_retained_observing_record_until_terminal_pipeline(
     assert report.stop_reason == "awaiting_human"
     assert [item.state for item in report.items] == [
         RunnerState.OBSERVING,
-        RunnerState.EXECUTING,
         RunnerState.AWAITING_HUMAN,
     ]
     assert clock.delays == [5]
@@ -18834,6 +19319,8 @@ def test_apply_retained_pipeline_polls_do_not_consume_segment_budget(
     gitlab.issue = _issue().model_copy(update={"labels": ("agent::running",)})
     clock = AdvancingMonotonicClock()
 
+    _set_success_pipeline_jobs(gitlab)
+
     report = dispatch(
         CommandRequest(command="loop.run", max_segments=2, max_activation_seconds=120),
         apply=True,
@@ -18846,7 +19333,7 @@ def test_apply_retained_pipeline_polls_do_not_consume_segment_budget(
     )
 
     assert report.stop_reason == "awaiting_human"
-    assert report.segments_run == 2
+    assert report.segments_run == 1
     assert clock.delays == [5, 10, 20, 30, 30]
     assert len(report.items[-1].phase_timings) == 64
 

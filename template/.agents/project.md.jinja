@@ -19,9 +19,9 @@ for its first rendered context. Once rendered, `.agents/project.md` is
 project-owned and preserved. `AGENTS.md` owns portable standing authority,
 safeguards, and human approval. It owns merge boundaries.
 
-Record project values and deviations in rendered `.agents/project.md`. Record
-any narrow, authorized content-agnostic maintenance sync exception there too.
-Do not put them in portable `AGENTS.md`.
+Put project values and layout exceptions in rendered `.agents/project.md`.
+Put any narrow, approved sync check there too. Keep them out of portable
+`AGENTS.md`.
 
 ## Architecture
 
@@ -92,19 +92,18 @@ Agent-policy changes are non-trivial, even when small.
 
 ## Documentation and agent-policy mirrors
 
-Portable shared policy is template-owned. It includes `AGENTS.md`, instructions, skills, roles,
-guidance, and docs. Template source and generated-project mirrors are
-byte-identical. This Jinja file gives the first rendered `.agents/project.md`.
-It becomes project-owned. This context is project-owned. It stays separate. It is not a policy mirror. Copier preserves it. It is preserved. It stays. This is the portable-policy mirror exception. Copier
-keeps it through `_skip_if_exists`. Smoke-render Copier after a template doc.
-Do so after a policy change too.
+The template owns shared policy in `AGENTS.md`, instructions, skills, roles,
+guidance, and docs. Its generated copies are byte-identical. This Jinja file
+renders the first `.agents/project.md`. That file belongs to the new project.
+Copier preserves it through `_skip_if_exists`, so it is not a policy mirror.
+Smoke-render Copier after a template doc or policy change.
 
 ## Validation ownership
 
-Coding owns executable behavior and tests. Documentation owns prose structure.
-It owns Diátaxis metadata and navigation. It owns local links. It owns mirror
-parity. It owns sync with configured behavior. Do not add tests that lock
-wording. Only Bash fences operators execute are interfaces. They stay in coding.
+Coding owns behavior and tests. Docs own prose, Diátaxis tags, links, and
+navigation. Docs also own mirror parity and sync with configured behavior.
+Do not add tests that lock wording. Bash fences that users run are interfaces.
+They stay in coding.
 
 ## Testing source of truth
 
@@ -114,18 +113,6 @@ wording. Only Bash fences operators execute are interfaces. They stay in coding.
 - Bash behavior: source scripts and ShellCheck configuration.
 - Shared instructions: template source and generated-output byte parity.
 - Rendered project context: Copier smoke output.
-
-## Pipeline Performance Budget
-
-```yaml
-pipeline_execution_preferred_seconds: 60
-pipeline_execution_hard_limit_seconds: 120
-```
-
-Apply these limits to the longest job `duration`. Do not use the pipeline
-wall-clock span. Do not use `queued_duration`. Jobs are queue-free execution
-units. Runner scheduling must not reject a change. Humans control these values.
-Their change needs explicit human approval.
 
 ## Python Versions
 

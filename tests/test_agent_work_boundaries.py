@@ -2154,6 +2154,7 @@ def test_gitlab_failed_job_evidence_uses_exact_numeric_paths_and_redacts_boundar
             "status": "failed",
             "failure_reason": "script_failure",
             "retried": False,
+            "allow_failure": False,
             "pipeline": {"id": 4, "sha": "a" * 40, "status": "failed"},
         }
     ]
@@ -2195,6 +2196,7 @@ def test_gitlab_pipeline_jobs_aggregate_two_bounded_pages(
             "stage": "test",
             "status": "failed",
             "retried": False,
+            "allow_failure": False,
             "pipeline": {"id": 4, "sha": "a" * 40},
         }
 
@@ -2228,6 +2230,41 @@ def test_gitlab_pipeline_jobs_aggregate_two_bounded_pages(
     )
 
 
+def test_gitlab_pipeline_jobs_preserve_optional_failure_and_missing_retried(
+    tmp_path: Path,
+) -> None:
+    payload = [
+        {
+            "id": 71,
+            "name": "unit",
+            "stage": "test",
+            "status": "success",
+            "allow_failure": False,
+            "pipeline": {"id": 4, "sha": "a" * 40},
+        },
+        {
+            "id": 72,
+            "name": "optional",
+            "stage": "test",
+            "status": "failed",
+            "allow_failure": True,
+            "retried": True,
+            "pipeline": {"id": 4, "sha": "a" * 40},
+        },
+    ]
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        del command
+        return CommandResult(0, json.dumps(payload), "")
+
+    jobs = GitLabGateway(_config(tmp_path), api).list_pipeline_jobs(4, "a" * 40)
+
+    assert [(job.id, job.retried, job.allow_failure) for job in jobs] == [
+        (71, False, False),
+        (72, True, True),
+    ]
+
+
 def test_gitlab_pipeline_jobs_reject_duplicate_ids_across_pages(tmp_path: Path) -> None:
     """A repeated job identity cannot become ambiguous repair evidence."""
     calls = 0
@@ -2249,6 +2286,7 @@ def test_gitlab_pipeline_jobs_reject_duplicate_ids_across_pages(tmp_path: Path) 
                 "stage": "test",
                 "status": "failed",
                 "retried": False,
+                "allow_failure": False,
                 "pipeline": {"id": 4, "sha": "a" * 40},
             }
             for job_id in (range(1, 101) if page == 1 else (1,))
@@ -2284,6 +2322,7 @@ def test_gitlab_pipeline_jobs_fail_closed_at_bounded_page_limit(tmp_path: Path) 
                         "stage": "test",
                         "status": "failed",
                         "retried": False,
+                        "allow_failure": False,
                         "pipeline": {"id": 4, "sha": "a" * 40},
                     }
                     for job_id in range(100)

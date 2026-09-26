@@ -680,9 +680,9 @@ It takes one request. It may take one fix. It keeps its own state.
 | --- | --- |
 | `phase_status` | Controller-derived. The worker does not supply it. |
 | Ordinary `workflow` | Every recorded result gets `complete`, including `split_required`. |
-| `post-publication` | Gets `complete` only for `ready_to_publish`. Failed, actionable, and other non-success results remain `rejected`. |
-| Successful post-publication assessment | Advances the verified exact-source handoff to `awaiting-human`. The `$pipeline-performance-judge` role and its prose remain AI discussion context rather than worker-result fields. |
-| Malformed, contradictory, failed, or actionable assessment | Keeps existing rejection and feedback handling; it does not advance that handoff. |
+| Post-publication pipeline proof | Controller-owned. It needs the current MR source SHA, at least one current required job, and success from every non-retried job that does not allow failure. No worker result authorizes this transition. |
+| Successful required-job proof | Advances the verified exact-source handoff to `awaiting-human`. |
+| Missing or contradictory success proof | A terminal-success pipeline with pending, failed, canceled, skipped, or other non-success current required jobs, or with no current required jobs, stays in bounded observation. If proof is still absent after three retries, it moves to `needs-repair` without starting a worker. Source-identity mismatch blocks immediately; transport errors retry. |
 | Red coding result | `red_checkpoint_ready` supplies the bounded `red_checkpoint_request`. While the producer is live, broker acceptance reruns and validates Red and returns controller-owned checkpoint evidence. It does not create a post-exit handoff. |
 | Completed ordinary workflow lane | Use `coding` or `content` with that lane's applicable controller-owned checkpoints and final interface. |
 | Workflow evidence | The controller verifies the applicable program-owned checkpoints and final interface before a transition. Model-authored specialist receipts and audit prose cannot authorize a result. |
@@ -839,7 +839,7 @@ work.
 | `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
-| `agent::needs_repair` | needs-repair | A legacy or manually checkpointed repair awaits exact recovery. Ordinary exact pipeline failures do not enter this state. |
+| `agent::needs_repair` | needs-repair | Legacy or reviewed repair, or exhausted required-job proof after a successful exact-source pipeline, awaits exact recovery. An ordinary failed pipeline uses its diagnostic repair path. |
 | `agent::repair_failed` | repair-failed | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed. It retains the evidence needed for safe follow-up. |
 | `agent::suggest_close` | suggest-close | Corroborated duplicate, superseded, already-satisfied, or no-longer-applicable evidence recommends human closure. |
 
@@ -870,9 +870,11 @@ The durable flow is below.
 | --- | --- |
 | `preparing` | Moves to `executing`. |
 | `executing` | Can move to `retry-wait`, return to execution, or produce `publishing`. |
-| Verified publication | Moves to `observing`. The controller waits for the terminal state of the exact SHA, then a fresh Pipeline Performance Judge reviews it. |
-| Healthy review | Writes the actionable handoff for the exact MR source commit, then moves to `awaiting-human`. |
-| Concrete repository-actionable problem | Creates a deduplicated ordinary issue for later normal selection. It does not directly repair the published MR. |
+| Verified publication | Moves to `observing`. The controller checks the current MR source SHA and its current jobs. |
+| At least one current required job exists and all succeed | Writes the actionable handoff for the exact MR source commit, then moves to `awaiting-human`. |
+| Failed pipeline with an exact retained owner | Uses the existing failed-job diagnostic and repair path when safe. |
+| Terminal-success pipeline with missing or contradictory required-job proof | Reobserves at most three times. If proof remains absent, moves to `needs-repair` without a worker. This includes pending, failed, canceled, skipped, or other non-success current required jobs, and empty or all-optional inventories. |
+| Stale or ambiguous identity; transport error | Identity blocks the handoff; transport errors retry. Neither claims success. |
 | Condition blocked by a person | Moves to `blocked`. After the recorded action, an operator explicitly retries that IID. |
 | Human merge or closure | Ends an awaiting-human record. |
 
@@ -959,7 +961,7 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 
 | Stage | Required order and boundary |
 | --- | --- |
-| Post-publication assessment | Start fresh after terminal exact-SHA evidence. Do not edit the published MR or enter a repair session directly. A concrete repository-actionable finding creates or reuses a deduplicated issue for later normal reconciliation and a new applicable workflow. Unverified evidence creates no repository work. |
+| Post-publication proof | Check the current MR source SHA and bounded job inventory. Require at least one current required job; every non-retried job with `allow_failure=false` must succeed. A failed pipeline keeps the exact failed-job diagnostic and repair path. A terminal-success pipeline with a non-success required job or no required job gets three bounded reobservations, then `needs-repair` without a worker if proof remains absent. Source-identity mismatch blocks immediately; transport errors retry. |
 | Ordinary loop, canary checkpoint, and targeted recovery | Apply the pipeline and default-evidence gate; then an exact failed-MR pipeline with one corroborated retained owner for one eligible repair workflow; then one durable immediate record, an exact-IID reviewed reclassification for exceptional retained work, and waits. A reviewed exact-IID plan may advance only its evidence-bound stale or missing target. Ordinary `loop run` remains capacity-one and fails closed before selecting new work. |
 | Repair retention and scope | A failed repair or changed exact evidence retains evidence, failure, timing, and worktree for safe later handling. Scheduled repair backoff and automatic-repair quarantine are item-local eligibility outcomes, not `retry-wait` or global blockers. |
 | Reclassification and conflict | Reclassify one exact IID at a time with that issue's live owner evidence. Status and inventory remain read-only; neither creates or acquires an owner marker. Distinct IIDs with disjoint branch, worktree, and MR identity are observable records, not a shared-identity conflict. Exact-IID recovery may reconcile a stale or missing target even when another retained record is stale or missing. Unknown owner evidence, duplicated or shared branch, worktree, or MR identity, or another verified live owner fails closed with the precise next action. |
@@ -978,7 +980,7 @@ project or item is safe to run.
 | `PUBLISHING` | The retained branch is exact. Publication identity is pending. | Resume publication for this item. Repair it when safe. |
 | `OBSERVING` | The current source SHA is exact. Pipeline evidence exists. | Observe or resume. Nonterminal evidence waits. A safe failure must be exact. It can repair. |
 | `REPAIR` | One failed current-source pipeline has a unique owner. | Run at most one repair workflow. Or resume one. Do this in the activation. |
-| `NEEDS_REPAIR` | A legacy or reviewed recovery record exists. | Defer. Expose reviewed recovery for the exact IID. Scan on. |
+| `NEEDS_REPAIR` | A legacy or reviewed recovery record exists, or required-job proof was exhausted after a successful exact-source pipeline. | Defer. Expose reviewed recovery for the exact IID. Scan on. |
 | `REPAIR_FAILED` | Per-item repair timing and attempt evidence exists. | Resume only when it is due. It must be safe. Otherwise, defer or quarantine locally. Scan on. |
 | `SUGGEST_CLOSE` | Closure evidence is corroborated. | Skip. Expose the human closure decision. |
 | `BLOCKED` | A human action or unresolved item evidence is recorded. | Skip automatic work. Expose the exact action. |
@@ -1001,10 +1003,10 @@ project or item is safe to run.
 | Closed-issue recovery step | Outcome |
 | --- | --- |
 | Start an applied activation | Take the single-project lock. Reconcile intent with observed evidence. Do this before open work. Then obtain one bounded, fixed IID-ordered inventory of closed issues with lifecycle labels. |
-| Listed issue with a ledger | Normalize its record to `COMPLETE`. Use the authenticated GitLab identity boundary for label removal. Before removal, clear transient retry and intent. Also clear error, worker-exit, and pending-feedback state. |
+| Listed issue with a ledger | A published candidate retains its wrapper and lifecycle label until fresh exact MR, successful exact-source pipeline, and current required-job proof permit `COMPLETE`. Other closed records normalize to `COMPLETE`; clear transient retry, intent, error, worker-exit, and pending-feedback state before authenticated label removal. |
 | Listed issue without a ledger | Remove stale lifecycle labels. Do not create a ledger record. Do not create a blocked or complete state. Do not create a journal or worktree. |
 | Write or label failure | A ledger-write failure leaves the label. A recorded issue's label-removal failure leaves its canonical `COMPLETE` record. It also leaves a stale label for a later activation. An orphan failure leaves only its stale label. Earlier IID successes remain reconciled. They stay reconciled. |
-| Scope and next step | This housekeeping uses neither `max_segments` nor the open-work budget. It starts no worker. It performs no repository, branch, worktree, push, or merge-request operation. Open orphan projections keep the usual blocked recovery path. After inventory, advance at most one selected or resumed open issue. Recovery applies at the worktree boundary. It also applies at the coarse workflow boundary, not every internal agent handoff. |
+| Scope and next step | This housekeeping uses neither `max_segments` nor the open-work budget. It starts no worker. A published candidate reads repository configuration, MR, pipeline, and jobs to verify completion. It does not mutate Git, a worktree, branch, or MR. Open orphan projections keep the usual blocked recovery path. After inventory, advance at most one selected or resumed open issue. Recovery applies at the worktree and coarse workflow boundaries, not at every internal agent handoff. |
 
 | Liveness event | Scheduler action |
 | --- | --- |
@@ -1384,9 +1386,9 @@ If a human merges while the controller observes the exact source pipeline, the
 controller may go straight to `COMPLETE`. It rereads fresh evidence. All of
 these must agree: the configured project. Recorded MR IID. Source and target
 project identities and branches. Recorded exact source SHA; MR closing relation;
-closed issue. And a successful pipeline for that exact SHA. Unrelated,
-mismatched, ambiguous, missing, or non-successful evidence cannot complete the
-record.
+closed issue. The exact source-SHA pipeline must report `success`, with at
+least one current required job and every such job successful for that SHA. Unrelated, mismatched, ambiguous, missing, pending, or failed
+evidence cannot complete the record.
 
 For an open issue, the controller repairs the `OBSERVING` lifecycle-label
 projection before it resumes observation. For verified completion, it writes
@@ -1447,8 +1449,7 @@ records `automatic_repair_count` and a 20-minute `automatic_repair_at` deadline.
 These are separate from ordinary `retry_count` and `retry_at`. A later
 activation can consider a due item again. After a third failed attempt, the
 item is quarantined or deferred and needs reviewed recovery. This is separate
-from ordinary `retry-wait` and its workflow retry count. It does not change a
-human-controlled pipeline-performance budget or stop unrelated eligible work.
+from ordinary `retry-wait` and its workflow retry count. It does not stop unrelated eligible work.
 Only reviewed recovery is exceptional. It needs one exact IID and current
 corroborated evidence. It does not use the automatic repair budget. Untrusted
 issue or merge-request content cannot trigger or set it. Migration preview

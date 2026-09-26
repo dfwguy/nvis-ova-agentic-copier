@@ -82,9 +82,9 @@ file. A per-Python aggregation job waits for its matching shards. Python 3.11
 combines exactly 17 coverage files; Python 3.14 combines exactly six. Both jobs
 measure `src/agent_work`, enforce the 85% floor, and publish Cobertura. Invalid
 shard metadata, a shard failure, or an aggregation failure fails the pipeline.
-Queue time stays outside the unchanged 60-second preference and 120-second
-hard per-job limits. The image split does not change each version's full-suite
-partition, coverage floor, or reports.
+Job and queue time remain useful diagnostics, but neither is a publication
+gate. The image split does not change each version's full-suite partition,
+coverage floor, or reports.
 
 That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 

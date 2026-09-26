@@ -61,12 +61,12 @@ clear cause is a review finding. Apply any tighter task-specific limit as well.
 A documented integration exception still needs a plan and must fit the task's
 budget.
 
-The project's **60-second preferred and 120-second hard pipeline limits**
-measure the longest terminal job's execution. They are separate from the
-per-test target. Image pulls, job setup, and scheduling can lengthen a job or
-pipeline without increasing a JUnit case duration. Queue time is excluded from
-the job limit. Use job evidence for those costs rather than assigning them to a
-test.
+Job duration is useful diagnostic evidence, but it is not a publication
+gate. Image pulls, job setup, and scheduling can lengthen a job or pipeline
+without increasing a JUnit case duration. Use job evidence for those costs
+rather than assigning them to a test. The controller's human handoff requires
+at least one current required job and success from every current required job
+for the exact MR source SHA.
 
 ## Long-running local test register
 
@@ -126,6 +126,17 @@ These are single observations with no measured cause or phase split.
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_trusted_generated_project_runs_setup_tasks` | 3.11 | 2.017 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable cost before judging whether a long run is needed. |
 | `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/template_update_publication.py]` | 3.14 | 1.026 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable cost before judging whether a long run is needed. |
+
+The Judge snapshot for tree `4ad4674c9f50facf75296041b4d17edfa6b39ea8`
+found one more Python 3.11 case at or above 1 second on 2026-09-26.
+Its JUnit SHA-256 digest is
+`c0993b899732fc8b5b34e7ffc80ac0ec20e543f58e5cf3068ebf26c0e889343e`.
+This is one local observation, not a proven regression. Its cause and phase
+costs are unmeasured.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_portable_ci_keeps_one_shared_setup_job` | 3.11 | 1.101 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable work. |
 
 Pytest's duration report can show setup, call, and teardown as separate
 phases. The current JUnit `testcase` time combines them. Keep the combined

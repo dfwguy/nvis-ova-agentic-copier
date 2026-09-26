@@ -242,35 +242,14 @@ def test_repair_worker_prompt_exposes_only_sanitized_bounded_job_diagnostic() ->
     assert "Untrusted failed-job evidence JSON:" in prompt
 
 
-def test_post_publication_prompt_exclusively_routes_pipeline_performance_judge() -> (
-    None
-):
-    prompt = build_worker_prompt(
-        {
-            "state": "executing",
-            "phase": "post-publication",
-            "workflow_lane": "coding",
-            "source_branch": "agent/issue-12",
-            "source_sha": "a" * 40,
-            "merge_request_iid": 88,
-            "merge_request_url": "https://gitlab.example.com/mr/88",
-        },
-        project_id=310967,
-        issue_iid=12,
-        effective_worker_budget_seconds=1800,
-    )
-
-    assert "$pipeline-performance-judge" in prompt
-    assert "$findings-triage" not in prompt
-    assert "310967" in prompt
-    assert "#88" in prompt
-    assert "agent/issue-12" in prompt
-    assert "a" * 40 in prompt
-    assert "coding" in prompt
-    assert "1800 seconds" in prompt
-    assert "create or reuse only a deduplicated GitLab issue" in prompt
-    assert "no MR/code/pipeline mutation/approval/merge" in prompt
-    assert "externally quiet on healthy evidence" in prompt
+def test_post_publication_prompt_is_rejected_by_controller_boundary() -> None:
+    with pytest.raises(ValueError, match="controller-owned"):
+        build_worker_prompt(
+            {"state": "executing", "phase": "post-publication"},
+            project_id=310967,
+            issue_iid=12,
+            effective_worker_budget_seconds=1800,
+        )
 
 
 def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
@@ -310,15 +289,6 @@ def test_workflow_prompt_binds_targeted_quality_reruns_to_trusted_provenance() -
         issue_iid=137,
         effective_worker_budget_seconds=1800,
     ).casefold()
-    post_publication_prompt = build_worker_prompt(
-        {
-            "state": "executing",
-            "phase": "post-publication",
-        },
-        project_id=310967,
-        issue_iid=137,
-        effective_worker_budget_seconds=1800,
-    ).casefold()
 
     assert "initial $judge-quality review is complete" in prompt
     assert "prior and current staged tree oids" in prompt
@@ -331,7 +301,6 @@ def test_workflow_prompt_binds_targeted_quality_reruns_to_trusted_provenance() -
     assert "quality judge to green to architect" in prompt
     assert "do not silently fall back to a complete review" in prompt
     assert "run a complete $judge-quality review" not in prompt
-    assert "$judge-quality" not in post_publication_prompt
 
 
 def test_workflow_prompt_defines_targeted_quality_scope_and_widening() -> None:
