@@ -1469,6 +1469,161 @@ def test_agent_loop_wrapper_drains_terminal_handoffs_while_work_remains_eligible
     assert _test_git_output(checkout, "rev-parse", "--show-toplevel") == str(checkout)
 
 
+def test_agent_loop_wrapper_only_continues_after_new_publication_pipeline_wait(
+    project_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Only the publication handoff pair may refresh and begin another activation."""
+    first = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "activation_complete",
+            "stop_reason": "pipeline_wait",
+        }
+    )
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path / "publication")
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (
+            first,
+            _preview_report("eligible"),
+            _applied_report("complete"),
+            _preview_report("idle"),
+        ),
+    )
+
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts/agent-work-systemd-run.sh"), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+    top_level = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "pipeline_wait",
+            "stop_reason": "pipeline_wait",
+        }
+    )
+    _, waiting_environment, _, _ = _wrapper_checkout_environment(tmp_path / "top")
+    waiting_calls = _scripted_wrapper_worker(
+        tmp_path / "top", waiting_environment, (top_level,)
+    )
+    waiting_result = subprocess.run(
+        ["bash", str(project_root / "scripts/agent-work-systemd-run.sh"), "--apply"],
+        check=False,
+        capture_output=True,
+        env=waiting_environment,
+        text=True,
+    )
+
+    assert waiting_result.returncode == 0, waiting_result.stderr
+    assert waiting_calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+    _, race_environment, _, _ = _wrapper_checkout_environment(tmp_path / "race")
+    race_calls = _scripted_wrapper_worker(
+        tmp_path / "race",
+        race_environment,
+        (
+            first,
+            _preview_report("resume_available"),
+            _applied_report("complete"),
+            _preview_report("idle"),
+        ),
+    )
+
+    race_result = _run_wrapper(project_root, race_environment, "--apply")
+
+    assert race_result.returncode == 0, race_result.stderr
+    assert race_calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+    _, repair_environment, _, _ = _wrapper_checkout_environment(tmp_path / "repair")
+    repair_calls = _scripted_wrapper_worker(
+        tmp_path / "repair",
+        repair_environment,
+        (
+            first,
+            _preview_report("repair_ready"),
+            _applied_report("complete"),
+            _preview_report("idle"),
+        ),
+    )
+
+    repair_result = _run_wrapper(project_root, repair_environment, "--apply")
+
+    assert repair_result.returncode == 0, repair_result.stderr
+    assert repair_calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
+def test_agent_loop_wrapper_does_not_continue_terminal_handoff_to_actionable_preview(
+    project_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Only a pipeline handoff may continue through an actionable preview."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (_applied_report("complete"), _preview_report("resume_available")),
+    )
+
+    result = subprocess.run(
+        ["bash", str(project_root / "scripts/agent-work-systemd-run.sh"), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+    _, repair_environment, _, _ = _wrapper_checkout_environment(tmp_path / "repair")
+    repair_calls = _scripted_wrapper_worker(
+        tmp_path / "repair",
+        repair_environment,
+        (_applied_report("complete"), _preview_report("repair_ready")),
+    )
+
+    repair_result = _run_wrapper(project_root, repair_environment, "--apply")
+
+    assert repair_result.returncode == 0, repair_result.stderr
+    assert repair_calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
 def test_agent_loop_wrapper_reemits_each_validated_report_once(
     project_root: Path, tmp_path: Path
 ) -> None:

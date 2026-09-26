@@ -43,8 +43,12 @@ Use one clear plan.
 The installed service can process consecutive terminally handed-off issues in
 one run. It also checks for ready work after it fixes prerequisite labels.
 Each issue has its own bounded run. Empty queues and saved retry waits return
-to the 20-minute timer. An applied run waits for nonterminal pipeline proof in
-place.
+to the 20-minute timer. An applied run waits for nonterminal default-branch
+pipeline proof in place. A new exact merge-request observer moves from
+`PUBLISHING` to `OBSERVING`, then returns `activation_complete/pipeline_wait`
+without polling. The wrapper previews once. Later, it parks a retained observer
+only when its SHA, owner, worktree, project, and target are exact. That parking
+can start another item or yield idle to the timer.
 
 Use one set checkout and one user timer for one GitLab project. Starting the
 project timer authorizes the loop. It selects only ready issues. They must be
@@ -593,13 +597,16 @@ systemctl --user status "$unit_name.service"
 ```
 
 Use `--max-segments` or `--max-activation-seconds` for smaller work limits.
-The run advances one issue. With `--apply`, it polls nonterminal default-branch
-or exact current-MR pipeline proof after 5, 10, and 20 seconds in the same run.
-Polling caps at 30 seconds. It resumes after proof is terminal. A future retry
-deadline, a human or safety block, missing, failed, or unknown proof, an idle
-no-ready-or-resumable-work result, or an exhausted limit stays a handoff.
-Preview is read-only and fast. It does not poll. The JSON `items` list saves
-flow results in order. `segments_run` and `stop_reason` sum up the run.
+The run advances one issue. With `--apply`, it polls a nonterminal
+default-branch pipeline after 5, 10, and 20 seconds. The cap is 30 seconds. A
+current-SHA MR pipeline moves from `PUBLISHING` to `OBSERVING` only when its
+owner, worktree, project, and target are exact. That activation hands off as
+`outcome=activation_complete` and `stop_reason=pipeline_wait` without polling.
+The service pass previews once. Later, ordinary admission parks that retained
+exact observer from ownership. Parking does not create `pipeline_wait`: it can
+start another item or be idle and yield to the timer. A retained inexact or stale
+claimant stays visible for `_observe` before fresh work. It blocks or repairs if
+identity is unclear. Preview is read-only and fast. It does not poll.
 
 If the full budget is used, inspect the saved retry or worktree restore result
 as you would any other timeout.

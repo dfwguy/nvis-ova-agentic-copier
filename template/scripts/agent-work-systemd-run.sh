@@ -312,7 +312,8 @@ preview_outcome() {
   local report="$1"
   if ! housekeeping "$AGENT_WORK_JQ" -e -s '
     length == 1 and (.[0] | .schema_version == 1 and .command == "loop.run" and
-    .applied == false and (.outcome == "eligible" or .outcome == "idle" or
+    .applied == false and (.outcome == "eligible" or .outcome == "resume_available" or
+    .outcome == "repair_ready" or .outcome == "idle" or
     .outcome == "pipeline_wait" or .outcome == "pipeline_blocked" or
     .outcome == "pipeline_inventory_blocked"))
   ' <<<"$report" >/dev/null; then
@@ -332,8 +333,17 @@ while :; do
   if ! stop_reason="$(housekeeping "$AGENT_WORK_JQ" -er '.[0].stop_reason' <<<"[$applied_report]")"; then
     stop 'agent-work applied activation report has no stop reason'
   fi
+  pipeline_handoff=false
   case "$stop_reason" in
     prerequisite_labels_reconciled|awaiting_human|blocked|failed|complete)
+      ;;
+    pipeline_wait)
+      if ! housekeeping "$AGENT_WORK_JQ" -e -s '
+        length == 1 and .[0].outcome == "activation_complete"
+      ' <<<"$applied_report" >/dev/null; then
+        exit 0
+      fi
+      pipeline_handoff=true
       ;;
     *)
       exit 0
@@ -346,7 +356,7 @@ while :; do
     stop 'agent-work eligibility preview returned an invalid report'
   fi
   printf '%s\n' "$preview_report"
-  if [[ "$outcome" != eligible ]]; then
+  if [[ "$outcome" != eligible && ( "$pipeline_handoff" != true || ( "$outcome" != resume_available && "$outcome" != repair_ready ) ) ]]; then
     exit 0
   fi
   refresh_base
