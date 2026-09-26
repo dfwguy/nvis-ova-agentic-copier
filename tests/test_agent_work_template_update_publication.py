@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
@@ -596,6 +597,25 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
         calls.append(command)
         if command[-1] == "write-tree":
             return subprocess.CompletedProcess(command, 0, (_TREE + "\n").encode(), b"")
+        if command == (
+            sys.executable,
+            "scripts/check_licenses.py",
+            "--root",
+            ".",
+            "--policy",
+            ".license-policy.toml",
+            "--candidate-tree",
+            _TREE,
+            "--json",
+        ):
+            assert _kwargs["cwd"] == worktree
+            assert not (worktree / ".venv").exists()
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"schema_version":1,"outcome":"compliant","violations":[]}',
+                b"",
+            )
         if command[-3:] == ("hook", "run", "pre-commit"):
             for environment in ("py311", "py314"):
                 (worktree / f"test-results-{environment}.xml").write_text(
@@ -635,8 +655,13 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
     evidence = dependencies.validate_tree(worktree, _TREE)
     assert evidence.success
     assert evidence.junit_artifacts == ("py311", "py314")
+    assert next(i for i, call in enumerate(calls) if "--candidate-tree" in call) < next(
+        i for i, call in enumerate(calls) if call[-3:] == ("hook", "run", "pre-commit")
+    )
+    assert sum("--candidate-tree" in call for call in calls) == 1
     assert sum(call[-3:] == ("hook", "run", "pre-commit") for call in calls) == 1
     assert dependencies.validate_tree(worktree, _TREE).success
+    assert sum("--candidate-tree" in call for call in calls) == 1
     assert sum(call[-3:] == ("hook", "run", "pre-commit") for call in calls) == 1
 
     snapshot = (

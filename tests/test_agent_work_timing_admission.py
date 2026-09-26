@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -430,6 +431,28 @@ def test_window_keeps_project_admission_through_nested_validation_and_later_work
                 return CommandResult(0, str(tmp_path / ".git"), "")
             if validation_command == ("git", "write-tree"):
                 return CommandResult(0, "a" * 40, "")
+            if validation_command == (
+                sys.executable,
+                "scripts/check_licenses.py",
+                "--root",
+                ".",
+                "--policy",
+                ".license-policy.toml",
+                "--candidate-tree",
+                "a" * 40,
+                "--json",
+            ):
+                return CommandResult(
+                    0,
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "outcome": "compliant",
+                            "violations": [],
+                        }
+                    ),
+                    "",
+                )
             if validation_command == ("git", "hook", "run", "pre-commit"):
                 observed.append("nested-hook")
             return CommandResult(0, "", "")

@@ -21,6 +21,8 @@ related:
     why: Explains the recoverable state machine in detail.
   - path: ../explanation/agentic-workflow.md
     why: Explains the Judge role that owns validation sessions.
+  - path: license-compliance.md
+    why: Defines the license check used before full-hook validation.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -123,7 +125,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
-| `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
+| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. |
 | `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. |
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
@@ -370,10 +372,12 @@ current tree reviewed. Incomplete coverage, drift, replay, and stale reads
 cannot satisfy finalization.
 
 In coding work, `validate` requires the tree ID and runs the Validation Judge
-while the producer is active. A failed result returns safe test names and
-JUnit digests when that evidence is available, so the producer
-can fix code and stage a new tree. `status` reads the saved result without
-another hook run. `validate` and `status` return an opaque evidence ID, test
+while the producer is active. Judge checks that tree's licenses before it
+starts a full-hook session. A license violation, checker error, or malformed
+result fails closed without JUnit cleanup or a hook run. The producer can fix
+the content and stage a new tree. A failed full-hook result returns safe test
+names and JUnit digests when available. `status` reads a saved result without
+another hook run. Saved `validate` and `status` results return an opaque evidence ID, test
 counts, digests, and hook time when available. For success, JUnit also gives
 total test time and the three slowest safe test names per Python version. Each
 supported version also has `over_100ms_cases`, a complete trusted list of safe
@@ -478,9 +482,16 @@ Use `validation run --candidate-tree TREE` to preview the action. It does not
 change state or start a hook without `--apply`.
 
 With `--apply`, `validation run` first checks that `TREE` is the current staged
-tree. It records the session as running. It invokes exactly one `git hook run
-pre-commit` command. It then atomically records that command's terminal exit
-code. A terminal-failure record can also have the existing bounded, canonical
+tree. It runs the read-only license checker against that exact Git tree and
+requires a valid, compliant result. A violation, checker error, malformed
+result, or staged-tree drift ends this attempt before JUnit cleanup and before
+the durable full-hook session. A failed license preflight returns
+`preflight-failure` without saving a session. After fixing a violation, stage a
+new tree and validate it. A passing preflight allows Judge to record the
+session as running.
+It invokes exactly one `git hook run pre-commit` command. It then atomically
+records that command's terminal exit code. A terminal-failure record can also
+have the existing bounded, canonical
 `diagnostic` and additive structured `hook_failures` from that one invocation.
 The command returns only when the hook has a terminal result.
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -315,6 +316,192 @@ def test_main_uses_injected_git_discovery_and_reports_failure_as_json(
             ".",
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "candidate_is_good", (False, True), ids=("candidate-bad", "candidate-good")
+)
+def test_candidate_tree_checks_tree_policy_annotations_and_root_template_content(
+    project_root: Path, tmp_path: Path, *, candidate_is_good: bool
+) -> None:
+    module = _load_checker(project_root)
+    tree = "a" * 40
+    policy = (project_root / ".license-policy.toml").read_text()
+    candidate_content = (
+        _commented_header("# ") + "VALUE = 1\n" if candidate_is_good else "VALUE = 1\n"
+    )
+    worktree_content = (
+        "VALUE = 1\n" if candidate_is_good else _commented_header("# ") + "VALUE = 1\n"
+    )
+    (tmp_path / "template").mkdir()
+    for relative in ("root.py", "template/generated.py"):
+        (tmp_path / relative).write_text(worktree_content)
+    (tmp_path / ".license-policy.toml").write_text("invalid = true\n")
+    (tmp_path / ".license-annotations.toml").write_text("invalid = true\n")
+    blobs = {
+        ".license-policy.toml": policy,
+        ".license-annotations.toml": _commented_header("# ") + "paths = []\n",
+        "root.py": candidate_content,
+        "template/generated.py": candidate_content,
+    }
+
+    def blob_oid(content: str) -> str:
+        encoded = content.encode()
+        return hashlib.sha1(
+            b"blob " + str(len(encoded)).encode() + b"\0" + encoded
+        ).hexdigest()
+
+    by_oid = {blob_oid(content): content for content in blobs.values()}
+    listing = "".join(
+        f"100644 blob {blob_oid(content)}\t{path}\0" for path, content in blobs.items()
+    )
+    seen: list[tuple[str, ...]] = []
+
+    def run_command(
+        command: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        arguments = tuple(command)
+        seen.append(arguments)
+        if "ls-tree" in arguments:
+            assert tree in arguments
+            return subprocess.CompletedProcess(command, 0, stdout=listing, stderr="")
+        if "cat-file" in arguments:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=by_oid[arguments[-1]], stderr=""
+            )
+        if "show" in arguments:
+            path = arguments[-1].split(":", 1)[1]
+            return subprocess.CompletedProcess(
+                command, 0, stdout=blobs[path], stderr=""
+            )
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    status = module.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--policy",
+            str(tmp_path / ".license-policy.toml"),
+            "--candidate-tree",
+            tree,
+            "--json",
+        ],
+        filesystem=module.LocalFilesystem(),
+        output=module.Output(stdout, stderr),
+        logger_factory=lambda _root: logging.getLogger("license-check.tree"),
+        run_command=run_command,
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert status == (0 if candidate_is_good else 1)
+    assert payload["outcome"] == ("compliant" if candidate_is_good else "violations")
+    assert [item["path"] for item in payload["violations"]] == (
+        [] if candidate_is_good else ["root.py", "template/generated.py"]
+    )
+    assert stderr.getvalue() == ""
+    assert any("ls-tree" in arguments for arguments in seen)
+
+
+@pytest.mark.parametrize(
+    ("binary_path", "expected_outcome", "expected_violations"),
+    (
+        (".venv/cache.bin", "compliant", []),
+        (
+            "asset.bin",
+            "violations",
+            [{"path": "asset.bin", "message": "unsupported file type"}],
+        ),
+    ),
+)
+def test_candidate_tree_skips_excluded_binary_and_classifies_unsupported_binary(
+    project_root: Path,
+    tmp_path: Path,
+    binary_path: str,
+    expected_outcome: str,
+    expected_violations: list[dict[str, str]],
+) -> None:
+    module = _load_checker(project_root)
+    policy = (project_root / ".license-policy.toml").read_text()
+    annotations = _commented_header("# ") + "paths = []\n"
+    blobs = {
+        "1" * 40: policy,
+        "2" * 40: annotations,
+    }
+    listing = (
+        f"100644 blob {'1' * 40}\t.license-policy.toml\0"
+        f"100644 blob {'2' * 40}\t.license-annotations.toml\0"
+        f"100644 blob {'3' * 40}\t{binary_path}\0"
+    )
+
+    def run_command(
+        command: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "ls-tree" in command:
+            return subprocess.CompletedProcess(command, 0, listing, "")
+        assert command[-1] != "3" * 40, "binary blob must not be decoded"
+        return subprocess.CompletedProcess(command, 0, blobs[command[-1]], "")
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    status = module.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--policy",
+            ".license-policy.toml",
+            "--candidate-tree",
+            "a" * 40,
+            "--json",
+        ],
+        filesystem=module.LocalFilesystem(),
+        output=module.Output(stdout, stderr),
+        run_command=run_command,
+    )
+
+    assert status == (0 if expected_outcome == "compliant" else 1)
+    assert json.loads(stdout.getvalue()) == {
+        "schema_version": 1,
+        "outcome": expected_outcome,
+        "violations": expected_violations,
+    }
+    assert stderr.getvalue() == ""
+
+
+@pytest.mark.parametrize(
+    "failure", ("missing-tree", "malformed-listing", "missing-blob")
+)
+def test_candidate_tree_runtime_failures_are_errors_not_usage(
+    project_root: Path, tmp_path: Path, failure: str
+) -> None:
+    module = _load_checker(project_root)
+
+    def run_command(
+        command: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "ls-tree" in command:
+            if failure == "missing-tree":
+                return subprocess.CompletedProcess(command, 128, "", "missing tree")
+            listing = (
+                "broken\0"
+                if failure == "malformed-listing"
+                else f"100644 blob {'1' * 40}\t.license-policy.toml\0"
+            )
+            return subprocess.CompletedProcess(command, 0, listing, "")
+        return subprocess.CompletedProcess(command, 1, "", "missing blob")
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    status = module.main(
+        ["--root", str(tmp_path), "--candidate-tree", "a" * 40, "--json"],
+        filesystem=module.LocalFilesystem(),
+        output=module.Output(stdout, stderr),
+        run_command=run_command,
+    )
+
+    assert status == 1
+    payload = json.loads(stdout.getvalue())
+    assert payload["schema_version"] == 1
+    assert payload["outcome"] == "error"
+    assert stderr.getvalue() == ""
 
 
 @pytest.mark.parametrize(
