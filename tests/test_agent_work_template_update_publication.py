@@ -32,6 +32,7 @@ from agent_work.template_update_publication import (
     _DefaultDependencies,
     publish_ready_template_update,
 )
+from agent_work.timing_admission import TimingAdmissionBusy
 
 _BASE = "a" * 40
 _CURRENT = "b" * 40
@@ -115,6 +116,7 @@ class _PublicationHarness:
     observed_tree: str = _TREE
     validation_tree: str = _TREE
     junit_artifacts: tuple[str, ...] = ("py311", "py314")
+    validation_busy: bool = False
     observed_mr_sha: str = _PUBLISHED
     observed_remote_sha: str | None = None
     remote_sha_after_push: str | None = None
@@ -166,6 +168,8 @@ class _PublicationHarness:
 
     def validate_tree(self, *_args: object, **_kwargs: object) -> object:
         self.events.append("validate")
+        if self.validation_busy:
+            raise TimingAdmissionBusy("project timing admission busy")
         return SimpleNamespace(
             tree=self.validation_tree,
             success=True,
@@ -266,6 +270,23 @@ def test_ready_template_update_validates_exact_tree_before_publication(
     assert harness.events.index("commit") < harness.events.index("push")
     assert harness.events.index("push") < harness.events.index("merge-request")
     assert harness.events.index("merge-request") < harness.events.index("readback")
+
+
+def test_busy_template_update_keeps_ready_work_for_later_validation(
+    tmp_path: Path,
+) -> None:
+    record = _ready_record(tmp_path)
+    harness = _PublicationHarness(record, validation_busy=True)
+
+    result = _publish(_ready_report(record), harness)
+
+    assert (result.outcome, result.state) == ("deferred", "ready")
+    assert harness.record == record
+    assert harness.intent is None
+    assert "validate" in harness.events
+    assert "commit" not in harness.events
+    assert "push" not in harness.events
+    assert "merge-request" not in harness.events
 
 
 @pytest.mark.parametrize("observed_tree", [None, "0" * 40])
@@ -585,6 +606,14 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
             return subprocess.CompletedProcess(command, 0, b"", b"")
         raise AssertionError(command)
 
+    def supervised_hook(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["capture_output"] is False
+        assert kwargs["current_directory"] == worktree
+        result = process(command)
+        return subprocess.CompletedProcess(command, result.returncode, "", "")
+
     config = AgentWorkConfig(
         host="git.example.test",
         project_id=37,
@@ -600,6 +629,7 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
         {},
         lambda *_args, **_kwargs: CommandResult(0, "", ""),
         process,
+        run_supervised_hook=supervised_hook,
     )
 
     evidence = dependencies.validate_tree(worktree, _TREE)

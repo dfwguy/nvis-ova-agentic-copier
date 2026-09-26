@@ -233,8 +233,9 @@ An exit of zero may start Judge's Non-functional Reviewer child only if the
 tree did not change. In interactive work, keep the full-hook JUnit for `py311`
 and `py314` fixed, with its hash and count. It starts the full timing list.
 Judge then gets a read-only comparator report for the exact baseline and
-candidate trees. Where timing impact needs proof, it has at least two focused
-runs per tree in each relevant environment. Each run has JUnit and setup,
+candidate trees. Where timing impact needs proof, baseline and candidate have
+equal focused run counts, with at least two per tree in each relevant
+environment. Each run has JUnit and setup,
 call, and teardown phase logs. Check each file hash and count, command,
 Python interpreter, and seed. The report shows signed candidate-minus-baseline
 deltas. A `review` flag asks the Non-functional Reviewer to assess the cause;

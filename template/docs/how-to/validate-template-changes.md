@@ -91,15 +91,62 @@ review changed tests; job duration is diagnostic evidence.
 
 ## Investigate local test timing
 
-1. Find the exact baseline and candidate Git trees. Prepare separate
-   checkouts with the same Python version and packages. Record each tree
-   hash, UTC date, interpreter, host load, and command. A branch name or test
-   total does not identify a run.
-2. Run `uv run tox -e py311` and `uv run tox -e py314` on the candidate.
-   Preserve their complete `test-results-py311.xml` and
-   `test-results-py314.xml` files. Record each file's SHA-256 digest, case
-   count, failure count, error count, and pytest seed. The fixed tox commands
-   do not pass a requested seed through `PYTEST_ADDOPTS` or extra arguments
+Enter one project-scoped validation window before the Judge hook and keep it
+through the focused repeats and comparison. `GITLAB_HOST` must be a bare host
+name, and `GITLAB_PROJECT_ID` must be a positive numeric project ID. Prepare
+a separate baseline worktree at the exact comparison commit. Replace
+`BASELINE_COMMIT_SHA` with its full commit ID. Prepare both baseline tox
+interpreters without running tests. Keep the staged candidate in its own
+worktree.
+
+```bash
+candidate_dir="$(pwd -P)"
+baseline_commit="BASELINE_COMMIT_SHA"
+baseline_parent="$(mktemp -d)"
+baseline_dir="$baseline_parent/baseline"
+git worktree add --detach "$baseline_dir" "$baseline_commit"
+(cd "$baseline_dir" && uv run --locked tox run -e py311,py314 --notest)
+export candidate_dir baseline_dir
+```
+
+From the candidate repository root, enter the window:
+
+```bash
+agent-work validation window --apply -- bash
+```
+
+At the child shell prompt, run:
+
+```bash
+candidate_tree="$(git write-tree)"
+agent-work validation run --candidate-tree "$candidate_tree" --apply
+"$baseline_dir/.tox/py311/bin/python" --version
+"$candidate_dir/.tox/py311/bin/python" --version
+"$baseline_dir/.tox/py314/bin/python" --version
+"$candidate_dir/.tox/py314/bin/python" --version
+```
+
+Keep the child shell open through all repeats and comparison. Leave it with
+`exit` after comparison; admission ends when the child exits, including after
+a crash. It admits one local timing measurement per project at a time. Other
+projects and CI continue independently. A busy admission waits up to 30
+seconds, then exits with status `1`, prints `project timing admission busy`,
+and saves `timing-contention.json` in the project's XDG state. Defer the
+proof and retry after the active window ends. Treat that record and any
+overlapping host work as contention evidence. Ad hoc tox timing outside the
+window does not count as admitted clean proof.
+
+Inside the admitted child shell:
+
+1. Record the exact baseline and staged candidate Git trees, UTC date, host
+   load, commands, and prepared interpreters. Confirm that the baseline and
+   candidate interpreters use the same Python versions and packages. A branch
+   name or test total does not identify a run.
+2. The Judge hook above runs the full supported matrix for the staged tree.
+   Preserve its complete `test-results-py311.xml` and
+   `test-results-py314.xml` JUnit snapshots. Record each file's SHA-256
+   digest, case count, failure count, error count, and pytest seed. The fixed
+   tox commands do not pass a requested seed through `PYTEST_ADDOPTS` or extra arguments
    after `tox --`. Use the full JUnit files to list **every** candidate case
    above 100 ms and at or above 1 second, by full case ID and environment.
 3. Find new and changed tests, including each parameter. Include cases that
@@ -107,27 +154,31 @@ review changed tests; job duration is diagnostic evidence.
    change touches, find out before approval. Select those cases and relevant
    slow cases for focused diagnosis. Use the same node IDs on both trees
    wherever the case exists at baseline.
-4. For each relevant Python environment, run the selected cases at least
-   twice on the baseline tree and twice on the candidate tree. Use the same
-   prepared interpreter, pytest command, arguments, and explicit
-   `--randomly-seed` for all four runs. Use `-vv --durations=0` to capture
+4. In each Python environment, run selected cases at least twice on each
+   tree. Use the same number of baseline and candidate runs. Pass only node IDs
+   present in the baseline to its runs; record added tests as candidate-only
+   evidence. Use the corresponding prepared tox interpreter in each worktree,
+   matching Python versions, pytest arguments, and an explicit
+   `--randomly-seed` for every paired run. Use `-vv --durations=0` to capture
    setup, call, and teardown, including phases below 5 ms that pytest may
    otherwise omit. Give every run a distinct JUnit path and phase-log path.
    Save each file unchanged with its SHA-256 digest and JUnit case count.
+   Record other host work that may have competed for CPU, disk, or memory.
    For Python 3.11, the focused command shape is
    `uv run --no-project --python .tox/py311/bin/python python -m pytest -vv --no-cov --durations=0 --randomly-seed=262 --junitxml=<unique-path>`
    followed by each selected full pytest node ID as a separate quoted
    argument. Use `py314` in the interpreter path for Python 3.14. Record the
    exact command and seed for every run.
-5. Supply the files and their tree, environment, interpreter, command, seed,
-   digest, and count records to the read-only
+5. Within the same window, supply the files and their tree, environment,
+   interpreter, command, seed, digest, and count records to the read-only
    `agent_work.local_test_timing.compare_local_test_timings` callable. It
    accepts an evidence manifest, the expected baseline and candidate trees,
    and a file-reading callback. It gives signed candidate-minus-baseline time
    changes, phase costs, case groups, and full candidate lists above 100 ms
    and at or above 1 second. It does not run tests or provide a command-line
    interface. Check its report against the diff before assigning a slowdown
-   to changed code.
+   to changed code. Check session fixtures before attributing the first
+   consuming case's setup cost to its test body.
 
 A `review` result needs closer review; it does not by itself prove a
 regression. Missing, mismatched, or partial proof blocks approval until the
@@ -138,8 +189,7 @@ rule blocks it. Do not call the mixed case a timing pass or a regression.
 Check host load and fixture setup before assigning cause. Do not infer cause
 from one run. An inherited case that stays above 100 ms but is unchanged or
 faster remains in the report without automatic rejection. Give each
-confirmed cost an owner and a
-reduction or integration-exception plan in the
+confirmed cost an owner and a reduction or integration-exception plan in the
 [long-running register](../reference/testing-strategy.md#long-running-local-test-register).
 The serial worker still uses trusted candidate-only timing proof; issue #270
 tracks paired baseline evidence there.

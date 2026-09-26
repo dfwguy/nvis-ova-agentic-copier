@@ -2165,6 +2165,31 @@ def reconcile_closed_issues(
         gitlab.transition_labels(issue.iid, None)
 
 
+def _record_timing_deferred(
+    record: LedgerRecord, *, ledger: LedgerPort, now: datetime
+) -> LedgerRecord:
+    """Requeue a busy timing window without charging the failure retry budget."""
+    condition = ConditionEvidence(
+        occurred_at=now,
+        retry_count=record.retry_count,
+        code=ErrorCode.TIMING_ADMISSION_BUSY.value,
+        detail="Project timing admission was busy; validation was deferred.",
+    )
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.RETRY_WAIT,
+            prior_state=record.state,
+            prior_phase=record.phase,
+            retry_at=now + timedelta(seconds=30),
+            error_code=ErrorCode.TIMING_ADMISSION_BUSY,
+            summary="Project timing admission was busy; validation was deferred.",
+            next_action="Repeat exact-tree validation after the timing window clears.",
+            condition_history=(*record.condition_history, condition)[-64:],
+        )
+    )
+
+
 def _record_retry(
     record: LedgerRecord,
     *,
@@ -3004,6 +3029,7 @@ def _execute(
     invoke: InvokerPort,
     timeout_seconds: int,
     now: datetime,
+    completion_clock: Callable[[], datetime],
     remaining_seconds: Callable[[], float] | None = None,
     issue_lock: Callable[[int], AbstractContextManager[None]] | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
@@ -3209,6 +3235,7 @@ def _execute(
         )
     validated_candidate_paths: tuple[str, ...] | None = None
     successfully_validated_tree: str | None = None
+    pending_deferred_tree: str | None = None
     prepared_candidate: str | None = None
     prepared_evidence: dict[str, object] | None = None
     uses_authored_base = (
@@ -3241,6 +3268,7 @@ def _execute(
         action: str, tree: str | None, selector: dict[str, object] | None = None
     ) -> dict[str, object]:
         nonlocal validated_candidate_paths, successfully_validated_tree
+        nonlocal pending_deferred_tree
         nonlocal prepared_candidate, prepared_evidence
         early_content = (
             record.state is RunnerState.EXECUTING
@@ -3281,6 +3309,7 @@ def _execute(
                     allow_base_ancestor=uses_authored_base,
                 )
                 prepared_candidate = staged_tree
+                pending_deferred_tree = None
                 validated_candidate_paths = observed_candidate_paths()
                 return {
                     "candidate_tree": staged_tree,
@@ -3375,6 +3404,9 @@ def _execute(
             )
             if report.get("state") == "terminal-success":
                 successfully_validated_tree = tree
+                pending_deferred_tree = None
+            elif action == "validate" and report.get("state") == "deferred":
+                pending_deferred_tree = tree
             return report
         except RepositoryError as error:
             reason = str(error)
@@ -3625,6 +3657,8 @@ def _execute(
             summary="Publication correction identity changed after worker invocation.",
         )
     record = refreshed_correction
+    if pending_deferred_tree is not None:
+        return _record_timing_deferred(record, ledger=ledger, now=completion_clock())
     if invocation.protocol_error is not None:
         if record.state is RunnerState.REPAIR and record.repair_attempt is not None:
             return _record_repair_failure(
@@ -5149,6 +5183,7 @@ def run_segment(
         ErrorCode.WORKER_TIMEOUT,
         ErrorCode.WORKER_PROTOCOL_INVALID,
         ErrorCode.WORKER_RECEIPT_INVALID,
+        ErrorCode.TIMING_ADMISSION_BUSY,
     }
     reexecute_due_worker_retry = record.state is RunnerState.RETRY_WAIT and (
         record.error_code in retryable_worker_errors
@@ -5398,6 +5433,7 @@ def run_segment(
             invoke=invoke,
             timeout_seconds=timeout_seconds,
             now=now,
+            completion_clock=boundary_clock,
             remaining_seconds=remaining_seconds,
             issue_lock=issue_lock,
             load_red_checkpoint=load_red_checkpoint,

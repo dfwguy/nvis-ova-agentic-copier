@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from string import ascii_letters, digits
@@ -28,6 +28,7 @@ from agent_work import validation
 from agent_work.cli import _read_validation_artifact
 from agent_work.ledger import state_home
 from agent_work.repository import CommandResult
+from agent_work.timing_admission import TimingAdmissionLease
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
@@ -166,6 +167,208 @@ def test_preview_never_runs_hook_or_mutates_durable_session() -> None:
     assert calls == []
     assert state.writes == []
     assert state.locks == []
+
+
+def test_project_admission_covers_running_record_hook_artifacts_and_terminal_record() -> (
+    None
+):
+    state = ValidationStateFake()
+    events: list[str] = []
+    dependencies, _ = _dependencies(state)
+
+    @contextmanager
+    def project_admission() -> Iterator[None]:
+        events.append("admitted")
+        try:
+            yield
+        finally:
+            events.append("released")
+
+    def write_record(tree: str, record: dict[str, object]) -> None:
+        events.append(f"record:{record['state']}")
+        state.atomic_write(tree, record)
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert command == ("git", "hook", "run", "pre-commit")
+        events.append("hook")
+        return CommandResult(0, "", "")
+
+    def capture(
+        _tree: str, _artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        events.append("capture")
+        return (
+            Path("/snapshots") / _CANDIDATE / "test-results-py311.xml",
+            Path("/snapshots") / _CANDIDATE / "test-results-py314.xml",
+        )
+
+    dependencies = replace(
+        dependencies,
+        project_admission=project_admission,
+        atomic_write_record=write_record,
+        remove_junit_artifact=lambda _path: events.append("cleanup"),
+        run_command=run,
+        read_artifact=lambda _path: (
+            events.append("artifact_read")
+            or b"<testsuite tests='1' failures='0' errors='0'/>"
+        ),
+        capture_junit_artifacts=capture,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "terminal-success"
+    assert events[0] == "admitted"
+    assert events[-1] == "released"
+    assert (
+        events.index("record:running") < events.index("cleanup") < events.index("hook")
+    )
+    assert (
+        events.index("hook") < events.index("artifact_read") < events.index("capture")
+    )
+    assert events.index("capture") < events.index("record:terminal-success")
+
+
+def test_project_admission_contention_leaves_candidate_and_hook_untouched() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    cleanup: list[Path] = []
+
+    @contextmanager
+    def busy_admission() -> Iterator[None]:
+        raise JudgeValidationError("project timing admission busy")
+        yield
+
+    dependencies = replace(
+        dependencies,
+        project_admission=busy_admission,
+        remove_junit_artifact=cleanup.append,
+    )
+
+    with pytest.raises(JudgeValidationError, match="admission busy"):
+        run_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+
+    assert state.writes == []
+    assert state.records == {}
+    assert state.locks == []
+    assert cleanup == []
+    assert calls == []
+
+
+def test_project_admission_serializes_separate_candidates_before_either_hook() -> None:
+    first_state = ValidationStateFake()
+    second_state = ValidationStateFake()
+    held = False
+    second_calls: list[tuple[str, ...]] = []
+
+    @contextmanager
+    def shared_admission() -> Iterator[None]:
+        nonlocal held
+        if held:
+            raise JudgeValidationError("project timing admission busy")
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    first_dependencies, _ = _dependencies(first_state)
+    second_dependencies, _ = _dependencies(second_state, current_tree=_OTHER_CANDIDATE)
+    second_dependencies = replace(
+        second_dependencies,
+        project_admission=shared_admission,
+        run_command=lambda command, **_kwargs: (
+            second_calls.append(command) or CommandResult(0, "", "")
+        ),
+    )
+
+    def first_hook(_command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        with pytest.raises(JudgeValidationError, match="admission busy"):
+            run_judge_validation(
+                candidate_tree=_OTHER_CANDIDATE,
+                apply=True,
+                dependencies=second_dependencies,
+            )
+        assert second_state.writes == []
+        assert second_calls == []
+        return CommandResult(0, "", "")
+
+    first_dependencies = replace(
+        first_dependencies,
+        project_admission=shared_admission,
+        run_command=first_hook,
+    )
+
+    first_report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=first_dependencies
+    )
+    second_report = run_judge_validation(
+        candidate_tree=_OTHER_CANDIDATE, apply=True, dependencies=second_dependencies
+    )
+
+    assert first_report.state == second_report.state == "terminal-success"
+    assert second_calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_project_admission_keeps_distinct_projects_independent() -> None:
+    first_state = ValidationStateFake()
+    second_state = ValidationStateFake()
+    first_dependencies, _ = _dependencies(first_state)
+    second_dependencies, second_calls = _dependencies(
+        second_state, current_tree=_OTHER_CANDIDATE
+    )
+    first_held = False
+    second_held = False
+
+    @contextmanager
+    def first_admission() -> Iterator[None]:
+        nonlocal first_held
+        assert not first_held
+        first_held = True
+        try:
+            yield
+        finally:
+            first_held = False
+
+    @contextmanager
+    def second_admission() -> Iterator[None]:
+        nonlocal second_held
+        assert not second_held
+        second_held = True
+        try:
+            yield
+        finally:
+            second_held = False
+
+    second_dependencies = replace(
+        second_dependencies, project_admission=second_admission
+    )
+
+    def first_hook(_command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nested = run_judge_validation(
+            candidate_tree=_OTHER_CANDIDATE,
+            apply=True,
+            dependencies=second_dependencies,
+        )
+        assert nested.state == "terminal-success"
+        assert first_held and not second_held
+        return CommandResult(0, "", "")
+
+    first_dependencies = replace(
+        first_dependencies,
+        project_admission=first_admission,
+        run_command=first_hook,
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=first_dependencies
+    )
+
+    assert report.state == "terminal-success"
+    assert second_calls == [("git", "hook", "run", "pre-commit")]
 
 
 @pytest.mark.parametrize(
@@ -390,6 +593,8 @@ def test_pre_hook_cleanup_retry_is_dry_run_then_one_append_only_attempt() -> Non
     commands: list[tuple[str, ...]] = []
     retry_records: dict[str, dict[str, object]] = {}
     retry_writes: list[dict[str, object]] = []
+    retained_lease = TimingAdmissionLease(123)
+    hook_leases: list[TimingAdmissionLease | None] = []
     initial_dependencies, _ = _dependencies(state)
     initial_dependencies = replace(
         initial_dependencies,
@@ -408,12 +613,18 @@ def test_pre_hook_cleanup_retry_is_dry_run_then_one_append_only_attempt() -> Non
         retry_records[tree] = record
         retry_writes.append(record)
 
+    def run_hook(
+        command: tuple[str, ...], lease: TimingAdmissionLease | None
+    ) -> CommandResult:
+        commands.append(command)
+        hook_leases.append(lease)
+        return CommandResult(0, "", "")
+
     retry_dependencies = replace(
         initial_dependencies,
         remove_junit_artifact=lambda _path: None,
-        run_command=lambda command, **_kwargs: (
-            commands.append(command) or CommandResult(0, "", "")
-        ),
+        project_admission=lambda: nullcontext(retained_lease),
+        run_hook=run_hook,
         read_retry_record=retry_records.get,
         atomic_write_retry_record=write_retry,
     )
@@ -443,6 +654,7 @@ def test_pre_hook_cleanup_retry_is_dry_run_then_one_append_only_attempt() -> Non
     assert repeated.action == "existing_retry"
     assert ordinary_run.state == "terminal-artifact-failure"
     assert commands == [("git", "hook", "run", "pre-commit")]
+    assert hook_leases == [retained_lease]
     assert state.records[_CANDIDATE] == original_record
     assert len(state.writes) == 2
     assert retry_writes[0]["state"] == "running"
@@ -453,6 +665,48 @@ def test_pre_hook_cleanup_retry_is_dry_run_then_one_append_only_attempt() -> Non
             json.dumps(original_record, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     )
+
+
+def test_retry_contention_does_not_write_retry_record_or_run_hook() -> None:
+    state = ValidationStateFake()
+    initial_dependencies, _ = _dependencies(state)
+    initial_dependencies = replace(
+        initial_dependencies,
+        remove_junit_artifact=lambda _path: (_ for _ in ()).throw(
+            OSError("cleanup failed before hook")
+        ),
+    )
+    original = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=initial_dependencies
+    )
+    original_record = json.loads(json.dumps(state.records[_CANDIDATE]))
+    retry_writes: list[dict[str, object]] = []
+    calls: list[tuple[str, ...]] = []
+
+    @contextmanager
+    def busy_admission() -> Iterator[None]:
+        raise JudgeValidationError("project timing admission busy")
+        yield
+
+    retry_dependencies = replace(
+        initial_dependencies,
+        project_admission=busy_admission,
+        remove_junit_artifact=lambda _path: None,
+        atomic_write_retry_record=lambda _tree, record: retry_writes.append(record),
+        run_command=lambda command, **_kwargs: (
+            calls.append(command) or CommandResult(0, "", "")
+        ),
+    )
+
+    with pytest.raises(JudgeValidationError, match="admission busy"):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+        )
+
+    assert original.state == "terminal-artifact-failure"
+    assert state.records[_CANDIDATE] == original_record
+    assert retry_writes == []
+    assert calls == []
 
 
 @pytest.mark.parametrize(

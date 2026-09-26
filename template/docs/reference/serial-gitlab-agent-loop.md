@@ -85,6 +85,7 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          [--apply] [--json] [--debug]
 agent-work validation run --candidate-tree TREE [--apply] [--json]
 agent-work validation retry --candidate-tree TREE [--apply] [--json]
+agent-work validation window [--apply] [--json] -- COMMAND [ARG ...]
 agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
@@ -124,6 +125,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` starts the one hook run. |
 | `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. |
+| `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
 | `candidate read` | Same identity and returned tree; optional manifest, chunk, or completion selector | Reads bounded, controller-derived base-to-tree file evidence for Consistency Judge. |
@@ -417,7 +419,29 @@ returns `1` on broker rejection, and returns `2` for invalid syntax.
 success. The worker uses `--apply --json` so it can parse bounded responses,
 including a failed validation result.
 
-### `validation run` and `validation status`
+### `validation window`, `validation run`, and `validation status`
+
+`validation window --apply -- COMMAND` holds one local timing admission for
+the configured GitLab project while `COMMAND` runs. It requires a bare
+`GITLAB_HOST` and positive numeric `GITLAB_PROJECT_ID`. Without `--apply`, it
+only previews the action and does not start the child. An interactive Judge can
+use `validation window --apply -- bash` to run the Judge hook and paired local
+timing repeats in one child shell. A nested `validation run` or `validation
+retry` can use that live window. The window ends when its child exits, including
+after a crash. Other configured projects and CI are independent. The CLI exits
+`0` when the child succeeds and `1` when it does not; `--json` includes the
+child's raw status as `exit_code`.
+
+An applied window, run, or retry waits up to 30 seconds for another local
+observation on the same project. If admission stays busy, it saves
+`timing-contention.json` under the project's XDG state and exits `1` without
+starting a hook or child. Plain output says `project timing admission busy`.
+With `--json`, `validation run` and `validation retry` return
+`{"candidate_tree":"TREE","state":"deferred","reason":"project_timing_admission_busy"}`.
+The window returns
+`{"action":"window","applied":true,"state":"deferred","reason":"project_timing_admission_busy"}`.
+These results mean the local timing proof must wait; they do not claim a clean
+measurement.
 
 The trusted controller or an interactive Judge checks one staged candidate in a
 durable session keyed by `TREE`.

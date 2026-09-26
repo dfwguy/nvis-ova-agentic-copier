@@ -1341,6 +1341,19 @@ class GitRepository:
             or report.get("candidate_tree") != candidate_tree
         ):
             raise RepositoryError("candidate validation response is invalid")
+        if report.get("state") == "deferred":
+            if (
+                action != "validate"
+                or result.returncode != 1
+                or report
+                != {
+                    "candidate_tree": candidate_tree,
+                    "state": "deferred",
+                    "reason": "project_timing_admission_busy",
+                }
+            ):
+                raise RepositoryError("candidate validation response is invalid")
+            return {"candidate_tree": candidate_tree, "state": "deferred"}
         artifacts = report.get("junit_artifacts")
         if not isinstance(artifacts, list) or len(artifacts) > 2:
             raise RepositoryError("candidate validation evidence is invalid")

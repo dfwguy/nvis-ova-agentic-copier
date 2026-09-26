@@ -25,7 +25,7 @@ from agent_work.gitlab import (
     MergeRequestPublicationReport,
     render_merge_request_description,
 )
-from agent_work.ledger import LockBusy
+from agent_work.ledger import LockBusy, project_state_path
 from agent_work.models import (
     CommandItemReport,
     CommandReport,
@@ -36,8 +36,216 @@ from agent_work.models import (
     RecoverySummary,
 )
 from agent_work.repository import CommandResult
+from agent_work.timing_admission import TimingAdmissionLease
 from agent_work.upstream_finding import UpstreamFindingPreview
 from agent_work.worker import WorkerResultBrokerClientRequest
+
+
+def test_validation_window_preview_does_not_launch_child() -> None:
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def run_validation_window(command: tuple[str, ...], apply: bool) -> int:
+        calls.append((command, apply))
+        return 0
+
+    output: list[str] = []
+    exit_code = main(
+        ["validation", "window", "--", "bash", "-c", "true"],
+        run_validation_window=run_validation_window,
+        write_stdout=output.append,
+    )
+
+    assert exit_code == 0
+    assert calls == []
+    assert output
+
+
+@pytest.mark.parametrize("child_exit_code", (0, 1, 2))
+def test_validation_window_apply_preserves_child_argv_and_normalizes_exit_code(
+    child_exit_code: int,
+) -> None:
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def run_validation_window(command: tuple[str, ...], apply: bool) -> int:
+        calls.append((command, apply))
+        return child_exit_code
+
+    exit_code = main(
+        ["validation", "window", "--apply", "--", "bash", "-c", "exit 7"],
+        run_validation_window=run_validation_window,
+        write_stdout=lambda _message: None,
+    )
+
+    assert exit_code == (0 if child_exit_code == 0 else 1)
+    assert calls == [(("bash", "-c", "exit 7"), True)]
+
+
+def test_validation_window_apply_json_reports_child_status() -> None:
+    output: list[str] = []
+    result = main(
+        ["validation", "window", "--apply", "--json", "--", "bash", "-c", "exit 7"],
+        run_validation_window=lambda _command, _apply: 7,
+        write_stdout=output.append,
+    )
+
+    assert result == 1
+    assert len(output) == 1
+    assert json.loads(output[0]) == {
+        "action": "window",
+        "applied": True,
+        "exit_code": 7,
+    }
+
+
+def test_validation_window_busy_json_reports_deferred_status() -> None:
+    from agent_work.timing_admission import TimingAdmissionBusy
+
+    output: list[str] = []
+    result = main(
+        ["validation", "window", "--apply", "--json", "--", "bash"],
+        run_validation_window=lambda _command, _apply: (_ for _ in ()).throw(
+            TimingAdmissionBusy("project timing admission busy")
+        ),
+        write_stdout=output.append,
+        write_stderr=lambda _message: None,
+    )
+
+    assert result == 1
+    assert json.loads(output[0]) == {
+        "action": "window",
+        "applied": True,
+        "state": "deferred",
+        "reason": "project_timing_admission_busy",
+    }
+
+
+def test_validation_window_help_and_missing_child_use_argparse_status() -> None:
+    with pytest.raises(SystemExit) as help_exit:
+        main(["validation", "window", "--help"])
+    with pytest.raises(SystemExit) as missing_child_exit:
+        main(["validation", "window", "--apply", "--"])
+
+    assert help_exit.value.code == 0
+    assert missing_child_exit.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {},
+        {"GITLAB_HOST": "gitlab.example.test"},
+        {"GITLAB_PROJECT_ID": "276"},
+        {"GITLAB_HOST": "gitlab.example.test", "GITLAB_PROJECT_ID": "invalid"},
+    ),
+)
+def test_applied_validation_without_numeric_project_identity_fails_before_hook(
+    tmp_path: Path, identity: dict[str, str]
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    removed: list[Path] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        if command == ("git", "rev-parse", "--git-dir"):
+            return CommandResult(0, str(tmp_path / ".git"), "")
+        if command == ("git", "write-tree"):
+            return CommandResult(0, "a" * 40, "")
+        return CommandResult(0, "", "")
+
+    errors: list[str] = []
+    result = main(
+        ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
+        environment={"XDG_STATE_HOME": str(tmp_path), **identity},
+        run_command=run,
+        run_validation_hook=lambda command, _lease: run(command),
+        read_validation_artifact=lambda _path: (
+            b"<testsuite tests='1' failures='0' errors='0'/>"
+        ),
+        remove_validation_artifact=removed.append,
+        write_stdout=lambda _message: None,
+        write_stderr=errors.append,
+    )
+
+    assert result == 1
+    assert ("git", "hook", "run", "pre-commit") not in commands
+    assert removed == []
+    assert list(tmp_path.rglob("*.json")) == []
+    assert errors
+
+
+def test_applied_validation_with_project_identity_runs_hook_under_shared_admission(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        "XDG_STATE_HOME": str(tmp_path),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "276",
+    }
+    commands: list[tuple[str, ...]] = []
+    removed: list[Path] = []
+    hook_leases: list[TimingAdmissionLease | None] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        if command == ("git", "rev-parse", "--git-dir"):
+            return CommandResult(0, str(tmp_path / ".git"), "")
+        if command == ("git", "write-tree"):
+            return CommandResult(0, "a" * 40, "")
+        return CommandResult(0, "", "")
+
+    def run_hook(
+        command: tuple[str, ...], lease: TimingAdmissionLease | None
+    ) -> CommandResult:
+        hook_leases.append(lease)
+        return run(command)
+
+    result = main(
+        ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
+        environment=environment,
+        run_command=run,
+        run_validation_hook=run_hook,
+        read_validation_artifact=lambda _path: (
+            b"<testsuite tests='1' failures='0' errors='0'/>"
+        ),
+        remove_validation_artifact=removed.append,
+        write_stdout=lambda _message: None,
+    )
+
+    project_root = project_state_path(
+        host="gitlab.example.test", project_id=276, environment=environment
+    )
+    assert result == 0
+    assert commands.count(("git", "hook", "run", "pre-commit")) == 1
+    assert len(hook_leases) == 1
+    assert isinstance(hook_leases[0], TimingAdmissionLease)
+    assert removed == [
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+    ]
+    assert any(path.is_file() for path in project_root.rglob("*"))
+
+
+def test_applied_validation_contention_returns_json_deferred_result() -> None:
+    from agent_work.timing_admission import TimingAdmissionBusy
+
+    output: list[str] = []
+    result = main(
+        ["validation", "run", "--candidate-tree", "a" * 40, "--apply", "--json"],
+        validation_run=lambda **_kwargs: (_ for _ in ()).throw(
+            TimingAdmissionBusy("project timing admission busy")
+        ),
+        write_stdout=output.append,
+        write_stderr=lambda _message: None,
+    )
+
+    assert result == 1
+    assert json.loads(output[0]) == {
+        "candidate_tree": "a" * 40,
+        "state": "deferred",
+        "reason": "project_timing_admission_busy",
+    }
 
 
 def test_human_status_renders_one_concise_answer_line_for_each_item() -> None:

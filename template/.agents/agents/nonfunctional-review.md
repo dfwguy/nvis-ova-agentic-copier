@@ -37,8 +37,9 @@ each path, hash, and count before you read its valid JUnit XML and numeric
 `time` fields. The full-hook `py311` and `py314` files list all candidate case
 times. Judge also gives you a read-only comparator report for the exact
 baseline and candidate trees. Check each SHA-256 hash and count, command, Python
-interpreter, and seed. Where timing impact needs proof, require at least two
-focused runs per tree in each relevant environment. Each run needs JUnit and
+interpreter, and seed. Where timing impact needs proof, require equal baseline
+and candidate focused run counts, with at least two per tree in each relevant
+environment. Each run needs JUnit and
 setup, call, and teardown phase logs. The report shows signed
 candidate-minus-baseline deltas. A `review` flag asks you to assess the cause;
 it does not prove the diff caused a regression. Missing, mismatched, or partial

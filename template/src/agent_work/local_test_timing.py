@@ -383,6 +383,8 @@ def compare_local_test_timings(
             )
             if len(evidence.baseline_runs) < 2 or len(evidence.candidate_runs) < 2:
                 raise ValueError("at least two runs per tree are required")
+            if len(evidence.baseline_runs) != len(evidence.candidate_runs):
+                raise ValueError("focused repeat counts must be equal")
             baseline = tuple(
                 _run_cases(
                     run,
@@ -415,6 +417,10 @@ def compare_local_test_timings(
                 set(cases) != set(candidate[0][0]) for cases, _ in candidate
             ):
                 raise ValueError("focused repeat case sets differ")
+            if any(name not in full for cases, _ in candidate for name in cases):
+                raise ValueError(
+                    "focused candidate case missing from full JUnit inventory"
+                )
             if any(
                 name not in full or any(name not in cases for cases, _ in candidate)
                 for name in changed_ids
