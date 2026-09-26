@@ -140,14 +140,21 @@ Scheduled repair backoff and repair quarantine are item-local. They are not `RET
 
 ## Publication separates observation from repair.
 
-After publication creates or updates an MR, the controller waits cheaply only for the exact source-SHA pipeline to become terminal. It then starts a fresh Pipeline Performance Judge context. This Fast/low role evaluates live evidence without changing code, the MR, jobs, approvals, or merge. Healthy evidence has no external effect. Concrete, repository-actionable evidence creates or reuses one deduplicated GitLab problem issue. Incomplete or unverified evidence does not manufacture work.
-
-The controller selects that problem issue only during later ordinary reconciliation. Its retained or newly prepared worktree starts a fresh complete workflow session. Pipeline observation never promises same-session repair.
+After publication creates or updates an MR, the controller observes the exact
+current source SHA and a bounded inventory of its current jobs. It requires at
+least one current required job and success from every such job before it
+records the human handoff. A failed pipeline uses the existing exact-owner
+repair path when evidence is safe. If a successful pipeline has a pending,
+failed, canceled, skipped, or other non-success required job, the controller
+checks again up to three times. It does the same when the inventory has no
+required job. If proof is still absent, it marks the issue `needs-repair`
+without starting a worker. A source-identity mismatch blocks immediately;
+transport errors retry. Job duration does not gate the handoff.
 
 ## Credentials, audit, and human handoff.
 
 The deterministic controller, AI workflow, and nested roles share one scoped Developer GitLab credential. Their separation supports deterministic, recoverable execution; it is not a security boundary. The credential stays in the checkout-local environment, not the service file, journal, or ledger.
 
-The bounded audit records decisions, evidence, tests, reviewers, correction outcomes, branch and merge-request identity, and the next action. It excludes credentials, prompts, chain-of-thought, and unbounded output. The worker returns one versioned, bounded result. The controller validates it before publication. A verified merge request hands work to a human reviewer. Only that human may approve or merge.
+The bounded audit records decisions, evidence, tests, reviewers, correction outcomes, branch and merge-request identity, and the next action. It excludes credentials, prompts, chain-of-thought, and unbounded output. The worker returns one versioned, bounded result. The controller validates it before publication. A verified merge request and successful required-job proof hand work to a human reviewer. Only that human may approve or merge.
 
 For lifecycle states, commands, recovery procedures, and protocol fields, use the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md) and [setup guide](../how-to/setup-serial-gitlab-agent-loop.md). For controller design and AI role routing, see [the recovery design](serial-agent-loop-recovery-design.md) and [the agent workflow explanation](agentic-workflow.md).

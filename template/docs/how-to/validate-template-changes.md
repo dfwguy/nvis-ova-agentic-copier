@@ -87,7 +87,7 @@ the job log. Root coverage excludes the generated Copier payload.
 
 The [testing strategy](../reference/testing-strategy.md) records per-case
 timing targets and the long-running test register. Use the JUnit case times to
-review changed tests; job duration measures a different limit.
+review changed tests; job duration is diagnostic evidence.
 
 ## Investigate local test timing
 
@@ -130,9 +130,10 @@ integration-exception plan in the
 [long-running register](../reference/testing-strategy.md#long-running-local-test-register).
 
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
-unrelated work. They do not guarantee a run time. Measure the longest terminal
-job only. Prefer 60 seconds or less and reject more than 120 seconds. Queue
-time is not part of either limit.
+unrelated work. They do not guarantee a run time. Check that the exact-source
+pipeline has at least one current required job and that all current required
+jobs pass. Record job and queue times only when they help diagnose a slow or
+failed run; duration does not gate publication.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary

@@ -8,7 +8,7 @@ status: current
 last_reviewed: 2026-09-24
 related:
   - path: validate-template-changes.md
-    why: Verifies the checks and timing budget protected by the images.
+    why: Verifies the checks served by the images.
   - path: ../reference/template-contract.md
     why: Defines the boundary between this repository and generated projects.
 ---
@@ -70,9 +70,9 @@ Each target has its own mutable BuildKit cache:
 `validation-tooling-cache`, `validation-pytest-py311-cache`, and
 `validation-pytest-py314-cache`. The split limits each image to its lane.
 GitLab can build the images at the same time. This aims to reduce the longest
-job's work, but it does not guarantee a build time. Prefer a job run of
-60 seconds or less. Reject one over 120 seconds. Do not count queue time. Do
-not print credentials, tokens, or auth files in logs.
+job's work, but it does not guarantee a build time. Job duration is diagnostic
+evidence, not a publication gate. Do not print credentials, tokens, or auth
+files in logs.
 
 ## 2. Review the image evidence.
 
@@ -145,10 +145,10 @@ six. Both jobs measure only maintained `src/agent_work` code, enforce the 85%
 floor, and publish Cobertura. A shard, coverage combine, coverage floor,
 report, or aggregation failure fails the pipeline.
 
-Use the longest terminal job with a numeric run time for the budget. Prefer 60
-seconds or less. Reject more than 120 seconds. Report skipped, canceled, and
-manual jobs separately. Also report pipeline span and queue time. Runner wait
-time is not part of this budget.
+For the exact MR source SHA, verify at least one current required job and
+success from every current required job. Report skipped, canceled, and manual jobs separately when
+checking a result. Job duration and wait time can explain delays; they do
+not decide the handoff.
 
 If an image needs a dependency, update the inputs. The next pipeline makes new
 commit candidates. Do not add bootstrap work to root jobs. Do not open a

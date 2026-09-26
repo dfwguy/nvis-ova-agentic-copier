@@ -114,12 +114,12 @@ Agent-policy changes are non-trivial, even when small.
 
 ## Documentation and agent-policy mirrors
 
-Portable shared policy is template-owned. It includes `AGENTS.md`, instructions, skills, roles,
+The template owns shared policy in `AGENTS.md`, instructions, skills, roles,
 guidance, and docs. Root and `template/` copies are byte-identical. Root
-`.agents/project.md` and `template/.agents/project.md.jinja` are the rendered
-context exception. Rendered `.agents/project.md` is project-owned. Copier keeps
-it through `_skip_if_exists`. It is not a portable policy mirror. Smoke-render
-Copier after a template doc or policy change.
+`.agents/project.md` and `template/.agents/project.md.jinja` are the context
+exception. Rendered `.agents/project.md` belongs to its project. Copier keeps
+it through `_skip_if_exists`, so it is not a policy mirror. Smoke-render Copier
+after a template doc or policy change.
 
 ## Validation ownership
 
@@ -144,18 +144,6 @@ not portable policy.
 - Shared instructions: root and `template/` byte parity.
 - Copier maintenance synchronization: the content-agnostic exception above.
 - Rendered project context: Copier smoke output.
-
-## Pipeline Performance Budget
-
-```yaml
-pipeline_execution_preferred_seconds: 60
-pipeline_execution_hard_limit_seconds: 120
-```
-
-Apply these limits to the longest job `duration`. Do not use the pipeline
-wall-clock span. Do not use `queued_duration`. Jobs are queue-free execution
-units. Runner scheduling must not reject a change. Humans control these values.
-A change needs explicit human approval.
 
 ## Python Versions
 

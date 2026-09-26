@@ -151,7 +151,6 @@ role is N/A only when facts show it does not apply.
 | Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, conditional `$consistency-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
-| Pipeline review | `$pipeline-performance-judge` | Main delegates after each created or updated MR. |
 
 In coding reconciliation, the mechanically re-proved retained Red receipt is
 the Red preparation receipt. Do not delegate a fresh Test Writer. TDD Red must
@@ -434,8 +433,9 @@ makes the matching direct pending-merge commit and the same postchecks. Any
 source or target ref drift invalidates every receipt. Restart exact selection
 and preparation. Main fetches and rechecks both refs just before publishing
 with exact old-source `--force-with-lease` and authoritative same-merge-request
-readback. Keep that readback. Pipeline review still applies. Only humans approve
-and merge. The timer remains irrelevant. Keep each proof. Check each result.
+readback. Keep that readback. Reconcile the exact-source pipeline through the
+ordinary publication or trusted-controller path. Only humans approve and merge.
+The timer remains irrelevant. Keep each proof. Check each result.
 
 ### Documentation and agent-policy workflow
 
@@ -447,7 +447,6 @@ and merge. The timer remains irrelevant. Keep each proof. Check each result.
 | Consistency review | Conditional `$consistency-judge` | Read-only comparison of changed repeated facts on the exact candidate tree, using controller-owned stage/read proof in serial work. |
 | Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, and source-of-truth verdict. |
 | Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
-| Pipeline review | `$pipeline-performance-judge` | Main delegates after every MR update. |
 
 Writer needs the approved content design and shared worktree. Its receipt lists
 edits, source-of-truth comparisons, mirrors, the documentation report, and
@@ -489,8 +488,8 @@ The internal review does not grant controller program authority.
 Finalizer receives that report, the final diff, the consistency receipt or
 exact N/A, and applicable Diátaxis or policy context. It returns one
 consolidated verdict here. After approval,
-`$git-flow` returns commit, push, and verified MR evidence. Pipeline Judge
-returns its own post-publication receipt. A Writer or Finalizer rejection goes
+`$git-flow` returns commit, push, verified MR, and exact-source pipeline
+evidence. A Writer or Finalizer rejection goes
 back to Writer only for an approved fix that makes real progress.
 
 Writer repairs consolidated Finalizer findings only while evidence shows

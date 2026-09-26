@@ -329,8 +329,11 @@ flowchart TD
     decision -- "normal approval" --> publish["Publication: Main"]
     decision -- "needs human" --> humanstop
     publish --> mr["Merge request"]
-    mr --> pipeline["Pipeline review: $pipeline-performance-judge"]
-    pipeline --> human["Human review, approval, and merge"]
+    mr --> pipeline["Bounded exact-source required-job check"]
+    pipeline -- "required jobs pass" --> human["Human review, approval, and merge"]
+    pipeline -- "failure" --> repairinteractive["Diagnose and repair in approved scope"]
+    repairinteractive --> publish
+    pipeline -- "pending or unverifiable" --> retrycheck["Report evidence and retry point"]
 ```
 
 ```mermaid
@@ -360,8 +363,11 @@ flowchart TD
     docdecision -- "yes" --> docpublish["Main publication"]
     docdecision -- "no" --> dochuman
     docpublish --> docmr["Merge request"]
-    docmr --> docpipeline["$pipeline-performance-judge"]
-    docpipeline --> dochumanreview["Human review, approval, and merge"]
+    docmr --> docpipeline["Bounded exact-source required-job check"]
+    docpipeline -- "required jobs pass" --> dochumanreview["Human review, approval, and merge"]
+    docpipeline -- "failure" --> docrepair["Diagnose and repair in approved scope"]
+    docrepair --> docpublish
+    docpipeline -- "pending or unverifiable" --> docretrycheck["Report evidence and retry point"]
 ```
 
 ```mermaid
@@ -372,18 +378,21 @@ flowchart TD
     serialproposals --> fullworkflow["Applicable full workflow: Red-first or resumed work"]
     fullworkflow --> controllerpublish["Controller publication"]
     controllerpublish --> serialmr["Merge request"]
-    serialmr --> wait["Cheap wait for exact-SHA terminal state"]
-    wait --> freshpipeline["Fresh AI context: Pipeline Performance Judge"]
-    freshpipeline --> serialhuman["Human review, approval, and merge"]
+    serialmr --> wait["Observe exact source SHA and current required jobs"]
+    wait -- "required job proof succeeds" --> serialhuman["Human review, approval, and merge"]
+    wait -- "failed pipeline" --> repair["Exact-owner pipeline repair"]
+    repair --> controllerpublish
+    wait -- "successful pipeline, proof absent" --> reobserve["Reobserve at most three times"]
+    reobserve --> needsrepair["Still absent: needs-repair without worker"]
 ```
 
 ```mermaid
 flowchart TD
-    judgeentry["Pipeline Performance Judge"] --> actionable{"Concrete repository-actionable problem?"}
-    actionable -- "yes" --> issue["Create or reuse one deduplicated problem issue"]
-    issue --> later["Later normal controller reconciliation, selection, and preparation"]
-    later --> freshworkflow["Fresh AI context: applicable full workflow"]
-    actionable -- "no: healthy evidence" --> quiet["Externally quiet"]
+    observation["Current MR source SHA and job inventory"] --> required{"Every current required job succeeded?"}
+    required -- "yes" --> handoff["Record exact-source human handoff"]
+    required -- "failed pipeline" --> repair["Run exact-owner repair when safe"]
+    required -- "success pipeline, proof absent" --> wait["Reobserve at most three times"]
+    wait --> review["Still absent: needs-repair without worker"]
 ```
 
 ```mermaid
@@ -579,21 +588,23 @@ allowed N/A receipts before publication.
 
 ### After publication
 
-Each MR create or update starts a fresh Fast/low Pipeline Performance Judge.
-The Judge uses that MR's exact source SHA. Healthy evidence makes no external
-change. A concrete problem the repository can act on creates or reuses one
-deduplicated GitLab issue. The Judge never directly changes the MR, code,
-pipeline, approval, or merge. Unknown evidence stays a reported limit, not
-made-up work.
+After an ordinary interactive MR create or update, the publisher makes one
+bounded check of the pipeline for that MR's exact source SHA and its required
+jobs. A failed required job goes back for diagnosis and approved-scope repair.
+Pending or unverifiable evidence stays reported as such, with a retry point.
+Job duration is not a publication or review gate.
 
 ### Serial flow
 
-The deterministic controller first does a cheap wait for the exact SHA to
-become terminal. A fresh Judge then starts. Later normal reconciliation selects
-a resulting problem issue and starts a new full workflow context. It does not
-promise a repair in the same session. Agents never approve or merge. They never
-change project-owned values or workflow policy just to clear a gate without
-explicit human approval for that change.
+The controller checks the MR source SHA and its current jobs. It needs at
+least one current required job. Every required job must pass before it records the
+handoff to a person. A failed pipeline goes to the safe repair path. If a
+successful pipeline has a non-success required job or no required jobs, the
+controller rechecks it up to three times. If proof is still absent, it marks
+the issue `needs-repair` without a worker. Stale or unclear source identity
+blocks at once; transport errors retry. Agents never approve or merge. They
+never change project-owned values or workflow policy just to clear a gate
+without explicit human approval for that change.
 
 ## Merge requests are the shared record
 

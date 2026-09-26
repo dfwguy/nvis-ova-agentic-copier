@@ -105,6 +105,7 @@ PIPELINE_JOB_FIELDS = (
     "status",
     "failure_reason",
     "retried",
+    "allow_failure",
     "pipeline",
 )
 NOTE_FIELDS = ("id", "body", "author", "created_at", "system")
@@ -1776,7 +1777,7 @@ class GitLabGateway:
     def list_pipeline_jobs(
         self, pipeline_id: int, source_sha: str
     ) -> tuple[PipelineJobEvidence, ...]:
-        """Return one bounded validated inventory for an exact failed pipeline."""
+        """Return one bounded validated inventory for an exact pipeline."""
         try:
             raw_jobs: list[dict[str, object]] = []
             for page in range(1, _MAX_PIPELINE_JOB_PAGES + 1):
@@ -1787,6 +1788,10 @@ class GitLabGateway:
                     ),
                     "pipeline job list",
                 )
+                if any("allow_failure" not in item for item in batch):
+                    raise GitLabError(
+                        "GitLab pipeline job inventory lacks failure policy"
+                    )
                 raw_jobs.extend(batch)
                 if len(batch) < 100:
                     break

@@ -819,11 +819,6 @@ def test_retry_planning_rejects_an_undeclared_transition() -> None:
             WorkflowPhase.CONTENT_WRITE,
             ("$diataxis-judge", "$agent-policy-judge"),
         ),
-        (
-            WorkflowPhase.POST_PUBLICATION,
-            WorkflowPhase.POST_PUBLICATION,
-            ("$pipeline-performance-judge",),
-        ),
     ],
 )
 def test_rejected_phase_routes_to_its_recorded_owner_without_retrying(

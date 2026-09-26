@@ -245,19 +245,20 @@ Then verify the exact readback. This includes Markdown and final newlines.
 
 ## Check the pipeline and hand off
 
-After publish, run `$pipeline-performance-judge` once for the exact source SHA.
-That skill alone watches and reads the live pipeline. Its feedback uses its own
-deduplicated issue route. That feedback does not allow this skill to change the
-merge request under review.
+After publish, make one bounded check of the pipeline for the exact published
+source SHA. In serial work, use the trusted controller's pipeline observation.
+Verify terminal state and every required job result against that SHA. If a
+required job fails, diagnose it and repair it through the accepted workflow
+within approved scope; then validate and update the same merge request. Do not
+create performance feedback from job duration.
 
-Set `pipeline_reconciled` only for a full exact-SHA receipt with
-`Pipeline health: Pass`. Stop safely on Reject, a nonterminal result, or a
-result that needs a check. Report the judge outcome and next action. Do not
-move the lifecycle forward.
+Set `pipeline_reconciled` only with exact-SHA evidence that the required jobs
+passed. Stop safely on a failed, nonterminal, or unverifiable result. Report
+the result and retry point. Do not move the lifecycle forward.
 
-After Pass, set `awaiting_human`. Report the merge request URL, exact source
-SHA, fix result, checks, and pipeline result. Leave the worktree, branch, and
-merge request ready for review.
+After the required jobs pass, set `awaiting_human`. Report the merge request
+URL, exact source SHA, fix result, checks, and pipeline result. Leave the
+worktree, branch, and merge request ready for review.
 
 Only a human may approve and merge. Clean up only after a
 numeric-project readback proves that a human merged the request. Repository

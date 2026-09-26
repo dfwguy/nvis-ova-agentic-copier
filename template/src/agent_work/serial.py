@@ -604,6 +604,23 @@ def collect_exact_failed_job_diagnostic(
     return job, trace
 
 
+def _required_pipeline_jobs_succeeded(
+    jobs: tuple[PipelineJobEvidence, ...], *, pipeline_id: int, source_sha: str
+) -> bool | None:
+    """Check a complete exact inventory; return None when no current job exists."""
+    if len({job.id for job in jobs}) != len(jobs) or any(
+        job.pipeline_id != pipeline_id or job.pipeline_sha != source_sha for job in jobs
+    ):
+        raise SegmentError("exact pipeline job inventory is ambiguous or stale")
+    current = tuple(job for job in jobs if not job.retried)
+    if not current:
+        return None
+    required = tuple(job for job in current if not job.allow_failure)
+    if not required:
+        return None
+    return all(job.status == "success" for job in required)
+
+
 def record_failed_job_diagnostic_unavailable(
     record: LedgerRecord, *, ledger: LedgerPort, gitlab: GitLabPort
 ) -> LedgerRecord:
@@ -2361,6 +2378,16 @@ def _reconcile_closed_published_issue(
             summary="Closed issue lacks exact published merge request evidence.",
         )
     if pipeline is None or pipeline.status != "success" or pipeline.sha != source_sha:
+        return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+    try:
+        jobs_succeeded = _required_pipeline_jobs_succeeded(
+            gitlab.list_pipeline_jobs(pipeline.id, source_sha),
+            pipeline_id=pipeline.id,
+            source_sha=source_sha,
+        )
+    except (GitLabError, SegmentError):
+        return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
+    if jobs_succeeded is not True:
         return _preserve_closed_published_wrapper(record, ledger=ledger, now=now)
     complete = ledger.persist(_completed_closed_record(record))
     gitlab.transition_labels(record.issue_iid, None)
@@ -4857,6 +4884,13 @@ def _observe(
         )
     if not closes_issue:
         return record
+    if pipeline is not None and pipeline.sha != record.source_sha:
+        return _block_publication_identity(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            summary="Observed pipeline source SHA does not match the publication.",
+        )
     if pipeline is None or pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
         if (
             record.intent is None
@@ -4895,16 +4929,155 @@ def _observe(
             gitlab=gitlab,
             now=now,
         )
-    return ledger.persist(
+    if pipeline.status != "success":
+        needs_repair = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.NEEDS_REPAIR,
+                phase=WorkflowPhase.POST_PUBLICATION,
+                error_code=ErrorCode.PIPELINE_REJECTED,
+                summary="The exact source-SHA pipeline ended without success.",
+                next_action="Inspect the terminal result before explicit recovery.",
+            )
+        )
+        gitlab.transition_labels(
+            needs_repair.issue_iid, label_for_state(needs_repair.state)
+        )
+        return needs_repair
+    try:
+        jobs_succeeded = _required_pipeline_jobs_succeeded(
+            gitlab.list_pipeline_jobs(pipeline.id, pipeline.sha),
+            pipeline_id=pipeline.id,
+            source_sha=record.source_sha,
+        )
+    except GitLabError:
+        return _record_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except SegmentError as error:
+        return _block_publication_identity(
+            record, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    if jobs_succeeded is not True:
+        missing_required = jobs_succeeded is None
+        if record.retry_count >= 3:
+            needs_repair = ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.NEEDS_REPAIR,
+                    phase=WorkflowPhase.POST_PUBLICATION,
+                    error_code=ErrorCode.PIPELINE_REJECTED,
+                    summary=(
+                        "The exact pipeline lacks current required job evidence."
+                        if missing_required
+                        else "A current required job has not succeeded in the exact pipeline."
+                    ),
+                    next_action=(
+                        "Restore a complete exact job inventory for recovery."
+                        if missing_required
+                        else "Inspect the contradictory required-job result before explicit recovery."
+                    ),
+                )
+            )
+            gitlab.transition_labels(
+                needs_repair.issue_iid, label_for_state(needs_repair.state)
+            )
+            return needs_repair
+        return ledger.persist(
+            record.model_copy(
+                update={
+                    "retry_count": record.retry_count + 1,
+                    "summary": (
+                        "The exact pipeline has no current required job proof."
+                        if missing_required
+                        else "A current required job has not yet succeeded in the exact pipeline."
+                    ),
+                    "next_action": "Reobserve its complete current job inventory.",
+                }
+            )
+        )
+    if record.pending_feedback is not None:
+        if record.pending_feedback.outcome is None:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Published feedback lacks a validated outcome.",
+            )
+        try:
+            retained_changes = repository.has_changes(record.worktree)
+        except RepositoryTransientError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
+        if retained_changes:
+            repair = ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.REPAIR,
+                    phase=WorkflowPhase.WORKFLOW,
+                    pending_feedback=record.pending_feedback.model_copy(
+                        update={"acknowledgement_ready": False}
+                    ),
+                    summary="Feedback worktree changed after publication.",
+                    next_action="Validate and publish the retained feedback changes.",
+                )
+            )
+            gitlab.transition_labels(repair.issue_iid, label_for_state(repair.state))
+            return repair
+        return _acknowledge_feedback(
+            record.model_copy(
+                update={
+                    "pending_feedback": record.pending_feedback.model_copy(
+                        update={"acknowledgement_ready": True}
+                    )
+                }
+            ),
+            ledger=ledger,
+            gitlab=gitlab,
+            repository=repository,
+            now=now,
+        )
+    awaiting = ledger.persist(
         transition_record(
             record,
-            RunnerState.EXECUTING,
-            phase=WorkflowPhase.POST_PUBLICATION,
+            RunnerState.AWAITING_HUMAN,
+            phase=WorkflowPhase.PIPELINE_WAIT,
             error_code=None,
-            summary="The exact source-SHA pipeline reached a terminal state.",
-            next_action="Run the fresh post-publication pipeline assessment.",
+            summary="The exact source-SHA pipeline and required jobs succeeded.",
+            next_action="Await human review and merge.",
         )
     )
+    try:
+        _ensure_awaiting_handoff(
+            awaiting, gitlab=gitlab, repository=repository, merge_request=mr
+        )
+    except GitLabError:
+        return _record_retry(
+            awaiting,
+            ledger=ledger,
+            gitlab=gitlab,
+            now=now,
+            error_code=ErrorCode.GITLAB_RETRYABLE,
+        )
+    except RepositoryError as error:
+        return _block_publication_identity(
+            awaiting, ledger=ledger, gitlab=gitlab, summary=str(error)
+        )
+    gitlab.transition_labels(awaiting.issue_iid, label_for_state(awaiting.state))
+    return awaiting
 
 
 def run_segment(
@@ -5008,6 +5181,10 @@ def run_segment(
     if (
         record.pending_feedback is not None
         and record.pending_feedback.acknowledgement_ready
+        and not (
+            record.state is RunnerState.OBSERVING
+            and record.phase is WorkflowPhase.PIPELINE_WAIT
+        )
     ):
         return _acknowledge_feedback(
             record, ledger=ledger, gitlab=gitlab, repository=repository, now=now
@@ -5109,6 +5286,26 @@ def run_segment(
             next_action=blocked.next_action,
         )
         return blocked
+    if (
+        record.state is RunnerState.EXECUTING
+        and record.phase is WorkflowPhase.POST_PUBLICATION
+    ):
+        if record.merge_request_iid is None:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Retained post-publication record has no exact merge request.",
+            )
+        record = ledger.persist(
+            transition_record(
+                record,
+                RunnerState.OBSERVING,
+                phase=WorkflowPhase.PIPELINE_WAIT,
+                summary="Reobserving the retained exact source-SHA pipeline.",
+                next_action="Verify current required jobs before human handoff.",
+            )
+        )
     if record.state in {
         RunnerState.EXECUTING,
         RunnerState.OBSERVING,
@@ -5282,12 +5479,7 @@ def run_segment(
             now=now,
         )
         finished_at = boundary_clock()
-        if (
-            outcome.state is RunnerState.EXECUTING
-            and outcome.phase is WorkflowPhase.POST_PUBLICATION
-        ):
-            timing_outcome = "success"
-        elif outcome.error_code is not None:
+        if outcome.error_code is not None:
             timing_outcome = outcome.error_code.value
         elif outcome.state is RunnerState.OBSERVING:
             timing_outcome = "pending"

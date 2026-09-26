@@ -327,7 +327,8 @@ class PipelineJobEvidence(_Evidence):
     stage: str = Field(default="", max_length=255)
     status: str = Field(min_length=1, max_length=64)
     failure_reason: str | None = Field(default=None, max_length=255)
-    retried: bool
+    retried: bool = False
+    allow_failure: bool = False
     pipeline_id: int = Field(gt=0)
     pipeline_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
 

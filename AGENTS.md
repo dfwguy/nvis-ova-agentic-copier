@@ -63,7 +63,6 @@ condition is false. The supported frontends do not all support `@...` imports.
 | Python tests | `.agents/lang/python-testing.md` | Before writing or reviewing Python tests |
 | Any repository mutation | `$git-flow` | Before branching or editing; retain through publication |
 | A Python change needs standard lint, format, type, or test checks, or the user asks to diagnose or repair those failures | `$lint-and-pytest` | Before the requested validation or repair; it does not replace routing, review, or publication. |
-| A change has published or updated an MR | `$pipeline-performance-judge` | After every MR update, following the accepted workflow finalizer result. |
 | Post-publication review leaves actionable Minor findings | `$findings-triage` | After publication, independently of other post-publication work. |
 | An existing repository needs standards assessment and a repair sequence | `$remediate` | Before proposing or carrying out the remediation work. |
 | A guarded serial GitLab polling loop must be configured | `$setup-agent-loop` | Before configuring the loop. |
