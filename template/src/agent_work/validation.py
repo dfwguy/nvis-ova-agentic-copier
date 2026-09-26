@@ -42,6 +42,9 @@ _JUNIT_ARTIFACTS = (
     ("py314", Path("test-results-py314.xml")),
 )
 _MAX_ARTIFACT_BYTES = 1_048_576
+MAX_TIMING_CASES = 1_024
+MAX_TIMING_CASE_NAME_BYTES = 256
+MAX_TIMING_CASE_LIST_BYTES = 262_144
 _MAX_COUNTER = 999_999_999
 _MAX_DIAGNOSTIC_BYTES = 512
 _MAX_HOOK_FAILURES = 16
@@ -94,6 +97,21 @@ def is_safe_junit_test_name(value: str) -> bool:
     return not test_name.startswith("/") and all(
         part not in {".", ".."} for part in test_name.split("/")
     )
+
+
+def _safe_timing_case_name(classname: str, test_name: str) -> str | None:
+    """Retain a safe base name and hide arbitrary parameter values in timing proof."""
+    full_name = f"{classname}::{test_name}" if classname else test_name
+    if is_safe_junit_test_name(full_name):
+        return full_name
+    base_name, separator, _parameter = test_name.partition("[")
+    if not separator or not test_name.endswith("]"):
+        return None
+    safe_base = f"{classname}::{base_name}" if classname else base_name
+    if not is_safe_junit_test_name(safe_base):
+        return None
+    digest = hashlib.sha256(full_name.encode("utf-8")).hexdigest()
+    return f"{safe_base}[param_{digest}]"
 
 
 def _safe_hook_id(value: str) -> bool:
@@ -182,6 +200,8 @@ class JUnitTiming:
     environment: Literal["py311", "py314"]
     total_seconds: float
     slowest_cases: tuple[SlowTestCase, ...]
+    timing_complete: bool
+    over_100ms_cases: tuple[SlowTestCase, ...]
 
 
 class _PersistedSlowCase(BaseModel):
@@ -199,6 +219,20 @@ class _PersistedJUnitTiming(BaseModel):
     environment: Literal["py311", "py314"]
     total_seconds: float = Field(ge=0, le=1_000_000)
     slowest_cases: tuple[_PersistedSlowCase, ...] = Field(max_length=3)
+    timing_complete: bool = Field(default=False, strict=True)
+    over_100ms_cases: tuple[_PersistedSlowCase, ...] = Field(
+        default=(), max_length=MAX_TIMING_CASES
+    )
+
+    def model_post_init(self, _context: object) -> None:
+        encoded = json.dumps(
+            [case.model_dump(mode="json") for case in self.over_100ms_cases],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > MAX_TIMING_CASE_LIST_BYTES or any(
+            case.seconds <= 0.100 for case in self.over_100ms_cases
+        ):
+            raise ValueError("JUnit timing case list exceeds bound")
 
 
 @dataclass(frozen=True)
@@ -578,14 +612,8 @@ def _junit_failure_counts(artifact: bytes | None) -> tuple[int, int] | None:
     return counts
 
 
-def _junit_test_count(artifact: bytes | None) -> int | None:
-    """Return a bounded test count from one well-formed successful JUnit artifact."""
-    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
-        return None
-    try:
-        root = ElementTree.fromstring(artifact)
-    except ElementTree.ParseError:
-        return None
+def _declared_junit_count(root: ElementTree.Element) -> int | None:
+    """Read a bounded declared count from an already parsed JUnit root."""
     root_name = root.tag.rsplit("}", 1)[-1]
     if root_name == "testsuite":
         return _bounded_counter(root.get("tests"))
@@ -603,6 +631,17 @@ def _junit_test_count(artifact: bytes | None) -> int | None:
         return None
     total = sum(count for count in child_counts if count is not None)
     return total if total <= _MAX_COUNTER else None
+
+
+def _junit_test_count(artifact: bytes | None) -> int | None:
+    """Return a bounded test count from one well-formed successful JUnit artifact."""
+    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+        return None
+    try:
+        root = ElementTree.fromstring(artifact)
+    except ElementTree.ParseError:
+        return None
+    return _declared_junit_count(root)
 
 
 def _unusable_artifact_reason(artifact: bytes | None) -> str:
@@ -630,32 +669,64 @@ def _junit_timing_summary(
     total = 0.0
     seen = 0
     slowest: list[_PersistedSlowCase] = []
+    over_100ms: list[_PersistedSlowCase] = []
+    over_100ms_bytes = 2
+    timing_complete = True
+    seen_names: set[str] = set()
     for case in root.iter():
         if case.tag.rsplit("}", 1)[-1] != "testcase":
             continue
+        seen += 1
         raw_seconds = case.get("time", "")
         if _SECONDS.fullmatch(raw_seconds) is None:
+            timing_complete = False
             continue
         seconds = float(raw_seconds)
         if not math.isfinite(seconds) or seconds > 1_000_000:
+            timing_complete = False
             continue
-        seen += 1
         total += seconds
         if total > 1_000_000:
             return None
         raw_name = case.get("name", "")
         raw_class = case.get("classname", "")
-        name = f"{raw_class}::{raw_name}" if raw_class else raw_name
-        if is_safe_junit_test_name(name):
-            slowest.append(_PersistedSlowCase(name=name, seconds=round(seconds, 3)))
+        name = _safe_timing_case_name(raw_class, raw_name)
+        if name is None or len(name.encode("utf-8")) > MAX_TIMING_CASE_NAME_BYTES:
+            timing_complete = False
+            continue
+        if name in seen_names:
+            timing_complete = False
+        seen_names.add(name)
+        slowest.append(_PersistedSlowCase(name=name, seconds=round(seconds, 3)))
+        if seconds > 0.100:
+            candidate = _PersistedSlowCase(name=name, seconds=seconds)
+            case_bytes = len(
+                json.dumps(
+                    candidate.model_dump(mode="json"), separators=(",", ":")
+                ).encode("utf-8")
+            )
+            separator_bytes = 1 if over_100ms else 0
+            if (
+                len(over_100ms) >= MAX_TIMING_CASES
+                or over_100ms_bytes + case_bytes + separator_bytes
+                > MAX_TIMING_CASE_LIST_BYTES
+            ):
+                timing_complete = False
+            else:
+                over_100ms.append(candidate)
+                over_100ms_bytes += case_bytes + separator_bytes
     if not seen:
         return None
+    if seen != _declared_junit_count(root):
+        timing_complete = False
     return _PersistedJUnitTiming(
         environment=environment,
         total_seconds=round(total, 3),
         slowest_cases=tuple(
             sorted(slowest, key=lambda item: (-item.seconds, item.name))[:3]
         ),
+        timing_complete=timing_complete,
+        over_100ms_cases=tuple(over_100ms),
     )
 
 
@@ -905,6 +976,11 @@ def _report(
                 item.total_seconds,
                 tuple(
                     SlowTestCase(case.name, case.seconds) for case in item.slowest_cases
+                ),
+                item.timing_complete,
+                tuple(
+                    SlowTestCase(case.name, case.seconds)
+                    for case in item.over_100ms_cases
                 ),
             )
             for item in record.junit_timings

@@ -93,9 +93,11 @@ These fast commands are repair tools. Validation verifies the candidate. It
 owns the one expensive tox/full-suite run. In serial work, Judge invokes the
 controller-owned durable validation and status boundary for that exact tree.
 The session runs the installed hook and persists evidence. The controller
-returns an unchanged-tree proof, opaque evidence identity, and bounded
-program-derived JUnit counts, digests, and timing summary without revealing
-controller-private snapshot paths. Interactive work keeps immutable JUnit
+returns an unchanged-tree proof, opaque evidence identity, and trusted
+program-derived JUnit counts, digests, three slowest cases, complete
+`over_100ms_cases` lists, and `timing_complete` flags for each supported local
+Python environment without revealing controller-private snapshot paths.
+Interactive work keeps immutable JUnit
 snapshot paths, SHA-256 digests, and counts. Judge returns its Non-functional
 Reviewer child receipt. Every coding candidate runs the full hook. Only then
 may Green start concurrent specialist reviews. Test Judge verifies the

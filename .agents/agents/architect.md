@@ -232,14 +232,22 @@ serial work, Judge gets saved test proof from the trusted validation boundary;
 the worker does not run the old validation CLI. A nonzero exit goes to Green.
 An exit of zero may start Judge's Non-functional Reviewer child only if the
 tree did not change. Interactive JUnit snapshots, digests, and counts stay
-immutable. Serial proof has an opaque ID and bounded counts, hashes, and time
-data from trusted code. Model prose cannot prove a pass in either mode.
-When changed tests add, modify, or expose a local case at or above 1 second,
-have the reviewer compare it with `docs/reference/testing-strategy.md` and
-report the case and environment. Route a needed register update through the
-documentation owner after the JUnit proof is available. Diagnose setup, case
-body, and environment costs; seek repeat evidence before treating one timing
-as a regression. Route a corroborated, unexplained ordinary-test regression
+immutable. Serial proof has an opaque ID, counts, hashes, and the three
+slowest cases. It also has a full trusted `over_100ms_cases` list and a
+`timing_complete` flag for each local Python environment. Missing or partial
+timing proof rejects the review. Model prose cannot prove a pass in either
+mode. Touched cases are added or modified tests and their parameterizations.
+They also include cases affected by a changed shared fixture or helper when
+those cases can be identified. Return an unclear impact map to the test owner
+for resolution before approval. If a touched case takes more than 0.100 s
+in either local environment, send it to the test owner for a fix before
+finalization. Exactly 0.100 s is allowed. One timing above it does not prove
+a regression. Also list every local case at or above 1.000 s in each
+environment that is missing from `docs/reference/testing-strategy.md`. Do
+this even if another finding needs a return. Send every needed register
+update to the documentation owner after the JUnit proof is ready. Check
+setup, case body, and environment costs. Seek repeat proof before calling one
+timing a regression. Route a corroborated, unexplained ordinary-test regression
 to the test or implementation owner for correction before finalization.
 Preserve the original proof; stage and validate a new tree after a correction.
 

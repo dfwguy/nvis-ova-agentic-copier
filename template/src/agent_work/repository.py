@@ -41,6 +41,9 @@ from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
 from .validation import (
+    MAX_TIMING_CASE_LIST_BYTES,
+    MAX_TIMING_CASE_NAME_BYTES,
+    MAX_TIMING_CASES,
     HookFailure,
     is_safe_junit_test_name,
     parse_installed_precommit_failures,
@@ -1383,6 +1386,8 @@ class GitRepository:
                 raise RepositoryError("candidate JUnit timing evidence is invalid")
             total = item.get("total_seconds")
             cases = item.get("slowest_cases")
+            timing_complete = item.get("timing_complete")
+            over_100ms_cases = item.get("over_100ms_cases")
             if (
                 not isinstance(total, (int, float))
                 or not math.isfinite(total)
@@ -1390,6 +1395,9 @@ class GitRepository:
                 or total > 1_000_000
                 or not isinstance(cases, list)
                 or len(cases) > 3
+                or not isinstance(timing_complete, bool)
+                or not isinstance(over_100ms_cases, list)
+                or len(over_100ms_cases) > MAX_TIMING_CASES
             ):
                 raise RepositoryError("candidate JUnit timing evidence is invalid")
             safe_cases: list[dict[str, object]] = []
@@ -1408,11 +1416,34 @@ class GitRepository:
                 ):
                     raise RepositoryError("candidate JUnit timing evidence is invalid")
                 safe_cases.append({"name": name, "seconds": seconds})
+            safe_over_100ms: list[dict[str, object]] = []
+            for case in over_100ms_cases:
+                if not isinstance(case, dict):
+                    raise RepositoryError("candidate JUnit timing evidence is invalid")
+                name = case.get("name")
+                seconds = case.get("seconds")
+                if (
+                    not isinstance(name, str)
+                    or not is_safe_junit_test_name(name)
+                    or len(name.encode("utf-8")) > MAX_TIMING_CASE_NAME_BYTES
+                    or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds)
+                    or not 0.100 < seconds <= 1_000_000
+                ):
+                    raise RepositoryError("candidate JUnit timing evidence is invalid")
+                safe_over_100ms.append({"name": name, "seconds": seconds})
+            if (
+                len(json.dumps(safe_over_100ms, separators=(",", ":")).encode("utf-8"))
+                > MAX_TIMING_CASE_LIST_BYTES
+            ):
+                raise RepositoryError("candidate JUnit timing evidence is invalid")
             safe_timings.append(
                 {
                     "environment": item["environment"],
                     "total_seconds": total,
                     "slowest_cases": safe_cases,
+                    "timing_complete": timing_complete,
+                    "over_100ms_cases": safe_over_100ms,
                 }
             )
         if (
