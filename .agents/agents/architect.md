@@ -230,25 +230,49 @@ and correction-cycle ledger. Judge receives the exact candidate tree. In
 serial work, Judge gets saved test proof from the trusted validation boundary;
 the worker does not run the old validation CLI. A nonzero exit goes to Green.
 An exit of zero may start Judge's Non-functional Reviewer child only if the
-tree did not change. Interactive JUnit snapshots, digests, and counts stay
-immutable. Serial proof has an opaque ID, counts, hashes, and the three
-slowest cases. It also has a full trusted `over_100ms_cases` list and a
-`timing_complete` flag for each local Python environment. Missing or partial
-timing proof rejects the review. Model prose cannot prove a pass in either
-mode. Touched cases are added or modified tests and their parameterizations.
-They also include cases affected by a changed shared fixture or helper when
-those cases can be identified. Return an unclear impact map to the test owner
-for resolution before approval. If a touched case takes more than 0.100 s
-in either local environment, send it to the test owner for a fix before
-finalization. Exactly 0.100 s is allowed. One timing above it does not prove
-a regression. Also list every local case at or above 1.000 s in each
-environment that is missing from `docs/reference/testing-strategy.md`. Do
-this even if another finding needs a return. Send every needed register
-update to the documentation owner after the JUnit proof is ready. Check
-setup, case body, and environment costs. Seek repeat proof before calling one
-timing a regression. Route a corroborated, unexplained ordinary-test regression
-to the test or implementation owner for correction before finalization.
-Preserve the original proof; stage and validate a new tree after a correction.
+tree did not change. In interactive work, keep the full-hook JUnit for `py311`
+and `py314` fixed, with its hash and count. It starts the full timing list.
+Judge then gets a read-only comparator report for the exact baseline and
+candidate trees. Where timing impact needs proof, it has at least two focused
+runs per tree in each relevant environment. Each run has JUnit and setup,
+call, and teardown phase logs. Check each file hash and count, command,
+Python interpreter, and seed. The report shows signed candidate-minus-baseline
+deltas. A `review` flag asks the Non-functional Reviewer to assess the cause;
+it does not prove the diff caused a regression. Missing, mismatched, or partial
+proof cannot pass. A report with `status=inconclusive`, no global reasons, and
+full case and paired-run proof may have mixed case directions. The reviewer
+must report that doubt and queue case-specific diagnosis or repair. It may
+approve when the impact map is clear and no new or newly slow test, controlled
+limit, or proven diff-caused regression blocks it. Do not claim a timing pass
+or invent a regression for the mixed case. An added ordinary test that runs
+above 0.100 s in repeated runs
+in either local environment goes back to the test owner unless an integration
+exception is approved. A changed test goes back if the change adds a cost
+above 0.100 s or causes a proven slowdown due to the changed test, fixture,
+or code. Exactly 0.100 s is allowed. Keep a touched case that was already
+above 0.100 s at baseline in the report. Its same or faster cost alone does
+not reject the change. Call an existing-case slowdown a regression only when
+candidate runs are consistently slower, phase logs and like environments back
+that up, and the diff shows the cause. Send a proven, unexplained ordinary
+test slowdown to the test or code owner. Keep the full-hook list, every case
+above 0.100 s, and every case at or above 1.000 s with its environment.
+Send every missing case and its proof to the documentation owner, even when
+another finding needs a return. In interactive work, add a stable
+`docs/reference/testing-strategy.md` register row only after repeat and phase
+diagnosis or an explicit owner decision. Keep a one-run inherited setup spike
+as a dated observation with a case-specific diagnosis queue. It alone does
+not block unrelated work.
+
+Serial work keeps its trusted candidate-only gate. The controller gives an
+opaque proof ID, counts, hashes, three slowest cases, full `over_100ms_cases`
+lists, and `timing_complete` flags for each supported environment. Missing or
+partial proof rejects review. Send any touched case above 0.100 s back to the
+test owner, subject to the documented integration exception. Serial proof has
+no baseline or phase data. In both modes, touched cases include added or
+changed tests and their parameters. They also include known cases affected by
+changed shared fixtures or helpers. Send an unclear impact map to the test
+owner. Model prose cannot prove a pass. Keep the first proof; stage and check
+a new tree after a fix.
 
 Each specialist reviewer receives the final relevant diff and Judge evidence.
 Each returns a complete verdict to Green. License Checker is required and may
