@@ -29,8 +29,10 @@ related:
 # Recoverable serial agent-loop architecture
 
 One run owns one bounded issue flow. After a handoff, the systemd wrapper checks
-its report and refreshes project and default-branch proof. It polls a live
-pipeline in place. Only idle or saved handoffs return control to the timer.
+its report. It refreshes project and default-branch proof. It polls a live
+default-branch pipeline in place. An exact MR observer hands off after
+publication. Later, a new activation parks it. The loop can then admit
+other work. Only idle or saved handoffs return control to the timer.
 
 This page explains recovery design. The [serial GitLab agent-loop
 explanation](serial-gitlab-agent-loop.md) explains use. The
@@ -183,8 +185,13 @@ The scheduler treats each saved state as follows:
 - `RETRY_WAIT`: no live owner and `retry_at` is due. Resume first due item;
   defer a later one and keep scanning.
 - `PUBLISHING`: exact branch and worktree wait to publish. Resume or repair.
-- `OBSERVING`: the exact MR SHA has a live pipeline. Wait or resume. A safe
-  owned terminal fault can enter repair.
+- `OBSERVING`: the exact MR SHA, owner, worktree, project, and target match.
+  Direct recovery checks it now. Its move from `PUBLISHING` returns
+  `activation_complete/pipeline_wait` without polling. Later ordinary admission
+  parks this exact observer from ownership. Parking can select another item or
+  be idle; it does not return `pipeline_wait`. A stale or inexact claim stays
+  visible for item-local `_observe` before fresh work. It blocks or repairs if
+  identity is unclear.
 - `REPAIR`: exact failed current-source proof and one owner permit repair.
 - `NEEDS_REPAIR`: old or reviewed proof, or exhausted required-job proof after
   a successful exact-source pipeline, defers new work. Show exact-IID reviewed
@@ -218,7 +225,7 @@ internal agent handoffs.
 | Phase | Action | Required evidence or authority | Stop or next state |
 | --- | --- | --- | --- |
 | Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
-| Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, or inaccessible evidence blocks. Nonterminal evidence yields. An exact failed MR pipeline enters `repair` only with one uniquely corroborated retained owner. |
+| Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, inaccessible, or nonterminal default-branch evidence blocks and polls in place. A new exact observer returns `activation_complete/pipeline_wait` without polling. Later ordinary admission parks a live MR only when its SHA, owner, worktree, project, and target match. Parking does not hand off; it may select another item or be idle. Ownerless evidence is non-owning and item-local. A stale or inexact claim stays visible for `_observe`. It runs before fresh work and blocks or repairs if identity is unclear. An exact failed MR pipeline enters `repair` only with one proven retained owner. |
 | Retained-work recovery | Resume one durable immediate `agent::running` record. Reclassify one blocked IID only with that issue's passive owner-marker corroboration and reviewed `loop recover --issue-iid IID`. | Status and inventory report each retained issue independently. A reviewed exact-IID plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
 | Human block | A failed or canceled default-branch pipeline blocks unrelated work. An ownerless failed or canceled open-MR pipeline stays item-local. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |

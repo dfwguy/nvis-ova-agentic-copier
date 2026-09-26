@@ -1064,8 +1064,10 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 | No immediate active record | Choose only the earliest due retry by `(retry_at, issue IID)`; future or undated retries remain queued. |
 | Multiple retained active records | Status and inventory report every record in deterministic order and classify each issue independently. Ordinary unpinned admission remains capacity-one and fails closed. A reviewed exact-IID recovery may advance its stale or missing target only when retained identities are disjoint and no different verified live owner exists. |
 | Successful pipeline | Clear its observation. |
-| `created`, `waiting_for_resource`, `preparing`, `scheduled`, `pending`, or `running` | Wait; do not select a new issue. |
-| Missing, malformed, inaccessible, identity, or check-pipeline evidence | Fail closed; do not allow unrelated work. |
+| Nonterminal default-branch pipeline | Wait in the activation. Do not select new work. |
+| New exact pending MR observer | When the applied issue moves from `PUBLISHING` to `OBSERVING`, it reports `outcome=activation_complete` and `stop_reason=pipeline_wait` without polling. The wrapper previews once. |
+| Retained exact nonterminal MR observer | Park it from ordinary ownership only when its SHA, retained owner, worktree, configured project, and target match. Later preview or apply may report eligible and start another item. If none exists, it may be idle and yield to the timer. Parking does not create `pipeline_wait`. |
+| Missing, malformed, inaccessible, identity, or check-pipeline evidence | Fail closed. Default-branch evidence blocks ordinary work. Ownerless open-MR evidence is non-owning and item-local. A retained inexact or stale `OBSERVING` claimant stays visible for item-local `_observe` reconciliation before fresh work. It blocks or repairs when identity cannot be established. |
 
 | Gate order | Rule |
 | --- | --- |
@@ -1077,7 +1079,8 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 | Canceled current-source open-MR pipeline | Keep this evidence local to its MR after checking the full pipeline inventory and eligible failed-pipeline repairs. A retained observing owner reaches `needs-repair` through ordinary observation; do not start failed-job repair or claim pipeline success. An ownerless canceled MR does not stop unrelated eligible work. |
 | Scheduled repair backoff or quarantine | Skip that item; seek another eligible exact repair before ordinary work. A failed automatic repair creates a durable 20-minute per-item backoff. After three automatic repair attempts, quarantine or defer it for human review; do not select it automatically. |
 | Status or preview | Retain attempt count, timing, evidence, and next action. |
-| Failed default-branch pipeline, or canceled default-branch pipeline | Stop before unrelated work and report the pipeline evidence. A failed open-MR pipeline without one safe exact owner remains item-local; never invent a repair owner or weaken the human-only approval and merge boundary. |
+| Failed default-branch pipeline, or canceled default-branch pipeline | Stop before unrelated work and report the pipeline evidence. |
+| Failed ownerless MR pipeline | Keep the known current-SHA evidence non-owning and item-local. Expose its action. It cannot choose a repair owner and does not starve unrelated eligible work. A retained inexact or stale claimant instead stays visible for `_observe` before fresh work. |
 
 | Repair inventory | Rule |
 | --- | --- |
@@ -1110,7 +1113,7 @@ project or item is safe to run.
 | `EXECUTING` | The issue's owner marker and retained-worktree evidence are recoverable. | Resume this item when it owns the one-item advancement capacity. Repair it when safe. |
 | `RETRY_WAIT` | `retry_at` is due. No owner is immediate. | Resume the earliest due retry. A future retry is deferred. Scan on. |
 | `PUBLISHING` | The retained branch is exact. Publication identity is pending. | Resume publication for this item. Repair it when safe. |
-| `OBSERVING` | The current source SHA is exact. Pipeline evidence exists. | Observe or resume. Nonterminal evidence waits. A safe failure must be exact. It can repair. |
+| `OBSERVING` | The current source SHA, owner, worktree, project, and target are exact. Pipeline evidence exists. | Direct or recovery handling observes immediately. Ordinary admission parks only this exact nonterminal item after its current activation, then scans for other eligible work. A retained stale or inexact claimant remains visible for item-local `_observe` reconciliation before fresh work. It blocks or repairs when identity cannot be established. Later terminal or conflict evidence takes priority: a conflict or exact failure enters repair, success with required jobs reaches human review, and exact canceled, skipped, or manual evidence enters item-local `NEEDS_REPAIR`. |
 | `REPAIR` | One failed current-source pipeline has a unique owner. | Run at most one repair workflow. Or resume one. Do this in the activation. |
 | `NEEDS_REPAIR` | A legacy or reviewed recovery record exists, or required-job proof was exhausted after a successful exact-source pipeline. | Defer. Expose reviewed recovery for the exact IID. Scan on. |
 | `REPAIR_FAILED` | Per-item repair timing and attempt evidence exists. | Resume only when it is due. It must be safe. Otherwise, defer or quarantine locally. Scan on. |
@@ -1143,8 +1146,10 @@ project or item is safe to run.
 | Liveness event | Scheduler action |
 | --- | --- |
 | Active Python activation | Advance at most one issue. Keep its active-work budget. That budget is 10,800 seconds. |
-| Nonterminal default-branch or exact current-MR pipeline evidence during `loop run --apply` | Stay in the activation. Poll after 5 seconds. Poll again after 10 seconds. Then poll after 20 seconds. Cap the poll at 30 seconds. Resume promptly when the evidence becomes terminal. |
-| Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. Start another applied activation only for `eligible`. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
+| Nonterminal default-branch pipeline during `loop run --apply` | Stay in the activation. Poll after 5 seconds. Poll again after 10 seconds. Then poll after 20 seconds. Cap the poll at 30 seconds. Resume promptly when the evidence becomes terminal. |
+| New exact pending MR observer | On its `PUBLISHING` to `OBSERVING` transition, finish with `outcome=activation_complete` and `stop_reason=pipeline_wait` without polling. The wrapper then makes one fresh preview. |
+| Retained exact nonterminal MR observer | Park it from ordinary ownership when its SHA, retained owner, worktree, configured project, and target match. Parking does not create `pipeline_wait`; later preview or apply may select another item or be idle. It never starts more than one worker at a time. |
+| Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. For an ordinary terminal handoff, start another applied activation only for `eligible`. Immediately after the exact `activation_complete/pipeline_wait` publication handoff, one preview may start another applied activation for `eligible`, `resume_available`, or `repair_ready`. A top-level `pipeline_wait/pipeline_wait` exits. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
 | Exact failed current-source pipeline | Activate `repair`. Run the repair workflow. Run it in the same applied activation. |
 | Handoff or idle | A future `retry-wait` remains a handoff. A future `time-limit` or `segment-limit` remains a handoff. A human or safety block remains a handoff. Missing, failed, or unrecognized evidence remains a handoff. `idle` means no eligible or resumable work exists. |
 | Timer and scope | `OnUnitInactiveSec=20min` starts only after a genuine idle service exit. It then checks for new work. It is not the active-pipeline polling cadence. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |

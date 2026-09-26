@@ -1803,6 +1803,7 @@ class _PipelineGateDecision:
     merge_request: MergeRequestEvidence | None = None
     pipeline: PipelineEvidence | None = None
     deferred_owner: LedgerRecord | None = None
+    deferred_observer_iids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -2027,6 +2028,13 @@ def _inspect_pipeline_gate(
                     detail="An open merge request has no current-source pipeline evidence.",
                     next_action="Validate the current merge-request pipeline before selecting work.",
                 )
+            if pipeline.sha != merge_request.sha:
+                return _pipeline_handoff(
+                    outcome="pipeline_inventory_blocked",
+                    pipeline_url=pipeline.web_url,
+                    detail="An open merge request pipeline does not match its current source SHA.",
+                    next_action="Validate the current merge-request pipeline before selecting work.",
+                )
             inspected.append((merge_request, pipeline))
         deferred_owner: LedgerRecord | None = None
         for merge_request, pipeline in inspected:
@@ -2064,27 +2072,48 @@ def _inspect_pipeline_gate(
                     merge_request=merge_request,
                     pipeline=pipeline,
                 )
-            # An ownerless or inexact failed MR is item-local evidence.  It
-            # cannot reserve the project-wide serial slot or starve later
-            # exact repairs and fresh eligible work.
+            # Ownerless failed-MR evidence is item-local and cannot reserve
+            # the project-wide serial slot. An inexact retained claimant stays
+            # scheduler-visible for its own reconciliation.
             continue
-        for _merge_request, pipeline in inspected:
-            if pipeline.status in {"failed", "canceled"}:
+        deferred_observer_iids: set[int] = set()
+        for merge_request, pipeline in inspected:
+            exact_owner_records = _exact_pipeline_owner_candidates(
+                records=records, merge_request=merge_request, project_id=project_id
+            )
+            if len(exact_owner_records) > 1:
+                return _pipeline_handoff(
+                    outcome="pipeline_blocked",
+                    pipeline_url=pipeline.web_url,
+                    detail="Multiple retained records claim one exact merge-request pipeline.",
+                    next_action="Reconcile the competing retained records before selecting work.",
+                )
+            owner = find_exact_pipeline_owner(
+                records=records,
+                merge_request=merge_request,
+                project_id=project_id,
+                default_branch=default_branch,
+                repository=repository,
+            )
+            if pipeline.status == "failed":
                 continue
             if pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
-                return _pipeline_handoff(
-                    outcome="pipeline_wait",
-                    pipeline_url=pipeline.web_url,
-                    detail="An open merge request has a current-source pipeline still running.",
-                    next_action="Wait for the current merge-request pipeline to reach a terminal state.",
-                )
-            if pipeline.status != "success":
-                return _pipeline_handoff(
-                    outcome="pipeline_inventory_blocked",
-                    pipeline_url=pipeline.web_url,
-                    detail="An open merge request pipeline has an unrecognized terminal status.",
-                    next_action="Verify the pipeline status before selecting work.",
-                )
+                if (
+                    owner is not None
+                    and owner.state is RunnerState.OBSERVING
+                    and owner.phase is WorkflowPhase.PIPELINE_WAIT
+                    and not merge_request.has_conflicts
+                ):
+                    deferred_observer_iids.add(owner.issue_iid)
+                continue
+            if pipeline.status in {"success", "canceled", "skipped", "manual"}:
+                continue
+            return _pipeline_handoff(
+                outcome="pipeline_inventory_blocked",
+                pipeline_url=pipeline.web_url,
+                detail="An open merge request pipeline has an unrecognized terminal status.",
+                next_action="Verify the pipeline status before selecting work.",
+            )
     except (GitLabError, OSError, RuntimeError, ValueError):
         return _pipeline_handoff(
             outcome="pipeline_inventory_blocked",
@@ -2092,7 +2121,10 @@ def _inspect_pipeline_gate(
             detail="Pipeline inventory could not be validated.",
             next_action="Restore GitLab access and validate pipeline inventory before selecting work.",
         )
-    return _PipelineGateDecision(deferred_owner=deferred_owner)
+    return _PipelineGateDecision(
+        deferred_owner=deferred_owner,
+        deferred_observer_iids=frozenset(deferred_observer_iids),
+    )
 
 
 def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logger:
@@ -3955,13 +3987,20 @@ def dispatch(
             gitlab.prerequisite_projection_inventory(), project_id=project.id
         )
         records = ledger.list_records()
-        resumable = resume_candidates(records, now=wired.clock())
         gate = _inspect_pipeline_gate(
             gitlab=gitlab,
             repository=repository,
             records=records,
             project_id=project.id,
             default_branch=project.default_branch,
+            now=wired.clock(),
+        )
+        resumable = resume_candidates(
+            tuple(
+                record
+                for record in records
+                if record.issue_iid not in gate.deferred_observer_iids
+            ),
             now=wired.clock(),
         )
         if gate.outcome is not None:
@@ -4155,6 +4194,7 @@ def dispatch(
                 item
                 for item in ledger.list_records()
                 if item.state in IMMEDIATE_OWNER_STATES
+                and item.issue_iid not in gate.deferred_observer_iids
             )
         )
         if len(immediate_owners) > 1:
@@ -4242,6 +4282,7 @@ def dispatch(
                 load_red_checkpoint=wired.load_red_checkpoint,
                 apply_red_checkpoint=wired.apply_red_checkpoint,
                 remaining_seconds=remaining_activation_seconds,
+                deferred_observer_iids=gate.deferred_observer_iids,
             )
             if record is None:
                 if remaining_activation_seconds() <= 0:
@@ -4307,6 +4348,9 @@ def dispatch(
                 stop_reason = "retry_wait"
                 break
             if record.state is RunnerState.OBSERVING:
+                if segment_start_state is RunnerState.PUBLISHING:
+                    stop_reason = "pipeline_wait"
+                    break
                 poll_delay, viable = _sleep_for_pipeline_poll(
                     delay=poll_delay,
                     remaining_seconds=remaining_activation_seconds,

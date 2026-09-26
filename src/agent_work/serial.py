@@ -1792,17 +1792,23 @@ def select_record(
     issue_iid: int | None = None,
     allow_pinned_conflict: bool = False,
     repository: RepositoryPort,
+    deferred_observer_iids: frozenset[int] = frozenset(),
 ) -> tuple[LedgerRecord | None, GitLabIssue | None]:
     """Reconcile work before ranking eligible fresh issues by priority and age."""
     project = gitlab.verify_project()
-    records = ledger.list_records()
-    if any(record.project_id != project.id for record in records):
+    all_records = ledger.list_records()
+    if any(record.project_id != project.id for record in all_records):
         raise SegmentError("ledger record belongs to another project")
-    for record in records:
+    for record in all_records:
         projection = record.outcome_projection
         if projection is not None and not projection.note_complete:
             replay_outcome_projection(record, ledger=ledger, gitlab=gitlab)
             return None, None
+    records = tuple(
+        record
+        for record in all_records
+        if record.issue_iid not in deferred_observer_iids
+    )
     scheduler_plan = plan_scheduler_inventory(records, now=now)
     if scheduler_plan.project_stop is not None and not (
         allow_pinned_conflict and issue_iid is not None
@@ -2027,7 +2033,7 @@ def select_record(
             {expected} if expected else set()
         ):
             return record, issue
-    record_iids = {record.issue_iid for record in records}
+    record_iids = {record.issue_iid for record in all_records}
     orphan = next(
         (issue for issue in gitlab.list_projected() if issue.iid not in record_iids),
         None,
@@ -5132,6 +5138,7 @@ def run_segment(
     apply_red_checkpoint: (
         Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None,
+    deferred_observer_iids: frozenset[int] = frozenset(),
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     automatically_recovered = False
@@ -5147,6 +5154,7 @@ def run_segment(
         issue_iid=issue_iid,
         allow_pinned_conflict=allow_pinned_conflict or automatically_recovered,
         repository=repository,
+        deferred_observer_iids=deferred_observer_iids,
     )
     if record is None or issue is None:
         return None

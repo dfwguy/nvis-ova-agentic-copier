@@ -127,7 +127,7 @@ Its 2026-09-26 times below are one observation, not a regression.
 | `tests.test_template::test_tests_init_rendered` | 3.11 | 1.108 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
 | `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.11 | 1.036 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
 | `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/systemd_smoke.py]` | 3.14 | 1.028 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
-| `generated_project` and `template_source` session fixtures (`tests/conftest.py`) | Both | Not measured separately | Fixture definitions, lines 32 and 50; 2026-09-25 | Setup is charged to the first consuming JUnit case. | Test maintainers | Issue #260 owns the render-only and trusted-task fixture split and setup timing. |
+| `generated_project` and `template_source` session fixtures (`tests/conftest.py`) | Both | Not measured separately | Fixture definitions, lines 32 and 50; 2026-09-25 | Setup is charged to the first consuming JUnit case. | Test maintainers | Issue #255 owns the render-only and trusted-task fixture split and setup timing. |
 
 The Judge snapshot for tree `1f3d65ed1a90155ae18dc90336b3a467afd40587`
 was recorded on 2026-09-26 at 00:46:42 UTC. Its Python 3.11 and 3.14 JUnit
@@ -187,9 +187,9 @@ regression is confirmed.
 
 | Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
-| `tests.test_template::test_portable_ci_is_mirrored_without_the_private_root_image` | 3.11 | 1.812 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
-| `tests.test_agent_work_serial_runtime::test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing` | 3.11 | 1.032 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
-| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/state_machine.py]` | 3.14 | 1.541 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+| `tests.test_template::test_portable_ci_is_mirrored_without_the_private_root_image` | 3.11 | 1.812 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #255. |
+| `tests.test_agent_work_serial_runtime::test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing` | 3.11 | 1.032 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/state_machine.py]` | 3.14 | 1.541 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #255. |
 
 The later issue #271 Judge snapshot for tree
 `b300459b5077160061f000691d20f07c8cd92ec3` recorded 2,875 Python
@@ -200,7 +200,7 @@ are unconfirmed; this run does not establish shared-fixture attribution.
 
 | Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
-| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/serial.py]` | 3.11 | 1.306 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, body, and teardown under issue #263. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/serial.py]` | 3.11 | 1.306 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, body, and teardown under issue #255. |
 
 The issue #271 Judge snapshot for staged tree
 `686a80568b85139bca69be969766742eab83cbfd` has Python 3.11 JUnit
@@ -269,16 +269,16 @@ for Python 3.14.
 | Python | Case (pytest node ID) | Full JUnit | Focused 1 / 2 | Phase finding | Owner and reduction or exception plan |
 | --- | --- | ---: | ---: | --- | --- |
 | 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: issue #268 records the integration exception; profile Copier VCS work and repeat in the same environment. |
-| 3.11 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 1.979 s | 1.979 / 2.007 s | Setup is 1.59 / 1.62 s; call is about 0.39 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
+| 3.11 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 1.979 s | 1.979 / 2.007 s | Setup is 1.59 / 1.62 s; call is about 0.39 s. | Test maintainers: use the fixture split recorded in issue #255 to reduce shared work. |
 | 3.11 | `tests/test_agent_work_state_machine.py::test_decision_review_draft_bounds_the_fully_rendered_description` | 1.894 s | 0.404 / 0.394 s | Focused call is about 0.40 s. | Test maintainers: repeat under comparable full-suite load before assigning a regression. |
-| 3.11 | `tests/test_template.py::test_agent_loop_wrapper_fast_forwards_before_applied_worker` | 1.125 s | 0.544 / 0.528 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
-| 3.11 | `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/repository.py]` | 1.056 s | 0.643 / 0.649 s | Focused setup is 0.64 / 0.65 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
+| 3.11 | `tests/test_template.py::test_agent_loop_wrapper_fast_forwards_before_applied_worker` | 1.125 s | 0.544 / 0.528 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #298. |
+| 3.11 | `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/repository.py]` | 1.056 s | 0.643 / 0.649 s | Focused setup is 0.64 / 0.65 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #255. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.013 s (historical) | 1.012 / 1.012 s (historical); 0.022 / 0.023 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.012 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: issue #268 records the integration exception; repeat under quiet conditions and inspect Copier VCS work before claiming a regression. |
-| 3.14 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 2.211 s | 1.999 / 1.979 s | Setup is 1.59 / 1.55 s; call is 0.41 / 0.43 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
-| 3.14 | `tests/test_template.py::test_readability_dependency_and_generated_ci_helper_are_rendered_portably` | 1.084 s | 0.680 / 0.686 s | Focused setup is about 0.68 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
-| 3.14 | `tests/test_template.py::test_agent_loop_wrapper_stops_on_refresh_command_failure[merge]` | 1.039 s | 0.484 / 0.560 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
+| 3.14 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 2.211 s | 1.999 / 1.979 s | Setup is 1.59 / 1.55 s; call is 0.41 / 0.43 s. | Test maintainers: use the fixture split recorded in issue #255 to reduce shared work. |
+| 3.14 | `tests/test_template.py::test_readability_dependency_and_generated_ci_helper_are_rendered_portably` | 1.084 s | 0.680 / 0.686 s | Focused setup is about 0.68 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #255. |
+| 3.14 | `tests/test_template.py::test_agent_loop_wrapper_stops_on_refresh_command_failure[merge]` | 1.039 s | 0.484 / 0.560 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #298. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.012 s (historical) | 1.012 / 1.013 s (historical); 0.022 / 0.022 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.013 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 
@@ -301,14 +301,47 @@ Retain genuine v1 copy provenance and the v2 update assertion, then check the
 full JUnit case time on both supported Python versions. The earlier
 8.169-second Python 3.14 observation remains an unconfirmed spike.
 
+### Narrow wrapper integration exception on 2026-09-26
+
+Tree `b34049019d158c16e8df9dcc53a3a097b44e17f6` began with eight task-added
+wrapper parameter cases and keeps two compact root-only shell end-to-end cases.
+The 100 ms local policy still applies. This is a dated exception, not a new hard
+budget. The original root/template publication cases took 0.352 to 0.361 seconds
+in the Judge JUnit. Two focused `--no-cov --durations=0` repeats passed in each
+environment. Setup and teardown were below 0.005 seconds.
+
+| Case | Python | Focused call 1 / 2 | Why it remains | Reduction plan |
+| --- | --- | ---: | --- | --- |
+| `tests/test_template.py::test_agent_loop_wrapper_only_continues_after_new_publication_pipeline_wait` | 3.11 | 0.56 / 0.56 s | Actual Bash wrapper, isolated fake checkout, and authenticated command boundary prove eligible second apply, top-level `pipeline_wait/pipeline_wait` with no preview, and the `resume_available` race. | Keep the root case; root/template parity covers the mirror. Profile and reduce fake-checkout and process cost under issue #298, then re-evaluate. |
+| Same case | 3.14 | 0.59 / 0.55 s | Same proof. | Same plan. |
+| `tests/test_template.py::test_agent_loop_wrapper_does_not_continue_terminal_handoff_to_actionable_preview` | 3.11 | 0.15 / 0.13 s | The same boundary proves an ordinary terminal handoff does not start an actionable preview. | Keep the root case; root/template parity covers the mirror. Profile and reduce fake-checkout and process cost under issue #298, then re-evaluate. |
+| Same case | 3.14 | 0.13 / 0.14 s | Same proof. | Same plan. |
+
+### Judge timing observations on 2026-09-26
+
+The Judge JUnit for tree `b34049019d158c16e8df9dcc53a3a097b44e17f6` found
+the following dated observations. They are not regression claims.
+
+Tree `a338affd0c63afce2b81257939122beb33d75a93` adds one Python 3.11
+observation below. Its cause and phase are unconfirmed. It may be the first
+`generated_project` consumer, but that does not prove the cause.
+
+| Case | Python | JUnit duration | Focused phase diagnosis | Follow-up |
+| --- | --- | ---: | --- | --- |
+| `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/validation.py]` | 3.11 | 1.097 s | Setup 0.72 / 0.76 s; call and teardown below 0.005 s. The generated/template fixture owns the cost. | Issue #255 fixture follow-up. |
+| `tests/test_template.py::test_agent_loop_wrapper_preview_blocks_behind_checkout_without_mutation` | 3.14 | 5.873 s | Call 6.62 / 0.50 s. The cold run has high variance. | Issue #292 wrapper follow-up. |
+| `tests/test_template.py::test_generated_lock_does_not_depend_on_its_own_project` | 3.14 | 1.963 s | Setup 1.75 / 1.60 s; call 0.02 s. The session generation fixture owns the cost. | Issue #255 fixture follow-up. |
+| `tests/test_template.py::test_portable_markdown_mirrors_match_generated_output` | 3.11 | 1.122 s | Cause and phase are unconfirmed. | Issue #255 diagnosis follow-up. |
+| `tests/test_template.py::test_generated_pre_commit_lints_shell_scripts` | 3.11 | 1.140 s | Cause and phase are unconfirmed. It may be the first `generated_project` consumer, but attribution is unproven. | Issue #255 diagnosis follow-up. |
+
 The full-suite outliers that fell below 1 second in both focused repeats need
 more comparable runs before anyone calls them regressions. Issue
 [#255](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/255)
-records nested outer UV fixture work, issue
-[#260](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/260)
-records the fixture split, and issue
-[#263](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/263)
-will automate the repair loop and queue follow-up diagnosis. The [local timing method](../how-to/validate-template-changes.md#investigate-local-test-timing)
+records fixture and generated-project work. Issue
+[#298](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/298)
+records wrapper reduction. Issue
+[#292](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/292)
+records the no-mutation preview diagnosis. The [local timing method](../how-to/validate-template-changes.md#investigate-local-test-timing)
 explains how to collect the next observation.
 
 ### Further local observations on 2026-09-26
@@ -352,7 +385,7 @@ enforce the local case target. Repeat the measurement before inferring change.
 
 | Case or shared fixture | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
-| `test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/gitlab_safeguards.py]` | 3.11 | 32.546 s | !314 pipeline 69850880; 2026-09-25 | May include first-use fixture setup; attribution needs checking. | Test maintainers | Under issue #260, measure render-only and trusted-task setup separately, then the case again. |
+| `test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/gitlab_safeguards.py]` | 3.11 | 32.546 s | !314 pipeline 69850880; 2026-09-25 | May include first-use fixture setup; attribution needs checking. | Test maintainers | Under issue #255, measure render-only and trusted-task setup separately, then the case again. |
 | `test_generated_package_directory` | 3.11 | 28.636 s | !314 pipeline 69850880; 2026-09-25 | Generated-project work or shared setup may contribute; unconfirmed. | Test maintainers | Profile case and fixture separately; reduce repeated generation where safe. |
 | `test_portable_markdown_mirrors_match_generated_output` | 3.11 | 26.483 s | !314 pipeline 69850880; 2026-09-25 | Generated-output comparison; cause unconfirmed. | Test maintainers | Inspect setup attribution and reduce repeated work. |
 | `test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/state_machine.py]` | 3.11 | 25.714 s | !314 pipeline 69850880; 2026-09-25 | Generated-output comparison; cause unconfirmed. | Test maintainers | Inspect setup attribution and reduce repeated work. |
