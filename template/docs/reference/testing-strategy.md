@@ -94,14 +94,14 @@ Its 2026-09-26 times below are one observation, not a regression.
 | Case or shared fixture | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_generated_pre_commit_uses_only_local_hooks` | 3.11 | 1.783 s | Local #249 JUnit; 2026-09-25 | Generated-project check; phase cost unmeasured. | Test maintainers | Separate setup from call time, then reduce avoidable work. |
-| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.11 | 3.558 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured. | Test maintainers | Review integration need and measure setup and update cost. |
+| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.11 | 3.558 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured in this snapshot. | Test maintainers | Issue #268: retain the real v1 copy and v2 update; review Copier VCS cost with same-environment repeats. |
 | `tests.test_agent_work_worker_result_broker::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 3.11 | 1.003 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.013 / 0.012 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_worker_result_broker::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 3.11 | 1.019 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.022 / 0.023 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_state_machine::test_decision_review_draft_bounds_the_fully_rendered_description` | 3.11 | 2.000 s | Local #249 JUnit; 2026-09-25 | Description validation; phase cost unmeasured. | Test maintainers | Profile the case and reduce avoidable work. |
 | `tests.test_licenses::test_repository_template_and_rendered_project_satisfy_license_policy` | 3.14 | 2.640 s | Local #249 JUnit; 2026-09-25 | Repository and rendered-project scan; phase cost unmeasured. | Test maintainers | Measure scan and setup costs separately. |
 | `tests.test_agent_work_worker_result_broker::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 3.14 | 1.005 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.013 / 0.013 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_worker_result_broker::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 3.14 | 1.012 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.022 / 0.022 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
-| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.14 | 2.300 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured. | Test maintainers | Review integration need and measure setup and update cost. |
+| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.14 | 2.300 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured in this snapshot. | Test maintainers | Issue #268: retain the real v1 copy and v2 update; review Copier VCS cost with same-environment repeats. |
 | `tests.test_template::test_generated_lock_does_not_depend_on_its_own_project` | 3.11 | 1.917 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
 | `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/runtime.py]` | 3.11 | 1.435 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
 | `tests.test_template::test_trusted_generated_project_runs_setup_tasks` | 3.11 | 2.056 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
@@ -198,19 +198,38 @@ for Python 3.14.
 
 | Python | Case (pytest node ID) | Full JUnit | Focused 1 / 2 | Phase finding | Owner and reduction or exception plan |
 | --- | --- | ---: | ---: | --- | --- |
-| 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: review the needed Copier integration work and reduce avoidable update cost. |
+| 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: issue #268 records the integration exception; profile Copier VCS work and repeat in the same environment. |
 | 3.11 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 1.979 s | 1.979 / 2.007 s | Setup is 1.59 / 1.62 s; call is about 0.39 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
 | 3.11 | `tests/test_agent_work_state_machine.py::test_decision_review_draft_bounds_the_fully_rendered_description` | 1.894 s | 0.404 / 0.394 s | Focused call is about 0.40 s. | Test maintainers: repeat under comparable full-suite load before assigning a regression. |
 | 3.11 | `tests/test_template.py::test_agent_loop_wrapper_fast_forwards_before_applied_worker` | 1.125 s | 0.544 / 0.528 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
 | 3.11 | `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/repository.py]` | 1.056 s | 0.643 / 0.649 s | Focused setup is 0.64 / 0.65 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.013 s (historical) | 1.012 / 1.012 s (historical); 0.022 / 0.023 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.012 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
-| 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: repeat under quiet conditions and inspect Copier update work before claiming a regression. |
+| 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: issue #268 records the integration exception; repeat under quiet conditions and inspect Copier VCS work before claiming a regression. |
 | 3.14 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 2.211 s | 1.999 / 1.979 s | Setup is 1.59 / 1.55 s; call is 0.41 / 0.43 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
 | 3.14 | `tests/test_template.py::test_readability_dependency_and_generated_ci_helper_are_rendered_portably` | 1.084 s | 0.680 / 0.686 s | Focused setup is about 0.68 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
 | 3.14 | `tests/test_template.py::test_agent_loop_wrapper_stops_on_refresh_command_failure[merge]` | 1.039 s | 0.484 / 0.560 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.012 s (historical) | 1.012 / 1.013 s (historical); 0.022 / 0.022 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.013 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
+
+Issue #268 records a measured integration exception for the Copier update case.
+The test uses a small tagged source, skips tasks, makes a real v1 copy, commits
+the customized project, then runs a real v2 update and checks that its legacy
+context survives. In prepared local environments on 2026-09-26, two focused
+runs took 2.90 / 2.69 seconds on Python 3.11 and 2.21 / 2.26 seconds on
+Python 3.14. A Python 3.14 profile recorded 2.712 seconds cumulative in
+`copier.run_update` and 3.020 seconds cumulative across six Copier VCS clone
+calls during copy and update. Local test Git helpers took about 0.029 seconds.
+These cumulative figures overlap and are not parts of one total. A temporary
+Python 3.14 probe compared whole-test totals of 3.048 / 3.122 seconds with a
+real v1 copy and v2 update against 2.798 / 2.501 seconds after manually
+seeding v1 answers before the real update. The seeded setup would lose genuine
+initial-copy provenance and still leaves a multi-second case, so it was not
+adopted. Keep the real update coverage. For a future reduction, measure Copier
+VCS clone and update steps with repeated runs in the same prepared environment.
+Retain genuine v1 copy provenance and the v2 update assertion, then check the
+full JUnit case time on both supported Python versions. The earlier
+8.169-second Python 3.14 observation remains an unconfirmed spike.
 
 The full-suite outliers that fell below 1 second in both focused repeats need
 more comparable runs before anyone calls them regressions. Issue
