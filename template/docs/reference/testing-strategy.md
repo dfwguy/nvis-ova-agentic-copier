@@ -5,7 +5,7 @@ summary: Look up test layers, case timing targets, and the register of long-runn
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/validate-template-changes.md
     why: Shows how to run the local and CI validation checks.
@@ -70,6 +70,19 @@ Python 3.11 and 3.14 JUnit SHA-256 digests begin `0203262df3f6` and
 Python 3.14, 2,647 (95.8%) finished below 100 ms and four reached 1 second.
 This is one local observation, not a stable baseline.
 
+Issue #251's immutable Python 3.11 JUnit tree
+`becbc74cf4fa74cd37aac6084c38c5314e3a55db` has SHA-256
+`ba8c6b0d37745d3efa81d896cf8455e964aa8de35df3002cdcaa0bcc019b494e`.
+On 2026-09-26 it recorded the two new cases below. This is one observation,
+not a regression.
+
+The later immutable tree `b9a0655612683e205ce0b8d47978cb6faef4932d`
+has Python 3.11 JUnit SHA-256
+`d5bd1d2a15433ef73494a753bf1621edba78ab5a7cc67092341238b09f1a4944`
+and Python 3.14 JUnit SHA-256
+`14f38269bb4aba7066b8862fbab730c07a8ad685b050272e45b007aaf928471a`.
+Its 2026-09-26 times below are one observation, not a regression.
+
 | Case or shared fixture | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_generated_pre_commit_uses_only_local_hooks` | 3.11 | 1.783 s | Local #249 JUnit; 2026-09-25 | Generated-project check; phase cost unmeasured. | Test maintainers | Separate setup from call time, then reduce avoidable work. |
@@ -81,6 +94,12 @@ This is one local observation, not a stable baseline.
 | `tests.test_agent_work_worker_result_broker::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 3.14 | 1.005 s | Local #249 JUnit; 2026-09-25 | Blocked-callback cleanup test; timing cause unconfirmed. | Test maintainers | Measure waits and check for a shorter controlled boundary. |
 | `tests.test_agent_work_worker_result_broker::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 3.14 | 1.012 s | Local #249 JUnit; 2026-09-25 | Blocked-callback cleanup test; timing cause unconfirmed. | Test maintainers | Measure waits and check for a shorter controlled boundary. |
 | `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.14 | 2.300 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured. | Test maintainers | Review integration need and measure setup and update cost. |
+| `tests.test_template::test_generated_lock_does_not_depend_on_its_own_project` | 3.11 | 1.917 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/runtime.py]` | 3.11 | 1.435 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
+| `tests.test_template::test_trusted_generated_project_runs_setup_tasks` | 3.11 | 2.056 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
+| `tests.test_template::test_tests_init_rendered` | 3.11 | 1.108 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
+| `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.11 | 1.036 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/systemd_smoke.py]` | 3.14 | 1.028 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
 | `generated_project` and `template_source` session fixtures (`tests/conftest.py`) | Both | Not measured separately | Fixture definitions, lines 32 and 50; 2026-09-25 | Setup is charged to the first consuming JUnit case. | Test maintainers | Issue #260 owns the render-only and trusted-task fixture split and setup timing. |
 
 Pytest's duration report can show setup, call, and teardown as separate

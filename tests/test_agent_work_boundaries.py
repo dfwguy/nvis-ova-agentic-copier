@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from pytest_subprocess import FakeProcess
 
 from agent_work import repository as repository_module
+from agent_work import worker as worker_module
 from agent_work.cli import main
 from agent_work.domain import (
     DEFAULT_MAX_ACTIVATION_SECONDS,
@@ -2897,11 +2898,12 @@ def test_gitlab_open_mr_inventory_reads_every_page_before_reconciliation(
 def test_gitlab_open_mr_inventory_rejects_excessive_pages(tmp_path: Path) -> None:
     """A non-terminating MR inventory fails closed at its bounded page limit."""
     calls = 0
+    full_page = json.dumps([{}] * 100)
 
     def fake(*_args: object, **_kwargs: object) -> CommandResult:
         nonlocal calls
         calls += 1
-        return CommandResult(0, json.dumps([_mr_payload() for _ in range(100)]), "")
+        return CommandResult(0, full_page, "")
 
     gateway = GitLabGateway(
         _config(tmp_path),
@@ -3823,16 +3825,74 @@ def test_agent_invoker_retains_only_the_shared_gitlab_token_for_issue_worktree(
         "ORDINARY_SETTING": "retained-setting",
         "DIRENV_CONFIG": "retained-direnv-setting",
     }
-    assert [kwargs["environment"] for _, kwargs in calls] == [
-        expected_environment,
-        expected_environment,
-        expected_environment,
-    ]
+    environments = [cast(dict[str, str], kwargs["environment"]) for _, kwargs in calls]
+    assert environments[:2] == [expected_environment, expected_environment]
+    assert {
+        key: value for key, value in environments[2].items() if key != "CODEX_HOME"
+    } == expected_environment
+    assert Path(str(environments[2]["CODEX_HOME"])).name == "codex"
     assert [kwargs["timeout_seconds"] for _, kwargs in calls] == [120, 120, 10]
     assert retained not in result.stdout + result.stderr
     assert all(value not in result.stdout + result.stderr for value in filtered)
     assert result.stdout == result.stderr
     assert result.stdout.split() == ["[REDACTED]"] * (len(filtered) + 1)
+
+
+def test_private_codex_home_cleanup_failure_preserves_primary_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed invocation keeps its primary diagnostic when cleanup also fails."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("auth.json", "config.toml"):
+        credential = source / name
+        credential.write_text("credential")
+        credential.chmod(0o600)
+
+    def run_command(*_args: object, **_kwargs: object) -> CommandResult:
+        raise RuntimeError("primary failure")
+
+    def fail_cleanup(_path: Path) -> None:
+        raise OSError("cleanup failure")
+
+    monkeypatch.setattr(worker_module.shutil, "rmtree", fail_cleanup)
+    invoker = AgentInvoker(
+        run_command,
+        environment={"CODEX_HOME": str(source)},
+        temporary_directory=tmp_path,
+    )
+    with pytest.raises(
+        RuntimeError, match="primary failure; private Codex home cleanup failed"
+    ):
+        invoker._run_worker_command(
+            "codex", ("codex", "exec"), stdin=None, timeout_seconds=1, environment={}
+        )
+
+
+def test_private_codex_home_cleanup_failure_is_reported_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful command cannot silently retain its private credential home."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("auth.json", "config.toml"):
+        credential = source / name
+        credential.write_text("credential")
+        credential.chmod(0o600)
+
+    def fail_cleanup(_path: Path) -> None:
+        raise OSError("cleanup failure")
+
+    monkeypatch.setattr(worker_module.shutil, "rmtree", fail_cleanup)
+    invoker = AgentInvoker(
+        lambda *_args, **_kwargs: CommandResult(0, "", ""),
+        environment={"CODEX_HOME": str(source)},
+        temporary_directory=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="private Codex home cleanup failed"):
+        invoker._run_worker_command(
+            "codex", ("codex", "exec"), stdin=None, timeout_seconds=1, environment={}
+        )
 
 
 def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
@@ -3855,7 +3915,6 @@ def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
         str(tmp_path / ".agents"),
         "--add-dir",
         str(tmp_path / "template" / ".agents"),
-        "--ephemeral",
         "--color",
         "never",
         "-",
@@ -3903,7 +3962,18 @@ def test_codex_preflight_rejects_an_unsupported_exec(
                     "AGENT_WORK_AGENT_PATH": "/codex",
                 },
             },
-        )
+        ),
+        (
+            ("/codex", "exec", "--help"),
+            {
+                "stdin": None,
+                "timeout_seconds": 120,
+                "environment": {
+                    "AGENT_WORK_AGENT": "codex",
+                    "AGENT_WORK_AGENT_PATH": "/codex",
+                },
+            },
+        ),
     ]
 
 
@@ -3932,6 +4002,64 @@ def test_codex_preflight_accepts_exec_with_scoped_directory_support() -> None:
     assert calls[0][0] == ("/codex", "exec", "--help")
     assert calls[0][1]["timeout_seconds"] == 120
     assert calls[1][0] == ("/codex", "features", "list")
+
+
+def test_codex_preflight_retries_one_anomalous_help_probe_before_features() -> None:
+    """A transient missing exec capability is retried once before multi-agent is read."""
+    calls: list[tuple[str, ...]] = []
+    help_results = iter(
+        (
+            SimpleNamespace(
+                returncode=1, stdout="usage: codex exec", stderr="transient"
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout="usage: codex exec --add-dir DIR --enable FEATURE",
+                stderr="",
+            ),
+        )
+    )
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command == ("/codex", "exec", "--help"):
+            return next(help_results)
+        return SimpleNamespace(
+            returncode=0, stdout="multi_agent stable true\n", stderr=""
+        )
+
+    AgentInvoker(
+        run_command,
+        environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
+    ).preflight()
+
+    assert calls == [
+        ("/codex", "exec", "--help"),
+        ("/codex", "exec", "--help"),
+        ("/codex", "features", "list"),
+    ]
+
+
+def test_codex_preflight_fails_closed_after_one_persistent_missing_exec_probe() -> None:
+    """Two invalid exec probes retain the established capability diagnostic."""
+    calls: list[tuple[str, ...]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0, stdout="usage: codex exec --enable FEATURE", stderr=""
+        )
+
+    with pytest.raises(WorkerProtocolError, match="--add-dir"):
+        AgentInvoker(
+            run_command,
+            environment={
+                "AGENT_WORK_AGENT": "codex",
+                "AGENT_WORK_AGENT_PATH": "/codex",
+            },
+        ).preflight()
+
+    assert calls == [("/codex", "exec", "--help")] * 2
 
 
 def test_codex_preflight_requires_service_child_delegation_capability() -> None:
@@ -4032,7 +4160,7 @@ def test_codex_preflight_rejects_missing_enable_support() -> None:
     with pytest.raises(WorkerProtocolError, match="--enable"):
         invoker.preflight()
 
-    assert calls == [("/codex", "exec", "--help")]
+    assert calls == [("/codex", "exec", "--help")] * 2
 
 
 @pytest.mark.parametrize(

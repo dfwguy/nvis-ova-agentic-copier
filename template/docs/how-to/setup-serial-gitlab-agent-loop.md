@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -337,6 +337,7 @@ case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
 [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
 install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
 install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
+install -D -m 0644 "systemd/$unit_name-smoke.service" "$HOME/.config/systemd/user/$unit_name-smoke.service"
 install -d -m 700 "$HOME/.config/$unit_name"
 printf 'AGENT_WORK_ENV_VERSION=%q\nAGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' 1 "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
 chmod 600 "$HOME/.config/$unit_name/agent-work.env"
@@ -351,8 +352,9 @@ env -i HOME="$HOME" PATH="$PATH" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.conf
 
 This isolated preview checks the exact service wrapper and key route without
 inheriting an interactive GitLab user. It must pass before starting the timer.
-Enable user linger so the user manager survives logout. Then reload and start
-the timer:
+Enable user linger so the user manager survives logout. Then reload the user
+units. A Codex setup starts its timer only after the companion smoke succeeds.
+Claude and Pi setups use the existing service and timer checks.
 
 Install writes version `1` of the factory-managed service-env contract. Its
 fixed required keys include `AGENT_WORK_TIMEOUT`. Keep project-owned
@@ -370,6 +372,60 @@ setup is the user-run service boundary.
 ```bash
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
+```
+
+### Run the companion smoke service.
+
+The smoke service needs Codex. Do not start it when `AGENT_WORK_AGENT` is
+`claude` or `pi`; use the existing service and timer checks for those agents.
+For Codex, this smoke is required before timer enablement. To change a service
+to Codex, rerun the install block with `AGENT_WORK_AGENT=codex` and the Codex
+path. Then reload the user units and keep the timer off until the smoke passes.
+
+Run this Codex smoke after install, after a Codex or service change, or after
+repeated agent handoff blocks. It uses the timer service's installed
+`EnvironmentFile`. It has no timer. It does no normal loop work.
+
+Keep the main timer off. Start the companion service once. Check its current
+JSON report and journal before you enable the timer:
+
+```bash
+smoke_service="$unit_name-smoke.service"
+systemctl --user daemon-reload
+systemctl --user start "$smoke_service"
+systemctl --user status "$smoke_service"
+smoke_started_at="$(systemctl --user show "$smoke_service" --property=ExecMainStartTimestamp --value)"
+journalctl --user -u "$smoke_service" --since "$smoke_started_at" --output=cat
+```
+
+The smoke shows live Codex handoff, the needed child sessions, and broker
+acceptance. It uses a private work space. It does not change an issue, merge
+request, normal-loop ledger record, or saved worktree.
+
+The companion service invokes `agent-work loop smoke --apply --json` through
+the installed wrapper. Its JSON report is written to its journal.
+
+The current pass report is:
+
+```json
+{"schema_version":1,"command":"loop.smoke","applied":true,"outcome":"passed","broker_accepted":true}
+```
+
+Do not use an exit code, agent prose, or a partial report as proof. Read the
+exact redacted JSON and journal for this run. An old pass is not proof. For a
+Codex setup, enable the timer only when the current result shows success.
+
+For a capacity or handoff failure, add live agent slots or fix the Codex
+feature, then run the smoke again. For a broker failure, read the short broker
+error and service journal, fix that path, and run the smoke again. Keep the
+timer off until the result is clear and passes.
+
+### Enable the unattended timer.
+
+For Codex, complete the smoke above first. For Claude or Pi, complete the
+existing service and timer checks instead. Then enable and inspect the timer:
+
+```bash
 systemctl --user enable --now "$unit_name.timer"
 systemctl --user status "$unit_name.timer"
 ```

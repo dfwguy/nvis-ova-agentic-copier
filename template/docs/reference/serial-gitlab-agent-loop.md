@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -43,6 +43,7 @@ agent-work loop run [--apply] [--max-segments COUNT]
 agent-work loop status [--issue-iid IID] [--apply] [--json] [--debug]
 agent-work loop retry --issue-iid IID [--apply --plan-file PATH] [--json] [--debug]
 agent-work loop canary [--apply --plan-file PATH] [--json] [--debug]
+agent-work loop smoke [--apply] [--json] [--debug]
 agent-work loop recover --issue-iid IID [--apply --plan-file PATH]
                         [--max-segments COUNT]
                         [--max-activation-seconds SECONDS] [--json] [--debug]
@@ -107,6 +108,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `loop status` | Optional exact `--issue-iid` | Read-only status; `--apply` is accepted for consistency. |
 | `loop retry` | Exact `--issue-iid`; the exact reviewed `--plan-file PATH` when applying | Reuses recovery checks and requires exactly one `safely_retryable` inventory result. |
 | `loop canary` | `--plan-file PATH` when applying | Bare invocation creates the immutable plan. |
+| `loop smoke` | Codex and `--apply` for a real smoke | Bare invocation previews the isolated smoke. Use the companion user service for the installed route. |
 | `loop recover` | Exact `--issue-iid`; reviewed `--plan-file PATH` when applying | Segment and activation-time limits retain `loop run` controls. |
 | `recovery inventory` | Optional exact `--issue-iid` | Read-only reconciliation; `--apply` changes nothing. |
 | `recovery resolve` | Exact `--issue-iid`, explicit `--choice`, and `--reason` | Applying also needs the exact reviewed `--plan-file`; some choices need evidence, a replacement IID, or a target label. |
@@ -129,6 +131,35 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `migration preview` | None | Returns the planned migration actions. |
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
+
+### Smoke
+
+`loop smoke` is a Codex-only delegation check. Do not use it with Claude or
+Pi. The installed route is the companion user service, which shares the normal
+service's `EnvironmentFile`, calls its wrapper with `--smoke`, and has no
+timer.
+
+Without `--apply`, the command prints `preview` and exits `0`. With `--json`,
+it returns this preview object:
+
+```json
+{"schema_version":1,"command":"loop.smoke","applied":false,"outcome":"preview"}
+```
+
+With `--apply`, it uses an isolated private workspace. A successful check
+prints `passed` and exits `0`. With `--json`, it returns this object:
+
+```json
+{"schema_version":1,"command":"loop.smoke","applied":true,"outcome":"passed","broker_accepted":true}
+```
+
+The applied check requires the live Codex child proof and broker acceptance.
+It does not create or change an issue, merge request, normal-loop ledger
+record, or retained worktree. A failed check exits `1` with a bounded safe
+diagnostic. Invalid command use exits `2`. `--debug` is accepted but does not
+change smoke output.
+
+### Loop run
 
 | `loop run` mode or condition | Behavior |
 | --- | --- |

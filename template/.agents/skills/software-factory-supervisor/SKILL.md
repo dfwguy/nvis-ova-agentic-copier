@@ -87,6 +87,22 @@ For routine factory work that fits, `AGENTS.md` standing authority is enough.
 It needs no per-command ask. It does not widen this skill's read-only limit or
 permit issue filing unless it says so.
 
+## Service smoke proof
+
+Use smoke only when `AGENT_WORK_AGENT=codex`. After user-service install, a
+Codex or config change, or repeated delegation blocks, request the required
+`agent-work loop smoke` through its companion user service. Follow [the
+serial-loop setup guide](../../../docs/how-to/setup-serial-gitlab-agent-loop.md#run-the-companion-smoke-service)
+to run it and inspect its journal. Check the exact trusted result and journal.
+Require success before relying on the unattended timer.
+
+With Claude or Pi, do not request smoke. Use the existing service and timer
+checks instead.
+
+On failure, report the delegation or broker stage. A failed smoke does not
+authorize plain `loop run`, issue or merge-request mutation, or timer reliance.
+This skill remains read-only.
+
 When recovery proof needs an operator check, first suggest the read-only
 `agent-work loop canary --json` plan. Then suggest only its exact reviewed
 `--apply --plan-file` call. Suggest `loop recover --issue-iid IID` only for

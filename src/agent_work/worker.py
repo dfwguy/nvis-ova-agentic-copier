@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import stat
 import tempfile
@@ -59,7 +60,7 @@ from .models import (
     WorkerExitEvidence,
     WorkerResultEnvelope,
 )
-from .ports import CommandRunner
+from .ports import CommandResult, CommandRunner
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
 
 
@@ -2330,7 +2331,6 @@ def _agent_command(
                     if candidate_directory
                     else ()
                 ),
-                "--ephemeral",
                 "--color",
                 "never",
                 "-",
@@ -2432,6 +2432,7 @@ class AgentInvoker:
         broker_factory: WorkerResultBrokerFactory | None = None,
         candidate_broker_factory: CandidateBrokerFactory | None = None,
         clock: Callable[[], float] = monotonic,
+        temporary_directory: Path | None = None,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
@@ -2440,20 +2441,113 @@ class AgentInvoker:
             candidate_broker_factory or create_candidate_broker
         )
         self._clock = clock
+        self._temporary_directory = temporary_directory
 
     supports_worker_result_broker = True
+
+    def _owned_codex_credential(self, source: Path, name: str) -> Path | None:
+        """Return one owner-only source credential suitable for a private home."""
+        candidate = source / name
+        if not candidate.exists():
+            return None
+        evidence = candidate.lstat()
+        if (
+            not stat.S_ISREG(evidence.st_mode)
+            or stat.S_IMODE(evidence.st_mode) != 0o600
+            or evidence.st_uid != os.geteuid()
+        ):
+            raise RuntimeError(
+                "Codex credential must be an owner-owned regular file with mode 0600"
+            )
+        return candidate
+
+    def _run_worker_command(
+        self,
+        agent: str,
+        command: tuple[str, ...],
+        *,
+        stdin: str | None,
+        timeout_seconds: int,
+        environment: dict[str, str],
+    ) -> CommandResult:
+        """Give a Codex worker an owned session home for exactly one invocation."""
+        if agent != "codex":
+            return self._run_command(
+                command,
+                stdin=stdin,
+                timeout_seconds=timeout_seconds,
+                environment=environment,
+            )
+        root = Path(
+            tempfile.mkdtemp(prefix="agent-work-codex-", dir=self._temporary_directory)
+        )
+        root_evidence: os.stat_result | None = None
+        primary_error: Exception | None = None
+        try:
+            os.chmod(root, 0o700)
+            root_evidence = root.lstat()
+            home = root / "codex"
+            home.mkdir(mode=0o700)
+            source = Path(self._environment.get("CODEX_HOME", Path.home() / ".codex"))
+            for name in ("auth.json", "config.toml"):
+                if credential := self._owned_codex_credential(source, name):
+                    os.symlink(credential, home / name)
+            scoped_environment = {
+                **environment,
+                "CODEX_HOME": str(home),
+            }
+            return self._run_command(
+                command,
+                stdin=stdin,
+                timeout_seconds=timeout_seconds,
+                environment=scoped_environment,
+            )
+        except Exception as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                current = root.lstat()
+                if (
+                    not stat.S_ISDIR(current.st_mode)
+                    or current.st_uid != os.geteuid()
+                    or stat.S_IMODE(current.st_mode) != 0o700
+                    or (
+                        root_evidence is not None
+                        and (current.st_dev, current.st_ino)
+                        != (root_evidence.st_dev, root_evidence.st_ino)
+                    )
+                ):
+                    raise OSError("private Codex root ownership changed")
+                shutil.rmtree(root)
+            except OSError as cleanup_error:
+                if primary_error is not None:
+                    raise RuntimeError(
+                        f"{primary_error}; private Codex home cleanup failed"
+                    ) from primary_error
+                else:
+                    raise RuntimeError(
+                        "private Codex home cleanup failed"
+                    ) from cleanup_error
 
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""
         agent, executable = _agent_profile(self._environment)
         if agent != "codex":
             return
-        result = self._run_command(
-            (executable, "exec", "--help"),
-            stdin=None,
-            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
-            environment=_worker_environment(self._environment),
-        )
+        for _ in range(2):
+            result = self._run_command(
+                (executable, "exec", "--help"),
+                stdin=None,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+                environment=_worker_environment(self._environment),
+            )
+            if (
+                result.returncode == 0
+                and re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout)
+                and re.search(r"(?<!\S)--enable(?:\s|$)", result.stdout)
+            ):
+                break
         if (
             result.returncode != 0
             or re.search(r"(?<!\S)--add-dir(?:\s|$)", result.stdout) is None
@@ -2545,7 +2639,8 @@ class AgentInvoker:
             worker_environment = _worker_environment(self._environment)
             worker_environment["UV_CACHE_DIR"] = str(session.cache_path)
             try:
-                result = self._run_command(
+                result = self._run_worker_command(
+                    agent,
                     command,
                     stdin=stdin,
                     timeout_seconds=timeout,
@@ -2599,7 +2694,8 @@ class AgentInvoker:
             )
         command, stdin = _agent_command(agent, executable, checkout, prompt)
         try:
-            result = self._run_command(
+            result = self._run_worker_command(
+                agent,
                 command,
                 stdin=stdin,
                 timeout_seconds=timeout,

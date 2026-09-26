@@ -15,4 +15,9 @@ if [[ -z "${UV_CACHE_DIR:-}" ]]; then
     UV_CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/uv"
     export UV_CACHE_DIR
 fi
-exec uv run --project "$project_root" agent-work "$@"
+uv_command="${AGENT_WORK_UV:-uv}"
+if [[ -n "${AGENT_WORK_UV:-}" && ( "$uv_command" != /* || ! -f "$uv_command" || ! -x "$uv_command" ) ]]; then
+    printf '%s\n' 'AGENT_WORK_UV must be an absolute executable file' >&2
+    exit 2
+fi
+exec "$uv_command" run --project "$project_root" agent-work "$@"

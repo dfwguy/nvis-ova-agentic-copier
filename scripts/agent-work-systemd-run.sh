@@ -118,6 +118,7 @@ authenticated() {
     "GITLAB_HOST=$host" "GITLAB_PROJECT_ID=$project_id" \
     "AGENT_WORK_FACTORY_USERNAME=$factory_username" \
     "AGENT_WORK_GIT=$AGENT_WORK_GIT" "AGENT_WORK_GLAB=$AGENT_WORK_GLAB" \
+    "AGENT_WORK_UV=$AGENT_WORK_UV" \
     "GIT_TERMINAL_PROMPT=0" "GCM_INTERACTIVE=never" \
     "GIT_ASKPASS=/bin/false" "SSH_ASKPASS=/bin/false" \
     "AGENT_WORK_GIT_CREDENTIAL_HELPER=$credential_helper")
@@ -235,6 +236,24 @@ refresh_base() {
   if [[ "$(housekeeping "${git[@]}" -C "$checkout" rev-parse HEAD)" != "$(housekeeping "${git[@]}" -C "$checkout" rev-parse "$remote_ref")" ]]; then stop 'checkout HEAD is not the refreshed origin default branch'; fi
 }
 
+if [[ "${1:-}" == --smoke ]]; then
+  cd "$checkout"
+  if ! smoke_report="$(authenticated "$AGENT_WORK_UV" run agent-work loop smoke --apply --json)"; then
+    printf '%s\n' "$smoke_report" >&2
+    exit 1
+  fi
+  if ! "$AGENT_WORK_JQ" -e -s '
+    length == 1 and (.[0] | (
+      .schema_version == 1 and .command == "loop.smoke" and
+      .applied == true and .outcome == "passed" and .broker_accepted == true
+    ))
+  ' <<<"$smoke_report" >/dev/null; then
+    printf '%s\n' 'stopped: smoke command did not emit one passed loop.smoke JSON report' >&2
+    exit 1
+  fi
+  printf '%s\n' "$smoke_report"
+  exit 0
+fi
 if [[ "${1:-}" != --apply ]]; then
   verify_project
   if ! lines="$(authenticated --housekeeping "${git[@]}" -C "$checkout" ls-remote --exit-code origin "refs/heads/$default")"; then
@@ -257,6 +276,7 @@ if ! authenticated --housekeeping "${git[@]}" -C "$checkout" \
   stop 'Git credential-helper publication readiness check failed'
 fi
 cd "$checkout"
+
 if [[ "${1:-}" != --apply ]]; then
   authenticated --housekeeping "$AGENT_WORK_UV" run agent-work loop run --json
   exit $?
