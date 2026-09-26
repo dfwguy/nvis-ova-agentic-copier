@@ -113,14 +113,19 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    git update-ref "$branch_ref" "$new_commit" "$passing_head"
    ```
 
-   Do not move or delete the durable Red ref. After the action, prove that the
-   branch and `HEAD` equal `new_commit`, its sole parent equals the base, its tree
-   equals the Judge tree, the Red ref is unchanged, and the worktree and index
-   are clean. Return the new SHA, checkpoint proof, and verdict. Any failed
-   precheck, action, or postcheck stops without publication. Main may publish
-   only this final passing tip. A serial-worker Finalizer never commits. Its
-   trusted runner keeps the one checked final commit path and Git hooks. Never
-   push a Red ref. Do not rely on server-side squash.
+   Do not move or delete the durable Red ref. After attempting compaction, run
+   only read-only postchecks. Never run `git reset`, including a reset to the
+   same commit, `git stash`, `git clean`, `git checkout`, `git switch`, or
+   `git restore`, and do not use any other mutating realignment or discard
+   action. Prove that the branch and `HEAD` equal `new_commit`, its sole parent
+   equals the base, its tree equals the Judge tree, the Red ref is unchanged,
+   and the worktree and index are clean. If any precheck, the action, or any
+   postcheck fails, preserve the observed refs, index, and worktree state and
+   stop without publication. Return the new SHA, checkpoint proof, and verdict.
+   Main may publish only this final passing tip. A serial-worker Finalizer never
+   commits.
+   Its trusted runner keeps the one checked final commit path and Git hooks.
+   Never push a Red ref. Do not rely on server-side squash.
 
 ## Verdict
 
