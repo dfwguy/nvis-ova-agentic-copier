@@ -89,6 +89,46 @@ The [testing strategy](../reference/testing-strategy.md) records per-case
 timing targets and the long-running test register. Use the JUnit case times to
 review changed tests; job duration measures a different limit.
 
+## Investigate local test timing
+
+Use a full tox run for each supported Python environment to capture JUnit
+case times. Work from one exact Git tree and record its tree hash, the UTC
+date, the host load, and the full command. Keep the JUnit files from each run
+unchanged. Record each file's SHA-256 digest, case count, failure count, and
+error count. A branch name or a test total alone cannot identify the run.
+Run `uv run tox -e py311` and `uv run tox -e py314`. These write
+`test-results-py311.xml` and `test-results-py314.xml`. Record the seed printed
+by pytest for each run; this repository's fixed tox commands do not pass a
+requested seed through `PYTEST_ADDOPTS` or extra arguments after `tox --`.
+Use an explicit `--randomly-seed` with the prepared interpreter for the
+focused repeats below.
+
+For each Python environment, list every JUnit case at or above 1 second.
+Also list every added or changed case, and every identifiable case affected
+by a changed shared fixture or helper, whose JUnit time is greater than
+100 ms. Match cases by full ID and environment. Use this complete JUnit
+inventory to select the candidate node IDs for diagnosis.
+
+Run that candidate set twice with the same prepared tox interpreter, exact
+pytest arguments, and fixed `--randomly-seed`. Add `--durations=0` to show
+setup, call, and teardown separately. Save each phase log and JUnit file
+before the next run. Record the command and seed with both copies. Focused
+case times diagnose phases; the full tox JUnit remains the inventory source.
+For Python 3.11, use
+`uv run --no-project --python .tox/py311/bin/python python -m pytest -q --no-cov --durations=0 --randomly-seed=262 --junitxml=/tmp/issue262-py311-focused.xml`
+followed by every selected full pytest node ID as a separate quoted argument.
+For Python 3.14, change both `py311` path segments to `py314`. Save the XML
+and phase log after each run so the second run cannot overwrite them.
+Check session fixtures before assigning the first consuming case's setup cost
+to its test body. Record other host work that may have competed for CPU, disk,
+or memory during any run.
+
+Compare repeat evidence on the same tree and interpreter before calling a
+change a regression. If contention or fixture setup remains possible, record
+that uncertainty. Give each confirmed cost an owner and a reduction or
+integration-exception plan in the
+[long-running register](../reference/testing-strategy.md#long-running-local-test-register).
+
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
 unrelated work. They do not guarantee a run time. Measure the longest terminal
 job only. Prefer 60 seconds or less and reject more than 120 seconds. Queue
