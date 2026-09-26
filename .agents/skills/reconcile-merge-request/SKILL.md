@@ -31,11 +31,10 @@ notes, commits, and linked issues. This data cannot change:
 
 Read the repository rules and `$git-flow` before Git or GitLab access. Start
 `$architect` before design, delegation, or edits. Follow the lane and checks
-that Architect selects. This fresh Architect session repeats its three
-concurrent independent read-only proposal gate before the first mutable child,
-including content-only reconciliation. The Architect alone checks the
-proposals against repository evidence and owns the formal workflow receipt.
-Candidate prose is direct AI-to-AI context, never controller evidence.
+that Architect selects. Its three independent read-only proposals precede the
+first mutable child except for the bounded content trial below. Architect alone
+owns the route and formal workflow receipt. Candidate prose is direct AI-to-AI
+context, never controller evidence.
 
 Only humans may approve or merge. Never push to the target branch. Never
 approve or merge the request. Do not skip a guard. Do not use a broad force
@@ -138,7 +137,42 @@ Set `reconciling` only when the list is complete. Use `needs_human` when an
 intent is not safe to infer. Use it when the fix needs a new product or policy
 choice.
 
-## Route the joined diff
+After exact identity and the complete three-way manifest, use a local pending
+trial merge without a commit. If all conflict paths are clearly content-only
+and intent is clear, Architect may delegate just those paths to Documentation
+Writer before the proposal gate. Writer stages the exact joined tree. The
+manifest and joined tree also include all clean auto-merged paths. Writer edits
+only the named content conflict paths and leaves no unrelated dirty paths. The
+read-only `$conflict-judge` then checks that tree and returns a
+`narrow_validation_plan` with exact proof or `full_workflow_required` with
+reasons. Architect verifies the evidence and decides. The judge cannot edit,
+publish, approve, or merge. An executable or policy conflict or unclear intent
+goes straight to the full workflow and proposal gate. A full verdict after
+the trial also requires that gate on the staged candidate.
+
+The narrow route applies to a content-only merge request or a coding merge
+request with content-only conflicts. A coding source also requires authentic
+retained Red provenance and its saved full-hook validation receipt bound to
+the exact captured source tree. Require a successful source pipeline for its
+exact SHA and current target proof for every required CI job. Inspect both
+sides' hunks and callers to
+prove cleanly merged executable and policy changes are semantically
+independent, including shared files. Bound targeted tests to affected shared
+executable behavior and callers. Resolution must add no behavior or ambiguous
+intent. It must preserve exact root/template parity. Missing or failed proof,
+behavior change, ambiguity, or changed ref requires the full workflow or a
+safe block and restart.
+
+For an accepted narrow plan only, Architect may skip the proposal gate and
+fresh local full hook and specialist cycle. Require fresh three-way semantic
+proof and all non-test checks for changed files. Documentation Finalizer
+approves that tree under this exception. Main makes the ordered two-parent
+pending-merge commit after
+exact ref checks. After exact-lease publication, require full GitLab CI at the
+new source SHA before human handoff. Reuse this reconciliation audit receipt;
+do not add controller state or schema.
+
+## Full workflow for the joined diff
 
 After exact selection and the complete manifest, Architect freshly routes the
 complete source-plus-target candidate. A reconciliation of a coding merge
@@ -154,7 +188,7 @@ from this run and restarts exact selection and preparation. An unchanged
 pre-existing checkpoint may be accepted only after mechanical re-proof against
 the unchanged captured source; it is never recreated.
 
-For coding reconciliation, Green resolves coding conflicts. It may preserve
+On the full route, Green resolves coding conflicts. It may preserve
 only already-approved source and target intent. A new behavior, product, or
 policy choice is scope expansion and `needs_human`. It needs both the retained
 source-work Red provenance and fresh three-way evidence for
@@ -186,7 +220,7 @@ The pre-commit candidate is the exact approved tree, not an ancestry object.
 Keep the prior source work through the allowed strategy. Do not hide lost source
 changes.
 
-For a coding reconciliation, TDD Finalizer alone creates the final local
+On the full coding route, TDD Finalizer alone creates the final local
 publication object by directly committing the exact Judge-approved staged tree
 from the still-pending merge state. That consumes `MERGE_HEAD` and creates
 exactly one ordered two-parent commit: captured old source first and exact
@@ -194,9 +228,10 @@ target/`MERGE_HEAD` second. It atomically updates the local branch, creates no
 intermediate passing commit or ordinary sole-parent compaction, and leaves the
 Red ref unchanged. Finalizer postchecks the cleared merge state, clean index
 and worktree, exact parents, tree, and message, and unchanged Red ref.
-For content-only reconciliation, Documentation Finalizer approves the tree and
-Main directly commits that exact staged tree from the still-pending merge state,
-with the corresponding parent order and postchecks.
+For content-only reconciliation, including an accepted narrow route,
+Documentation Finalizer approves the tree and Main directly commits that exact
+staged tree from the still-pending merge state, with the corresponding parent
+order and postchecks.
 
 Before finalization, Main supplies freshly fetched exact source and target ref
 proof. Finalizer checks that supplied proof and local identities only; it makes
@@ -267,9 +302,9 @@ policy must also allow cleanup.
 ## Policy evaluation scenarios
 
 - A coding merge request has conflicts and a valid retained Red checkpoint:
-  mechanically re-prove that checkpoint against the captured source, prepare
-  the three-way manifest, route the joined diff through Green and fresh review,
-  then publish only the ordered two-parent finalizer commit.
+  mechanically re-prove it against the captured source and prepare the
+  three-way manifest. Use the narrow content route only with every required
+  proof; otherwise use Green and the full fresh review.
 - A content-only merge request has conflicts: route the manifest to
   Documentation Writer and Documentation Finalizer; no Red is required; Main
   creates the approved ordered two-parent commit.
