@@ -20112,6 +20112,105 @@ def test_loop_run_skips_failed_merge_request_pipeline_without_safe_owner(
     assert report.items and report.items[0].issue_iid == 12
 
 
+def test_loop_run_canceled_merge_request_pipeline_without_owner_allows_fresh_work(
+    tmp_path: Path,
+) -> None:
+    """An ownerless canceled MR pipeline is item-local evidence."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    merge_request = _mr(sha="a" * 40, description="Change without issue closure")
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="canceled",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run"),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "activation_complete"
+    assert report.items and report.items[0].issue_iid == 12
+    assert gitlab.eligible_calls > 0
+
+
+def test_loop_run_canceled_exact_pipeline_observes_owner_without_failed_job_repair(
+    tmp_path: Path,
+) -> None:
+    """A canceled exact pipeline reaches the serial observation handoff."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    merge_request = _mr(sha=retained.source_sha or "a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="canceled",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+    gitlab.pipeline = gitlab.pipeline_by_merge_request[
+        (merge_request.iid, merge_request.sha)
+    ]
+    invoker = FakeInvoker()
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=replace(
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
+            invoke=invoker,
+        ),
+    )
+
+    assert [item.issue_iid for item in report.items] == [retained.issue_iid]
+    assert report.items[-1].state is RunnerState.NEEDS_REPAIR
+    assert report.items[-1].phase is WorkflowPhase.POST_PUBLICATION
+    assert report.items[-1].error_code is ErrorCode.PIPELINE_REJECTED
+    observed = ledger.load(retained.issue_iid)
+    assert observed is not None and observed.repair_attempt is None
+    assert gitlab.eligible_calls == 0
+    assert invoker.prompts == []
+
+
+def test_loop_run_canceled_default_branch_pipeline_blocks_fresh_work(
+    tmp_path: Path,
+) -> None:
+    """The default-branch pipeline gate stays project-wide for cancellation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    gitlab = FakeGitLab()
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status="canceled", sha="d" * 40, web_url="https://pipeline/main"
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_dependencies(config, ledger, gitlab, FakeRepository(config)),
+    )
+
+    assert report.outcome == "pipeline_inventory_blocked"
+    assert report.items == ()
+    assert gitlab.eligible_calls == 0
+
+
 def test_loop_run_with_multiple_pipeline_wait_owners_fails_closed(
     tmp_path: Path,
 ) -> None:

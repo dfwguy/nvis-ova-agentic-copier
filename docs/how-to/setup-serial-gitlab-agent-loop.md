@@ -804,7 +804,7 @@ preview after an identity rotation, ledger revision, or a change to target,
 repository, merge-request, or pipeline evidence. Neither plan prints secrets.
 
 Keep the timer stopped if the command reports a conflict, a higher-priority
-owner, a failed pipeline without an exact owner, or a nonterminal pipeline.
+owner, a blocked default-branch pipeline, or a nonterminal pipeline.
 Follow the reported safe next action. Do not select another issue or change
 retained artifacts.
 

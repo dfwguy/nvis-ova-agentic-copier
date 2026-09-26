@@ -102,9 +102,10 @@ GitLab labels stay broad:
   actionable issue handoff await human review.
 - `agent::blocked`: documented human action is needed.
 - `agent::failed`: a rare, fatal state prevented safe checking or recording.
-- `agent::needs_repair`: legacy or reviewed repair, or exhausted required-job
-  proof after a successful exact-source pipeline, awaits exact recovery. An
-  ordinary failed pipeline uses its diagnostic repair path.
+- `agent::needs_repair`: legacy or reviewed repair, exhausted required-job
+  proof after a successful exact-source pipeline, or a canceled exact-source
+  pipeline for a retained observing owner awaits exact recovery. An ordinary
+  failed pipeline uses its diagnostic repair path.
 - `agent::repair_failed`: auto or reviewed repair failed, or exact proof
   changed. It keeps follow-up proof.
 - `agent::suggest_close`: confirmed proof asks a human to close duplicate,
@@ -219,7 +220,7 @@ internal agent handoffs.
 | Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
 | Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, or inaccessible evidence blocks. Nonterminal evidence yields. An exact failed MR pipeline enters `repair` only with one uniquely corroborated retained owner. |
 | Retained-work recovery | Resume one durable immediate `agent::running` record. Reclassify one blocked IID only with that issue's passive owner-marker corroboration and reviewed `loop recover --issue-iid IID`. | Status and inventory report each retained issue independently. A reviewed exact-IID plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
-| Human block | Treat a failed default-branch or ownerless MR pipeline as blocking humans. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
+| Human block | A failed or canceled default-branch pipeline blocks unrelated work. An ownerless failed or canceled open-MR pipeline stays item-local. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
 | Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, open split prerequisite, or required open descendant of a closed decomposition parent. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
 | Classification | Classify before claim: ordinary work, existing-MR remediation, merge-conflict repair, or manual-lane protected policy work. | The applicable classification and Architect lane. | Claim only after classification. |
