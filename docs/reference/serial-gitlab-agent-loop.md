@@ -398,6 +398,35 @@ Judge result goes back to the same live producer for a fix within the worker
 budget. The worker must not run direct
 `validation` commands, stage through Git, or write controller state.
 
+A rejected candidate request can add bounded context after its existing safe
+reason: `candidate_broker: <safe reason> [reason=<code> action=<action>
+selector=<mode> request=<ordinal>]`. Actions are `stage`, `read`, `validate`,
+and `status`. Selectors are `none`, `manifest`, `chunk`, and `complete`; only
+`read` can have a selector other than `none`. The ordinal is a canonical
+decimal number from 1 through 513, or `513+` after that.
+
+| Code | Rejection |
+| --- | --- |
+| `invalid_selector_state` | A valid `manifest`, `chunk`, or `complete` selector conflicts with the current paged read state. |
+| `invalid_request` | Another candidate request is invalid, including a safe controller callback rejection. |
+| `request_limit` | The session has exceeded 512 requests. |
+| `identity_mismatch`, `timeout`, `request_byte_budget`, `candidate_drift`, `invalid_candidate_identity`, `invalid_read_response`, `read_response_oversize`, `response_byte_budget` | The corresponding existing safe failure reason. |
+| `candidate_rejected` | Another allowlisted safe controller callback reason. |
+
+For example, a valid chunk shape rejected by the current paged read state
+reports `reason=invalid_selector_state action=read selector=chunk`; a request
+past the cap reports `reason=request_limit` with its recognized action and
+selector.
+
+The suffix contains no selector path, file content, nonce, or tree ID.
+Unparseable requests, malformed selector shapes, and unsafe callback text
+retain a general diagnostic. A rejection still invalidates the session; the
+suffix does not authorize another request or a finalization result. During a
+live session, read the failed candidate command's diagnostic. If the worker
+exits with the failure, use `loop status --issue-iid IID` or
+`recovery inventory --issue-iid IID` to inspect the retained safe diagnostic
+before planning recovery.
+
 The finalizer's existing workflow receipt carries the Consistency Judge
 verdict, or a specific not-applicable reason when copied facts did not change.
 There is no new workflow receipt slot. A missing, failed, or stale expected

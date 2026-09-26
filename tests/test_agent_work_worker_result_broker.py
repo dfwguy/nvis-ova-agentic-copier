@@ -39,6 +39,7 @@ from agent_work.worker import (
     WorkerResultBrokerClientRequest,
     WorkerResultBrokerFactory,
     create_candidate_broker,
+    is_safe_worker_result_diagnostic,
     request_candidate_validation,
 )
 
@@ -855,6 +856,325 @@ def test_candidate_broker_rejects_replayed_page(candidate_scratch: Path) -> None
     assert session.reviewed_candidate is None
     with pytest.raises(WorkerProtocolError, match="candidate request is invalid"):
         session.close_and_capture()
+
+
+def test_candidate_broker_reports_bounded_invalid_selector_state(
+    candidate_scratch: Path,
+) -> None:
+    """A rejected page identifies its safe request shape without echoing input."""
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    secret_path = "docs/private-candidate-content-sentinel.md"
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    expected = (
+        "candidate_broker: candidate request is invalid "
+        "[reason=invalid_selector_state action=read selector=chunk request=3]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={
+                "mode": "chunk",
+                "path": secret_path,
+                "side": "old",
+                "offset": 0,
+                "length": 1,
+            },
+        )
+    assert str(rejected.value) == expected
+    assert all(
+        secret not in str(rejected.value)
+        for secret in (secret_path, request.nonce, tree, "before", "after!")
+    )
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+    assert not session.socket_path.parent.exists()
+
+
+def test_candidate_broker_reports_bounded_513th_request(
+    candidate_scratch: Path,
+) -> None:
+    """The request cap reports the crossing ordinal and revokes the session."""
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        return {"candidate_tree": tree, "state": "staged"}
+
+    session = create_candidate_broker(
+        action,
+        request=request,
+        timeout_seconds=30,
+        temporary_directory=candidate_scratch,
+    )
+    session._requests = 512
+    expected = (
+        "candidate_broker: request is not permitted "
+        "[reason=request_limit action=stage selector=none request=513]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(session.socket_path, client, action="stage")
+    assert str(rejected.value) == expected
+    assert all(secret not in str(rejected.value) for secret in (request.nonce, tree))
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+    assert not session.socket_path.parent.exists()
+
+
+def test_candidate_broker_reports_bounded_status_request_limit(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    session = create_candidate_broker(
+        lambda _kind, _tree: {"candidate_tree": tree, "state": "staged"},
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    session._requests = 512
+    expected = (
+        "candidate_broker: request is not permitted "
+        "[reason=request_limit action=status selector=none request=513]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path, client, action="status", candidate_tree=tree
+        )
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+def test_candidate_broker_reports_bounded_duplicate_manifest(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    expected = (
+        "candidate_broker: candidate request is invalid "
+        "[reason=invalid_selector_state action=read selector=manifest request=3]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={"mode": "manifest"},
+        )
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+def test_candidate_broker_reports_chunk_before_manifest_as_selector_state(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    expected = (
+        "candidate_broker: candidate request is invalid "
+        "[reason=invalid_selector_state action=read selector=chunk request=2]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={
+                "mode": "chunk",
+                "path": "docs/guide.md",
+                "side": "old",
+                "offset": 0,
+                "length": 1,
+            },
+        )
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+def test_candidate_broker_rejects_list_selector_mode_without_crashing(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    expected = "candidate_broker: candidate request is invalid"
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector={"mode": []},
+        )
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+@pytest.mark.parametrize("bad_field", ["side", "offset"])
+def test_candidate_broker_rejects_malformed_chunk_shape_generically(
+    candidate_scratch: Path, bad_field: str
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+    tree = "b" * 40
+    session = create_candidate_broker(
+        _paged_candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    request_candidate_validation(session.socket_path, client, action="stage")
+    request_candidate_validation(
+        session.socket_path, client, action="read", candidate_tree=tree
+    )
+    selector: dict[str, object] = {
+        "mode": "chunk",
+        "path": "docs/guide.md",
+        "side": "old",
+        "offset": 0,
+        "length": 1,
+    }
+    selector[bad_field] = [] if bad_field == "side" else -1
+    expected = "candidate_broker: candidate request is invalid"
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(
+            session.socket_path,
+            client,
+            action="read",
+            candidate_tree=tree,
+            selector=selector,
+        )
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+def test_candidate_broker_reports_bounded_callback_rejection(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        raise WorkerProtocolError("candidate_broker", "candidate request is invalid")
+
+    session = create_candidate_broker(
+        action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    expected = (
+        "candidate_broker: candidate request is invalid "
+        "[reason=invalid_request action=stage selector=none request=1]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(session.socket_path, client, action="stage")
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+def test_candidate_broker_callback_limit_phrase_is_not_cap_evidence(
+    candidate_scratch: Path,
+) -> None:
+    request = _request()
+    client = WorkerResultBrokerClientRequest(nonce=request.nonce, issue_iid=81)
+
+    def action(_kind: str, _tree: str | None) -> dict[str, object]:
+        raise WorkerProtocolError("candidate_broker", "request is not permitted")
+
+    session = create_candidate_broker(
+        action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=candidate_scratch,
+    )
+    expected = (
+        "candidate_broker: request is not permitted "
+        "[reason=candidate_rejected action=stage selector=none request=1]"
+    )
+    with pytest.raises(WorkerProtocolError) as rejected:
+        request_candidate_validation(session.socket_path, client, action="stage")
+    assert str(rejected.value) == expected
+    with pytest.raises(WorkerProtocolError) as captured:
+        session.close_and_capture()
+    assert str(captured.value) == expected
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        (
+            "candidate_broker: request is not permitted "
+            "[reason=request_limit action=stage selector=none request=1]"
+        ),
+        (
+            "candidate_broker: candidate request is invalid "
+            "[reason=invalid_selector_state action=read selector=chunk request=513]"
+        ),
+    ],
+)
+def test_candidate_broker_rejects_impossible_diagnostic_context(
+    diagnostic: str,
+) -> None:
+    assert not is_safe_worker_result_diagnostic(diagnostic)
 
 
 def test_candidate_broker_empty_and_deleted_sides_need_no_chunks(
