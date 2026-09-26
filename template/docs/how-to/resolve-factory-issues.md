@@ -5,7 +5,7 @@ summary: Recover saved work.
 audience: maintainer
 tags: [agent-workflow]
 status: draft
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the recovery inventory and resolution command contract.
@@ -46,12 +46,20 @@ changing any of those records.
 uv run agent-work recovery inventory --issue-iid 89 --json
 ```
 
-Begin with aggregate `total`, `open`, and `closed`, then inspect `active`,
-`blocked`, `dependency_gated`, `human_action`, and `no_action` counts. For a
-candidate, inspect its active state, `human_action_required` and the bounded
-cause, named open trusted prerequisites, and the exact next action. The
-inventory lists failed main and open-MR pipelines first and ordinary retained
-work afterward. The inventory reports fresh items but never selects them.
+Begin with aggregate `total`, `open`, and `closed`. Then inspect `active`,
+`blocked`, `dependency_gated`, `human_action`, and `no_action` counts. For one
+candidate, inspect its active state and `human_action_required`. Read its
+bounded cause, open needs, and exact next action. An open need can be a direct
+prerequisite. It can also be a required child or descendant of a closed split
+parent. The inventory lists failed main and open-MR pipelines first. It lists
+ordinary retained work next. The inventory reports fresh items but never
+selects them.
+
+Closing a direct prerequisite is not enough when it was split. The inventory
+stays `dependency_gated` while any required descendant is open. Let the normal
+timer check again. Do not start a tight retry or worker. When all required
+descendants close, the saved record can become `safely_retryable`. It then
+continues through the reviewed recovery path.
 
 Treat `closed_no_action` as settled for a closed recordless split issue or a
 closed `COMPLETE` record. Worktree, head, MR, or pipeline drift does not
@@ -128,7 +136,7 @@ Confirm observed and proposed states.
 Make the decision and authority visible.
 
 ```text
-Operator: Issue #89 was dependency-gated. The dependency merged; should I retry it?
+Operator: Issue #89 was dependency-gated. Inventory now shows every required descendant closed; should I retry it?
 Maintainer: Yes. Retry only #89. The linked MR is the evidence; do not claim another issue.
 Operator: I will apply the reviewed retry plan and report the before/after receipt.
 ```

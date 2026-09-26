@@ -73,10 +73,12 @@ override a prerequisite. Remove the exact label when the tracker is ready for
 normal work. An otherwise ready open issue then returns to fresh selection.
 
 The loop creates and keeps `agent-prereq_<IID>` labels only when a checked split
-child has an open trusted need. These non-scoped labels let one child show
-several open needs at once. They are a user-visible projection, not a queue
-control. Do not add, remove, or use them to bypass a dependency. Split markers
-and the live state of prerequisite issues remain the source of truth.
+child has an open trusted need. A need can be a direct prerequisite or an open
+child or descendant that must finish for a closed, decomposed prerequisite.
+These non-scoped labels let one child show several open needs at once. They are
+a user-visible projection, not a queue control. Do not add, remove, or use them
+to bypass a dependency. Validated split markers and one complete snapshot of
+live issue state remain the source of truth.
 
 ## Check needs and Developer-readable guards.
 
@@ -683,20 +685,38 @@ decomposition state, saved plan or progress record, checkpoint restoration, or
 special queue to repair.
 
 For an open child, the runner projects each open trusted prerequisite as one
-`agent-prereq_<IID>` label, ordered by numeric IID. It removes a projection
-when the prerequisite closes, the trusted marker removes the dependency, or
-the child closes. Preview `loop run` and `recovery inventory` show current and
-intended labels without writing them. An applied `loop run` repairs missing or
-stale labels before normal selection. It creates or normalizes canonical
-project-label definitions, removes exact legacy `agent::prereq_<IID>` labels
-from affected issues, and adds the full ordered canonical set. It deletes
-matching legacy project-label definitions only after every issue-label
-transition succeeds. A partial transition keeps those definitions for a safe
-retry. A pass that repairs projection drift only repairs. It does not claim
-work, create a ledger record or worktree, or start a worker. After that pass,
-the service wrapper previews the queue. It starts a new applied run only if
-work is ready. It reads GitLab again before it picks an issue. If none is
-ready, the service exits and the timer checks later.
+`agent-prereq_<IID>` label, ordered by numeric IID. When a literal prerequisite
+closes after decomposition, the same dependency continues through that parent
+to every required open child or descendant. The dependent stays blocked and
+shows those descendant IIDs until they all close. The closed parent's label is
+replaced by descendant labels, so the dependency projection remains visible.
+During an interrupted controller decomposition, the parent remains open and is
+still the direct blocker. Only a closed parent expands to its observed,
+marker-bound children.
+
+Selection, label projection, and recovery use the same marker-derived proof
+from one complete live issue snapshot. A missing referenced dependency,
+duplicate child identity, malformed or ambiguous marker, self-reference, or
+cycle fails closed. While a required descendant is open, the runner does not
+claim the dependent, start its worker, or schedule a tight retry. Retained
+recovery reports `dependency_gated`. After all required descendants close, it
+can report the existing retained work as `safely_retryable`; the work and human
+merge-request review remain in place.
+
+The runner removes a projection when the complete proof has no open required
+need, the trusted marker removes the dependency, or the dependent closes.
+Preview `loop run` and `recovery inventory` show current and intended labels
+without writing them. An applied `loop run` repairs missing or stale labels
+before normal selection. It creates or normalizes canonical project-label
+definitions, removes exact legacy `agent::prereq_<IID>` labels from affected
+issues, and adds the full ordered canonical set. It deletes matching legacy
+project-label definitions only after every issue-label transition succeeds. A
+partial transition keeps those definitions for a safe retry. A pass that
+repairs projection drift only repairs. It does not claim work, create a ledger
+record or worktree, or start a worker. After that pass, the service wrapper
+previews the queue. It starts a new applied run only if work is ready. It reads
+GitLab again before it picks an issue. If none is ready, the service exits and
+the timer checks later.
 
 Let each approved child issue enter the normal eligibility queue and produce
 its own merge request in dependency order. Leave a tracking parent blocked or

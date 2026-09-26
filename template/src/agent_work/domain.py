@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -452,6 +453,7 @@ class PrerequisiteLabelReconciliation:
 
     projections: tuple[PrerequisiteLabelProjection, ...]
     label_names: tuple[str, ...]
+    dependency_proofs: tuple[tuple[int, tuple[tuple[int, str], ...]], ...]
 
 
 def prerequisite_label_iid(label: str) -> int | None:
@@ -475,22 +477,65 @@ def prerequisite_label_name(iid: int) -> str:
     return f"{PREREQUISITE_LABEL_PREFIX}{iid}"
 
 
+@dataclass(frozen=True)
+class _PrerequisiteGraph:
+    """Validated split-marker graph built from one complete issue snapshot."""
+
+    by_iid: Mapping[int, GitLabIssue]
+    markers: Mapping[int, tuple[int, str, tuple[int, ...]]]
+    children_by_parent: Mapping[int, tuple[int, ...]]
+
+    def proof(self, issue_iid: int) -> tuple[tuple[int, str], ...]:
+        """Return stable prerequisite and decomposition evidence for one issue."""
+        marker = self.markers.get(issue_iid)
+        if marker is None:
+            return ()
+        proof: dict[int, str] = {}
+        pending = list(reversed(marker[2]))
+        while pending:
+            dependency_iid = pending.pop()
+            if dependency_iid in proof:
+                continue
+            dependency = self.by_iid[dependency_iid]
+            proof[dependency_iid] = dependency.state
+            if dependency.state == "closed":
+                pending.extend(
+                    reversed(self.children_by_parent.get(dependency_iid, ()))
+                )
+        return tuple(sorted(proof.items()))
+
+
+def _prerequisite_dependency_proofs(
+    graph: _PrerequisiteGraph,
+) -> tuple[tuple[int, tuple[tuple[int, str], ...]], ...]:
+    """Return every stable dependency proof from one validated graph."""
+    return tuple(
+        (issue_iid, graph.proof(issue_iid)) for issue_iid in sorted(graph.by_iid)
+    )
+
+
+def prerequisite_dependency_proof(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> tuple[tuple[int, tuple[tuple[int, str], ...]], ...]:
+    """Derive every issue's trusted dependency proof from one complete snapshot."""
+    graph = _prerequisite_graph(issues, project_id=project_id)
+    return _prerequisite_dependency_proofs(graph)
+
+
 def prerequisite_projection_inventory(
     issues: tuple[GitLabIssue, ...], *, project_id: int
 ) -> tuple[PrerequisiteLabelProjection, ...]:
     """Derive safe prerequisite-label projections from a complete issue snapshot."""
-    return tuple(
-        projection
-        for projection in _prerequisite_label_intentions(issues, project_id=project_id)
-        if frozenset(projection.current_labels) != frozenset(projection.intended_labels)
-    )
+    return prerequisite_label_reconciliation(issues, project_id=project_id).projections
 
 
 def prerequisite_label_reconciliation(
     issues: tuple[GitLabIssue, ...], *, project_id: int
 ) -> PrerequisiteLabelReconciliation:
     """Derive all applied label repairs from one validated issue snapshot."""
-    intentions = _prerequisite_label_intentions(issues, project_id=project_id)
+    graph = _prerequisite_graph(issues, project_id=project_id)
+    dependency_proofs = _prerequisite_dependency_proofs(graph)
+    intentions = _prerequisite_label_intentions(issues, proofs=dict(dependency_proofs))
     return PrerequisiteLabelReconciliation(
         projections=tuple(
             projection
@@ -509,34 +554,23 @@ def prerequisite_label_reconciliation(
                 key=lambda label: prerequisite_label_iid(label) or 0,
             )
         ),
+        dependency_proofs=dependency_proofs,
     )
 
 
 def _prerequisite_label_intentions(
-    issues: tuple[GitLabIssue, ...], *, project_id: int
+    issues: tuple[GitLabIssue, ...],
+    *,
+    proofs: Mapping[int, tuple[tuple[int, str], ...]],
 ) -> tuple[PrerequisiteLabelProjection, ...]:
-    """Derive complete intended labels while validating the trusted snapshot."""
-    by_iid = {issue.iid: issue for issue in issues}
-    if len(by_iid) != len(issues):
-        raise ValueError("issue inventory contains duplicate IIDs")
+    """Derive complete intended labels from validated dependency proofs."""
     projections: list[PrerequisiteLabelProjection] = []
     for issue in sorted(issues, key=lambda item: item.iid):
-        if issue.state not in {"opened", "closed"}:
-            raise ValueError("issue state is invalid")
-        marker = parse_split_marker(issue.description, project_id)
-        if marker is None:
-            dependency_iids: tuple[int, ...] = ()
-        else:
-            parent_iid, _key, dependency_iids = marker
-            if parent_iid == issue.iid or issue.iid in dependency_iids:
-                raise ValueError("invalid split marker dependency")
-            if any(dependency_iid not in by_iid for dependency_iid in dependency_iids):
-                raise ValueError("split dependency is missing")
         intended_dynamic = (
             tuple(
                 prerequisite_label_name(dependency_iid)
-                for dependency_iid in sorted(dependency_iids)
-                if by_iid[dependency_iid].state == "opened"
+                for dependency_iid, state in proofs[issue.iid]
+                if state == "opened"
             )
             if issue.state == "opened"
             else ()
@@ -549,6 +583,71 @@ def _prerequisite_label_intentions(
             PrerequisiteLabelProjection(issue.iid, issue.labels, intended)
         )
     return tuple(projections)
+
+
+def _prerequisite_graph(
+    issues: tuple[GitLabIssue, ...], *, project_id: int
+) -> _PrerequisiteGraph:
+    """Parse and validate one complete issue snapshot exactly once."""
+    by_iid = {issue.iid: issue for issue in issues}
+    if len(by_iid) != len(issues):
+        raise ValueError("issue inventory contains duplicate IIDs")
+    markers: dict[int, tuple[int, str, tuple[int, ...]]] = {}
+    child_identities: set[tuple[int, str]] = set()
+    children_by_parent: dict[int, list[int]] = {}
+    edges: dict[int, set[int]] = {issue.iid: set() for issue in issues}
+    for issue in issues:
+        if issue.state not in {"opened", "closed"}:
+            raise ValueError("issue state is invalid")
+        if issue.description.count("<!-- agent-work-split:v1") > 1:
+            raise ValueError("split marker is ambiguous")
+        marker = parse_split_marker(issue.description, project_id)
+        if marker is None:
+            continue
+        parent_iid, key, dependency_iids = marker
+        if parent_iid == issue.iid or issue.iid in dependency_iids:
+            raise ValueError("invalid split marker dependency")
+        if any(dependency_iid not in by_iid for dependency_iid in dependency_iids):
+            raise ValueError("split dependency is missing")
+        identity = (parent_iid, key)
+        if identity in child_identities:
+            raise ValueError("split child identity is duplicate")
+        child_identities.add(identity)
+        markers[issue.iid] = marker
+        children_by_parent.setdefault(parent_iid, []).append(issue.iid)
+        edges[issue.iid].update(dependency_iids)
+        if parent_iid in by_iid:
+            edges[parent_iid].add(issue.iid)
+
+    visit_state = {issue_iid: 0 for issue_iid in edges}
+    for root_iid in sorted(edges):
+        if visit_state[root_iid] != 0:
+            continue
+        visit_state[root_iid] = 1
+        stack = [(root_iid, iter(sorted(edges[root_iid])))]
+        while stack:
+            _issue_iid, referenced_iids = stack[-1]
+            try:
+                referenced_iid = next(referenced_iids)
+            except StopIteration:
+                visit_state[_issue_iid] = 2
+                stack.pop()
+                continue
+            if visit_state[referenced_iid] == 1:
+                raise ValueError("split dependency cycle is invalid")
+            if visit_state[referenced_iid] == 0:
+                visit_state[referenced_iid] = 1
+                stack.append((referenced_iid, iter(sorted(edges[referenced_iid]))))
+    return _PrerequisiteGraph(
+        by_iid=MappingProxyType(by_iid),
+        markers=MappingProxyType(markers),
+        children_by_parent=MappingProxyType(
+            {
+                parent_iid: tuple(sorted(child_iids))
+                for parent_iid, child_iids in children_by_parent.items()
+            }
+        ),
+    )
 
 
 def split_fingerprint(project_id: int, parent_iid: int, key: str) -> str:

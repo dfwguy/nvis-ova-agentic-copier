@@ -157,6 +157,45 @@ costs are unmeasured.
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_portable_ci_keeps_one_shared_setup_job` | 3.11 | 1.101 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable work. |
 
+The issue #274 Judge snapshot for tree
+`69a7fb41ed00f9bb9e6c3d1e8f4eca3cd17156c6` found one further Python 3.11
+entry on 2026-09-26. Its JUnit SHA-256 is
+`530943cc48107228b6d7417a229f7eba414d567e8a8ebfdb2dbb4c072b745e3a`.
+This is one local observation, not a stable regression. Its cause and phase
+costs are unmeasured.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_generated_dev_environment_includes_local_tox_matrix` | 3.11 | 1.141 s | Issue #274 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before judging whether an integration exception is needed. |
+
+The later C4 Judge snapshot for tree
+`78c3315784ac3c50f2303a34826e4474166cee3b` found two further entries on
+2026-09-26. The Python 3.11 JUnit SHA-256 is
+`c49243ad7dad4c030fa11f654a3ffce099fe9ec6cb4f3f6840c8f3e506540490`.
+The Python 3.14 JUnit SHA-256 is
+`ddadfa4c86dab8f038239001ec0e5f815bf73be0a42d937b30333493edbf3fba`.
+Each is one local observation, not a stable regression. Their causes and phase
+costs are unmeasured.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_agent_policy::test_ruff_uses_version_016_defaults` | 3.11 | 1.143 s | C4 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
+| `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.14 | 12.880 s | C4 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
+
+The C5 Judge snapshot for tree `534d24aa3609d0aa7350a1c2a4b1f7de2971ab70`
+found two further entries on 2026-09-26. The Python 3.11 JUnit SHA-256 is
+`7471c29acf8d17811479a02b126da504264c85c7b625bdcec489757a5a04745f`.
+The Python 3.14 JUnit SHA-256 is
+`d184e780cc7d907e2567491405cd0ff41278e69f6539b630136a841bdd58b9a8`.
+Each is one local observation, not a stable regression. Their causes and phase
+costs are unmeasured. The Python 3.14 lock entry is distinct from the existing
+Python 3.11 entry for that case.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_generated_ci_uses_exact_stable_python_versions` | 3.11 | 1.033 s | C5 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
+| `tests.test_template::test_generated_lock_does_not_depend_on_its_own_project` | 3.14 | 1.756 s | C5 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
+
 Pytest's duration report can show setup, call, and teardown as separate
 phases. The current JUnit `testcase` time combines them. Keep the combined
 time for the review trigger and use phase evidence to diagnose a slow case.

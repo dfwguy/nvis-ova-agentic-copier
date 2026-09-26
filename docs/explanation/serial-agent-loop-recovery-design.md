@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-26
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -118,14 +118,37 @@ proof delta, fault, time, and worktree. `agent::blocked` covers authority,
 safety, and open proof; `agent::failed` is rare and fatal. Labels show owner.
 
 Split prior-need labels are a user view. On an open child,
-`agent-prereq_<IID>` names an open, trusted prior need. They are non-scoped, so
-one issue can show many needs. Gates use checked markers and live need state.
+`agent-prereq_<IID>` names one open, trusted need. The labels are non-scoped, so
+one issue can show many needs. Gates use checked markers and live issue state.
 
-The runner orders by number, makes or reuses fixed labels, and safely fixes
-stale views. It removes a view when its need or child closes, or a marker ends.
-Migration keeps legacy `agent::prereq_<IID>` definitions until each changed
-issue has its full set. A stopped move retries; a failed remote update leaves
-retryable view drift. It never changes child authority, life cycle, or fit.
+Each proof starts with direct prerequisites. An open prerequisite stays a need.
+A closed split parent expands to every required open child. If a closed child
+was also split, the proof repeats this step. This keeps dependent work blocked
+while replacement work is open.
+
+During an interrupted controller split, the parent stays open. It remains the
+direct need. The proof expands only a closed parent and only to observed
+children with valid markers.
+
+Label projection, fresh selection, and retained recovery use the same proof
+from one complete issue snapshot. Labels show every open proof member. The
+runner fails closed for a duplicate issue IID or an invalid issue state. It
+also stops for a missing literal dependency or a duplicate `(parent,key)` child
+identity. A malformed or ambiguous marker, self-reference, or cycle also stops
+it. An absent marker parent remains valid provenance. On failure, the loop
+claims no dependent worker and starts no tight retry.
+
+A retained dependent stays `dependency_gated` while any proof member is open.
+When all members close, its saved work can become `safely_retryable`. It still
+follows normal human merge-request review.
+
+The runner sorts the displayed IIDs and creates or reuses fixed labels. It
+removes a label when the complete proof has no matching open need. It also
+removes labels when the dependent closes or a trusted marker ends the
+dependency. Migration keeps legacy `agent::prereq_<IID>` definitions until each
+changed issue has its full set. A stopped move retries. A failed remote update
+leaves retryable view drift. These labels never change child authority, life
+cycle, or fit.
 
 Auto exact-pipeline repair is item-bound. One failed try saves a 20-minute
 backoff. Three failed auto tries quarantine or defer it for human review.
@@ -197,8 +220,8 @@ internal agent handoffs.
 | Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, or inaccessible evidence blocks. Nonterminal evidence yields. An exact failed MR pipeline enters `repair` only with one uniquely corroborated retained owner. |
 | Retained-work recovery | Resume one durable immediate `agent::running` record. Reclassify one blocked IID only with that issue's passive owner-marker corroboration and reviewed `loop recover --issue-iid IID`. | Status and inventory report each retained issue independently. A reviewed exact-IID plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
 | Human block | Treat a failed default-branch or ownerless MR pipeline as blocking humans. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
-| Prerequisite projection | Reconcile prerequisite-label projections before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
-| Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, or open split prerequisite. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
+| Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
+| Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, open split prerequisite, or required open descendant of a closed decomposition parent. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
 | Classification | Classify before claim: ordinary work, existing-MR remediation, merge-conflict repair, or manual-lane protected policy work. | The applicable classification and Architect lane. | Claim only after classification. |
 | Write-ahead transition | Persist intent before each external mutation. Record its observed result. | Durable intent and observed result. | Reconciliation completes or compensates across interruption. |
 | Worker | Run one bounded owner worker in its durable worktree. Validate its versioned `ready_to_publish`, `retryable`, or `needs_human` result. | The one workflow-owning worker session and its versioned result. | Continue to publication only with a valid result. |
@@ -419,16 +442,20 @@ project lock. Review of the next action does not authorize a change to moved
 evidence. A conflicting active record fails closed. A competing owner does too.
 Changed evidence does too. The loop chooses no substitute.
 
-The recovery inventory is an audit view. It is not a second recovery engine. It
-reports current and intended prerequisite-label projections. It gives the
-source-of-truth reason for each need. It reconciles neither. Terminal evidence
-takes no-action precedence. A closed recordless split issue stays settled. A
-closed `COMPLETE` record does too. Later worktree, head, merge-request, or
-pipeline evidence can drift. That drift cannot reopen terminal work. It avoids
-false work from old artifacts. It keeps aggregate closed and no-action counts
-visible. A closed nonterminal record needs a human decision. A targeted lookup
-is exact. It keeps full evidence. The view keeps one IID and one explicit
-choice. Its resolution stays evidence-bound. Only humans approve or merge.
+The recovery inventory is a read-only audit view. It is not a second recovery
+engine. It uses the same complete dependency proof as selection and label
+projection. It lists current and intended labels. It also names each direct or
+transferred open need. It reconciles none of them.
+
+Terminal evidence takes no-action precedence. A closed recordless split issue
+stays settled. A closed `COMPLETE` record does too. Later worktree, head,
+merge-request, or pipeline drift cannot reopen terminal work. This prevents
+false work from old artifacts. Aggregate closed and no-action counts stay
+visible. A closed nonterminal record needs a human decision.
+
+A targeted lookup is exact and keeps full evidence. The view keeps one IID and
+one explicit choice. Its resolution stays evidence-bound. Only humans approve
+or merge.
 
 ## Security and authority boundaries
 
