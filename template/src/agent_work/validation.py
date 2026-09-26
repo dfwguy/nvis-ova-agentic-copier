@@ -764,6 +764,8 @@ def _failed_junit_evidence(
             continue
         summaries.append(f"{label} failures={counts[0]} errors={counts[1]}")
         digests.append(hashlib.sha256(artifact).hexdigest())
+        if len(names) >= 16:
+            continue
         try:
             root = ElementTree.fromstring(artifact)
         except ElementTree.ParseError:
