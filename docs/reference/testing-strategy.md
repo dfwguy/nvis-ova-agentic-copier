@@ -35,23 +35,43 @@ known long-running cases.
 | Full supported matrix | Run the complete pytest suite on Python 3.11 and 3.14 through tox and the validation hooks. The Judge's JUnit files provide case counts and durations for each environment. |
 | CI | Run the supported matrix in native pytest shards and the other validation jobs. Shards distribute work but do not shorten an individual test or fixture. |
 
-For each added or modified test case, including its parameterizations, a local
-JUnit duration **greater than 100 ms** in either supported Python environment
-returns the change to the test owner for correction. Apply this rule also to
-identifiable cases affected by a changed shared fixture or helper. If you
-cannot tell which cases are affected, flag the gap for action before approval.
-Exactly 100 ms is allowed. Measure the JUnit `testcase` `time` value, which
-includes setup, the test body, and teardown attributed to that case. A session
-fixture can make its first consuming case look slow. Inspect fixture use before
-assigning a cause. CI case times help diagnose load and environment effects;
-this local rule is not a CI gate.
+The local goal is **100 ms or less** per test case in each supported Python
+environment. Exactly 100 ms meets the goal. Use the JUnit `testcase` `time`,
+which includes setup, the test body, and teardown attributed to that case.
+Keep parameterized cases distinct. A session fixture can put shared setup on
+its first consuming case, so inspect phase evidence before assigning a cause.
+CI case times help diagnose load and environment effects; the local goal is
+not a CI case gate.
 
-Independently, every local case at or above **1 second** triggers review and
-entry in the long-running register for each supported Python environment.
-Report every missing case and environment even if another timing finding
-already returns the change for correction. This register trigger alone does
-not reject the change. One timing observation does not prove a regression;
-compare repeat evidence before making that claim.
+In interactive work, an added ordinary test that repeatedly exceeds 100 ms
+returns to its owner unless an integration exception is approved. A modified
+existing test returns when the change introduces a cost above 100 ms or a
+corroborated slowdown attributable to the changed test, fixture, or code.
+Include identifiable cases affected by a changed shared fixture or helper.
+If the impact map is unclear, resolve it before approval. An inherited case
+above 100 ms remains visible, but unchanged or faster cost alone does not
+reject the change. Compare at least two focused runs on each exact baseline
+and candidate tree in the same environment. A regression claim needs
+consistent candidate slowdown, setup, call, or teardown evidence, comparable
+environments, and a supporting diff. One run or a comparator review flag
+alone does not establish a code-caused regression. Missing, mismatched, or
+partial paired proof blocks approval. Complete paired proof with mixed case
+directions remains visible for case-specific diagnosis; that uncertainty alone
+does not block an unrelated change. Do not call the mixed case a timing pass
+or a regression.
+
+The serial worker currently has candidate-only trusted timing proof. It
+returns an identifiable touched case above 100 ms to the test owner, subject
+to a documented integration exception. It does not claim a baseline or phase
+comparison. Issue #270 tracks the paired-evidence path for serial work.
+
+Independently, inventory **every** local case above 100 ms and at or above
+**1 second** for each supported Python environment. Every case at or above
+1 second needs a full report and review. Report each unregistered case and
+environment even when another timing finding already returns the change for
+correction. Add a stable register entry after repeat and phase diagnosis, or
+an explicit decision to track the observed cost. A one-run inherited setup
+spike alone does not block an unrelated change or prove a regression.
 
 Keep a documented integration case that needs more time in the register below.
 Record why it needs that time and how its cost will be reduced or reviewed.
@@ -192,6 +212,28 @@ records the fixture split, and issue
 will automate the repair loop and queue follow-up diagnosis. The [local timing method](../how-to/validate-template-changes.md#investigate-local-test-timing)
 explains how to collect the next observation.
 
+### Further local observations on 2026-09-26
+
+The earlier Judge's local JUnit proof for tree `ae1a72b9` found three inherited
+cases at or above 1 second. These rows retain that dated observation. Each
+duration is one run; causes and phase costs are unconfirmed. The rows do not
+establish a stable cost or a regression.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests/test_template.py::test_generated_ci_uses_exact_stable_python_versions` | 3.11 | 1.048 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+| `tests/test_template.py::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.11 | 1.042 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+| `tests/test_template.py::test_generated_tests_directory` | 3.14 | 1.095 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+
+The later Judge JUnit proof for tree `a9f8358` reported
+`tests/test_template.py::test_yamllint_helper_present` at 1.084 seconds on
+Python 3.11. This is another inherited, one-run observation with an unconfirmed
+cause. It is reported here for review, not entered as a stable register case.
+Test maintainers will repeat it and inspect setup, call, and teardown under
+issues [#271](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/271)
+and [#272](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/272)
+before deciding whether to track or reduce the cost.
+
 ## CI timing context
 
 This is **one CI observation** from merge request !314, pipeline
@@ -221,12 +263,16 @@ enforce the local case target. Repeat the measurement before inferring change.
 | `test_ci_trusts_only_the_exact_checkout_directory[rendered]` | 3.14 | 10.221 s | !314 pipeline 69850880; 2026-09-25 | Rendered-project check; cause unconfirmed. | Test maintainers | Inspect setup attribution and reduce repeated work. |
 
 For the full current local list in interactive work, read the latest
-supported-version Judge JUnit proof and select each `testcase` whose numeric
-`time` is at least 1 second. In serial work, use the complete trusted
-`over_100ms_cases` list for each supported environment only when its
-`timing_complete` flag is true. An absent field or false flag makes the proof
-incomplete and rejects the review. The three slowest names cannot establish a
-complete inventory.
+supported-version Judge JUnit proof. Select each `testcase` whose numeric
+`time` is above 0.100 seconds or at least 1.000 seconds. The read-only
+`agent_work.local_test_timing.compare_local_test_timings` result also exposes
+complete `over_100ms_cases` and `at_least_1s_cases` by environment from the
+candidate's full JUnit proof. Its `clear`, `review`, and `inconclusive`
+statuses guide adjudication; `review` is not an automatic rejection. In
+serial work, use the complete trusted `over_100ms_cases` list for each
+supported environment only when its `timing_complete` flag is true. An absent
+field or false flag makes the proof incomplete and rejects the review. The
+three slowest names cannot establish a complete inventory.
 
 Timing evidence may show an unsafe JUnit parameter as a stable `[param_<hash>]`
 suffix on its safe base test name. The hash has 64 lowercase SHA-256 hex

@@ -2799,6 +2799,7 @@ esac""",
         "src/agent_work/gitlab.py",
         "src/agent_work/gitlab_safeguards.py",
         "src/agent_work/ledger.py",
+        "src/agent_work/local_test_timing.py",
         "src/agent_work/migration.py",
         "src/agent_work/models.py",
         "src/agent_work/ports.py",
@@ -2973,6 +2974,7 @@ def test_template_executable_mirrors_match_root(
     for relative_path in (
         Path(".pre-commit-config.yaml"),
         Path("src/agent_work/state_machine.py"),
+        Path("src/agent_work/local_test_timing.py"),
         Path("src/agent_work/worker.py"),
         Path("src/agent_work/template_update_publication.py"),
     ):

@@ -5,7 +5,7 @@ summary: Run local tests and CI checks for a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-26
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -91,43 +91,58 @@ review changed tests; job duration measures a different limit.
 
 ## Investigate local test timing
 
-Use a full tox run for each supported Python environment to capture JUnit
-case times. Work from one exact Git tree and record its tree hash, the UTC
-date, the host load, and the full command. Keep the JUnit files from each run
-unchanged. Record each file's SHA-256 digest, case count, failure count, and
-error count. A branch name or a test total alone cannot identify the run.
-Run `uv run tox -e py311` and `uv run tox -e py314`. These write
-`test-results-py311.xml` and `test-results-py314.xml`. Record the seed printed
-by pytest for each run; this repository's fixed tox commands do not pass a
-requested seed through `PYTEST_ADDOPTS` or extra arguments after `tox --`.
-Use an explicit `--randomly-seed` with the prepared interpreter for the
-focused repeats below.
+1. Find the exact baseline and candidate Git trees. Prepare separate
+   checkouts with the same Python version and packages. Record each tree
+   hash, UTC date, interpreter, host load, and command. A branch name or test
+   total does not identify a run.
+2. Run `uv run tox -e py311` and `uv run tox -e py314` on the candidate.
+   Preserve their complete `test-results-py311.xml` and
+   `test-results-py314.xml` files. Record each file's SHA-256 digest, case
+   count, failure count, error count, and pytest seed. The fixed tox commands
+   do not pass a requested seed through `PYTEST_ADDOPTS` or extra arguments
+   after `tox --`. Use the full JUnit files to list **every** candidate case
+   above 100 ms and at or above 1 second, by full case ID and environment.
+3. Find new and changed tests, including each parameter. Include cases that
+   use changed shared fixtures or helpers. If you cannot tell which cases the
+   change touches, find out before approval. Select those cases and relevant
+   slow cases for focused diagnosis. Use the same node IDs on both trees
+   wherever the case exists at baseline.
+4. For each relevant Python environment, run the selected cases at least
+   twice on the baseline tree and twice on the candidate tree. Use the same
+   prepared interpreter, pytest command, arguments, and explicit
+   `--randomly-seed` for all four runs. Use `-vv --durations=0` to capture
+   setup, call, and teardown, including phases below 5 ms that pytest may
+   otherwise omit. Give every run a distinct JUnit path and phase-log path.
+   Save each file unchanged with its SHA-256 digest and JUnit case count.
+   For Python 3.11, the focused command shape is
+   `uv run --no-project --python .tox/py311/bin/python python -m pytest -vv --no-cov --durations=0 --randomly-seed=262 --junitxml=<unique-path>`
+   followed by each selected full pytest node ID as a separate quoted
+   argument. Use `py314` in the interpreter path for Python 3.14. Record the
+   exact command and seed for every run.
+5. Supply the files and their tree, environment, interpreter, command, seed,
+   digest, and count records to the read-only
+   `agent_work.local_test_timing.compare_local_test_timings` callable. It
+   accepts an evidence manifest, the expected baseline and candidate trees,
+   and a file-reading callback. It gives signed candidate-minus-baseline time
+   changes, phase costs, case groups, and full candidate lists above 100 ms
+   and at or above 1 second. It does not run tests or provide a command-line
+   interface. Check its report against the diff before assigning a slowdown
+   to changed code.
 
-For each Python environment, list every JUnit case at or above 1 second.
-Also list every added or changed case, and every identifiable case affected
-by a changed shared fixture or helper, whose JUnit time is greater than
-100 ms. Match cases by full ID and environment. Use this complete JUnit
-inventory to select the candidate node IDs for diagnosis.
-
-Run that candidate set twice with the same prepared tox interpreter, exact
-pytest arguments, and fixed `--randomly-seed`. Add `--durations=0` to show
-setup, call, and teardown separately. Save each phase log and JUnit file
-before the next run. Record the command and seed with both copies. Focused
-case times diagnose phases; the full tox JUnit remains the inventory source.
-For Python 3.11, use
-`uv run --no-project --python .tox/py311/bin/python python -m pytest -q --no-cov --durations=0 --randomly-seed=262 --junitxml=/tmp/issue262-py311-focused.xml`
-followed by every selected full pytest node ID as a separate quoted argument.
-For Python 3.14, change both `py311` path segments to `py314`. Save the XML
-and phase log after each run so the second run cannot overwrite them.
-Check session fixtures before assigning the first consuming case's setup cost
-to its test body. Record other host work that may have competed for CPU, disk,
-or memory during any run.
-
-Compare repeat evidence on the same tree and interpreter before calling a
-change a regression. If contention or fixture setup remains possible, record
-that uncertainty. Give each confirmed cost an owner and a reduction or
-integration-exception plan in the
+A `review` result needs closer review; it does not by itself prove a
+regression. Missing, mismatched, or partial proof blocks approval until the
+evidence owner repairs it. If sound paired proof shows mixed case directions,
+record the doubt and queue case-specific diagnosis. That doubt alone need not
+block an unrelated change when its impact map is clear and no other timing
+rule blocks it. Do not call the mixed case a timing pass or a regression.
+Check host load and fixture setup before assigning cause. Do not infer cause
+from one run. An inherited case that stays above 100 ms but is unchanged or
+faster remains in the report without automatic rejection. Give each
+confirmed cost an owner and a
+reduction or integration-exception plan in the
 [long-running register](../reference/testing-strategy.md#long-running-local-test-register).
+The serial worker still uses trusted candidate-only timing proof; issue #270
+tracks paired baseline evidence there.
 
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
 unrelated work. They do not guarantee a run time. Measure the longest terminal
