@@ -437,7 +437,7 @@ their terminal results. If a required job fails, diagnose and repair it within
 approved scope, validate again, and update the same MR. If results are pending
 or cannot be verified, report the check and retry point without claiming
 pipeline success. Serial work uses the trusted controller's exact-source
-pipeline observation and required-job checks. Job duration is not a gate.
+pipeline observation and required-job checks.
 AI must never approve or merge the MR itself, so human review and merge
 determine whether the change lands. They do not prevent unrelated work.
 

@@ -190,10 +190,9 @@ The serial worker still uses trusted candidate-only timing proof; issue #270
 tracks paired baseline evidence there.
 
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
-unrelated work. They do not guarantee a run time. Check that the exact-source
+unrelated work. Check that the exact-source
 pipeline has at least one current required job and that all current required
-jobs pass. Record job and queue times only when they help diagnose a slow or
-failed run; duration does not gate publication.
+jobs pass. Record job and queue times when they help diagnose a failed run.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary

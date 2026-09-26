@@ -81,8 +81,7 @@ clear cause is a review finding. Apply any tighter task-specific limit as well.
 A documented integration exception still needs a plan and must fit the task's
 budget.
 
-Job duration is useful diagnostic evidence, but it is not a publication
-gate. Image pulls, job setup, and scheduling can lengthen a job or pipeline
+Image pulls, job setup, and scheduling can lengthen a job or pipeline
 without increasing a JUnit case duration. Use job evidence for those costs
 rather than assigning them to a test. The controller's human handoff requires
 at least one current required job and success from every current required job

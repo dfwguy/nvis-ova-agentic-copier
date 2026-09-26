@@ -68,10 +68,8 @@ rules, exclusions, or failure behavior to use the cache.
 Each target has its own mutable BuildKit cache:
 `validation-tooling-cache`, `validation-pytest-py311-cache`, and
 `validation-pytest-py314-cache`. The split limits each image to its lane.
-GitLab can build the images at the same time. This aims to reduce the longest
-job's work, but it does not guarantee a build time. Job duration is diagnostic
-evidence, not a publication gate. Do not print credentials, tokens, or auth
-files in logs.
+GitLab can build the images at the same time. Do not print credentials, tokens,
+or auth files in logs.
 
 ## 2. Review the image evidence.
 
@@ -140,8 +138,7 @@ floor, or report failure fails the pipeline.
 
 For the exact MR source SHA, verify at least one current required job and
 success from every current required job. Report skipped, canceled, and manual jobs separately when
-checking a result. Job duration and wait time can explain delays; they do
-not decide the handoff.
+checking a result. Job duration and wait time can explain delays.
 
 If an image needs a dependency, update the inputs. The next pipeline makes new
 commit candidates. Do not add bootstrap work to root jobs. Do not open a

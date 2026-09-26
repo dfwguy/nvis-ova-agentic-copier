@@ -323,7 +323,7 @@ the numeric project, its default branch, and `/approval_rules`. It does not
 change project settings or grant approval or merge authority.
 
 `issue publish` is the configured-checkout boundary for policy callers. These
-include findings triage and pipeline feedback. Upstream-finding and split-child
+include findings triage. Upstream-finding and split-child
 flows keep distinct deduplication and lifecycle transports. They reuse the
 shared escaped- and encoded-linebreak guard. They also reuse the exact
 authoritative read-back safety contract. Both checks apply to both flows. Both

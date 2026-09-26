@@ -67,21 +67,18 @@ image. Each Python's full-suite pytest job uses its matching image.
 
 Each target has its own commit-and-pipeline tag, registry cache, build
 metadata, and digest evidence. This keeps unrelated tools out of the pytest
-images and lets GitLab build the lanes independently. The split is meant to
-reduce the work on the longest path. It does not promise that a job will meet
-a fixed run time. Jobs still validate the current Dockerfile and locked
-dependencies, not a stale fixed digest, and do not install dependencies again.
+images and lets GitLab build the lanes independently. Jobs still validate the
+current Dockerfile and locked dependencies, not a stale fixed digest, and do
+not install dependencies again.
 The readability job imports the root package from `src` with `PYTHONPATH` and
 runs without a dependency sync.
 
 The root pytest work is a simple DAG. One job per Python version runs the
 full suite and writes its own JUnit and Cobertura reports. Each measures
 `src/agent_work` and enforces the 85% coverage floor. A test or coverage
-failure fails the pipeline. Removing the shards reduces the number of jobs
-waiting for runners. Job and queue time remain useful diagnostics, but neither
-is a publication gate. The image split and coverage floor remain in place.
+failure fails the pipeline. Job and queue time remain useful diagnostics.
 
-That optimization is only for this repository. Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
+Generated projects keep one portable `validation (10 gates)` job, without the private registry image or its credentials. Before `uv run --no-sync` validation, that job always runs `uv sync --locked --all-groups` from its checkout's `pyproject.toml` and `uv.lock` for both Python environments. The root and generated paths differ, but neither can silently validate stale dependencies.
 
 Both CI configurations run only for merge-request events and the default branch. They avoid duplicate feature-branch pipelines.
 

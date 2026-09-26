@@ -284,8 +284,7 @@ After publish, make one bounded check of the pipeline for the exact published
 source SHA. In serial work, use the trusted controller's pipeline observation.
 Verify terminal state and every required job result against that SHA. If a
 required job fails, diagnose it and repair it through the accepted workflow
-within approved scope; then validate and update the same merge request. Do not
-create performance feedback from job duration.
+within approved scope; then validate and update the same merge request.
 
 Set `pipeline_reconciled` only with exact-SHA evidence that the required jobs
 passed. Stop safely on a failed, nonterminal, or unverifiable result. Report

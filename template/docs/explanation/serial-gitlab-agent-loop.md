@@ -149,7 +149,7 @@ failed, canceled, skipped, or other non-success required job, the controller
 checks again up to three times. It does the same when the inventory has no
 required job. If proof is still absent, it marks the issue `needs-repair`
 without starting a worker. A source-identity mismatch blocks immediately;
-transport errors retry. Job duration does not gate the handoff.
+transport errors retry.
 
 ## Credentials, audit, and human handoff.
 
