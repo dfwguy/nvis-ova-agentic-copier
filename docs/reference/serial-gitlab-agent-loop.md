@@ -969,7 +969,7 @@ work.
 | `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, and one factory-authored actionable issue handoff await human review. |
 | `agent::blocked` | blocked | A human must take the recorded next action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
-| `agent::needs_repair` | needs-repair | Legacy or reviewed repair, or exhausted required-job proof after a successful exact-source pipeline, awaits exact recovery. An ordinary failed pipeline uses its diagnostic repair path. |
+| `agent::needs_repair` | needs-repair | Legacy or reviewed repair, exhausted required-job proof after a successful exact-source pipeline, or a canceled exact current-source pipeline for a retained observing owner awaits exact recovery. An ordinary failed pipeline uses its diagnostic repair path. |
 | `agent::repair_failed` | repair-failed | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed. It retains the evidence needed for safe follow-up. |
 | `agent::suggest_close` | suggest-close | Corroborated duplicate, superseded, already-satisfied, or no-longer-applicable evidence recommends human closure. |
 
@@ -1003,6 +1003,7 @@ The durable flow is below.
 | Verified publication | Moves to `observing`. The controller checks the current MR source SHA and its current jobs. |
 | At least one current required job exists and all succeed | Writes the actionable handoff for the exact MR source commit, then moves to `awaiting-human`. |
 | Failed pipeline with an exact retained owner | Uses the existing failed-job diagnostic and repair path when safe. |
+| Canceled exact current-source pipeline for a retained observing owner | Moves to `needs-repair` through ordinary observation. It does not claim success or start failed-job repair. |
 | Terminal-success pipeline with missing or contradictory required-job proof | Reobserves at most three times. If proof remains absent, moves to `needs-repair` without a worker. This includes pending, failed, canceled, skipped, or other non-success current required jobs, and empty or all-optional inventories. |
 | Stale or ambiguous identity; transport error | Identity blocks the handoff; transport errors retry. Neither claims success. |
 | Condition blocked by a person | Moves to `blocked`. After the recorded action, an operator explicitly retries that IID. |
@@ -1073,9 +1074,10 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 | Failed-pipeline condition | Eligibility, action, and outcome |
 | --- | --- |
 | Exact failed MR pipeline with one retained owner | Automatic repair needs exact configured project, merge-request, branch, source-SHA, and worktree evidence. Consider exact candidates in fixed order and run at most one repair workflow per activation. |
+| Canceled current-source open-MR pipeline | Keep this evidence local to its MR after checking the full pipeline inventory and eligible failed-pipeline repairs. A retained observing owner reaches `needs-repair` through ordinary observation; do not start failed-job repair or claim pipeline success. An ownerless canceled MR does not stop unrelated eligible work. |
 | Scheduled repair backoff or quarantine | Skip that item; seek another eligible exact repair before ordinary work. A failed automatic repair creates a durable 20-minute per-item backoff. After three automatic repair attempts, quarantine or defer it for human review; do not select it automatically. |
 | Status or preview | Retain attempt count, timing, evidence, and next action. |
-| Failed default-branch pipeline, or failed MR pipeline without one safe exact owner | Record an actionable human handoff or block. Never claim an unrelated issue, invent a repair owner, or weaken the human-only approval and merge boundary. |
+| Failed default-branch pipeline, or canceled default-branch pipeline | Stop before unrelated work and report the pipeline evidence. A failed open-MR pipeline without one safe exact owner remains item-local; never invent a repair owner or weaken the human-only approval and merge boundary. |
 
 | Repair inventory | Rule |
 | --- | --- |
@@ -1126,7 +1128,7 @@ project or item is safe to run.
 | Status and preview | Report the reason and attempt information. Report timing, an evidence summary, and the next action. Preview is read-only. It uses the same eligibility logic. It does not claim work. It does not change GitLab, the ledger, worktrees, branches, or services. |
 | Controller controls | Retry counts are trusted controller constants. Repair budgets, delay bounds, priorities, and lock rules are too. Untrusted issue or merge-request text cannot set, reset, or affect them. |
 | Failed-pipeline inventory | Skip blocked owners. Skip deferred, quarantined, retry-exhausted, awaiting-human, and dependency-gated owners. Then consider another exact eligible repair. If the gate permits it, consider ordinary eligible work. A local ineligibility does not stop the project. It never creates global `pipeline_blocked`. |
-| Project-wide pipeline stop | Stop for a failed default-branch pipeline. Also stop for a cross-item owner. The owner must be truly ambiguous. |
+| Project-wide pipeline stop | Stop for a failed or canceled default-branch pipeline. Also stop for a cross-item owner. The owner must be truly ambiguous. An ownerless failed or canceled open-MR pipeline is item-local. |
 | Fast-forward reconciliation | Require configured numeric project identity. Require retained MR identity and URL. Require a matching source branch, the configured target project, and the default branch. Require a clean retained worktree and no competing identity. The retained branch and `HEAD` must equal the MR source SHA. The retained SHA must be an ancestor of the MR SHA. On failure, quarantine the item locally. Then continue scanning. Never choose an MR by recency or issue text. |
 | Suggested closure | `agent::suggest_close` needs structured, corroborated evidence. The evidence can show a duplicate. It can show a superseded issue. It can show an already-satisfied or no-longer-applicable issue. It is a recommendation, not a closure. A human closure alone reconciles the record to `COMPLETE`. A human closure also clears the label. The runner never approves, merges, or closes an issue. |
 

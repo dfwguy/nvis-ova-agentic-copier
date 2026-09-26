@@ -2069,7 +2069,7 @@ def _inspect_pipeline_gate(
             # exact repairs and fresh eligible work.
             continue
         for _merge_request, pipeline in inspected:
-            if pipeline.status == "failed":
+            if pipeline.status in {"failed", "canceled"}:
                 continue
             if pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
                 return _pipeline_handoff(

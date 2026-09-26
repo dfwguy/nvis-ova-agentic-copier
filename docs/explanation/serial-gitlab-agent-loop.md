@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -72,7 +72,7 @@ For each activation, the controller performs these stages in order:
 | --- | --- |
 | **Lock and refresh** | Lock the configured project and refresh its dedicated checkout. |
 | **Reconcile** | Compare the ledger with GitLab issues, merge requests, Git branches, and retained worktrees. An active owner with exact, runnable evidence comes before new work. Scheduled repair backoff and automatic-repair quarantine stay visible, but do not monopolize later activations. |
-| **Observe pipeline safety** | Inspect the newest default-branch pipeline and each open merge request's newest pipeline for its current source SHA. Missing, malformed, or inaccessible evidence blocks work. In an applied activation, poll nonterminal evidence in place with a short, bounded exponential delay. A terminal failure takes priority over ordinary work. |
+| **Observe pipeline safety** | Inspect the newest default-branch pipeline and each open merge request's newest pipeline for its current source SHA. Missing, malformed, or inaccessible evidence blocks work. In an applied activation, poll nonterminal evidence in place with a short, bounded exponential delay. A failed default-branch pipeline blocks ordinary work; an eligible exact-owner failed-MR repair takes priority. An ownerless canceled MR stays item-local. |
 | **Select** | After safe resumable work and the pipeline gate, select at most one eligible item, or stop. Consider exact failed-pipeline repairs before fresh issues. If the first repair is deferred, scan for another eligible exact repair. Fresh selection is deterministic: exact high priority, normal, then exact low priority; creation time and IID break ties. |
 | **Prepare worktree** | Create or recover the selected issue's retained worktree. Invoke AI only after selection and preparation. |
 | **Run the workflow session** | One bounded AI session handles the current segment. |
@@ -85,7 +85,7 @@ The controller keeps selection and recovery safe and visible.
 | --- | --- |
 | Refresh | Before publication, update current `main` through normal Git reconciliation in the retained worktree; never discard work to refresh the base. Keep watching nonterminal default-branch or exact current-MR pipeline evidence, and resume when it is terminal. A future external retry, no progress, a budget limit, or a human-facing state ends an activation; retryable worker failures may continue while time remains. |
 | Shared gate | The same gate protects manual applied runs and timer-driven activations, so one path cannot start unrelated work after the other finds a pipeline problem. |
-| Repair limits | Resume a failed merge-request pipeline only with a retained owner and exact project, merge-request, branch, current-source-SHA, and worktree evidence. Each owner gets at most three automatic repair attempts. Record a durable 20-minute per-item backoff after each failed attempt. A later activation can scan for another eligible repair or ordinary work. After three failed attempts, quarantine or defer the item for human review. Keep it visible in status and preview, but do not create a loop-wide checkpoint. A failed default-branch pipeline or ownerless failed merge request creates an actionable human block. |
+| Repair limits | Resume a failed merge-request pipeline only with a retained owner and exact project, merge-request, branch, current-source-SHA, and worktree evidence. Each owner gets at most three automatic repair attempts. Record a durable 20-minute per-item backoff after each failed attempt. A later activation can scan for another eligible repair or ordinary work. After three failed attempts, quarantine or defer the item for human review. Keep it visible in status and preview, but do not create a loop-wide checkpoint. A failed or canceled default-branch pipeline blocks unrelated work; an ownerless failed or canceled open-MR pipeline stays item-local. |
 | Attributable recovery | Favor visible, attributable recovery over guessing which issue should repair shared or unclear pipeline evidence. The [reference contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate) defines statuses and exact checks. |
 | Safe diagnostics | For an eligible repair, select one current failed job from the exact pipeline and ignore superseded retries. Read only that job's trace, remove secret-like text and control sequences, and keep a bounded diagnostic. Validate and save it before repair begins, so a restart uses the same verified context. Never pass a raw trace to the ledger, report, or workflow prompt. Missing, ambiguous, stale, or malformed job or trace evidence stops repair; the workflow does not guess, retry, or cancel a job or pipeline. |
 
