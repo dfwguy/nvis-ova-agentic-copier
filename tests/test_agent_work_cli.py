@@ -312,6 +312,64 @@ def test_validation_run_cli_forwards_preview_and_renders_bounded_json() -> None:
     }
 
 
+def test_validation_cli_renders_complete_over_100ms_case_evidence() -> None:
+    """The trusted JSON response gives reviewers more than the top three."""
+    timing = SimpleNamespace(
+        environment="py311",
+        total_seconds=6.100001,
+        slowest_cases=(
+            SimpleNamespace(name="test_one", seconds=3),
+            SimpleNamespace(name="test_two", seconds=2),
+            SimpleNamespace(name="test_three", seconds=1),
+        ),
+        timing_complete=True,
+        over_100ms_cases=(
+            SimpleNamespace(name="test_one", seconds=3),
+            SimpleNamespace(name="test_two", seconds=2),
+            SimpleNamespace(name="test_three", seconds=1),
+            SimpleNamespace(name="test_four", seconds=0.100001),
+        ),
+    )
+
+    def validation_run(
+        *, candidate_tree: str, wait_seconds: int | None = None
+    ) -> SimpleNamespace:
+        del wait_seconds
+        return SimpleNamespace(
+            candidate_tree=candidate_tree,
+            applied=False,
+            action="status",
+            state="terminal-success",
+            terminal=True,
+            exit_code=0,
+            diagnostic=None,
+            hook_failures=(),
+            junit_artifacts=(),
+            failed_tests=(),
+            failed_junit_digests=(),
+            elapsed_seconds=6.100001,
+            junit_timings=(timing,),
+        )
+
+    output: list[str] = []
+    assert (
+        main(
+            ["validation", "status", "--candidate-tree", "a" * 40, "--json"],
+            validation_status=validation_run,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    rendered = json.loads(output[0])["junit_timings"][0]
+    assert rendered["timing_complete"] is True
+    assert [case["name"] for case in rendered["over_100ms_cases"]] == [
+        "test_one",
+        "test_two",
+        "test_three",
+        "test_four",
+    ]
+
+
 def test_candidate_cli_previews_and_forwards_live_identity(
     tmp_path: Path,
 ) -> None:

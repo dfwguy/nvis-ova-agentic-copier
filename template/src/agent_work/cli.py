@@ -189,9 +189,13 @@ class _SlowTestCase(Protocol):
 class _JUnitTiming(Protocol):
     environment: str
     total_seconds: float
+    timing_complete: bool
 
     @property
     def slowest_cases(self) -> Sequence[_SlowTestCase]: ...
+
+    @property
+    def over_100ms_cases(self) -> Sequence[_SlowTestCase]: ...
 
 
 class _ArtifactFailure(Protocol):
@@ -2162,6 +2166,11 @@ def main(
                     "slowest_cases": [
                         {"name": case.name, "seconds": case.seconds}
                         for case in item.slowest_cases
+                    ],
+                    "timing_complete": item.timing_complete,
+                    "over_100ms_cases": [
+                        {"name": case.name, "seconds": case.seconds}
+                        for case in item.over_100ms_cases
                     ],
                 }
                 for item in report.junit_timings

@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from string import ascii_letters, digits
+from typing import cast
 
 import pytest
 from hypothesis import given
@@ -819,6 +820,158 @@ def test_success_junit_timing_summary_is_bounded_and_durable() -> None:
     assert "private-secret" not in str(state.records[_CANDIDATE])
 
 
+def test_junit_timing_summary_retains_every_case_strictly_over_100ms() -> None:
+    """Review sees a qualifying case even when it falls below the top three."""
+    artifact = (
+        b"<testsuite tests='6' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_one' time='3'/>"
+        b"<testcase classname='tests.test_module' name='test_two' time='2'/>"
+        b"<testcase classname='tests.test_module' name='test_three' time='1'/>"
+        b"<testcase classname='tests.test_module' name='test_four' time='0.100001'/>"
+        b"<testcase classname='tests.test_module' name='test_boundary' time='0.100'/>"
+        b"<testcase classname='tests.test_module' name='test_fast' time='0.099999'/>"
+        b"</testsuite>"
+    )
+
+    summary = validation._junit_timing_summary("py311", artifact)
+
+    assert summary is not None
+    assert summary.timing_complete is True
+    assert [case.name for case in summary.over_100ms_cases] == [
+        "tests.test_module::test_one",
+        "tests.test_module::test_two",
+        "tests.test_module::test_three",
+        "tests.test_module::test_four",
+    ]
+    assert summary.over_100ms_cases[-1].seconds > 0.100
+    assert len(summary.slowest_cases) == 3
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        b"<testcase classname='/home/private' name='test_secret' time='1.2'/>",
+        b"<testcase classname='tests.test_module' name='test_unknown' time='bogus'/>",
+        b"<testcase classname='tests.test_module' name='test_unbounded' time='1000001'/>",
+    ],
+)
+def test_junit_timing_summary_marks_relevant_unusable_case_incomplete(
+    case: bytes,
+) -> None:
+    """Omitted or unsafe timing cannot be represented as a complete review list."""
+    artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_known' time='1'/>"
+        + case
+        + b"</testsuite>"
+    )
+
+    summary = validation._junit_timing_summary("py311", artifact)
+
+    assert summary is not None
+    assert summary.timing_complete is False
+    assert [item.name for item in summary.over_100ms_cases] == [
+        "tests.test_module::test_known"
+    ]
+    assert b"/home/private" not in str(summary).encode()
+
+
+def test_junit_timing_summary_marks_case_list_overflow_incomplete() -> None:
+    """A bounded report states when it cannot enumerate every qualifying test."""
+    artifact = (
+        b"<testsuite tests='1025' failures='0' errors='0'>"
+        + b"".join(
+            f"<testcase classname='tests.test_module' name='test_{index}' time='1'/>".encode()
+            for index in range(1025)
+        )
+        + b"</testsuite>"
+    )
+
+    summary = validation._junit_timing_summary("py311", artifact)
+
+    assert summary is not None
+    assert summary.timing_complete is False
+    assert len(summary.over_100ms_cases) < 1025
+    assert all(
+        validation.is_safe_junit_test_name(item.name)
+        for item in summary.over_100ms_cases
+    )
+
+
+def test_junit_timing_summary_uses_opaque_ids_for_private_parameter_values() -> None:
+    """Ordinary parameter values keep timing complete without exposing inputs."""
+    artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b'<testcase classname="tests.test_module" '
+        b"name='test_case[{&quot;path&quot;:&quot;/home/private&quot;}]' time='0.101'/>"
+        b'<testcase classname="tests.test_module" '
+        b"name='test_case[{&quot;path&quot;:&quot;/home/other&quot;}]' time='0.102'/>"
+        b"</testsuite>"
+    )
+
+    summary = validation._junit_timing_summary("py311", artifact)
+
+    assert summary is not None
+    assert summary.timing_complete is True
+    names = [case.name for case in summary.over_100ms_cases]
+    assert len(set(names)) == 2
+    assert all(name.startswith("tests.test_module::test_case[param_") for name in names)
+    assert all(validation.is_safe_junit_test_name(name) for name in names)
+    assert "/home/" not in str(summary)
+
+
+def test_junit_timing_summary_marks_declared_case_mismatch_incomplete() -> None:
+    """A declared case without a testcase element cannot be timed completely."""
+    artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_present' time='0.2'/>"
+        b"</testsuite>"
+    )
+
+    summary = validation._junit_timing_summary("py311", artifact)
+
+    assert summary is not None
+    assert summary.timing_complete is False
+    assert [case.name for case in summary.over_100ms_cases] == [
+        "tests.test_module::test_present"
+    ]
+
+
+def test_junit_timing_completion_and_cases_survive_durable_status() -> None:
+    """The reviewer can recover the complete list after validation exits."""
+    artifact = (
+        b"<testsuite tests='4' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_module' name='test_one' time='4'/>"
+        b"<testcase classname='tests.test_module' name='test_two' time='3'/>"
+        b"<testcase classname='tests.test_module' name='test_three' time='2'/>"
+        b"<testcase classname='tests.test_module' name='test_four' time='1'/>"
+        b"</testsuite>"
+    )
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    dependencies = replace(dependencies, read_artifact=lambda _path: artifact)
+
+    run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert len(status.junit_timings) == 2
+    assert all(item.timing_complete for item in status.junit_timings)
+    assert all(len(item.over_100ms_cases) == 4 for item in status.junit_timings)
+    persisted_timings = cast(
+        list[dict[str, object]], state.records[_CANDIDATE]["junit_timings"]
+    )
+    assert all(
+        isinstance(cases := item.get("over_100ms_cases"), list)
+        and len(cases) == 4
+        and item.get("timing_complete") is True
+        for item in persisted_timings
+    )
+
+
 @pytest.mark.parametrize(
     ("safe_name", "unsafe_name"),
     [
@@ -886,7 +1039,7 @@ def test_parameterized_junit_failure_evidence_retains_only_safe_names() -> None:
     ]
 
 
-def test_parameterized_junit_timing_evidence_retains_only_safe_names() -> None:
+def test_parameterized_junit_timing_evidence_hides_unsafe_parameter_values() -> None:
     artifact = (
         b"<testsuite tests='4' failures='0' errors='0'>"
         b"<testcase classname='tests.test_module' name='test_case[linux-x86_64]' time='4'/>"
@@ -904,9 +1057,11 @@ def test_parameterized_junit_timing_evidence_retains_only_safe_names() -> None:
     )
 
     assert report.junit_timings[0].total_seconds == 10.0
-    assert [case.name for case in report.junit_timings[0].slowest_cases] == [
-        "tests.test_module::test_case[linux-x86_64]"
-    ]
+    names = [case.name for case in report.junit_timings[0].slowest_cases]
+    assert names[0] == "tests.test_module::test_case[linux-x86_64]"
+    assert names[1].startswith("tests.test_module::test_case[param_")
+    assert all(validation.is_safe_junit_test_name(name) for name in names)
+    assert "../private" not in str(report.junit_timings)
 
 
 def test_junit_evidence_drops_absolute_and_traversal_classnames() -> None:

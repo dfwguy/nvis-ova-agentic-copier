@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -340,11 +340,21 @@ JUnit digests when that evidence is available, so the producer
 can fix code and stage a new tree. `status` reads the saved result without
 another hook run. `validate` and `status` return an opaque evidence ID, test
 counts, digests, and hook time when available. For success, JUnit also gives
-total test time and the three slowest safe test names per Python version.
-These summaries remain in the saved record for later status reads. They
-contain no controller state or JUnit file path. After the worker exits, the
-controller checks the tree and changed files again before publication. It
-keeps no extra authorization ledger.
+total test time and the three slowest safe test names per Python version. Each
+supported version also has `over_100ms_cases`, a complete trusted list of safe
+case names and durations strictly greater than 0.100 s, and `timing_complete`.
+An unsafe JUnit parameter appears as a stable `[param_<hash>]` suffix on its
+safe base test name. The hash has 64 lowercase SHA-256 hex digits. Each suffix
+identifies a distinct case. Match the emitted ID with its Python environment.
+It hashes the raw JUnit class and case name. An unsafe class name, malformed
+case name, or duplicate emitted ID makes `timing_complete` false. Do not
+request the raw parameter text.
+If either field is missing or `timing_complete` is false, the timing proof is
+incomplete and non-functional review rejects it. The three slowest names do not
+replace the complete list. These summaries remain in the saved record for
+later status reads. They contain no controller state or JUnit file path. After
+the worker exits, the controller checks the tree and changed files again before
+publication. It keeps no extra authorization ledger.
 
 The socket has a private directory and a fixed deadline. A read permits at
 most 128 paths, 2 MiB per Git blob, and 16 MiB of combined old and new

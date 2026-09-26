@@ -355,6 +355,11 @@ def test_trusted_candidate_judge_response_strips_state_paths(
                     "environment": "py311",
                     "total_seconds": 1.25,
                     "slowest_cases": [{"name": "test_known", "seconds": 1.25}],
+                    "timing_complete": True,
+                    "over_100ms_cases": [
+                        {"name": "test_known", "seconds": 1.25},
+                        {"name": "test_fourth", "seconds": 0.100001},
+                    ],
                 }
             ]
         ),
@@ -396,6 +401,70 @@ def test_trusted_candidate_judge_response_strips_state_paths(
     assert observed["evidence_id"]
     if returncode == 0:
         assert observed["junit_timings"] == report["junit_timings"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"name": "/private/test_secret", "seconds": 0.2},
+        {"name": "test_known", "seconds": 0.100},
+        {"name": "test_known", "seconds": "invalid"},
+    ],
+)
+def test_judge_candidate_rejects_unsafe_over_100ms_case(
+    tmp_path: Path, case: dict[str, object]
+) -> None:
+    """The trusted boundary rejects private names and invalid threshold entries."""
+    tree = "b" * 40
+    report = {
+        "candidate_tree": tree,
+        "state": "terminal-success",
+        "terminal": True,
+        "exit_code": 0,
+        "hook_failures": [],
+        "junit_artifacts": [],
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "junit_timings": [
+            {
+                "environment": "py311",
+                "total_seconds": 1.0,
+                "slowest_cases": [{"name": "test_known", "seconds": 1.0}],
+                "timing_complete": True,
+                "over_100ms_cases": [case],
+            }
+        ],
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            0, tree if command[-1] == "write-tree" else json.dumps(report), ""
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("src/example.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return tree
+
+    with pytest.raises(RepositoryError, match="candidate JUnit timing evidence"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path / "worktree",
+            tree,
+            base_sha="a" * 40,
+            changed_paths=("src/example.py",),
+            action="validate",
+            timeout_seconds=30,
+        )
 
 
 def test_judge_candidate_accepts_verified_ancestor_scope(tmp_path: Path) -> None:
