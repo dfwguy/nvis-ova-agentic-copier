@@ -107,6 +107,7 @@ from .repository import (
     GitRepository,
     RepositoryError,
     RepositoryTransientError,
+    WorktreeStatus,
     discover_config,
     run_subprocess,
 )
@@ -461,7 +462,8 @@ def _recovery_observation(
     state_root: Path | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
-) -> RecoveryObservation:
+    select_retained_evidence: bool = True,
+) -> tuple[RecoveryObservation, WorktreeStatus | None]:
     """Build bounded recovery evidence without reading untrusted issue prose."""
     observed_issue = gitlab.fetch_issue(issue_iid) if issue is None else issue
     pipeline_status = None
@@ -525,11 +527,14 @@ def _recovery_observation(
         if not exists or record is None or repository is None
         else repository.head(record.worktree)
     )
-    paths = (
-        ()
-        if not exists or record is None or repository is None
-        else repository.changed_paths(record.worktree)
-    )
+    status = None
+    status_failed = False
+    if exists and record is not None and repository is not None:
+        try:
+            status = repository.observe_worktree_status(record.worktree)
+        except RepositoryError:
+            status_failed = True
+    paths = () if status is None else status.changed_paths
     blocked_cause = None
     if (
         record is not None
@@ -592,27 +597,31 @@ def _recovery_observation(
             )
         except RecoveryIneligibleError:
             retry_ineligible_reason = "discovery marker recovery evidence is ineligible"
-    dirty = None if exists is None else bool(paths)
+    dirty = None if status_failed or exists is None else bool(status and status.dirty)
+    if status_failed:
+        retry_ineligible_reason = "retained worktree evidence could not be verified"
     if (
         record is not None
         and record.state is RunnerState.BLOCKED
         and repository is not None
         and not _precheckpoint_test_only_red_family(record)
         and not discovery_marker_shape
+        and select_retained_evidence
+        and not status_failed
     ):
         try:
-            dirty = repository.has_changes(record.worktree)
             _retained_dirty_recovery_evidence(
                 record,
                 repository=repository,
                 load_red_checkpoint=load_red_checkpoint,
+                status=status,
             )
         except RepositoryError:
             retry_ineligible_reason = "retained worktree evidence could not be verified"
             dirty = None
         except (OSError, RuntimeError, SegmentError, ValueError) as error:
             retry_ineligible_reason = _safe_retry_ineligible_reason(error)
-    return RecoveryObservation(
+    observation = RecoveryObservation(
         issue_iid=issue_iid,
         issue_state=observed_issue.state,
         labels=observed_issue.labels,
@@ -650,6 +659,7 @@ def _recovery_observation(
         precheckpoint_test_only_red=precheckpoint is not None,
         retry_ineligible_reason=retry_ineligible_reason,
     )
+    return observation, status
 
 
 def _safe_retry_ineligible_reason(error: Exception) -> str:
@@ -831,17 +841,8 @@ def _recovery_plan(
         repository=repository,
         owner_status=owner_status,
     )
-    dirty_evidence = (
-        None
-        if choice is not ResolutionChoice.RETRY
-        or _precheckpoint_test_only_red_family(record)
-        or discovery_shape
-        else _retained_dirty_recovery_evidence(
-            record, repository=repository, load_red_checkpoint=load_red_checkpoint
-        )
-    )
     try:
-        observation = _recovery_observation(
+        observation, status = _recovery_observation(
             record,
             issue_iid=request.issue_iid,
             gitlab=gitlab,
@@ -854,7 +855,24 @@ def _recovery_plan(
             split_dependencies=split_dependencies,
             state_root=config.state_root,
             load_red_checkpoint=load_red_checkpoint,
+            select_retained_evidence=False,
         )
+        if observation.worktree_exists and status is None:
+            raise RepositoryError("could not inspect retained worktree status")
+        dirty_evidence = None
+        if (
+            choice is ResolutionChoice.RETRY
+            and not _precheckpoint_test_only_red_family(record)
+            and not discovery_shape
+        ):
+            if observation.retry_ineligible_reason is not None:
+                raise RecoveryIneligibleError(observation.retry_ineligible_reason)
+            dirty_evidence = _retained_dirty_recovery_evidence(
+                record,
+                repository=repository,
+                load_red_checkpoint=load_red_checkpoint,
+                status=status,
+            )
         if choice is ResolutionChoice.RETRY and request._automatic_blocked_retry:
             _require_safely_retryable_automatic_retry(observation)
         resolution = build_resolution_plan(
@@ -1171,20 +1189,30 @@ def _retained_dirty_recovery_evidence(
     *,
     repository: RepositoryPort | None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+    status: WorktreeStatus | None,
 ) -> dict[str, str] | None:
     """Select exact retained dirty recovery evidence for preview and inventory."""
     legacy = _legacy_dirty_publication_evidence(
-        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        record,
+        repository=repository,
+        load_red_checkpoint=load_red_checkpoint,
+        status=status,
     )
     if legacy is not None:
         return legacy
     authored = _authored_candidate_recovery_evidence(
-        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        record,
+        repository=repository,
+        load_red_checkpoint=load_red_checkpoint,
+        status=status,
     )
     if authored is not None:
         return authored
     affected = _affected_dirty_correction_evidence(
-        record, repository=repository, load_red_checkpoint=load_red_checkpoint
+        record,
+        repository=repository,
+        load_red_checkpoint=load_red_checkpoint,
+        status=status,
     )
     if affected is not None:
         return affected
@@ -1192,7 +1220,8 @@ def _retained_dirty_recovery_evidence(
         record is not None
         and record.state is RunnerState.BLOCKED
         and repository is not None
-        and repository.has_changes(record.worktree)
+        and status is not None
+        and status.dirty
     ):
         raise RecoveryIneligibleError("retained dirty recovery evidence is ineligible")
     return None
@@ -1203,6 +1232,7 @@ def _legacy_dirty_publication_evidence(
     *,
     repository: RepositoryPort | None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+    status: WorktreeStatus | None,
 ) -> dict[str, str] | None:
     """Bind one historical dirty publication candidate or reject it fail-closed."""
     if record is not None and record.correction_identity is not None:
@@ -1221,7 +1251,9 @@ def _legacy_dirty_publication_evidence(
                 record.project_id, record.issue_iid, checkpoint_base
             )
         )
-        candidate = repository.observe_legacy_publication_candidate(record.worktree)
+        candidate = repository.observe_legacy_publication_candidate(
+            record.worktree, status=status
+        )
         if not correction_identity_matches(
             record,
             candidate,
@@ -1240,7 +1272,7 @@ def _legacy_dirty_publication_evidence(
         or record.intent.kind != "publish_merge_request"
     ):
         return None
-    if repository is None or not repository.has_changes(record.worktree):
+    if repository is None or status is None or not status.dirty:
         return None
     if (
         record.error_code is not ErrorCode.PUBLICATION_IDENTITY_MISMATCH
@@ -1251,7 +1283,9 @@ def _legacy_dirty_publication_evidence(
         raise RecoveryIneligibleError(
             "legacy publication recovery evidence is ineligible"
         )
-    candidate = repository.observe_legacy_publication_candidate(record.worktree)
+    candidate = repository.observe_legacy_publication_candidate(
+        record.worktree, status=status
+    )
     expected = record.intent.expected_evidence
     eligible = (
         record.work_kind is WorkKind.ORDINARY
@@ -1307,11 +1341,12 @@ def _affected_dirty_correction_evidence(
     *,
     repository: RepositoryPort | None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+    status: WorktreeStatus | None,
 ) -> dict[str, str] | None:
     """Bind the one retained worker-protocol failure shape that predates snapshots."""
     if record is None or repository is None or record.correction_identity is not None:
         return None
-    if not repository.has_changes(record.worktree):
+    if status is None or not status.dirty:
         return None
     if not (
         record.state is RunnerState.BLOCKED
@@ -1348,7 +1383,9 @@ def _affected_dirty_correction_evidence(
         raise RecoveryIneligibleError(
             "affected correction recovery evidence is ineligible"
         )
-    candidate = repository.observe_legacy_publication_candidate(record.worktree)
+    candidate = repository.observe_legacy_publication_candidate(
+        record.worktree, status=status
+    )
     checkpoint = (
         None
         if record.workflow_lane is WorkflowLane.CONTENT or load_red_checkpoint is None
@@ -1372,11 +1409,12 @@ def _authored_candidate_recovery_evidence(
     *,
     repository: RepositoryPort | None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+    status: WorktreeStatus | None,
 ) -> dict[str, str] | None:
     """Bind one reviewed committed candidate to its original Red checkpoint."""
     if record is None or repository is None or record.correction_identity is not None:
         return None
-    if not repository.has_changes(record.worktree) or record.source_sha is None:
+    if status is None or not status.dirty or record.source_sha is None:
         return None
     original_base_sha = repository.single_parent(record.worktree, record.source_sha)
     checkpoint = (
@@ -1387,7 +1425,9 @@ def _authored_candidate_recovery_evidence(
     try:
         identity = build_authored_candidate_correction_identity(
             record,
-            repository.observe_legacy_publication_candidate(record.worktree),
+            repository.observe_legacy_publication_candidate(
+                record.worktree, status=status
+            ),
             original_base_sha=original_base_sha,
             checkpoint=checkpoint,
         )
@@ -2838,7 +2878,7 @@ def dispatch(
                         ),
                         state_root=config.state_root,
                         load_red_checkpoint=wired.load_red_checkpoint,
-                    )
+                    )[0]
                     for iid in sorted(candidate_iids)
                 )
             )
@@ -2983,7 +3023,7 @@ def dispatch(
             record, reviewed, choice
         )
         if replaying:
-            observation = _recovery_observation(
+            observation, _ = _recovery_observation(
                 record,
                 issue_iid=request.issue_iid or 0,
                 gitlab=gitlab,
@@ -3064,7 +3104,7 @@ def dispatch(
                 and current_record.state is RunnerState.BLOCKED
             )
             if replaying and not blocked_automatic_replay:
-                current_observation = _recovery_observation(
+                current_observation, _ = _recovery_observation(
                     current_record,
                     issue_iid=request.issue_iid or 0,
                     gitlab=gitlab,

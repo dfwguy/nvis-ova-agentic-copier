@@ -88,6 +88,7 @@ from agent_work.repository import (
     PublicationError,
     RepositoryError,
     RepositoryTransientError,
+    WorktreeStatus,
     classify_publication_failure,
 )
 from agent_work.runtime import RuntimeDependencies, dispatch, find_exact_pipeline_owner
@@ -786,6 +787,7 @@ class FakeRepository:
             (),
         )
         self.changed_paths_calls = 0
+        self.worktree_status_calls = 0
         self.publication_changed_paths_calls = 0
         self.publication_targets: list[str] = []
         self.publication_paths: tuple[str, ...] | None = None
@@ -867,6 +869,18 @@ class FakeRepository:
             raise self.changed_paths_error
         return self.paths
 
+    def observe_worktree_status(self, worktree: Path) -> WorktreeStatus:
+        """Return one independently controlled dirty and path observation."""
+        del worktree
+        self.worktree_status_calls += 1
+        if self.changed_paths_error is not None:
+            raise self.changed_paths_error
+        return WorktreeStatus(
+            dirty=self.dirty,
+            changed_paths=self.paths,
+            porcelain="".join(f" M {path}\0" for path in self.paths),
+        )
+
     def red_candidate_tree(
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str:
@@ -945,9 +959,9 @@ class FakeRepository:
         return {"candidate_tree": candidate_tree, "state": "terminal-success"}
 
     def observe_legacy_publication_candidate(
-        self, worktree: Path
+        self, worktree: Path, *, status: WorktreeStatus | None = None
     ) -> LegacyPublicationCandidate:
-        del worktree
+        del worktree, status
         if self.legacy_observation_error is not None:
             raise self.legacy_observation_error
         return LegacyPublicationCandidate(
@@ -5690,6 +5704,41 @@ def test_loop_retry_preview_propagates_repository_evidence_failure(
     assert gitlab.labels == []
 
 
+@pytest.mark.parametrize("command", ("loop.retry", "recovery.resolve"))
+def test_retry_preview_propagates_unavailable_worktree_status(
+    tmp_path: Path, command: str
+) -> None:
+    """An unavailable status check is an operational error, not ineligibility."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.changed_paths_error = RepositoryError("private status detail")
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    request = (
+        CommandRequest(command="loop.retry", issue_iid=record.issue_iid)
+        if command == "loop.retry"
+        else CommandRequest(
+            command="recovery.resolve",
+            issue_iid=record.issue_iid,
+            choice="retry",
+            reason="Review the retained worktree.",
+        )
+    )
+
+    with pytest.raises(RepositoryError, match="could not inspect retained worktree"):
+        dispatch(
+            request,
+            apply=False,
+            dependencies=_dependencies(config, ledger, gitlab, repository),
+        )
+
+    assert ledger.load(record.issue_iid) == record
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.labels == []
+
+
 @pytest.mark.parametrize("command", ("loop.retry", "loop.recover"))
 def test_direct_retry_preview_reports_unsupported_dirty_evidence_as_ineligible(
     tmp_path: Path, command: str
@@ -6177,6 +6226,128 @@ def test_recovery_inventory_uses_dirty_probe_when_changed_paths_are_empty(
     assert candidate.classification == "needs_human_decision"
     assert candidate.corroboration["worktree_dirty"] == "true"
     assert candidate.corroboration["retry_ineligible_reason"]
+
+
+@pytest.mark.parametrize("command", ("recovery.inventory", "recovery.resolve"))
+def test_retained_recovery_uses_one_status_observation_per_invocation(
+    tmp_path: Path, command: str
+) -> None:
+    """Selectors and reports share one retained worktree observation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    request = (
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid)
+        if command == "recovery.inventory"
+        else CommandRequest(
+            command="recovery.resolve",
+            issue_iid=record.issue_iid,
+            choice="retry",
+            reason="The retained hook correction was reviewed.",
+        )
+    )
+
+    report = dispatch(
+        request,
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    if command == "recovery.inventory":
+        assert report.recovery_candidates[0].classification == "safely_retryable"
+    else:
+        assert report.operational_plan is not None
+        assert report.operational_plan.evidence["legacy_index_fingerprint"]
+    assert repository.worktree_status_calls == 1
+    assert repository.changed_paths_calls == repository.has_changes_calls == 0
+
+
+def test_retained_recovery_keeps_dirty_state_independent_of_changed_paths(
+    tmp_path: Path,
+) -> None:
+    """An empty path list cannot turn a dirty retained worktree into a retry."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.paths = ()
+    repository.legacy_unstaged_paths = ()
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["worktree_dirty"] == "true"
+    assert repository.worktree_status_calls == 1
+
+
+def test_retained_recovery_redacts_status_observation_error(tmp_path: Path) -> None:
+    """A failed status observation gives a bounded, nonprivate classification."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.changed_paths_error = RepositoryError("/private/worktree/status detail")
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+
+    report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=record.issue_iid),
+        apply=False,
+        dependencies=_dependencies(config, ledger, gitlab, repository),
+    )
+
+    candidate = report.recovery_candidates[0]
+    assert candidate.classification == "needs_human_decision"
+    assert candidate.corroboration["retry_ineligible_reason"] == (
+        '"retained worktree evidence could not be verified"'
+    )
+    assert "/private/worktree/status detail" not in candidate.model_dump_json()
+    assert repository.worktree_status_calls == 1
+
+
+def test_recovery_apply_observes_fresh_status_and_rejects_drift(tmp_path: Path) -> None:
+    """The apply invocation rechecks retained status before effects."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_legacy_dirty_hook_publication_record(tmp_path))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.current_head = record.source_sha or ""
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    dependencies = _dependencies(config, ledger, gitlab, repository)
+    request = CommandRequest(
+        command="recovery.resolve",
+        issue_iid=record.issue_iid,
+        choice="retry",
+        reason="The retained hook correction was reviewed.",
+    )
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert repository.worktree_status_calls == 1
+    plan_file = tmp_path / "reviewed-status-plan.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    repository.paths = ("src/changed-after-preview.py",)
+
+    with pytest.raises(RuntimeError, match="evidence changed|ineligible|correction"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    assert repository.worktree_status_calls == 3
+    assert ledger.load(record.issue_iid) == record
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    assert gitlab.created_merge_requests == 0 and gitlab.labels == []
 
 
 def test_recovery_inventory_redacts_repository_observation_failure(
