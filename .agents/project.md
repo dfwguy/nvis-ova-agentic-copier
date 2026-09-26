@@ -91,7 +91,7 @@ This Copier template has its payload in `template/`. It also ships the
 - **Actual paths:** the systemd-only wrapper and entry point is
   `scripts/agent-work-systemd-run.sh`. Its mirror is in `template/scripts/`.
   Its service units are in `systemd/` and `template/systemd/`. Its behavior is
-  tested by `tests/test_template.py`. Recoverable records are below the XDG state directory.
+  tested by `tests/test_agent_work_systemd_smoke.py`. Recoverable records are below the XDG state directory.
   The project lock is there. Durable issue worktrees are too.
 - **Rationale:** this is a systemd boundary, not an interactive CLI or
   sourceable library. The installed service unit uses its stable `scripts/`

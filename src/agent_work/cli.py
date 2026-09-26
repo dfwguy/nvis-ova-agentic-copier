@@ -75,7 +75,7 @@ from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointEvidence,
 )
-from .repository import discover_config, run_subprocess
+from .repository import CommandResult, discover_config, run_subprocess
 from .review_handoff import (
     ReviewHandoffDependencies,
     ReviewHandoffError,
@@ -95,6 +95,12 @@ from .service_environment import (
     migrate_service_environment as default_migrate_service_environment,
 )
 from .status import project_status
+from .systemd_smoke import (
+    SystemdSmokeDependencies,
+    SystemdSmokeError,
+    SystemdSmokeReport,
+    run_systemd_smoke,
+)
 from .template_comparison import (
     BinaryCommandRunner,
     TemplateComparison,
@@ -689,6 +695,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_integer,
         default=16,
         help="maximum persisted workflow attempts in one applied activation (default: %(default)s)",
+    )
+    smoke = loop_actions.add_parser(
+        "smoke", help="run one isolated Codex delegation smoke"
+    )
+    _common(
+        smoke,
+        apply_help="run the isolated smoke; omit for a read-only preview",
+        debug_help="accepted for command consistency; smoke keeps bounded diagnostics",
     )
     run.add_argument(
         "--max-activation-seconds",
@@ -1703,6 +1717,7 @@ def main(
     apply_upstream: _ApplyUpstream | None = None,
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
+    systemd_smoke_action: Callable[..., SystemdSmokeReport] = run_systemd_smoke,
     discover_agent_work_config: Callable[..., AgentWorkConfig] = discover_config,
     sleeper: Callable[[float], None] = time.sleep,
     environment: Mapping[str, str] = os.environ,
@@ -1748,6 +1763,53 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "loop" and parsed.action == "smoke":
+        if not parsed.apply:
+            write_stdout(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "command": "loop.smoke",
+                        "applied": False,
+                        "outcome": "preview",
+                    },
+                    separators=(",", ":"),
+                )
+                if parsed.json
+                else "preview"
+            )
+            return 0
+        try:
+            configuration = discover_agent_work_config(
+                current_directory=current_checkout(),
+                environment=environment,
+                run_command=run_command,
+            )
+            report = systemd_smoke_action(
+                dependencies=SystemdSmokeDependencies(
+                    run_command=cast(Callable[..., CommandResult], run_command),
+                    environment=environment,
+                    checkout=configuration.checkout,
+                    timeout_seconds=300,
+                    codex_home=Path(
+                        environment.get("CODEX_HOME", str(home_directory() / ".codex"))
+                    ),
+                )
+            )
+        except (OSError, RuntimeError, SystemdSmokeError) as error:
+            write_stderr(str(error))
+            return 1
+        payload = {
+            "schema_version": 1,
+            "command": "loop.smoke",
+            "applied": True,
+            "outcome": "passed",
+            "broker_accepted": report.broker_accepted,
+        }
+        write_stdout(
+            json.dumps(payload, separators=(",", ":")) if parsed.json else "passed"
+        )
+        return 0
     if parsed.resource == "review-handoff":
         human_output: str | None = None
         try:

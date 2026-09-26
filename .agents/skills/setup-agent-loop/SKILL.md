@@ -115,7 +115,9 @@ effective API access 30. Then it checks repository safeguards.
    project-named user timer only with applicable `AGENTS.md` standing
    authorization or separate explicit authority. Enabling the guarded loop also
    authorizes it to resume active or automatically resumable work before fresh
-   work. Save the agent name in its environment file.
+   work. For Codex, do not enable its timer until current smoke passes. For
+   Claude or Pi, smoke is N/A. Use existing service and timer checks. Save the
+   agent name in its environment file.
    Save absolute `uv` and agent paths there. The runner calls the saved agent path.
    Never use service-manager PATH. Save bare `GITLAB_HOST`, positive numeric
    `GITLAB_PROJECT_ID`, and those paths in the mode-600 file. Never save a
@@ -125,6 +127,7 @@ effective API access 30. Then it checks repository safeguards.
    file. `direnv` supplies credentials. The wrapper then restores saved host and project
    ID. Before timer enablement, run its no-`--apply` preview with
    `env -i`. Use exactly public service variables. Use the least service baseline.
+   For Codex, the preview does not replace a current passed smoke.
    An interactive credential must not mask a bad route. Nor may an identity. The user
    manager does not inherit interactive `direnv` values. Never store its token.
    Do not use `glab auth status`; it checks stored `glab` logins only.
@@ -150,6 +153,7 @@ effective API access 30. Then it checks repository safeguards.
    case "$agent_name" in codex|claude|pi) ;; *) exit 1;; esac
    [[ "$agent_path" == /* && -x "$agent_path" ]] || exit 1
    install -D -m 0644 "systemd/$unit_name.service" "$HOME/.config/systemd/user/$unit_name.service"
+   install -D -m 0644 "systemd/$unit_name-smoke.service" "$HOME/.config/systemd/user/$unit_name-smoke.service"
    install -D -m 0644 "systemd/$unit_name.timer" "$HOME/.config/systemd/user/$unit_name.timer"
    install -d -m 700 "$HOME/.config/$unit_name"
    printf 'AGENT_WORK_ENV_VERSION=%q\nAGENT_WORK_CHECKOUT=%q\nAGENT_WORK_GIT=%q\nAGENT_WORK_GLAB=%q\nAGENT_WORK_JQ=%q\nAGENT_WORK_FLOCK=%q\nAGENT_WORK_TIMEOUT=%q\nAGENT_WORK_UV=%q\nAGENT_WORK_AGENT=%q\nAGENT_WORK_AGENT_PATH=%q\nAGENT_WORK_DIRENV=%q\nAGENT_WORK_BASE_BRANCH=%q\nAGENT_WORK_FACTORY_USERNAME=%q\nGITLAB_HOST=%q\nGITLAB_PROJECT_ID=%q\n' 1 "$PWD" "$git_path" "$glab_path" "$jq_path" "$flock_path" "$timeout_path" "$uv_path" "$agent_name" "$agent_path" "$direnv_path" agent/work-base "$factory_username" "$gitlab_host" "$gitlab_project_id" >"$HOME/.config/$unit_name/agent-work.env"
@@ -165,7 +169,11 @@ effective API access 30. Then it checks repository safeguards.
 
    The wrapper writes once to stdout/stderr. systemd records it. Operators use
    `journalctl --user -u <project-slug>-agent-work.service`. After an isolated
-   preview succeeds, run `systemctl --user enable --now
+   preview succeeds, Codex needs a current smoke pass before timer enablement.
+   Follow [the smoke-service
+   guide](../../../docs/how-to/setup-serial-gitlab-agent-loop.md#run-the-companion-smoke-service)
+   to inspect its exact result and journal. Smoke is N/A for Claude or Pi. Use
+   existing service and timer checks. Then run `systemctl --user enable --now
    <project-slug>-agent-work.timer`. The timer runs 20 minutes after the prior
    service ends. Its random delay is stable. Require linger with `sudo
    loginctl enable-linger "$USER"`. Check `Linger=yes` with `loginctl show-user

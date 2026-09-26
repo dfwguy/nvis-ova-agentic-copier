@@ -1140,7 +1140,10 @@ def test_agent_loop_wrapper_bounds_housekeeping_without_capping_applied_worker(
         for call in timeout_calls
     )
     assert any(environment["AGENT_WORK_GLAB"] in call for call in timeout_calls)
-    assert all(environment["AGENT_WORK_UV"] not in call for call in timeout_calls)
+    worker_command = (
+        f"{environment['AGENT_WORK_UV']} run agent-work loop run --apply --json"
+    )
+    assert all(worker_command not in call for call in timeout_calls)
     assert marker.read_text() == "one\nrun agent-work loop run --apply --json\n"
 
 
