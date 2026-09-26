@@ -17,6 +17,7 @@ import importlib
 import json
 import logging
 import re
+import sys
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
@@ -4112,6 +4113,11 @@ def test_recovery_inventory_v2_summarizes_active_human_and_terminal_evidence(
     tmp_path: Path,
 ) -> None:
     """Untargeted inventory is read-only and omits settled terminal detail."""
+
+    class CompleteRecoveryInventoryGitLab(ClosedInventoryGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return tuple(self.issues.values())
+
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     active = ledger.persist(
@@ -4122,7 +4128,7 @@ def test_recovery_inventory_v2_summarizes_active_human_and_terminal_evidence(
             tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.WORKFLOW
         ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
     )
-    gitlab = ClosedInventoryGitLab(
+    gitlab = CompleteRecoveryInventoryGitLab(
         _issue(iid=12, state="opened").model_copy(
             update={"labels": ("agent::running",)}
         ),
@@ -4233,12 +4239,19 @@ def test_recovery_preview_binds_one_exact_merge_request_pipeline_and_dependencie
     tmp_path: Path,
 ) -> None:
     """Preview evidence includes the unique durable MR and trusted split prerequisite."""
+
+    class CompleteDependencyInventoryGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (*self.split_children.values(), *self.issues.values())
+
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     ledger.persist(
         _record(tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY)
     )
-    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    gitlab = CompleteDependencyInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
     gitlab.open_merge_request_inventory = (_mr(),)
     gitlab.pipeline = PipelineEvidence(
         id=7, status="failed", sha="a" * 40, web_url="https://pipeline/7"
@@ -4266,6 +4279,95 @@ def test_recovery_preview_binds_one_exact_merge_request_pipeline_and_dependencie
     assert evidence["pipeline_id"] == 7
     assert evidence["pipeline_sha"] == "a" * 40
     assert evidence["split_dependencies"] == '[[23, "closed"]]'
+
+
+def test_recovery_inventory_gates_retained_dependent_on_open_decomposition_children(
+    tmp_path: Path,
+) -> None:
+    """Recovery reports the open children transferred from a closed prerequisite."""
+
+    class DecomposedDependencyGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            target = _issue(
+                iid=264,
+                description=render_split_marker(310967, 260, "dependent", (262, 263)),
+            ).model_copy(update={"labels": ("agent::blocked",)})
+            super().__init__(target)
+            graph = (
+                target,
+                _issue(iid=262, state="closed"),
+                _issue(iid=263, state="closed"),
+                _issue(
+                    iid=271,
+                    description=render_split_marker(310967, 263, "first", ()),
+                ),
+                _issue(
+                    iid=272,
+                    description=render_split_marker(310967, 263, "second", (271,)),
+                ),
+                _issue(
+                    iid=273,
+                    description=render_split_marker(310967, 263, "third", (272,)),
+                ),
+            )
+            self.issues = {issue.iid: issue for issue in graph}
+            self.split_children = {
+                issue.description: issue for issue in graph if issue.description
+            }
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return tuple(self.issues.values())
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    retained = _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.DISCOVERY
+    ).model_copy(
+        update={
+            "issue_iid": 264,
+            "source_branch": "agent/issue-264",
+            "worktree": config.state_root / "worktrees" / "264",
+        }
+    )
+    ledger.persist(retained)
+    gitlab = DecomposedDependencyGitLab()
+    dependencies = _dependencies(config, ledger, gitlab, FakeRepository(config))
+
+    open_report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=264),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    candidate = open_report.recovery_candidates[0]
+    assert candidate.classification == "dependency_gated"
+    assert candidate.corroboration["split_dependencies"] == (
+        '[[262, "closed"], [263, "closed"], [271, "opened"], '
+        '[272, "opened"], [273, "opened"]]'
+    )
+    assert candidate.dependency_explanation == (
+        "Trusted prerequisites #271, #272, #273 remain open."
+    )
+
+    for iid in (271, 272, 273):
+        gitlab.issues[iid] = gitlab.issues[iid].model_copy(update={"state": "closed"})
+    gitlab.split_children = {
+        issue.description: issue
+        for issue in gitlab.issues.values()
+        if issue.description
+    }
+    closed_report = dispatch(
+        CommandRequest(command="recovery.inventory", issue_iid=264),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    closed_candidate = closed_report.recovery_candidates[0]
+    assert closed_candidate.classification == "safely_retryable"
+    assert closed_candidate.corroboration["split_dependencies"] == (
+        '[[262, "closed"], [263, "closed"], [271, "closed"], '
+        '[272, "closed"], [273, "closed"]]'
+    )
 
 
 @pytest.mark.parametrize(
@@ -6901,11 +7003,22 @@ def test_precheckpoint_test_only_red_inventory_never_advertises_ineligible_varia
     tmp_path: Path, defect: str
 ) -> None:
     """Only the exact test-only Red candidate is eligible for automatic retry review."""
+
+    class CompleteDependencyInventoryGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (*self.split_children.values(), *self.issues.values())
+
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = _precheckpoint_test_only_red_record(tmp_path)
     repository = _precheckpoint_test_only_repository(config, record)
-    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    gitlab = (
+        CompleteDependencyInventoryGitLab(
+            _issue().model_copy(update={"labels": ("agent::blocked",)})
+        )
+        if defect == "dependency_open"
+        else FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    )
     if defect == "branch":
         repository.legacy_branch = "agent/issue-999"
     elif defect == "head":
@@ -17668,6 +17781,36 @@ def test_prerequisite_projection_adds_only_open_trusted_dependencies() -> None:
     ]
 
 
+def test_prerequisite_projection_transfers_open_children_of_closed_dependency() -> None:
+    """A closed decomposed prerequisite projects each open child onto its dependent."""
+    issues = (
+        _issue(
+            iid=264,
+            description=render_split_marker(310967, 260, "dependent", (262, 263)),
+        ),
+        _issue(iid=262, state="closed"),
+        _issue(iid=263, state="closed"),
+        _issue(iid=271, description=render_split_marker(310967, 263, "first", ())),
+        _issue(
+            iid=272,
+            description=render_split_marker(310967, 263, "second", (271,)),
+        ),
+        _issue(
+            iid=273,
+            description=render_split_marker(310967, 263, "third", (272,)),
+        ),
+    )
+
+    projection = domain.prerequisite_projection_inventory(issues, project_id=310967)
+
+    intended_by_issue = {item.issue_iid: item.intended_labels for item in projection}
+    assert intended_by_issue.get(264) == (
+        "agent-prereq_271",
+        "agent-prereq_272",
+        "agent-prereq_273",
+    )
+
+
 def test_prerequisite_projection_orders_multiple_prerequisites_numerically() -> None:
     """Projection preserves unrelated labels and orders dynamic labels by IID."""
     dependent = _issue(
@@ -17741,32 +17884,29 @@ def test_prerequisite_projection_preserves_noncanonical_lookalike_labels(
     assert projection[0].intended_labels == (lookalike,)
 
 
-@given(
-    st.lists(
-        st.sampled_from(
-            (
-                "customer::priority",
-                "agent::prereq_0",
-                "agent::prereq_01",
-                "agent::prereq_37x",
-                "agent::prereq_37",
-            )
-        ),
-        unique=True,
+def test_prerequisite_projection_only_replaces_exact_dynamic_labels() -> None:
+    """Every supported label subset preserves each noncanonical label."""
+    candidate_labels = (
+        "customer::priority",
+        "agent::prereq_0",
+        "agent::prereq_01",
+        "agent::prereq_37x",
+        "agent::prereq_37",
     )
-)
-def test_prerequisite_projection_only_replaces_exact_dynamic_labels(
-    labels: list[str],
-) -> None:
-    """Arbitrary supported label inventories preserve every noncanonical label."""
-    dependent = _issue(iid=38).model_copy(
-        update={"labels": (*labels, "agent::prereq_37")}
-    )
-    projection = domain.prerequisite_projection_inventory(
-        (dependent,), project_id=310967
-    )
-    expected = tuple(label for label in labels if label != "agent::prereq_37")
-    assert projection[0].intended_labels == expected
+    for selection in range(1 << len(candidate_labels)):
+        labels = tuple(
+            label
+            for index, label in enumerate(candidate_labels)
+            if selection & (1 << index)
+        )
+        dependent = _issue(iid=38).model_copy(
+            update={"labels": (*labels, "agent::prereq_37")}
+        )
+        projection = domain.prerequisite_projection_inventory(
+            (dependent,), project_id=310967
+        )
+        expected = tuple(label for label in labels if label != "agent::prereq_37")
+        assert projection[0].intended_labels == expected
 
 
 @pytest.mark.parametrize(
@@ -17832,6 +17972,84 @@ def test_prerequisite_projection_rejects_invalid_dependency_evidence(
     """Malformed, ambiguous, self-referential, and incomplete evidence fails closed."""
     with pytest.raises(ValueError, match="split|duplicate"):
         domain.prerequisite_projection_inventory(issues, project_id=310967)
+
+
+def test_prerequisite_projection_rejects_ambiguous_split_markers() -> None:
+    """Two valid split markers in one description are ambiguous evidence."""
+    issue = _issue(
+        iid=38,
+        description="\n".join(
+            (
+                render_split_marker(310967, 100, "first", ()),
+                render_split_marker(310967, 101, "second", ()),
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="split marker is ambiguous"):
+        domain.prerequisite_projection_inventory((issue,), project_id=310967)
+
+
+def test_prerequisite_projection_rejects_dependency_cycle() -> None:
+    """Valid markers cannot form a dependency cycle."""
+    issues = (
+        _issue(
+            iid=10,
+            description=render_split_marker(310967, 100, "first", (11,)),
+        ),
+        _issue(
+            iid=11,
+            description=render_split_marker(310967, 101, "second", (10,)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        domain.prerequisite_projection_inventory(issues, project_id=310967)
+
+
+def test_prerequisite_projection_rejects_duplicate_child_identity() -> None:
+    """Two valid markers cannot claim the same parent and child key."""
+    issues = (
+        _issue(
+            iid=10,
+            description=render_split_marker(310967, 100, "duplicate", ()),
+        ),
+        _issue(
+            iid=11,
+            description=render_split_marker(310967, 100, "duplicate", ()),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="identity.*duplicate"):
+        domain.prerequisite_projection_inventory(issues, project_id=310967)
+
+
+def test_prerequisite_dependency_proof_handles_chain_beyond_recursion_limit() -> None:
+    """A valid decomposition chain is bounded by inventory, not Python recursion."""
+    chain_length = sys.getrecursionlimit() + 50
+    issues = [
+        _issue(
+            iid=1,
+            description=render_split_marker(310967, 999_999, "root", (2,)),
+        ),
+        _issue(iid=2, state="closed"),
+    ]
+    issues.extend(
+        _issue(
+            iid=iid,
+            state="closed",
+            description=render_split_marker(310967, iid - 1, f"child-{iid}", ()),
+        )
+        for iid in range(3, chain_length + 3)
+    )
+
+    proof = dict(
+        domain.prerequisite_dependency_proof(tuple(issues), project_id=310967)
+    )[1]
+
+    assert len(proof) == chain_length + 1
+    assert proof[0] == (2, "closed")
+    assert proof[-1] == (chain_length + 2, "closed")
 
 
 def test_apply_reconciles_prerequisite_projection_before_worker_preflight(
@@ -20700,6 +20918,11 @@ def test_recovery_inventory_binds_per_issue_owner_evidence_to_its_candidates(
     tmp_path: Path,
 ) -> None:
     """One coordinator owner cannot make all retained recovery records live."""
+
+    class PerIssueInventoryGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (self.issue, self.issues[stale.issue_iid])
+
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     active = ledger.persist(
@@ -20716,9 +20939,11 @@ def test_recovery_inventory_binds_per_issue_owner_evidence_to_its_candidates(
         owner_probe_calls.append(issue_iid)
         return {active.issue_iid: "active", stale.issue_iid: "stale"}[issue_iid]
 
+    gitlab = PerIssueInventoryGitLab()
+    gitlab.issues[stale.issue_iid] = _issue(iid=stale.issue_iid)
     dependencies = _with_issue_owner_probe(
         replace(
-            _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+            _dependencies(config, ledger, gitlab, FakeRepository(config)),
             process_probe=lambda: "active",
         ),
         issue_owner_probe,

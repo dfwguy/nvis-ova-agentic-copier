@@ -2636,6 +2636,38 @@ def test_gitlab_eligibility_honors_valid_split_dependency_markers(
     assert [issue.iid for issue in gateway.list_eligible()] == [20, 21]
 
 
+def test_gitlab_eligibility_transfers_closed_dependency_to_its_open_children(
+    tmp_path: Path,
+) -> None:
+    """Admission follows marker-derived descendants independently of display labels."""
+    issues = [
+        _issue_payload(264, ["agent-prereq_999"])
+        | {"description": render_split_marker(310967, 260, "dependent", (262, 263))},
+        _issue_payload(262) | {"state": "closed"},
+        _issue_payload(263) | {"state": "closed"},
+        _issue_payload(271)
+        | {"description": render_split_marker(310967, 263, "first", ())},
+        _issue_payload(272)
+        | {"description": render_split_marker(310967, 263, "second", (271,))},
+        _issue_payload(273)
+        | {"description": render_split_marker(310967, 263, "third", (272,))},
+    ]
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        endpoint = command[command.index("-X") + 2]
+        assert endpoint == "projects/310967/issues"
+        return CommandResult(0, json.dumps(issues), "")
+
+    gateway = GitLabGateway(_config(tmp_path), api)
+
+    assert 264 not in {issue.iid for issue in gateway.list_eligible()}
+    for issue in issues:
+        if issue["iid"] in {271, 272, 273}:
+            issue["state"] = "closed"
+    issues[0]["labels"] = ["agent-prereq_271"]
+    assert 264 in {issue.iid for issue in gateway.list_eligible()}
+
+
 def test_gitlab_eligibility_prioritizes_exact_labels_and_absolute_creation_time(
     tmp_path: Path,
 ) -> None:
@@ -2993,7 +3025,7 @@ def test_gitlab_eligibility_excludes_every_ineligible_issue_kind(
     payload.update({"state": state, "confidential": confidential})
 
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
-        assert "state=opened" in command
+        assert "state=all" in command
         assert "order_by=created_at" in command
         assert "sort=asc" in command
         assert not any(part.startswith("labels=") for part in command)
@@ -3008,6 +3040,7 @@ def test_gitlab_eligible_inventory_reads_every_oldest_first_page(
     tmp_path: Path,
 ) -> None:
     def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert "state=all" in command
         page_field = next(part for part in command if part.startswith("page="))
         page = int(page_field.removeprefix("page="))
         payload = (

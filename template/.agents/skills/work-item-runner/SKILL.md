@@ -181,6 +181,7 @@ manufacture changes.
 The GitLab lifecycle first resumes active and automatically resumable work. It
 does this before it selects a fresh open, non-confidential issue. That issue
 must lack a lifecycle projection, ledger record, and open split prerequisite.
+Required open descendants of a closed prerequisite also keep it blocked.
 
 | State | Projection |
 |---|---|

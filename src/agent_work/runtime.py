@@ -39,7 +39,7 @@ from .domain import (
     WorkflowPhase,
     WorkKind,
     label_for_state,
-    parse_split_marker,
+    prerequisite_dependency_proof,
     prerequisite_label_iid,
     prerequisite_label_reconciliation,
     prerequisite_projection_inventory,
@@ -781,26 +781,17 @@ def _is_safe_red_checkpoint_diagnostic(value: str) -> bool:
 
 
 def _recovery_split_dependencies(
-    issue_iid: int, *, project: GitLabProject, gitlab: GitLabPort
+    issue_iid: int,
+    *,
+    project: GitLabProject,
+    issues: tuple[GitLabIssue, ...],
 ) -> tuple[tuple[int, str], ...]:
     """Read validated split prerequisites for exactly one recovery target."""
-    child = next(
-        (
-            candidate
-            for candidate in gitlab.split_child_inventory()
-            if candidate.iid == issue_iid
-        ),
-        None,
-    )
-    if child is None:
-        return ()
-    marker = parse_split_marker(child.description, project.id)
-    if marker is None:
-        return ()
-    return tuple(
-        (dependency_iid, gitlab.fetch_issue(dependency_iid).state)
-        for dependency_iid in sorted(marker[2])
-    )
+    proofs = dict(prerequisite_dependency_proof(issues, project_id=project.id))
+    try:
+        return proofs[issue_iid]
+    except KeyError as error:
+        raise ValueError("recovery target is missing from issue inventory") from error
 
 
 def _recovery_plan(
@@ -815,6 +806,7 @@ def _recovery_plan(
     controller_status: str | None = None,
     owner_status: str = "unknown",
     issue: GitLabIssue | None = None,
+    dependency_inventory: tuple[GitLabIssue, ...],
     merge_requests: tuple[MergeRequestEvidence, ...] | None = None,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
     | None = None,
@@ -826,7 +818,7 @@ def _recovery_plan(
     except ValueError as error:
         raise RuntimeError(str(error)) from error
     split_dependencies = _recovery_split_dependencies(
-        request.issue_iid, project=project, gitlab=gitlab
+        request.issue_iid, project=project, issues=dependency_inventory
     )
     precheckpoint = _precheckpoint_test_only_red_evidence(
         record,
@@ -2820,45 +2812,34 @@ def dispatch(
     if request.command in {"recovery.inventory", "recovery.resolve"}:
         username = recovery_username
         if request.command == "recovery.inventory":
-            prerequisite_projections = _prerequisite_projections(
-                gitlab.prerequisite_projection_inventory(), project_id=project.id
+            dependency_inventory = gitlab.prerequisite_projection_inventory()
+            prerequisite_reconciliation = prerequisite_label_reconciliation(
+                dependency_inventory, project_id=project.id
             )
+            prerequisite_projections = _prerequisite_projection_reports(
+                prerequisite_reconciliation.projections
+            )
+            dependency_proofs = dict(prerequisite_reconciliation.dependency_proofs)
             records = (
                 ledger.list_records()
                 if request.issue_iid is None
                 else (ledger.load(request.issue_iid),)
             )
             retained = tuple(record for record in records if record is not None)
-            projected = gitlab.list_projected()
-            split_children = gitlab.split_child_inventory()
-            projected = (*projected, *split_children)
-            observed_issues = {issue.iid: issue for issue in projected}
-            observed_issues.update(
-                {
-                    record.issue_iid: gitlab.fetch_issue(record.issue_iid)
-                    for record in retained
-                }
-            )
-            dependency_ids: set[int] = set()
-            child_dependencies: dict[int, tuple[int, ...]] = {}
-            for child in split_children:
-                parsed_marker = parse_split_marker(child.description, project.id)
-                if parsed_marker is None:
-                    continue
-                child_dependencies[child.iid] = parsed_marker[2]
-                dependency_ids.update(parsed_marker[2])
-            for dependency_iid in dependency_ids:
-                observed_issues.setdefault(
-                    dependency_iid, gitlab.fetch_issue(dependency_iid)
-                )
+            observed_issues = {issue.iid: issue for issue in dependency_inventory}
+            observed_iids = {
+                issue.iid
+                for issue in dependency_inventory
+                if set(issue.labels).intersection(LIFECYCLE_LABELS)
+                or "<!-- agent-work-split:v1" in issue.description
+            }
+            observed_iids.update(record.issue_iid for record in retained)
             merge_requests = gitlab.open_merge_requests()
             controller = wired.process_probe()
             default_pipeline = gitlab.latest_pipeline_for_ref(project.default_branch)
             records_by_iid = {record.issue_iid: record for record in retained}
             candidate_iids = (
-                set(observed_issues)
-                if request.issue_iid is None
-                else {request.issue_iid}
+                observed_iids if request.issue_iid is None else {request.issue_iid}
             )
             inventory = build_inventory(
                 tuple(
@@ -2872,10 +2853,7 @@ def dispatch(
                         project=project,
                         controller_status=controller,
                         owner_status=_issue_owner_status(wired, iid),
-                        split_dependencies=tuple(
-                            (dependency_iid, observed_issues[dependency_iid].state)
-                            for dependency_iid in child_dependencies.get(iid, ())
-                        ),
+                        split_dependencies=dependency_proofs[iid],
                         state_root=config.state_root,
                         load_red_checkpoint=wired.load_red_checkpoint,
                     )[0]
@@ -3000,7 +2978,14 @@ def dispatch(
         choice = ResolutionChoice(request.choice or "")
         if record is None and choice is not ResolutionChoice.REOPEN:
             raise RuntimeError("recovery issue has no retained record")
-        snapshot_issue = gitlab.fetch_issue(request.issue_iid or 0)
+        snapshot_dependency_inventory = gitlab.prerequisite_projection_inventory()
+        snapshot_issues = {issue.iid: issue for issue in snapshot_dependency_inventory}
+        try:
+            snapshot_issue = snapshot_issues[request.issue_iid or 0]
+        except KeyError as error:
+            raise RuntimeError(
+                "recovery target is missing from issue inventory"
+            ) from error
         snapshot_mrs = gitlab.open_merge_requests()
         snapshot_controller = wired.process_probe()
         reviewed: OperationalPlan | None = None
@@ -3034,7 +3019,9 @@ def dispatch(
                 issue=snapshot_issue,
                 merge_requests=snapshot_mrs,
                 split_dependencies=_recovery_split_dependencies(
-                    request.issue_iid or 0, project=project, gitlab=gitlab
+                    request.issue_iid or 0,
+                    project=project,
+                    issues=snapshot_dependency_inventory,
                 ),
                 state_root=config.state_root,
             )
@@ -3052,6 +3039,7 @@ def dispatch(
                     controller_status=snapshot_controller,
                     owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                     issue=snapshot_issue,
+                    dependency_inventory=snapshot_dependency_inventory,
                     merge_requests=snapshot_mrs,
                     load_red_checkpoint=wired.load_red_checkpoint,
                 )
@@ -3091,7 +3079,16 @@ def dispatch(
             current_record = ledger.load(request.issue_iid or 0)
             if current_record is None and choice is not ResolutionChoice.REOPEN:
                 raise RuntimeError("recovery record disappeared")
-            current_issue = gitlab.fetch_issue(request.issue_iid or 0)
+            current_dependency_inventory = gitlab.prerequisite_projection_inventory()
+            current_issues = {
+                issue.iid: issue for issue in current_dependency_inventory
+            }
+            try:
+                current_issue = current_issues[request.issue_iid or 0]
+            except KeyError as error:
+                raise RuntimeError(
+                    "recovery evidence changed; create a new preview"
+                ) from error
             current_mrs = gitlab.open_merge_requests()
             # The lock owner becomes this process after acquisition; retain the
             # pre-acquisition probe so the lock cannot make its own plan drift.
@@ -3115,7 +3112,9 @@ def dispatch(
                     issue=current_issue,
                     merge_requests=current_mrs,
                     split_dependencies=_recovery_split_dependencies(
-                        request.issue_iid or 0, project=project, gitlab=gitlab
+                        request.issue_iid or 0,
+                        project=project,
+                        issues=current_dependency_inventory,
                     ),
                     state_root=config.state_root,
                 )
@@ -3146,6 +3145,7 @@ def dispatch(
                         controller_status=current_controller,
                         owner_status=_issue_owner_status(wired, request.issue_iid or 0),
                         issue=current_issue,
+                        dependency_inventory=current_dependency_inventory,
                         merge_requests=current_mrs,
                         load_red_checkpoint=wired.load_red_checkpoint,
                     )

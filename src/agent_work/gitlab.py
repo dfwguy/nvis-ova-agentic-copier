@@ -33,7 +33,7 @@ from .domain import (
     JobTraceEvidence,
     PipelineJobEvidence,
     legacy_prerequisite_label_iid,
-    parse_split_marker,
+    prerequisite_dependency_proof,
     prerequisite_label_iid,
     sanitize_outcome_note_field,
 )
@@ -1215,21 +1215,23 @@ class GitLabGateway:
 
     def list_eligible(self) -> tuple[GitLabIssue, ...]:
         """Return eligible issues by priority, absolute creation time, and IID."""
-        issues = self._issues(state="opened")
-        dependency_inventory = (
-            self._issues(state="all")
-            if any("<!-- agent-work-split:v1" in issue.description for issue in issues)
-            else issues
-        )
-        by_iid = {issue.iid: issue for issue in dependency_inventory}
+        inventory = self._issues(state="all")
+        try:
+            dependency_proofs = dict(
+                prerequisite_dependency_proof(
+                    inventory, project_id=self._config.project_id
+                )
+            )
+        except ValueError as error:
+            raise GitLabError("GitLab split dependency evidence is invalid") from error
         eligible = tuple(
             issue
-            for issue in issues
+            for issue in inventory
             if issue.state == "opened"
             and not issue.confidential
             and MANUAL_TRACKER_LABEL not in issue.labels
             and not set(issue.labels).intersection(LIFECYCLE_LABELS)
-            and self._split_dependencies_closed(issue, by_iid)
+            and all(state == "closed" for _, state in dependency_proofs[issue.iid])
         )
         return tuple(
             sorted(
@@ -1241,27 +1243,6 @@ class GitLabGateway:
                 ),
             )
         )
-
-    def _split_dependencies_closed(
-        self, issue: GitLabIssue, by_iid: dict[int, GitLabIssue]
-    ) -> bool:
-        """Validate split provenance and defer children with open prerequisites."""
-        try:
-            parsed = parse_split_marker(issue.description, self._config.project_id)
-        except ValueError as error:
-            raise GitLabError("GitLab split marker is invalid") from error
-        if parsed is None:
-            return True
-        parent, _key, dependency_iids = parsed
-        if parent == issue.iid:
-            raise GitLabError("GitLab split marker is invalid")
-        if issue.iid in dependency_iids:
-            raise GitLabError("GitLab split marker is invalid")
-        try:
-            dependency_issues = tuple(by_iid[value] for value in dependency_iids)
-        except KeyError as error:
-            raise GitLabError("GitLab split dependency is missing") from error
-        return all(dependency.state == "closed" for dependency in dependency_issues)
 
     def list_projected(self) -> tuple[GitLabIssue, ...]:
         """Return issues carrying any lifecycle projection."""

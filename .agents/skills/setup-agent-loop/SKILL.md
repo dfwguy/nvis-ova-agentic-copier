@@ -232,7 +232,9 @@ effective API access 30. Then it checks repository safeguards.
 
 The guarded loop resumes active work first. It then selects new,
 open, non-confidential issues with no lifecycle projection, ledger record, or
-open split prerequisite. It projects active work as `agent::running`. It uses
+open split prerequisite. Required open descendants of a closed prerequisite
+also keep the dependent blocked.
+It projects active work as `agent::running`. It uses
 `agent::awaiting-human` only with same-project MR evidence, matching local and
 remote tips, default target, and `Closes #IID`. Expected human action uses
 `agent::blocked`. `agent::failed` is only for exceptional cases. It is only for unrecoverable cases.

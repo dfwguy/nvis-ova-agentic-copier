@@ -660,11 +660,11 @@ accepted for consistent invocation and changes nothing.
 | --- | --- |
 | Corroborated evidence | Lifecycle-projected GitLab issues; local ledger; each retained issue's passive advisory owner marker; fixed branch and retained worktree; merge request and exact-source pipeline; default-branch pipeline; configured project and credential identity; and controller, service, and short-lived project-lock evidence. |
 | JSON and human aggregates | `total`, `open`, `closed`, `active`, `blocked`, `dependency_gated`, `human_action`, and `no_action`. |
-| Detailed candidate | Per-issue owner state; active state; `human_action_required`; bounded blocked cause; dependency explanation naming open trusted prerequisites; current and intended prerequisite-label projections; exact next action. |
-| Classification | Legitimately waiting, dependency-gated, safely retryable, superseded or duplicate, closure candidate, or needing a specific human decision. For a blocked dirty worktree, inventory runs the retained-artifact evidence checks shared with retry preview. Supported dirty recovery can qualify as `safely_retryable`; the explicit retry preview remains the final gate. |
+| Detailed candidate | Per-issue owner state; active state; `human_action_required`; bounded blocked cause; dependency explanation naming direct open prerequisites and required open descendants of closed decomposition parents; current and intended prerequisite-label projections; exact next action. |
+| Classification | Legitimately waiting, dependency-gated, safely retryable, superseded or duplicate, closure candidate, or needing a specific human decision. A retained dependent remains `dependency_gated` while any required descendant is open. After all required descendants close, preserved retained work can qualify as `safely_retryable`; the explicit retry preview remains the final gate. For a blocked dirty worktree, inventory runs the retained-artifact evidence checks shared with retry preview. |
 | Ineligible retained candidate | When those shared checks reject dirty retained evidence, including a legacy candidate, report `needs_human_decision` with a bounded reason. The next action is to inspect the retained worktree and ledger before choosing a reviewed resolution. Preserve both artifacts; inventory does not authorize a retry. |
 | Report order | Failed default-branch and open-merge-request pipelines; retained issues by deterministic owner-evidence and IID ordering; safely retryable blocked items; dependency reconciliation; awaiting-human items; fresh ordinary work. |
-| Fresh work | Reports it only. Never claims it. When trusted split prerequisites clear, recommends an explicit retry rather than starting a child item. |
+| Fresh work | Reports it only. Never claims it. When direct prerequisites and required descendants clear, recommends an explicit retry rather than starting a child item. |
 | `closed_no_action` | Takes precedence for a closed recordless split issue and a closed `COMPLETE` record. These terminal states need no action even when retained worktree, head, merge-request, or pipeline evidence drifted. |
 | Closed records | Closed nonterminal records need human review. An untargeted inventory collapses settled closed-item detail but keeps aggregate counts. `--issue-iid IID` returns that item's exact evidence. |
 
@@ -923,7 +923,7 @@ For new work, the runner uses these rules.
 
 | Check | Result |
 | --- | --- |
-| Issue is open and non-confidential; has no lifecycle projection, ledger record, or open split prerequisite | Eligible for fresh selection. |
+| Issue is open and non-confidential; has no lifecycle projection, ledger record, open split prerequisite, or required open descendant of a closed decomposition parent | Eligible for fresh selection. |
 | Exact `agent-priority::high` | Rank 0. |
 | No recognized exact priority value, including unknown priority-like labels | Rank 1. |
 | Exact `agent-priority::low` | Rank 2. |
@@ -1304,7 +1304,9 @@ A split-required issue returns one protocol-version-2 envelope:
 ### Split prerequisite-label projection
 
 Only validated split markers and live referenced-issue state control a child's
-dependency gate. The runner projects this state to operators with non-scoped
+dependency gate. The runner derives one marker-based proof from a complete live
+issue snapshot and shares it across selection, recovery, and label projection.
+It projects the open needs to operators with non-scoped
 `agent-prereq_<IID>` labels. A projection label never changes eligibility.
 
 The table shows what labels mean. Labels show open needs. They do not set the
@@ -1313,12 +1315,17 @@ rules keep the view clear.
 
 | Projection state | Required label action or outcome |
 | --- | --- |
-| Open split child | It has one `agent-prereq_<IID>` label for each open trusted prerequisite. The runner orders prerequisite IIDs numerically when it calculates and reports the set. |
+| Open split child | It has one `agent-prereq_<IID>` label for each open trusted need. The runner orders IIDs numerically when it calculates and reports the set. |
+| Open direct prerequisite | The literal prerequisite IID remains in the trusted need set. |
+| Interrupted controller decomposition | The parent remains open and remains the direct need. Only a closed parent expands to its observed marker-bound children. |
+| Closed decomposed prerequisite | Its literal dependency continues through the closed parent to every required open child or descendant. Those descendant IIDs replace the closed parent's IID in the open need set. Recursive decomposition follows the same rule. |
 | Project label | The runner creates or reuses it safely on repeat. It has color `#6F42C1` and description `Open split prerequisites for agent-work issue dependency display.` |
-| Reconciliation | It adds missing labels and removes stale ones. It removes a label when its prerequisite closes, the trusted marker dependency is removed, or the dependent issue closes. Repairs are idempotent, and a partly completed remote update stays retryable. |
+| Reconciliation | It adds missing labels and removes stale ones. It removes a label only when the complete proof no longer requires that open IID, the trusted marker dependency is removed, or the dependent issue closes. Repairs are idempotent, and a partly completed remote update stays retryable. |
 | Applied reconciliation | It creates or normalizes canonical project-label definitions, removes exact legacy `agent::prereq_<IID>` labels from affected issues, and adds the full numerically ordered canonical set. |
 | Legacy definition | It is deleted only after every issue-label change succeeds. If a change fails, definitions remain for the next safe, idempotent retry. |
 | Preservation and preview | Reconciliation keeps unrelated and lifecycle labels. Preview reports the intended change but does not write it. |
+| Fail-closed evidence | A missing referenced dependency, duplicate child identity, malformed or ambiguous marker, self-reference, or cycle blocks selection and recovery. The runner claims no dependent worker and starts no tight retry. |
+| Retained recovery | It remains `dependency_gated` while any required descendant is open. After they all close, the existing retained work can become `safely_retryable`. Retained artifacts and human merge-request review remain in place. |
 
 | Worker context state | Required action or outcome |
 | --- | --- |
