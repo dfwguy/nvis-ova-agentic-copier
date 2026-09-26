@@ -30,6 +30,25 @@ def test_generated_project_structure(generated_project: Path) -> None:
     assert (generated_project / ".gitlab-ci.yml").exists()
 
 
+@pytest.mark.parametrize("task_output", (".git", "uv.lock"))
+def test_generated_project_renders_without_running_trusted_tasks(
+    generated_project: Path, task_output: str
+) -> None:
+    """Ordinary render assertions need files without task-created output."""
+    config = tomllib.loads((generated_project / "pyproject.toml").read_text())
+
+    assert config["project"]["name"] == "my_test_project"
+    assert not (generated_project / task_output).exists()
+
+
+def test_trusted_generated_project_runs_setup_tasks(
+    trusted_generated_project: Path,
+) -> None:
+    """The explicit trusted path retains Git and dependency setup coverage."""
+    assert (trusted_generated_project / ".git").is_dir()
+    assert (trusted_generated_project / "uv.lock").is_file()
+
+
 def test_root_envrc_is_ignored_in_source_template_and_rendered_project(
     generated_project: Path,
     project_root: Path,
@@ -612,10 +631,10 @@ def test_generated_dev_environment_includes_local_tox_matrix(
 
 
 def test_generated_lock_does_not_depend_on_its_own_project(
-    generated_project: Path,
+    trusted_generated_project: Path,
 ) -> None:
     """The generated dependency graph must not contain a project self-edge."""
-    lock = tomllib.loads((generated_project / "uv.lock").read_text())
+    lock = tomllib.loads((trusted_generated_project / "uv.lock").read_text())
     project = next(
         package for package in lock["package"] if package["source"] == {"editable": "."}
     )

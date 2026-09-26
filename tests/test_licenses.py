@@ -619,10 +619,10 @@ def test_license_enforcement_is_wired_into_precommit_and_ci(project_root: Path) 
 
 
 def test_repository_template_and_rendered_project_satisfy_license_policy(
-    generated_project: Path, project_root: Path, template_dir: Path
+    trusted_generated_project: Path, project_root: Path, template_dir: Path
 ) -> None:
     """Every maintained file in root, template, and Copier output is compliant."""
-    for root in (project_root, template_dir, generated_project):
+    for root in (project_root, template_dir, trusted_generated_project):
         result = _run_checker(project_root, root)
         assert result.returncode == 0, result.stderr
 
