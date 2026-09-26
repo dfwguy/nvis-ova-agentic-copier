@@ -186,8 +186,34 @@ from one run. An inherited case that stays above 100 ms but is unchanged or
 faster remains in the report without automatic rejection. Give each
 confirmed cost an owner and a reduction or integration-exception plan in the
 [long-running register](../reference/testing-strategy.md#long-running-local-test-register).
-The serial worker still uses trusted candidate-only timing proof; issue #270
-tracks paired baseline evidence there.
+The serial worker still uses trusted candidate-only timing proof.
+
+### Resume after an interrupted successful hook
+
+If the window ends after a successful Judge hook but before timing is done,
+close it. Read the saved status for the same staged tree. Require
+`terminal-success`, hook exit code `0`, and both saved full-suite JUnit files.
+Keep each absolute path, SHA-256 digest, and test count. Do not run the hook,
+validation run, or retry again for that tree.
+
+Check process and supervisor evidence first. It must show that the old factory
+worker and all its child processes have ended and are quiet. A free project
+lock alone does not prove this. Discard all timing runs from the old window,
+even a partial pair. Open a new admitted window for timing only. Inside it,
+recheck the saved status and JUnit files. Check the exact staged tree and the
+unchanged candidate worktree. Stop if an identity or file has changed. The
+saved hook result cannot validate a changed candidate.
+
+In the new window, run complete equal baseline and candidate repeats for both
+`py311` and `py314`. Run each tree at least twice. Record the baseline commit
+and tree, candidate tree, and selected node IDs. Record each command, Python
+interpreter and package version, pytest seed, JUnit and phase-log path, SHA-256
+digest, and case count. Bind the read-only comparator to those exact trees.
+Check for competing host work during and after the runs. Any overlap voids
+that window's timing proof. Gather fresh complete pairs once it ends. Log the
+interruption, old-worker check, new window, identities, saved full-suite files,
+focused files, and contention checks in the durable audit. Non-functional
+Review and Finalizer wait for sound proof.
 
 This is a simple CI DAG, not a state machine. The separate images aim to reduce
 unrelated work. Check that the exact-source

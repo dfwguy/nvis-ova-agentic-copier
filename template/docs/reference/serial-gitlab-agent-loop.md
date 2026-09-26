@@ -578,6 +578,24 @@ requests for the same candidate tree never rerun the combined hook or an
 individual hook. They never rewrite the record. The one explicit pre-hook
 cleanup retry writes a separate append-only attempt.
 
+An interrupted interactive window can leave a saved `terminal-success` result
+for the exact staged tree while its focused timing is incomplete. Status still
+returns the saved hook exit code `0` and immutable full-suite `py311` and
+`py314` JUnit paths, SHA-256 digests, and test counts. A new window for timing
+only may use that result after positive proof that the earlier factory worker
+and its descendants have ended and are quiet. A free admission lock alone is
+insufficient. The new window must recheck status, staged-tree and worktree
+identity, and saved artifacts. Focused runs from the interrupted window are
+discarded. The read-only comparator checks complete equal baseline and
+candidate repetitions against the exact trees, commands, interpreter paths,
+seeds, and JUnit and phase-log paths, digests, and counts. The Judge checks and
+audits Python and package version parity separately; the comparator does not
+accept version fields. Contention during or after the runs invalidates the
+timing proof. The durable audit records the interruption, old-worker check,
+new window, identities, artifacts, and contention check. Non-functional
+Review and Finalizer cannot proceed on partial or contaminated proof. No
+second validation run, retry, or hook is allowed for the same tree.
+
 ### `credential rotate`
 
 Use this command after a GitLab credential changes. It safely rebinds the
