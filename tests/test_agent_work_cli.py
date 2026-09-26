@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -191,6 +192,24 @@ def test_applied_validation_with_project_identity_runs_hook_under_shared_admissi
             return CommandResult(0, str(tmp_path / ".git"), "")
         if command == ("git", "write-tree"):
             return CommandResult(0, "a" * 40, "")
+        if command == (
+            sys.executable,
+            "scripts/check_licenses.py",
+            "--root",
+            ".",
+            "--policy",
+            ".license-policy.toml",
+            "--candidate-tree",
+            "a" * 40,
+            "--json",
+        ):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {"schema_version": 1, "outcome": "compliant", "violations": []}
+                ),
+                "",
+            )
         return CommandResult(0, "", "")
 
     def run_hook(
@@ -1066,6 +1085,98 @@ def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> No
             "test_count": 5,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("checker_outcome", "checker_returncode", "hook_count"),
+    (
+        ("violations", 1, 0),
+        ("compliant", 0, 1),
+    ),
+)
+def test_validation_default_cli_runs_exact_license_preflight_before_hook(
+    tmp_path: Path,
+    checker_outcome: str,
+    checker_returncode: int,
+    hook_count: int,
+) -> None:
+    class HookReached(Exception):
+        """Stop after the preflight ordering boundary has been observed."""
+
+    tree = "a" * 40
+    calls: list[tuple[str, ...]] = []
+    checker_command = (
+        sys.executable,
+        "scripts/check_licenses.py",
+        "--root",
+        ".",
+        "--policy",
+        ".license-policy.toml",
+        "--candidate-tree",
+        tree,
+        "--json",
+    )
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        calls.append(command)
+        if command == ("git", "rev-parse", "--git-dir"):
+            return CommandResult(0, str(tmp_path / "git"), "")
+        if command == ("git", "write-tree"):
+            return CommandResult(0, tree, "")
+        if command == checker_command:
+            violations = (
+                [{"path": "bad.py", "message": "missing NVIDIA license header"}]
+                if checker_outcome == "violations"
+                else []
+            )
+            return CommandResult(
+                checker_returncode,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "outcome": checker_outcome,
+                        "violations": violations,
+                    }
+                ),
+                "",
+            )
+        assert command == ("git", "hook", "run", "pre-commit")
+        raise HookReached
+
+    def run_hook(command: tuple[str, ...], _lease: object) -> CommandResult:
+        return run(command)
+
+    output: list[str] = []
+    assert not (tmp_path / ".venv").exists()
+
+    def invoke() -> int:
+        return main(
+            ["validation", "run", "--candidate-tree", tree, "--apply", "--json"],
+            run_command=run,
+            run_validation_hook=run_hook,
+            environment={
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+                "GITLAB_HOST": "git.example.test",
+                "GITLAB_PROJECT_ID": "37",
+            },
+            write_stdout=output.append,
+        )
+
+    if hook_count:
+        with pytest.raises(HookReached):
+            invoke()
+        assert output == []
+    else:
+        assert invoke() == 1
+        assert json.loads(output[0])["state"] == "preflight-failure"
+    assert calls.count(checker_command) == 1
+    assert calls.count(("git", "hook", "run", "pre-commit")) == hook_count
+    if hook_count:
+        assert calls.index(checker_command) < calls.index(
+            ("git", "hook", "run", "pre-commit")
+        )
+    else:
+        assert not tuple((tmp_path / "state").rglob("*.json"))
 
 
 @pytest.mark.parametrize("action", ("run", "status"))

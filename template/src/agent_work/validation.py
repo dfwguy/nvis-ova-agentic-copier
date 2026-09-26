@@ -16,6 +16,7 @@ import json
 import math
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
@@ -73,6 +74,11 @@ _CANONICAL_HOOK_LINE = re.compile(
     r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+:[0-9]+:[0-9]+: (?:[A-Z][0-9]{1,5}|[a-z][a-z0-9-]*))$"
 )
 _FALLBACK_HOOK_LINE = "No safe structured diagnostic available."
+_LICENSE_MESSAGE = re.compile(
+    r"^(?:missing NVIDIA license header|misplaced NVIDIA license header|"
+    r"incomplete NVIDIA license header|unsupported file type|"
+    r"external license annotation required(?: for symlink)?)$"
+)
 _SAFE_TEST_NAME = re.compile(
     r"^(?:[A-Za-z0-9_./:-]+::)?test_[A-Za-z0-9_./:-]{1,150}"
     r"(?:\[[A-Za-z0-9_-][A-Za-z0-9_.-]{0,149}\])?$"
@@ -129,6 +135,19 @@ class HookFailure:
 
     hook_id: str
     diagnostic_lines: tuple[str, ...]
+
+
+class _LicenseViolation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    path: str = Field(strict=True)
+    message: str = Field(strict=True)
+
+
+class _LicenseResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[1]
+    outcome: Literal["compliant", "violations"]
+    violations: tuple[_LicenseViolation, ...] = Field(max_length=16)
 
 
 class _PersistedHookFailure(BaseModel):
@@ -432,6 +451,7 @@ class JudgeValidationReport:
     ]
     state: Literal[
         "preview",
+        "preflight-failure",
         "running",
         "terminal-success",
         "terminal-failure",
@@ -463,6 +483,7 @@ class JudgeValidationDependencies:
     atomic_write_record: Callable[[str, dict[str, object]], None]
     candidate_lock: Callable[[str], AbstractContextManager[None]]
     run_command: CommandRunner
+    run_license_preflight: Callable[[str], object]
     monotonic_clock: Callable[[], float]
     sleeper: Callable[[float], None]
     run_hook: (
@@ -482,6 +503,69 @@ class JudgeValidationDependencies:
 
 def _valid_tree(value: str) -> bool:
     return bool(_TREE.fullmatch(value))
+
+
+def _preflight_failure(
+    candidate_tree: str, result: object
+) -> JudgeValidationReport | None:
+    """Accept only a bounded, consistent checker success envelope."""
+    details: tuple[str, ...] = (_FALLBACK_HOOK_LINE,)
+    stdout = getattr(result, "stdout", None)
+    stderr = getattr(result, "stderr", None)
+    returncode = getattr(result, "returncode", None)
+    if (
+        isinstance(stdout, str)
+        and isinstance(stderr, str)
+        and len(stdout.encode("utf-8")) <= 16_384
+    ):
+        try:
+
+            def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+                value: dict[str, object] = {}
+                for key, item in pairs:
+                    if key in value:
+                        raise ValueError("duplicate checker field")
+                    value[key] = item
+                return value
+
+            payload = _LicenseResult.model_validate(
+                json.loads(stdout, object_pairs_hook=unique_pairs)
+            )
+        except (ValueError, ValidationError):
+            payload = None
+        if payload is not None:
+            if (
+                returncode == 0
+                and payload.outcome == "compliant"
+                and not payload.violations
+                and not stderr
+            ):
+                return None
+            if (
+                returncode == 1
+                and payload.outcome == "violations"
+                and payload.violations
+                and all(
+                    _safe_path(item.path)
+                    and len(item.path.encode("utf-8")) <= 200
+                    and _LICENSE_MESSAGE.fullmatch(item.message)
+                    for item in payload.violations
+                )
+            ):
+                details = tuple(
+                    f"{item.path}: {item.message}"
+                    for item in payload.violations[:_MAX_HOOK_LINES]
+                )
+    return JudgeValidationReport(
+        candidate_tree,
+        True,
+        "ran",
+        "preflight-failure",
+        False,
+        None,
+        None,
+        (HookFailure("license-check", details),),
+    )
 
 
 def _valid_junit_artifacts(
@@ -1069,6 +1153,15 @@ def run_judge_validation(
             return _report(
                 candidate_tree, applied=True, action="existing", record=record
             )
+        try:
+            preflight_result = dependencies.run_license_preflight(candidate_tree)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            preflight_result = None
+        preflight = _preflight_failure(candidate_tree, preflight_result)
+        if preflight is not None:
+            return preflight
+        if dependencies.current_staged_tree() != candidate_tree:
+            raise JudgeValidationError("candidate tree is not the current staged tree")
         running = _Record(
             candidate_tree=candidate_tree, schema_version=2, state="running"
         )

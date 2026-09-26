@@ -256,6 +256,7 @@ class _ValidationReport(Protocol):
     ]
     state: Literal[
         "preview",
+        "preflight-failure",
         "running",
         "terminal-success",
         "terminal-failure",
@@ -2358,6 +2359,19 @@ def main(
                     candidate_lock=candidate_lock,
                     project_admission=project_admission,
                     run_command=run_command,
+                    run_license_preflight=lambda tree: run_command(
+                        (
+                            sys.executable,
+                            "scripts/check_licenses.py",
+                            "--root",
+                            ".",
+                            "--policy",
+                            ".license-policy.toml",
+                            "--candidate-tree",
+                            tree,
+                            "--json",
+                        )
+                    ),
                     run_hook=validation_hook,
                     monotonic_clock=time.monotonic,
                     sleeper=time.sleep,

@@ -1382,6 +1382,7 @@ class GitRepository:
             )
         state = report.get("state")
         if state not in {
+            "preflight-failure",
             "running",
             "terminal-success",
             "terminal-failure",

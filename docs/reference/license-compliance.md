@@ -5,12 +5,14 @@ summary: Look up license rules, checked files, and allowed exemptions.
 audience: maintainer
 tags: [compliance, template]
 status: current
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-26
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why final validation uses specialized review roles.
   - path: readability.md
     why: Describes the writing readability check.
+  - path: serial-gitlab-agent-loop.md
+    why: Defines the Judge validation session that runs the license preflight.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -33,6 +35,7 @@ files.
 | --- | --- |
 | Pre-commit | `license-check` stops a commit with a bad header. |
 | GitLab CI | `license-check` checks the submitted tree. |
+| Judge preflight | The read-only checker scans the exact staged candidate tree before a durable full-hook session starts. A failed check stops validation before JUnit cleanup or the hook. |
 | Final review | `$license-checker` reviews the stable Green diff. Green waits for its result, and `$tdd-finalizer` requires a current passing rerun. |
 
 Fix every failed file and rerun the check after a checked file changes. A fail
@@ -46,11 +49,18 @@ Run this from the repository root.
 uv run python scripts/check_licenses.py --root . --policy .license-policy.toml
 ```
 
+For a staged candidate, pass its exact Git tree ID:
+
+```bash
+uv run python scripts/check_licenses.py --root . --policy .license-policy.toml --candidate-tree TREE --json
+```
+
 | Item | Use |
 | --- | --- |
 | `scripts/check_licenses.py --root <path> --policy <path>` | Read-only command. |
 | `.license-policy.toml` | Main policy file. |
 | `.license-annotations.toml` | File for listed exceptions. |
+| `--candidate-tree TREE` | Scan the exact Git tree, including its policy and annotations, instead of checkout content. |
 | `--json` | Writes a versioned result. |
 | `--debug` | Adds scan detail. |
 | `--apply` | Not supported. |
@@ -58,8 +68,8 @@ uv run python scripts/check_licenses.py --root . --policy .license-policy.toml
 | Exit | Meaning |
 | --- | --- |
 | 0 | Files pass, or help was asked for. |
-| 1 | One or more files fail. |
-| 2 | Input, path, scan, or policy error. |
+| 1 | One or more files fail. With `--candidate-tree`, runtime Git, policy, annotation, or scan errors also exit 1; `--json` reports `outcome: error`. |
+| 2 | Invalid command syntax or arguments. In ordinary checkout mode, input, path, scan, or policy errors also exit 2. |
 
 JSON goes to standard output with an empty error stream. Normal passes are
 silent. Normal errors and debug notes go to standard error.
@@ -70,12 +80,19 @@ The JSON result has `schema_version` 1. Its `outcome` is `compliant`,
 `violations`, or `error`. A violation has `path` and `message`; an error has
 `error`. This format also covers startup errors.
 
+Judge accepts only a valid `compliant` JSON result with a successful exit
+status. A violation, checker error, or malformed result fails the preflight.
+After a correction, stage a new tree and validate that tree.
+
 ## Scope
 
 The policy checks the root, `.agents`, the Copier payload, and rendered output.
 A template file and its output must both pass. Git gives the scan its tracked
 paths. Outside Git, the scan uses `.gitignore` rules. It does not follow links
 and sorts paths.
+
+With `--candidate-tree`, the checker reads tracked files from that tree. It
+does not use unstaged checkout changes or change the tree.
 
 The scan walks from the top down and applies each nested ignore rule in order.
 A nested rule can add a path back. The scan prunes a skipped directory only
@@ -84,9 +101,10 @@ when no nested rule can add a path back.
 ## Text and config
 
 The scan reads text and TOML as UTF-8. A bad or unreadable checked file fails.
-A bad, missing, or unreadable policy or annotation file is a setup error and
-exits 2. The scan does not use part of a policy or assume an empty annotation
-list.
+A bad, missing, or unreadable policy or annotation file is a setup error. It
+exits 2 in ordinary checkout mode. With `--candidate-tree`, policy, annotation,
+or scan execution errors exit 1; `--json` emits `outcome: error`. The scan does
+not use part of a policy or assume an empty annotation list.
 
 ## Header rules
 

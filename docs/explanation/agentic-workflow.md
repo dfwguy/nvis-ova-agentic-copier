@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-25
+last_reviewed: 2026-09-26
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -147,12 +147,14 @@ controller later makes the one final commit for the whole change.
 Green runs the fast formatter, lint, type checks, and focused behavior tests.
 Green and the Diátaxis Writer stop editing before their combined candidate is
 staged. In interactive work, Main stages it and records its tree ID. Judge uses
-`validation run` for that tree. The durable session runs one
-`git hook run pre-commit`, then saves fixed JUnit snapshots, digests, and test
-counts. Judge checks the unchanged tree after success. Judge and Non-functional
+`validation run` for that tree. Judge first scans its licenses. A failed scan
+stops before the durable full-hook session or JUnit cleanup. A passing scan
+allows the session to run one `git hook run pre-commit`, then save fixed JUnit
+snapshots, digests, and test counts. Judge checks the unchanged tree after
+success. Judge and Non-functional
 Reviewer can read persisted evidence after a lost command handle without
 rerunning the hook. See the [validation command
-reference](../reference/serial-gitlab-agent-loop.md#validation-run-and-validation-status).
+reference](../reference/serial-gitlab-agent-loop.md#validation-window-validation-run-and-validation-status).
 
 In serial work, Green asks a private controller socket to stage the changed
 paths the controller observes. The content workflow uses that boundary too.
@@ -160,7 +162,8 @@ It returns the exact Git tree ID. The worker cannot write the linked
 checkout's Git administrative data or controller state.
 
 For coding work, the Validation Judge first uses that socket to validate the
-staged tree and read its durable status. The trusted controller runs one hook
+staged tree and read its durable status. The trusted controller checks licenses
+in that tree before it starts the full-hook session. It runs one hook
 for each tree and records fixed JUnit snapshots, digests, test counts, and
 elapsed time. It returns an opaque evidence ID and bounded results without
 private snapshot paths. A failed result gives the same live worker safe test

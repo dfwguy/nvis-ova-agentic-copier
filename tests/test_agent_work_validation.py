@@ -96,6 +96,9 @@ def _dependencies(
 
     return (
         JudgeValidationDependencies(
+            run_license_preflight=lambda _tree: CommandResult(
+                0, _preflight_payload("compliant"), ""
+            ),
             current_staged_tree=lambda: current_tree,
             read_record=state.read,
             atomic_write_record=state.atomic_write,
@@ -143,6 +146,9 @@ def _diagnostic_dependencies(
         )
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -154,6 +160,228 @@ def _diagnostic_dependencies(
         capture_junit_artifacts=capture,
     )
     return dependencies, calls, artifact_reads
+
+
+def _preflight_payload(
+    outcome: str, violations: list[dict[str, str]] | None = None
+) -> str:
+    return json.dumps(
+        {"schema_version": 1, "outcome": outcome, "violations": violations or []}
+    )
+
+
+def test_license_violation_preflight_keeps_candidate_without_session_or_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    events: list[str] = []
+    dependencies = replace(
+        dependencies,
+        run_license_preflight=lambda tree: (
+            events.append(f"preflight:{tree}")
+            or CommandResult(
+                1,
+                _preflight_payload(
+                    "violations",
+                    [
+                        {
+                            "path": "template/bad.py",
+                            "message": "missing NVIDIA license header",
+                        }
+                    ],
+                ),
+                "",
+            )
+        ),
+        remove_junit_artifact=lambda path: events.append(f"remove:{path}"),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.candidate_tree == _CANDIDATE
+    assert report.state == "preflight-failure"
+    assert report.hook_failures[0].hook_id == "license-check"
+    assert state.locks == [_CANDIDATE]
+    assert state.writes == []
+    assert events == [f"preflight:{_CANDIDATE}"]
+    assert hooks == []
+
+
+def test_project_admission_covers_license_rejection_without_running_state() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    events: list[str] = []
+
+    @contextmanager
+    def project_admission() -> Iterator[None]:
+        events.append("admitted")
+        try:
+            yield
+        finally:
+            events.append("released")
+
+    dependencies = replace(
+        dependencies,
+        project_admission=project_admission,
+        run_license_preflight=lambda _tree: (
+            events.append("preflight")
+            or CommandResult(
+                1,
+                _preflight_payload(
+                    "violations",
+                    [{"path": "bad.py", "message": "missing NVIDIA license header"}],
+                ),
+                "",
+            )
+        ),
+        run_hook=lambda _command, _lease: (
+            events.append("hook") or CommandResult(0, "", "")
+        ),
+        remove_junit_artifact=lambda _path: events.append("cleanup"),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert events == ["admitted", "preflight", "released"]
+    assert state.writes == []
+    assert hooks == []
+
+
+def test_compliant_license_preflight_precedes_one_full_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, _hooks = _dependencies(state)
+    events: list[str] = []
+    dependencies = replace(
+        dependencies,
+        run_license_preflight=lambda tree: (
+            events.append(f"preflight:{tree}")
+            or CommandResult(0, _preflight_payload("compliant"), "")
+        ),
+        run_command=lambda command, **_kwargs: (
+            events.append(" ".join(command)) or CommandResult(0, "", "")
+        ),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "terminal-success"
+    assert events == [f"preflight:{_CANDIDATE}", "git hook run pre-commit"]
+    assert len(state.writes) >= 1
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    (
+        (0, "not-json"),
+        (0, _preflight_payload("violations", [{"path": "bad.py", "message": "bad"}])),
+        (1, _preflight_payload("compliant")),
+        (2, '{"schema_version":1,"outcome":"error","error":"unavailable"}'),
+        (0, '{"schema_version":1,"outcome":"compliant","violations":[],"extra":1}'),
+    ),
+    ids=(
+        "malformed",
+        "mismatched-violation",
+        "mismatched-compliant",
+        "error",
+        "extra-field",
+    ),
+)
+def test_invalid_license_preflight_fails_closed_before_session_or_hook(
+    returncode: int, stdout: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    removals: list[Path] = []
+    dependencies = replace(
+        dependencies,
+        run_license_preflight=lambda _tree: CommandResult(returncode, stdout, "secret"),
+        remove_junit_artifact=removals.append,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert report.candidate_tree == _CANDIDATE
+    assert state.writes == []
+    assert removals == []
+    assert hooks == []
+    assert "secret" not in str(report)
+
+
+def test_staged_tree_drift_after_preflight_rejects_without_session_or_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    current_tree = iter((_CANDIDATE, _OTHER_CANDIDATE))
+    dependencies = replace(
+        dependencies,
+        current_staged_tree=lambda: next(current_tree),
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
+    )
+
+    with pytest.raises(JudgeValidationError, match="staged tree"):
+        run_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+
+    assert state.writes == []
+    assert hooks == []
+
+
+def test_corrected_tree_runs_after_bad_tree_and_existing_record_is_idempotent() -> None:
+    state = ValidationStateFake()
+    hooks: list[tuple[str, ...]] = []
+    preflights: list[str] = []
+    current = [_CANDIDATE]
+    dependencies, _ = _dependencies(state)
+
+    def preflight(tree: str) -> CommandResult:
+        preflights.append(tree)
+        return CommandResult(
+            1 if tree == _CANDIDATE else 0,
+            _preflight_payload(
+                "violations" if tree == _CANDIDATE else "compliant",
+                [{"path": "bad.py", "message": "missing NVIDIA license header"}]
+                if tree == _CANDIDATE
+                else [],
+            ),
+            "",
+        )
+
+    dependencies = replace(
+        dependencies,
+        current_staged_tree=lambda: current[0],
+        run_license_preflight=preflight,
+        run_command=lambda command, **_kwargs: (
+            hooks.append(command) or CommandResult(0, "", "")
+        ),
+    )
+    rejected = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    current[0] = _OTHER_CANDIDATE
+    accepted = run_judge_validation(
+        candidate_tree=_OTHER_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    existing = run_judge_validation(
+        candidate_tree=_OTHER_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert rejected.state == "preflight-failure"
+    assert _CANDIDATE not in state.records
+    assert accepted.state == existing.state == "terminal-success"
+    assert existing.action == "existing"
+    assert preflights == [_CANDIDATE, _OTHER_CANDIDATE]
+    assert hooks == [("git", "hook", "run", "pre-commit")]
 
 
 def test_preview_never_runs_hook_or_mutates_durable_session() -> None:
@@ -1942,6 +2170,9 @@ def test_successful_apply_captures_exact_supported_junit_bytes_and_status_reuses
         )
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -1989,6 +2220,9 @@ def test_successful_apply_captures_exact_supported_junit_bytes_and_status_reuses
     )
 
     status_dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2142,6 +2376,9 @@ def test_hook_failure_keeps_existing_diagnostics_without_junit_capture() -> None
     state = ValidationStateFake()
     captures: list[object] = []
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2176,6 +2413,9 @@ def test_artifact_capture_failure_is_terminal_without_rerunning_the_hook() -> No
         return CommandResult(0, "", "")
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2239,6 +2479,9 @@ def test_apply_removes_stale_junit_sources_before_hook_and_in_finally_cleanup(
         )
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2286,6 +2529,9 @@ def test_post_hook_junit_cleanup_failure_is_terminal_and_never_retries_hook(
         return CommandResult(0, "", "")
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2325,6 +2571,9 @@ def test_pre_hook_junit_cleanup_failure_is_terminal_without_a_hook_return_code()
         return CommandResult(0, "", "")
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2387,6 +2636,9 @@ def test_unusable_success_junit_xml_is_terminal_without_capture_or_hook_retry(
         return CommandResult(0, "", "")
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,
@@ -2538,6 +2790,9 @@ def test_interrupted_hook_preserves_running_record_for_nonduplicating_recovery()
         raise RuntimeError("frontend handle lost")
 
     dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
+        ),
         current_staged_tree=lambda: _CANDIDATE,
         read_record=state.read,
         atomic_write_record=state.atomic_write,

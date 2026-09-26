@@ -90,6 +90,10 @@ class CommandRunner(Protocol):
         """Run one command and return its completed result."""
 
 
+class TreeReadError(OSError):
+    """A requested candidate Git blob could not be read."""
+
+
 def _run_command(
     command: Sequence[str],
     *,
@@ -134,6 +138,112 @@ class LocalFilesystem:
     def resolve(self, path: Path) -> Path:
         """Return the canonical path."""
         return path.resolve()
+
+
+@dataclass(frozen=True)
+class TreeFilesystem:
+    """Read only files and symlinks from one immutable Git tree."""
+
+    root: Path
+    entries: dict[Path, tuple[str, str]]
+    contents: dict[str, str]
+    run: CommandRunner
+
+    @classmethod
+    def load(cls, root: Path, tree: str, run: CommandRunner) -> TreeFilesystem:
+        """Load the tree listing through the injected command runner."""
+        listing = run(
+            ("git", "-C", str(root), "ls-tree", "-r", "-z", tree),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if listing.returncode != 0:
+            raise OSError("cannot read candidate Git tree")
+        entries: dict[Path, tuple[str, str]] = {}
+        for record in listing.stdout.split("\0"):
+            if not record:
+                continue
+            metadata, separator, name = record.partition("\t")
+            fields = metadata.split(" ")
+            relative = Path(name)
+            if (
+                not separator
+                or len(fields) != 3
+                or fields[0] not in {"100644", "100755", "120000"}
+                or fields[1] != "blob"
+                or re.fullmatch(r"[0-9a-f]{40}", fields[2]) is None
+                or relative.is_absolute()
+                or not name
+                or any(part in {".", ".."} for part in relative.parts)
+                or relative in entries
+            ):
+                raise ValueError("invalid candidate Git tree listing")
+            entries[relative] = (fields[0], fields[2])
+        return cls(root, entries, {}, run)
+
+    def _relative(self, path: Path) -> Path:
+        try:
+            return path.relative_to(self.root)
+        except ValueError as error:
+            raise OSError("path is outside candidate Git tree") from error
+
+    def list_directory(self, path: Path) -> tuple[Path, ...]:
+        """Return direct children recorded in the tree."""
+        relative = self._relative(path)
+        return tuple(
+            {
+                path / item.parts[len(relative.parts)]
+                for item in self.entries
+                if len(item.parts) > len(relative.parts)
+                and item.parts[: len(relative.parts)] == relative.parts
+            }
+        )
+
+    def is_file(self, path: Path) -> bool:
+        """Return whether the entry is a regular blob."""
+        entry = self.entries.get(self._relative(path))
+        return entry is not None and entry[0] != "120000"
+
+    def is_directory(self, path: Path) -> bool:
+        """Return whether the tree contains descendants of this path."""
+        relative = self._relative(path)
+        return relative == Path(".") or any(
+            item.parts[: len(relative.parts)] == relative.parts
+            and len(item.parts) > len(relative.parts)
+            for item in self.entries
+        )
+
+    def is_symlink(self, path: Path) -> bool:
+        """Return whether the tree entry is a symbolic link."""
+        entry = self.entries.get(self._relative(path))
+        return entry is not None and entry[0] == "120000"
+
+    def read_text(self, path: Path) -> str:
+        """Read a regular blob from the candidate tree."""
+        entry = self.entries.get(self._relative(path))
+        if entry is None or entry[0] == "120000":
+            raise TreeReadError("candidate Git blob is unavailable")
+        oid = entry[1]
+        if oid not in self.contents:
+            blob = self.run(
+                ("git", "-C", str(self.root), "cat-file", "blob", oid),
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            if blob.returncode != 0:
+                raise TreeReadError("cannot read candidate Git blob")
+            self.contents[oid] = blob.stdout
+        return self.contents[oid]
+
+    def resolve(self, path: Path) -> Path:
+        """Return a lexical absolute path within the tree root."""
+        resolved = path if path.is_absolute() else self.root / path
+        self._relative(resolved)
+        return resolved
 
 
 @dataclass(frozen=True)
@@ -193,6 +303,7 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     parser.add_argument("--root", type=Path)
     parser.add_argument("--policy", type=Path, default=Path(".license-policy.toml"))
     parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--candidate-tree", type=str)
     parser.add_argument("--debug", "-d", action="store_true")
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(arguments)
@@ -544,6 +655,8 @@ def _check_path(
 
     try:
         content = filesystem.read_text(path)
+    except TreeReadError:
+        raise
     except (OSError, UnicodeDecodeError):
         return "unsupported file type"
     if annotated and content == "<!-- agent-workflow-legacy-project-guard -->\n":
@@ -744,25 +857,49 @@ def main(
         )
         return 2
 
+    if (
+        namespace.candidate_tree is not None
+        and re.fullmatch(r"[0-9a-f]{40}", namespace.candidate_tree) is None
+    ):
+        _emit_error(
+            "invalid candidate Git tree",
+            json_output=namespace.json_output,
+            output=command_output,
+        )
+        return 2
+    runtime_exit = 1 if namespace.candidate_tree is not None else 2
     local_filesystem = filesystem or LocalFilesystem()
     try:
         root = local_filesystem.resolve(namespace.root or Path("."))
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         _emit_error(
             str(error),
             json_output=namespace.json_output,
             output=command_output,
         )
-        return 2
+        return runtime_exit
     if not local_filesystem.is_directory(root):
         _emit_error(
             f"invalid root directory: {root}",
             json_output=namespace.json_output,
             output=command_output,
         )
-        return 2
+        return runtime_exit
     try:
-        policy_path = local_filesystem.resolve(namespace.policy)
+        active_filesystem: Filesystem = (
+            TreeFilesystem.load(
+                root, namespace.candidate_tree, run_command or _run_command
+            )
+            if namespace.candidate_tree is not None
+            else local_filesystem
+        )
+        policy_argument = (
+            root / namespace.policy
+            if namespace.candidate_tree is not None
+            and not namespace.policy.is_absolute()
+            else namespace.policy
+        )
+        policy_path = active_filesystem.resolve(policy_argument)
         logger = (
             logger_factory(policy_path.parent)
             if logger_factory is not None
@@ -772,23 +909,24 @@ def main(
                 stream=None if namespace.json_output else command_output.stderr,
             )
         )
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         _emit_error(
             str(error),
             json_output=namespace.json_output,
             output=command_output,
         )
-        return 2
+        return runtime_exit
     logger.info("started root=%s", root)
     try:
-        policy = _load_policy(policy_path, local_filesystem)
-        annotations = _load_annotations(policy_path, policy, local_filesystem)
-        maintained_paths = _load_maintained_paths(
-            root,
-            run_command or _run_command,
+        policy = _load_policy(policy_path, active_filesystem)
+        annotations = _load_annotations(policy_path, policy, active_filesystem)
+        maintained_paths = (
+            frozenset(active_filesystem.entries)
+            if isinstance(active_filesystem, TreeFilesystem)
+            else _load_maintained_paths(root, run_command or _run_command)
         )
         ignore_rules = (
-            _load_ignore_rules(root, root, local_filesystem)
+            _load_ignore_rules(root, root, active_filesystem)
             if maintained_paths is None
             else ()
         )
@@ -796,7 +934,7 @@ def main(
             root,
             policy,
             annotations,
-            filesystem=local_filesystem,
+            filesystem=active_filesystem,
             logger=logger,
             ignore_rules=ignore_rules,
             maintained_paths=maintained_paths,
@@ -808,7 +946,7 @@ def main(
             json_output=namespace.json_output,
             output=command_output,
         )
-        return 2
+        return runtime_exit
 
     logger.info("completed violations=%d", len(result.findings))
     _emit_result(result, json_output=namespace.json_output, output=command_output)

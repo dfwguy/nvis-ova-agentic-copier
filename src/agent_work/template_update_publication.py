@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -598,6 +599,35 @@ class _DefaultDependencies:
                 )
             return CommandResult(result.returncode, "", "")
 
+        def run_license_preflight(candidate: str) -> CommandResult:
+            result = self.run_process(
+                (
+                    sys.executable,
+                    "scripts/check_licenses.py",
+                    "--root",
+                    ".",
+                    "--policy",
+                    ".license-policy.toml",
+                    "--candidate-tree",
+                    candidate,
+                    "--json",
+                ),
+                cwd=path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=safe_environment,
+                check=False,
+                timeout=120,
+            )
+            try:
+                return CommandResult(
+                    result.returncode,
+                    result.stdout.decode("utf-8"),
+                    result.stderr.decode("utf-8"),
+                )
+            except UnicodeDecodeError:
+                return CommandResult(2, "", "")
+
         dependencies = JudgeValidationDependencies(
             current_staged_tree=lambda: self._git(path, "write-tree"),
             read_record=read_record,
@@ -605,6 +635,7 @@ class _DefaultDependencies:
             candidate_lock=lambda candidate: XdgProjectLock(
                 state / f"{candidate}.lock"
             ),
+            run_license_preflight=run_license_preflight,
             project_admission=lambda: project_timing_admission(
                 host=self.config.host,
                 project_id=self.config.project_id,
