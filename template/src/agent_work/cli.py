@@ -94,6 +94,8 @@ from .service_environment import (
 from .service_environment import (
     migrate_service_environment as default_migrate_service_environment,
 )
+from .slow_root_intake import MAX_SLOW_ROOT_MANIFEST_BYTES, SlowRootReport
+from .slow_root_intake import reconcile_slow_roots as default_reconcile_slow_roots
 from .status import project_status
 from .systemd_smoke import (
     SystemdSmokeDependencies,
@@ -674,6 +676,15 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
     parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
+    slow_root = resources.add_parser("slow-root", help="reconcile confirmed slow roots")
+    slow_root_actions = slow_root.add_subparsers(dest="action", required=True)
+    reconcile = slow_root_actions.add_parser(
+        "reconcile", help="preview or file confirmed slow root issues"
+    )
+    reconcile.add_argument("--manifest-file", type=Path, required=True)
+    _common(
+        reconcile, apply_help="create confirmed root issues after a second inventory"
+    )
     loop = resources.add_parser("loop", help="inspect or advance the serial loop")
     loop_actions = loop.add_subparsers(dest="action", required=True)
     run = loop_actions.add_parser(
@@ -1089,6 +1100,18 @@ def _read_validation_artifact(path: Path) -> bytes:
     """Read at most one bounded fixed validation artifact."""
     with path.open("rb") as handle:
         return handle.read(1_048_577)
+
+
+def _read_slow_root_manifest(
+    path: Path, *, read_bounded: Callable[..., bytes | None]
+) -> bytes:
+    """Read one manifest up to its declared byte limit before parsing."""
+    payload = read_bounded(path.resolve(), limit=MAX_SLOW_ROOT_MANIFEST_BYTES)
+    if payload is None:
+        raise ValueError("slow root manifest is unavailable")
+    if len(payload) > MAX_SLOW_ROOT_MANIFEST_BYTES:
+        raise ValueError("slow root manifest exceeds 262144 bytes")
+    return payload
 
 
 def _review_handoff_dependencies(
@@ -1758,11 +1781,74 @@ def main(
         _read_validation_artifact
     ),
     registry_cleanup_action: _RegistryCleanupAction | None = None,
+    slow_root_reconcile_action: Callable[..., SlowRootReport] | None = None,
+    slow_root_manifest_reader: Callable[[Path], bytes] | None = None,
+    read_bounded_regular_file: Callable[..., bytes | None] = read_bounded_regular,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "slow-root" and parsed.action == "reconcile":
+        try:
+            project_id = int(environment.get("GITLAB_PROJECT_ID", ""))
+            host = environment.get("GITLAB_HOST", "")
+            if project_id <= 0 or not host:
+                raise ValueError("slow root GitLab configuration is invalid")
+            manifest_reader = (
+                slow_root_manifest_reader
+                if slow_root_manifest_reader is not None
+                else partial(
+                    _read_slow_root_manifest, read_bounded=read_bounded_regular_file
+                )
+            )
+            manifest_bytes = manifest_reader(parsed.manifest_file)
+            action = slow_root_reconcile_action
+            if action is None:
+                glab = find_executable("glab")
+                if glab is None or not Path(glab).is_absolute():
+                    raise ValueError("slow root GitLab configuration is invalid")
+                port = GitLabIssuePublisher(
+                    host=host,
+                    project_id=project_id,
+                    glab_path=str(Path(glab).resolve()),
+                    run_command=run_command,
+                )
+                action = partial(
+                    default_reconcile_slow_roots,
+                    list_issues=partial(port.list_all_issues, project_id=project_id),
+                    create_issue=port.create_issue,
+                    fetch_issue=lambda iid: port.fetch_issue(
+                        project_id=project_id, iid=iid
+                    ),
+                )
+            report = action(manifest_bytes, project_id=project_id, apply=parsed.apply)
+        except (GitLabError, OSError, RuntimeError, ValueError) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        payload = {
+            "applied": report.applied,
+            "items": [
+                {
+                    "root_key": item.root_key,
+                    "action": item.action,
+                    "issue_iid": item.issue_iid,
+                }
+                for item in report.items
+            ],
+        }
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else "\n".join(
+                f"{item.root_key}: {item.action}"
+                + (f" #{item.issue_iid}" if item.issue_iid is not None else "")
+                for item in report.items
+            )
+        )
+        return 0
     if parsed.resource == "loop" and parsed.action == "smoke":
         if not parsed.apply:
             write_stdout(

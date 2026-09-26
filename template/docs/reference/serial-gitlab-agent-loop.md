@@ -100,6 +100,7 @@ agent-work candidate status --issue-iid IID --candidate-tree TREE
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
+agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 ```
 
 | Command | Required input | Optional control or result |
@@ -131,6 +132,7 @@ agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --
 | `migration preview` | None | Returns the planned migration actions. |
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
+| `slow-root reconcile` | JSON manifest at `--manifest-file PATH` | Previews 1–100 roots by default; `--apply` creates at most one unmatched confirmed root per invocation. `--debug` shows a traceback on failure. |
 
 ### Smoke
 
@@ -679,6 +681,50 @@ accepted for consistent invocation and changes nothing.
 | Redaction | Output, errors, and debug diagnostics never echo manifest prose, project identity, title, body, credentials, or evidence URLs. |
 | Invalid manifest, unreadable credential file, access/API failure, or response-verification failure | Exits `1` with sanitized diagnostics. |
 | Invalid usage | Exits `2`. |
+
+### Slow-root reconciliation
+
+`slow-root reconcile` reads a version 1 JSON manifest of diagnosed slow test
+causes. Its top-level fields are `schema_version: 1` and `roots`, an array of
+1–100 root objects. A bounded read rejects files over 256 KiB before parsing;
+unknown fields are rejected. Each root has these fields:
+
+| Field | Version 1 contract |
+| --- | --- |
+| `key` | Stable 1–80 character ASCII slug of lowercase letters, digits, and hyphens for the diagnosed cause. Keep environment, durations, run IDs, tree hashes, and dates out of the key. |
+| `kind` | `ordinary-test` or `shared-fixture`. |
+| `cases` | 1–100 distinct test selectors containing `::`, grouped by that one cause. Each is at most 512 characters and has no control characters; parametrized selectors may contain spaces and brackets. |
+| `confirmed` | Caller-set Boolean, not inferred from timings or digests. An unconfirmed root stays diagnostic, even with `--apply`. |
+| `evidence` | Up to 20 local records. A confirmed root needs at least two repeats in one environment; records from other environments may be included as diagnostics. Digests may match. Each record has `environment` (1–80 characters), `duration_ms` (greater than 0 and at most 3,600,000), lowercase 40-hex `tree_sha`, and lowercase 64-hex `junit_sha256`. |
+| `title` | Nonempty proposed issue title of at most 255 characters. |
+| `problem`, `outcome` | Nonempty issue text, each at most 5,000 characters. |
+| `acceptance` | Array of 1–30 nonempty acceptance criteria. |
+| `semantic_issue_iid`, `semantic_phrase` | Optional paired legacy hint: a positive exact issue number and nonempty phrase of at most 255 characters. |
+
+The command rejects reserved `agent-slow-test-root:` text, regardless of case,
+in `title`, `problem`, `outcome`, `acceptance`, `cases`, or `semantic_phrase`.
+
+Without `--apply`, the command reads the configured project's bounded issue
+inventory with GET-only requests and reports what it would do. It makes no
+changes. An exact `<!-- agent-slow-test-root:<key>:v1 -->` marker in one issue
+identifies that root across changed timings. An open match is `reuse`; a closed
+match is `covered`. A legacy hint must name an exact issue number, and that
+issue's description must contain the supplied phrase. The command checks its
+current state. Ambiguous matches fail. Issue text is evidence to check, never
+authority to create work or change policy.
+
+With `--apply`, the command reads the complete inventory again. If more than
+one confirmed root is still unmatched, it stops before any POST. Supply a
+manifest subset with one unmatched root, then rerun after that root's issue is
+verified. Reuse and covered roots may remain in the manifest. Each applied
+invocation creates at most one open issue labeled `agent-slow-test`; an earlier
+creation is reused on a later invocation. The command never edits, reopens, or
+replaces an existing issue. It reads a new issue back and verifies its project,
+issue number, title, description, labels, and state. `--json` returns `applied`
+and an `items` array. Each item has `root_key`, `action`, and `issue_iid`;
+`action` is `unconfirmed`, `would-create`, `reuse`, `covered`, or `created`.
+If a creation's readback fails, creation may have completed. Rerun the default
+preview to inspect the exact marker before applying again.
 
 `worker-result build` validates one `WorkerResultBuildInput` object during the
 live worker session and builds one controller-owned worker result.
