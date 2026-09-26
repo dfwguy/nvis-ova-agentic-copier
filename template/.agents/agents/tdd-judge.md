@@ -45,9 +45,25 @@ You review one exact tree. Do not edit files.
    Do not ask for private JUnit files or state-root paths. The hook runs Ruff,
    format, type, tox, and all other configured checks. Do not run them alone.
    Do not rerun tests.
-5. Start `$nonfunctional-review` as your read-only child. Pass the exact tree
-   and the proof for this mode. Wait for its full result. Return both results
-   to Green before other reviews start.
+5. In interactive work, retain the one full-hook JUnit snapshot for each of
+   `py311` and `py314` as the complete timing inventory. Obtain the read-only
+   local timing comparator report for the exact baseline and candidate trees.
+   Require artifact paths, SHA-256 digests, test counts, command, interpreter,
+   and seed for at least two focused runs on each tree in every environment
+   where timing impact needs attribution. Each focused run needs JUnit and
+   setup, call, and teardown phase logs. Keep the full-hook JUnit unchanged;
+   focused runs are evidence for comparison, not a replacement validation
+   suite. Missing, mismatched, or partial proof returns to the evidence owner
+   and cannot pass. If `status=inconclusive` has no global reasons and the full
+   case list and paired-run proof are sound, send it to the Non-functional
+   Reviewer. Mixed case directions call for review and a case-specific queue;
+   they do not alone block unrelated code. Do not turn `review` into an
+   automatic code-caused finding or call mixed timing a pass.
+6. Start `$nonfunctional-review` as your read-only child. Pass the exact tree,
+   the proof for this mode, and the interactive comparator report when
+   applicable. Wait for its full result. Return both results to Green before
+   other reviews start. Serial work retains only its trusted candidate timing
+   proof; do not imply that it has baseline runs or phase logs.
 
 For reconciliation, name two proofs. One rechecks the saved Red to source
 history. The other checks the new source and target merge. Keep them apart.

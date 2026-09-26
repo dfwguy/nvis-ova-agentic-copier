@@ -845,6 +845,33 @@ class GitLabIssuePublisher:
                 return tuple(matches)
         raise GitLabError("GitLab returned too many issue publication pages")
 
+    def list_all_issues(self, *, project_id: int) -> tuple[dict[str, object], ...]:
+        """Read a complete bounded open and closed issue inventory."""
+        self._require_project(project_id)
+        inventory: list[dict[str, object]] = []
+        seen: set[int] = set()
+        for page in range(1, _MAX_ISSUE_PAGES + 1):
+            payload = self._call(
+                f"projects/{project_id}/issues",
+                fields=("state=all", "per_page=100", f"page={page}"),
+            )
+            if not isinstance(payload, list) or len(payload) > 100:
+                raise GitLabError("GitLab returned invalid issue inventory")
+            for value in payload:
+                if not isinstance(value, dict):
+                    raise GitLabError("GitLab returned invalid issue inventory")
+                issue = cast(dict[str, object], value)
+                iid = issue.get("iid")
+                if issue.get("project_id") != project_id:
+                    raise GitLabError("GitLab returned wrong-project issue inventory")
+                if type(iid) is not int or iid <= 0 or iid in seen:
+                    raise GitLabError("GitLab returned duplicate or invalid issue IID")
+                seen.add(iid)
+                inventory.append(issue)
+            if len(payload) < 100:
+                return tuple(inventory)
+        raise GitLabError("GitLab issue inventory exceeds page limit")
+
     def create_issue(self, **kwargs: object) -> dict[str, object]:
         project_id = cast(int, kwargs["project_id"])
         self._require_project(project_id)

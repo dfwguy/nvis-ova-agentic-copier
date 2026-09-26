@@ -35,23 +35,43 @@ known long-running cases.
 | Full supported matrix | Run the complete pytest suite on Python 3.11 and 3.14 through tox and the validation hooks. The Judge's JUnit files provide case counts and durations for each environment. |
 | CI | Run the supported matrix in native pytest shards and the other validation jobs. Shards distribute work but do not shorten an individual test or fixture. |
 
-For each added or modified test case, including its parameterizations, a local
-JUnit duration **greater than 100 ms** in either supported Python environment
-returns the change to the test owner for correction. Apply this rule also to
-identifiable cases affected by a changed shared fixture or helper. If you
-cannot tell which cases are affected, flag the gap for action before approval.
-Exactly 100 ms is allowed. Measure the JUnit `testcase` `time` value, which
-includes setup, the test body, and teardown attributed to that case. A session
-fixture can make its first consuming case look slow. Inspect fixture use before
-assigning a cause. CI case times help diagnose load and environment effects;
-this local rule is not a CI gate.
+The local goal is **100 ms or less** per test case in each supported Python
+environment. Exactly 100 ms meets the goal. Use the JUnit `testcase` `time`,
+which includes setup, the test body, and teardown attributed to that case.
+Keep parameterized cases distinct. A session fixture can put shared setup on
+its first consuming case, so inspect phase evidence before assigning a cause.
+CI case times help diagnose load and environment effects; the local goal is
+not a CI case gate.
 
-Independently, every local case at or above **1 second** triggers review and
-entry in the long-running register for each supported Python environment.
-Report every missing case and environment even if another timing finding
-already returns the change for correction. This register trigger alone does
-not reject the change. One timing observation does not prove a regression;
-compare repeat evidence before making that claim.
+In interactive work, an added ordinary test that repeatedly exceeds 100 ms
+returns to its owner unless an integration exception is approved. A modified
+existing test returns when the change introduces a cost above 100 ms or a
+corroborated slowdown attributable to the changed test, fixture, or code.
+Include identifiable cases affected by a changed shared fixture or helper.
+If the impact map is unclear, resolve it before approval. An inherited case
+above 100 ms remains visible, but unchanged or faster cost alone does not
+reject the change. Compare at least two focused runs on each exact baseline
+and candidate tree in the same environment. A regression claim needs
+consistent candidate slowdown, setup, call, or teardown evidence, comparable
+environments, and a supporting diff. One run or a comparator review flag
+alone does not establish a code-caused regression. Missing, mismatched, or
+partial paired proof blocks approval. Complete paired proof with mixed case
+directions remains visible for case-specific diagnosis; that uncertainty alone
+does not block an unrelated change. Do not call the mixed case a timing pass
+or a regression.
+
+The serial worker currently has candidate-only trusted timing proof. It
+returns an identifiable touched case above 100 ms to the test owner, subject
+to a documented integration exception. It does not claim a baseline or phase
+comparison. Issue #270 tracks the paired-evidence path for serial work.
+
+Independently, inventory **every** local case above 100 ms and at or above
+**1 second** for each supported Python environment. Every case at or above
+1 second needs a full report and review. Report each unregistered case and
+environment even when another timing finding already returns the change for
+correction. Add a stable register entry after repeat and phase diagnosis, or
+an explicit decision to track the observed cost. A one-run inherited setup
+spike alone does not block an unrelated change or prove a regression.
 
 Keep a documented integration case that needs more time in the register below.
 Record why it needs that time and how its cost will be reduced or reviewed.
@@ -94,14 +114,14 @@ Its 2026-09-26 times below are one observation, not a regression.
 | Case or shared fixture | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_generated_pre_commit_uses_only_local_hooks` | 3.11 | 1.783 s | Local #249 JUnit; 2026-09-25 | Generated-project check; phase cost unmeasured. | Test maintainers | Separate setup from call time, then reduce avoidable work. |
-| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.11 | 3.558 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured. | Test maintainers | Review integration need and measure setup and update cost. |
+| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.11 | 3.558 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured in this snapshot. | Test maintainers | Issue #268: retain the real v1 copy and v2 update; review Copier VCS cost with same-environment repeats. |
 | `tests.test_agent_work_worker_result_broker::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 3.11 | 1.003 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.013 / 0.012 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_worker_result_broker::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 3.11 | 1.019 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.022 / 0.023 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_state_machine::test_decision_review_draft_bounds_the_fully_rendered_description` | 3.11 | 2.000 s | Local #249 JUnit; 2026-09-25 | Description validation; phase cost unmeasured. | Test maintainers | Profile the case and reduce avoidable work. |
 | `tests.test_licenses::test_repository_template_and_rendered_project_satisfy_license_policy` | 3.14 | 2.640 s | Local #249 JUnit; 2026-09-25 | Repository and rendered-project scan; phase cost unmeasured. | Test maintainers | Measure scan and setup costs separately. |
 | `tests.test_agent_work_worker_result_broker::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 3.14 | 1.005 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.013 / 0.013 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
 | `tests.test_agent_work_worker_result_broker::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 3.14 | 1.012 s (historical) | Local #249 JUnit; 2026-09-25. Focused #267 repeats; 2026-09-26. | The 1 s close join caused the old duration; focused repeats now take 0.022 / 0.022 s. | Test maintainers | The test uses a 0.01 s close join; monitor later full-suite JUnit. Production retains the 1.0 s default. |
-| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.14 | 2.300 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured. | Test maintainers | Review integration need and measure setup and update cost. |
+| `tests.test_template::test_copier_update_preserves_legacy_project_context` | 3.14 | 2.300 s | Local #249 JUnit; 2026-09-25 | Real Copier update; phase cost unmeasured in this snapshot. | Test maintainers | Issue #268: retain the real v1 copy and v2 update; review Copier VCS cost with same-environment repeats. |
 | `tests.test_template::test_generated_lock_does_not_depend_on_its_own_project` | 3.11 | 1.917 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
 | `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/runtime.py]` | 3.11 | 1.435 s | Issue #251 immutable JUnit; 2026-09-26 | Unmeasured; fixture or setup may contribute. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce avoidable work or document an exception. |
 | `tests.test_template::test_trusted_generated_project_runs_setup_tasks` | 3.11 | 2.056 s | Immutable JUnit tree `b9a0655612683e205ce0b8d47978cb6faef4932d`; 2026-09-26 | Phase unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown. Then reduce work or document an exception. |
@@ -157,44 +177,56 @@ costs are unmeasured.
 | --- | --- | ---: | --- | --- | --- | --- |
 | `tests.test_template::test_portable_ci_keeps_one_shared_setup_job` | 3.11 | 1.101 s | Local Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat and measure setup, body, and teardown; reduce avoidable work. |
 
-The issue #274 Judge snapshot for tree
-`69a7fb41ed00f9bb9e6c3d1e8f4eca3cd17156c6` found one further Python 3.11
-entry on 2026-09-26. Its JUnit SHA-256 is
-`530943cc48107228b6d7417a229f7eba414d567e8a8ebfdb2dbb4c072b745e3a`.
-This is one local observation, not a stable regression. Its cause and phase
-costs are unmeasured.
+The issue #271 Judge snapshot for tree
+`b5329cf41ba1def31b1b02efaab6f75237daf672` has 2,866 cases in each
+supported environment. Its Python 3.11 and 3.14 JUnit SHA-256 digests are
+`896d5e4282546371119723d00c072a6c5aede004b620099b0b7fdc8b18c9c3e8`
+and `4fc89a84a30f26c5b189b557788d59ef2631bf71fd92ede3a72b22e6ff36a7ed`.
+The three new entries below are single observations from 2026-09-26. A
+concurrent issue #270 tox run confounded host load; neither a cause nor a
+regression is confirmed.
 
 | Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
-| `tests.test_template::test_generated_dev_environment_includes_local_tox_matrix` | 3.11 | 1.141 s | Issue #274 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before judging whether an integration exception is needed. |
+| `tests.test_template::test_portable_ci_is_mirrored_without_the_private_root_image` | 3.11 | 1.812 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+| `tests.test_agent_work_serial_runtime::test_status_dispatch_caps_sorted_listing_and_exact_lookup_bypasses_listing` | 3.11 | 1.032 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/state_machine.py]` | 3.14 | 1.541 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup and call under issue #263. |
 
-The later C4 Judge snapshot for tree
-`78c3315784ac3c50f2303a34826e4474166cee3b` found two further entries on
-2026-09-26. The Python 3.11 JUnit SHA-256 is
-`c49243ad7dad4c030fa11f654a3ffce099fe9ec6cb4f3f6840c8f3e506540490`.
-The Python 3.14 JUnit SHA-256 is
-`ddadfa4c86dab8f038239001ec0e5f815bf73be0a42d937b30333493edbf3fba`.
-Each is one local observation, not a stable regression. Their causes and phase
-costs are unmeasured.
-
-| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
-| --- | --- | ---: | --- | --- | --- | --- |
-| `tests.test_agent_policy::test_ruff_uses_version_016_defaults` | 3.11 | 1.143 s | C4 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
-| `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.14 | 12.880 s | C4 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
-
-The C5 Judge snapshot for tree `534d24aa3609d0aa7350a1c2a4b1f7de2971ab70`
-found two further entries on 2026-09-26. The Python 3.11 JUnit SHA-256 is
-`7471c29acf8d17811479a02b126da504264c85c7b625bdcec489757a5a04745f`.
-The Python 3.14 JUnit SHA-256 is
-`d184e780cc7d907e2567491405cd0ff41278e69f6539b630136a841bdd58b9a8`.
-Each is one local observation, not a stable regression. Their causes and phase
-costs are unmeasured. The Python 3.14 lock entry is distinct from the existing
-Python 3.11 entry for that case.
+The later issue #271 Judge snapshot for tree
+`b300459b5077160061f000691d20f07c8cd92ec3` recorded 2,875 Python
+3.11 cases. Its JUnit SHA-256 digest is
+`633e056ce0d6bab46dd79be8f12ce358b85eafc4b38a47551f883780f10fa739`.
+The case below is one observation from 2026-09-26. Its cause and phase costs
+are unconfirmed; this run does not establish shared-fixture attribution.
 
 | Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
 | --- | --- | ---: | --- | --- | --- | --- |
-| `tests.test_template::test_generated_ci_uses_exact_stable_python_versions` | 3.11 | 1.033 s | C5 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
-| `tests.test_template::test_generated_lock_does_not_depend_on_its_own_project` | 3.14 | 1.756 s | C5 Judge JUnit; 2026-09-26 | Cause and phase costs unmeasured. | Test maintainers | Repeat under quiet, comparable conditions and measure setup, body, and teardown. Reduce avoidable work before deciding whether an integration exception is needed. |
+| `tests.test_template::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/serial.py]` | 3.11 | 1.306 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, body, and teardown under issue #263. |
+
+The issue #271 Judge snapshot for staged tree
+`686a80568b85139bca69be969766742eab83cbfd` has Python 3.11 JUnit
+SHA-256 `38985735a7c958b50bcc3f2e8f7310e9ea33e1f906974c9fc7d76b0d47fc539d`.
+The entry below is one observation from 2026-09-26; its cause and phase costs
+are unconfirmed, and it does not establish a regression.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_ci_trusts_only_the_exact_checkout_directory[root]` | 3.11 | 1.311 s | Issue #271 Judge JUnit; 2026-09-26 | Cause unconfirmed; phase cost unmeasured. | Test maintainers | Repeat under quiet load and measure setup, call, and teardown under issue #272. |
+
+The later issue #271 full-hook JUnit for tree
+`9321a35bf7f911f5edc7fee5ce6edb0596021101` has Python 3.11 and 3.14
+SHA-256 digests
+`7157ecc093a0468eda0548382aea75e2a27b3bb41da8b5a3a52a364a9525fc30`
+and `c5f35c0f025a03f84a0f956de83e5addc8bec03a9342091bc9f6045db772d732`.
+The quiet-repeat JUnit digests are
+`704d201220d79c2d6591681d1a0678d5e22d3d5502022313a4b4404f875334f7`
+and `fd4f228a0acccbeeda89a30e2a65bea5ec93268fc3297416c6ae83fa679754ea`,
+respectively. These are observations from 2026-09-26, not a regression claim.
+
+| Case | Python | Full-hook duration | Quiet repeat | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | ---: | --- | --- | --- | --- |
+| `tests.test_template::test_ci_trusts_only_the_exact_checkout_directory[rendered]` | 3.11 | 1.452 s | 0.662 s | Issue #271 JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Measure setup, call, and teardown under issue #272. |
+| `tests.test_template::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.14 | 1.172 s | 5.914 s | Issue #271 JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Measure setup, call, and teardown under issue #272. |
 
 Pytest's duration report can show setup, call, and teardown as separate
 phases. The current JUnit `testcase` time combines them. Keep the combined
@@ -237,19 +269,38 @@ for Python 3.14.
 
 | Python | Case (pytest node ID) | Full JUnit | Focused 1 / 2 | Phase finding | Owner and reduction or exception plan |
 | --- | --- | ---: | ---: | --- | --- |
-| 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: review the needed Copier integration work and reduce avoidable update cost. |
+| 3.11 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.898 s | 2.923 / 2.586 s | Call dominates both repeats. | Test maintainers: issue #268 records the integration exception; profile Copier VCS work and repeat in the same environment. |
 | 3.11 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 1.979 s | 1.979 / 2.007 s | Setup is 1.59 / 1.62 s; call is about 0.39 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
 | 3.11 | `tests/test_agent_work_state_machine.py::test_decision_review_draft_bounds_the_fully_rendered_description` | 1.894 s | 0.404 / 0.394 s | Focused call is about 0.40 s. | Test maintainers: repeat under comparable full-suite load before assigning a regression. |
 | 3.11 | `tests/test_template.py::test_agent_loop_wrapper_fast_forwards_before_applied_worker` | 1.125 s | 0.544 / 0.528 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
 | 3.11 | `tests/test_template.py::test_serial_runner_assets_have_exact_root_template_and_generated_parity[src/agent_work/repository.py]` | 1.056 s | 0.643 / 0.649 s | Focused setup is 0.64 / 0.65 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.013 s (historical) | 1.012 / 1.012 s (historical); 0.022 / 0.023 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.11 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.012 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
-| 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: repeat under quiet conditions and inspect Copier update work before claiming a regression. |
+| 3.14 | `tests/test_template.py::test_copier_update_preserves_legacy_project_context` | 2.753 s | 8.169 / 2.733 s | Call dominates; the first focused spike is unexplained. | Test maintainers: issue #268 records the integration exception; repeat under quiet conditions and inspect Copier VCS work before claiming a regression. |
 | 3.14 | `tests/test_licenses.py::test_repository_template_and_rendered_project_satisfy_license_policy` | 2.211 s | 1.999 / 1.979 s | Setup is 1.59 / 1.55 s; call is 0.41 / 0.43 s. | Test maintainers: use the fixture split recorded in issue #260 to reduce shared work. |
 | 3.14 | `tests/test_template.py::test_readability_dependency_and_generated_ci_helper_are_rendered_portably` | 1.084 s | 0.680 / 0.686 s | Focused setup is about 0.68 s. | Test maintainers: inspect first-use setup against the fixture split recorded in issue #260. |
 | 3.14 | `tests/test_template.py::test_agent_loop_wrapper_stops_on_refresh_command_failure[merge]` | 1.039 s | 0.484 / 0.560 s | Call dominates focused repeats. | Test maintainers: queue serial wrapper diagnosis through issue #263. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_candidate_broker_deferred_cleanup_waits_for_blocked_callback` | 1.012 s (historical) | 1.012 / 1.013 s (historical); 0.022 / 0.022 s after #267 | The old call held near 1.01 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
 | 3.14 | `tests/test_agent_work_worker_result_broker.py::test_broker_eventually_cleans_up_after_blocked_builder_returns` | 1.002 s (historical) | 1.003 / 1.003 s (historical); 0.013 / 0.013 s after #267 | The old call held near 1.00 s because of the close join; focused repeats on 2026-09-26 show the shorter test bound removes that wait. | Test maintainers: monitor later full-suite JUnit; production retains the 1.0 s default. |
+
+Issue #268 records a measured integration exception for the Copier update case.
+The test uses a small tagged source, skips tasks, makes a real v1 copy, commits
+the customized project, then runs a real v2 update and checks that its legacy
+context survives. In prepared local environments on 2026-09-26, two focused
+runs took 2.90 / 2.69 seconds on Python 3.11 and 2.21 / 2.26 seconds on
+Python 3.14. A Python 3.14 profile recorded 2.712 seconds cumulative in
+`copier.run_update` and 3.020 seconds cumulative across six Copier VCS clone
+calls during copy and update. Local test Git helpers took about 0.029 seconds.
+These cumulative figures overlap and are not parts of one total. A temporary
+Python 3.14 probe compared whole-test totals of 3.048 / 3.122 seconds with a
+real v1 copy and v2 update against 2.798 / 2.501 seconds after manually
+seeding v1 answers before the real update. The seeded setup would lose genuine
+initial-copy provenance and still leaves a multi-second case, so it was not
+adopted. Keep the real update coverage. For a future reduction, measure Copier
+VCS clone and update steps with repeated runs in the same prepared environment.
+Retain genuine v1 copy provenance and the v2 update assertion, then check the
+full JUnit case time on both supported Python versions. The earlier
+8.169-second Python 3.14 observation remains an unconfirmed spike.
 
 The full-suite outliers that fell below 1 second in both focused repeats need
 more comparable runs before anyone calls them regressions. Issue
@@ -260,6 +311,28 @@ records the fixture split, and issue
 [#263](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/263)
 will automate the repair loop and queue follow-up diagnosis. The [local timing method](../how-to/validate-template-changes.md#investigate-local-test-timing)
 explains how to collect the next observation.
+
+### Further local observations on 2026-09-26
+
+The earlier Judge's local JUnit proof for tree `ae1a72b9` found three inherited
+cases at or above 1 second. These rows retain that dated observation. Each
+duration is one run; causes and phase costs are unconfirmed. The rows do not
+establish a stable cost or a regression.
+
+| Case | Python | Observed duration | Evidence and date | Cause or interpretation | Owner | Reduction or exception plan |
+| --- | --- | ---: | --- | --- | --- | --- |
+| `tests/test_template.py::test_generated_ci_uses_exact_stable_python_versions` | 3.11 | 1.048 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+| `tests/test_template.py::test_agent_loop_wrapper_refreshes_advanced_default_branch_before_next_activation` | 3.11 | 1.042 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+| `tests/test_template.py::test_generated_tests_directory` | 3.14 | 1.095 s | Tree `ae1a72b9` Judge JUnit; 2026-09-26 | Cause and phase costs unconfirmed. | Test maintainers | Repeat under comparable load, measure setup, call, and teardown, then reduce avoidable cost. |
+
+The later Judge JUnit proof for tree `a9f8358` reported
+`tests/test_template.py::test_yamllint_helper_present` at 1.084 seconds on
+Python 3.11. This is another inherited, one-run observation with an unconfirmed
+cause. It is reported here for review, not entered as a stable register case.
+Test maintainers will repeat it and inspect setup, call, and teardown under
+issues [#271](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/271)
+and [#272](https://gitlab-master.nvidia.com/nvis-ova/nvis-ova-agentic-copier/-/issues/272)
+before deciding whether to track or reduce the cost.
 
 ## CI timing context
 
@@ -290,12 +363,16 @@ enforce the local case target. Repeat the measurement before inferring change.
 | `test_ci_trusts_only_the_exact_checkout_directory[rendered]` | 3.14 | 10.221 s | !314 pipeline 69850880; 2026-09-25 | Rendered-project check; cause unconfirmed. | Test maintainers | Inspect setup attribution and reduce repeated work. |
 
 For the full current local list in interactive work, read the latest
-supported-version Judge JUnit proof and select each `testcase` whose numeric
-`time` is at least 1 second. In serial work, use the complete trusted
-`over_100ms_cases` list for each supported environment only when its
-`timing_complete` flag is true. An absent field or false flag makes the proof
-incomplete and rejects the review. The three slowest names cannot establish a
-complete inventory.
+supported-version Judge JUnit proof. Select each `testcase` whose numeric
+`time` is above 0.100 seconds or at least 1.000 seconds. The read-only
+`agent_work.local_test_timing.compare_local_test_timings` result also exposes
+complete `over_100ms_cases` and `at_least_1s_cases` by environment from the
+candidate's full JUnit proof. Its `clear`, `review`, and `inconclusive`
+statuses guide adjudication; `review` is not an automatic rejection. In
+serial work, use the complete trusted `over_100ms_cases` list for each
+supported environment only when its `timing_complete` flag is true. An absent
+field or false flag makes the proof incomplete and rejects the review. The
+three slowest names cannot establish a complete inventory.
 
 Timing evidence may show an unsafe JUnit parameter as a stable `[param_<hash>]`
 suffix on its safe base test name. The hash has 64 lowercase SHA-256 hex
