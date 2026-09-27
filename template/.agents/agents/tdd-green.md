@@ -116,6 +116,14 @@ not add untested functionality.
    `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
    with capability evidence. An expected read must pass and stay current.
    Otherwise, block finalization.
+   Get Architect's `$temporality-judge` applicability decision. Run that
+   read-only review only when changed content-owned docs or policy adds,
+   changes, or removes time-bound guidance, run-result claims, or historical
+   proof. Give it the exact Judge tree and the same base, manifest, diff, and
+   mode-specific read proof used for content review. Otherwise carry
+   `$temporality-judge: not applicable — <reason>` with the scope reason.
+   Route a finding through Architect to the content owner. A new staged tree
+   voids the receipt; review the new tree when the trigger still applies.
 6. **Classify and repair with evidence.** Consolidate all findings before you
    edit. A finding is resolvable only if it identifies owner/domain and
    path/scope. It must identify evidence and requested outcome. It must name an
@@ -140,7 +148,8 @@ not add untested functionality.
    receipt. Get it before dependent review and a Finalizer check.
    In interactive work, rerun Consistency Judge for a new tree when it applies.
    Its receipt must
-   name that tree. If behavior or tests change, rerun focused behavior
+   name that tree. Rerun Temporality Judge when the changed content still
+   triggers it; its receipt must name the new tree. If behavior or tests change, rerun focused behavior
    tests. Require the full installed hook from the
    validation session. Each coding candidate needs it. Before changing a
    test, reconfirm that it fails against pre-fix behavior.

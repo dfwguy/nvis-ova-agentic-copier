@@ -150,7 +150,7 @@ role is N/A only when facts show it does not apply.
 | Red and policy preparation | `$tdd-red`, conditional `$agent-policy-writer` | Red establishes the exact mode-specific checkpoint first. Serial work runs only Red before the producer-owned trusted result boundary. Policy preparation finishes before implementation. |
 | Concurrent implementation and documentation | `$tdd-green`, `$diataxis-writer` | After Red and policy preparation, Green owns production/tests. Diátaxis Writer owns `docs/**`, `template/docs/**`, `README.md`, and prose in `template/README.md.jinja`; it does not change executable Jinja logic. After both stop editing, interactive Main stages their combined candidate; serial Green requests controller-owned staging. |
 | Validation | `$tdd-judge` then `$nonfunctional-review` | Judge validates the exact staged tree and returns immutable evidence with its child receipt. |
-| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, conditional `$consistency-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. |
+| Specialist review | `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`, `$tdd-document`, conditional `$cli-syntax-judge`, `$filesystem-structure-judge`, `$agent-policy-judge`, conditional `$consistency-judge`, conditional `$temporality-judge`, and `$license-checker` | Green delegates initially applicable reviewers concurrently after validation. Temporality review applies only when changed content adds, changes, or removes time-bound guidance or run proof. |
 | Finalization | `$tdd-finalizer` | Verifies final receipts and returns normal or draft-safety verdict. |
 | Publication | `$git-flow` | Main publishes only after Architect accepts finalizer evidence. |
 
@@ -259,12 +259,14 @@ candidate runs are consistently slower, phase logs and like environments back
 that up, and the diff shows the cause. Send a proven, unexplained ordinary
 test slowdown to the test or code owner. Keep the full-hook list, every case
 above 0.100 s, and every case at or above 1.000 s with its environment.
-Send every missing case and its proof to the documentation owner, even when
-another finding needs a return. In interactive work, add a stable
-`docs/reference/testing-strategy.md` register row only after repeat and phase
-diagnosis or an explicit owner decision. Keep a one-run inherited setup spike
-as a dated observation with a case-specific diagnosis queue. It alone does
-not block unrelated work.
+Non-functional Review owns the full case inventory and timing adjudication.
+Its receipt keeps every case, environment, and proof in the durable audit or
+linked issue record, even when another finding needs a return. A confirmed
+cost needs an owner and reduction or integration-exception plan there. A
+one-run inherited setup spike stays there as an observation with a
+case-specific diagnosis queue. It alone does not block unrelated work.
+Architect routes the review finding; it does not measure cases or require
+dated case rows in the testing strategy.
 
 Serial work keeps its trusted candidate-only gate. The controller gives an
 opaque proof ID, counts, hashes, three slowest cases, full `over_100ms_cases`
@@ -507,7 +509,8 @@ The timer remains irrelevant. Keep each proof. Check each result.
 | Design | `$architect` | Content/mirror design and final decision. |
 | Writing | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
 | Consistency review | Conditional `$consistency-judge` | Read-only comparison of changed repeated facts on the exact candidate tree, using controller-owned stage/read proof in serial work. |
-| Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, and source-of-truth verdict. |
+| Temporality review | Conditional `$temporality-judge` | Read-only review when changed docs or policy adds, changes, or removes time-bound guidance or run proof. Use the exact candidate tree; return findings to Writer and restage. |
+| Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, temporality, and source-of-truth verdict. Final changed-file readability is the last content gate. |
 | Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
 
 Writer needs the approved content design and shared worktree. Its receipt lists
@@ -547,8 +550,26 @@ evidence inside the existing `$documentation-finalizer:` completion receipt
 and durable audit. Do not add a top-level `WORKFLOW_RECEIPTS` tuple item.
 The internal review does not grant controller program authority.
 
-Finalizer receives that report, the final diff, the consistency receipt or
-exact N/A, and applicable Diátaxis or policy context. It returns one
+Run `$temporality-judge` after Writer and before Finalizer only when changed
+content-owned documentation or policy adds, changes, or removes time-bound
+guidance, run-result claims, or historical proof. Give it the same exact
+staged tree, base, manifest, and diff as the content reviews. In serial work,
+use the same live controller-owned candidate read and completeness rules as
+Consistency Judge. A new staged tree voids its receipt. Route findings to
+Writer, then restage and review the new tree. Otherwise record exactly
+`$temporality-judge: not applicable — <reason>` with the scope reason.
+Keep this internal receipt inside the existing Finalizer receipt and durable
+audit; it adds no top-level tuple item or program authority.
+
+For a coding change that also edits documentation or policy, use the same
+narrow trigger for those changed content files on the exact candidate tree.
+Green gets the applicable receipt or exact N/A from Architect. Route findings
+to the content owner and review the restaged tree. Code-only changes and
+timeless content edits use an N/A with a reason. The review does not inspect
+test timing or change executable validation gates.
+
+Finalizer receives that report, the final diff, the consistency and temporality
+receipts or exact N/A, and applicable Diátaxis or policy context. It returns one
 consolidated verdict here. After approval,
 `$git-flow` returns commit, push, verified MR, and exact-source pipeline
 evidence. A Writer or Finalizer rejection goes

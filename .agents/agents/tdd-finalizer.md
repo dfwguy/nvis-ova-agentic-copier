@@ -30,6 +30,10 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Get the Consistency Judge receipt or
    Architect's exact `$consistency-judge: not applicable — <reason>`.
+   Check whether changed docs or policy add, change, or remove time-bound
+   guidance, run claims, or old proof. If so, get the Temporality Judge receipt
+   for the final tree. Otherwise get Architect's exact
+   `$temporality-judge: not applicable — <reason>` with its scope rationale.
    In serial work, an applicable receipt must approve the final candidate tree
    and cite a live controller-owned `candidate read` snapshot taken after Judge
    validation. Check its immutable issue and session identity, base commit and
@@ -42,9 +46,10 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    the boundary is unavailable in the selected mode, require the exact
    `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
    with mode and capability evidence. A missing, rejected, failed, or stale
-   expected read is a block, not N/A. An interactive receipt must approve the
-   final staged tree and name its base and tree OID. In reconciliation, it also
-   names source, target, and joined-tree proof.
+   expected read is a block, not N/A. When Temporality Judge applies, check
+   its tree and read proof the same way. An interactive receipt must
+   approve the final staged tree and name its base and tree OID. In
+   reconciliation, it also names source, target, and joined-tree proof.
    Check the writer's final docs and README receipt. Check the Diátaxis and
    README Judge verdicts against the staged
    tree. Check that both writers stopped before the applicable staging
@@ -71,13 +76,16 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    count, and exact tree ID for each supported version. Interactive work uses
    fixed file paths. Serial work uses an opaque proof ID and bounded time data
    from trusted code. Never ask for private paths. Compare the docs and README
-   verdicts to the final diff. Do not rerun language commands, suites, or
-   pre-commit.
-4. Last, for interactive work, require `git write-tree` to match Judge's tree
-   ID and the Consistency Judge's tree OID when applicable. No maintained
+   verdicts to the final diff. Do not rerun tests, lint, or pre-commit.
+   Step 4 allows one final check of changed-file readability.
+4. For interactive work, require `git write-tree` to match Judge's tree
+   ID and the Consistency and Temporality Judges' tree OIDs when applicable. No maintained
    file may be unstaged or untracked. For serial work, require the
    controller's tree and changed-path proof.
    Do not run worker-side Git staging or `git write-tree`.
+   After these content checks, run changed-file readability for changed
+   Markdown as the last content gate. If none changed, record N/A. A repair
+   needs a new tree and fresh applicable receipts.
 5. In coding reconciliation, require the captured old source SHA, exact target
    SHA, mechanically re-proved retained Red-to-source provenance, and fresh
    three-way reconciliation evidence. Require Main's freshly fetched exact
@@ -133,10 +141,11 @@ Approve only when all evidence and the exact-tree check pass. Else reject to
 Green or Architect with the missing or stale proof. A draft-safety verdict does
 not approve merge.
 
-For a guarded template update, put the judge verdict or exact N/A and its proof
-in the existing `$tdd-finalizer:` completion receipt and durable audit. Never
-add a top-level `WORKFLOW_RECEIPTS` tuple item for this judge. This review does
-not grant controller program authority.
+For a guarded template update, include both judge results in the existing
+`$tdd-finalizer:` completion receipt and durable audit. Include the
+Consistency and Temporality Judge verdicts or exact N/A with proof. Never add a top-level
+`WORKFLOW_RECEIPTS` tuple item for either judge. These reviews grant no
+controller program authority.
 
 ## Constraints
 

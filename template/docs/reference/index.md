@@ -12,8 +12,9 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Use this page to find facts. It lists test times and rules. It also lists facts
-about the agent loop. Pick the page that fits your task.
+This page lists facts for this repo. Start with the page you need. The test
+page has timing goals. The other pages tell you how the template and agent
+loop work.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -23,7 +24,7 @@ about the agent loop. Pick the page that fits your task.
 - [Template revision preview](template-revision-preview.md) — Compare the recorded template revision with a candidate revision.
 - [Template update](template-update.md) — Look up the guarded template update command and its recovery states.
 - [License compliance](license-compliance.md) — Look up license rules, checked files, and allowed exemptions.
-- [Testing strategy](testing-strategy.md) — Look up test layers, case timing targets, and the register of long-running tests.
+- [Testing strategy](testing-strategy.md) — Look up test design, validation layers, and local case timing rules.
 
 ### Writing
 - [Readability checking](readability.md) — Look up readability checks, scopes, and results.
