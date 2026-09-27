@@ -1490,6 +1490,13 @@ def _published_commit_dependencies(
         return result.returncode == 0
 
     def inspect_commit(sha: str) -> dict[str, object]:
+        object_type = git("cat-file", "-t", sha)
+        try:
+            size = int(git("cat-file", "-s", sha))
+        except ValueError as error:
+            raise PublishedCommitError("commit object size is malformed") from error
+        if object_type != "commit" or not 0 < size <= 65_536:
+            raise PublishedCommitError("commit object is not a bounded commit")
         raw = git("cat-file", "-p", sha)
         header, separator, message = raw.partition("\n\n")
         if not separator:
@@ -1503,10 +1510,24 @@ def _published_commit_dependencies(
         )
         return {
             "sha": sha,
+            "type": object_type,
+            "size": size,
             "parents": parents,
             "tree": trees[0] if len(trees) == 1 else None,
             "message": message,
         }
+
+    def is_ancestor(checkout: Path, base: str, source: str) -> bool:
+        if checkout.resolve(strict=True) != candidate:
+            raise PublishedCommitError("requested worktree changed")
+        result = run_command(
+            ("git", "-C", str(candidate), "merge-base", "--is-ancestor", base, source),
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            environment=git_environment,
+        )
+        if result.returncode not in (0, 1):
+            raise PublishedCommitError("Red checkpoint ancestry check failed")
+        return result.returncode == 0
 
     return PublishedCommitDependencies(
         read_project=read_project,
@@ -1519,6 +1540,7 @@ def _published_commit_dependencies(
         create_commit=create_commit,
         compare_and_swap_ref=compare_and_swap_ref,
         inspect_commit=inspect_commit,
+        is_ancestor=is_ancestor,
     )
 
 

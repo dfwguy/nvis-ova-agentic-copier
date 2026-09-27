@@ -16,12 +16,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .red_checkpoint import RedCheckpointEvidence, checkpoint_ref
 from .review_handoff import ReviewHandoffManifest
 
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_INTERACTIVE_RED_REF = re.compile(r"refs/agent-work/red/[A-Za-z0-9/_-]+\Z")
+_SERIAL_RED_REF = re.compile(
+    r"refs/agent-work/red-checkpoints/[1-9][0-9]*/[0-9a-f]{40}\Z"
+)
+_MAX_RED_COMMIT_SIZE = 65_536
 
 
 class PublishedCommitError(RuntimeError):
@@ -37,7 +43,9 @@ class PublishedCommitInput(BaseModel):
     worktree: Path
     expected_source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     judge_tree: str = Field(pattern=r"^[0-9a-f]{40}$")
-    red_ref: str = Field(pattern=r"^refs/agent-work/red/[A-Za-z0-9/_-]+$")
+    red_ref: str = Field(
+        pattern=r"^refs/agent-work/(?:red/[A-Za-z0-9/_-]+|red-checkpoints/[1-9][0-9]*/[0-9a-f]{40})$"
+    )
     red_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     review_session_id: str = Field(pattern=r"^session/[A-Za-z0-9_-]+$")
     review_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -72,6 +80,7 @@ class PublishedCommitDependencies:
     create_commit: Callable[[str, str, str], str]
     compare_and_swap_ref: Callable[[str, str, str], bool]
     inspect_commit: Callable[[str], dict[str, object]]
+    is_ancestor: Callable[[Path, str, str], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +124,51 @@ def _check_local(
     _require(local.get("untracked_files") is False, "untracked state is not clean")
 
 
+def _check_serial_red_checkpoint(
+    request: PublishedCommitRequest,
+    dependencies: PublishedCommitDependencies,
+    *,
+    issue_iid: int,
+    branch: str,
+) -> None:
+    """Authenticate a retained serial Red commit against the published source."""
+    commit = dependencies.inspect_commit(request.red_sha)
+    message = commit.get("message")
+    size = commit.get("size")
+    _require(
+        commit.get("sha") == request.red_sha
+        and commit.get("type") == "commit"
+        and type(size) is int
+        and 0 < size <= _MAX_RED_COMMIT_SIZE
+        and isinstance(message, str)
+        and len(message.encode()) <= 32_768,
+        "Red checkpoint commit is malformed or oversized",
+    )
+    if not isinstance(message, str):
+        raise PublishedCommitError("Red checkpoint message is missing")
+    try:
+        evidence = RedCheckpointEvidence.model_validate_json(message)
+    except ValidationError as error:
+        raise PublishedCommitError("Red checkpoint evidence is invalid") from error
+    _require(
+        request.red_ref == checkpoint_ref(issue_iid, evidence.base_sha)
+        and evidence.ref == request.red_ref
+        and evidence.project_id == request.project_id
+        and evidence.issue_iid == issue_iid
+        and evidence.source_branch == branch
+        and commit.get("parents") == (evidence.base_sha,)
+        and commit.get("tree") == evidence.tree_oid,
+        "Red checkpoint identity differs from the reviewed source",
+    )
+    _require(
+        dependencies.is_ancestor is not None
+        and dependencies.is_ancestor(
+            request.worktree, evidence.base_sha, request.expected_source_sha
+        ),
+        "Red checkpoint base is not a historical source ancestor",
+    )
+
+
 def append_published_commit(
     request: PublishedCommitRequest,
     *,
@@ -139,8 +193,9 @@ def append_published_commit(
         _DIGEST.fullmatch(request.review_manifest_sha256) is not None,
         "review manifest digest is malformed",
     )
+    serial_red = _SERIAL_RED_REF.fullmatch(request.red_ref) is not None
     _require(
-        request.red_ref.startswith("refs/agent-work/red/")
+        (serial_red or _INTERACTIVE_RED_REF.fullmatch(request.red_ref) is not None)
         and ".." not in request.red_ref,
         "Red checkpoint ref is invalid",
     )
@@ -195,6 +250,14 @@ def append_published_commit(
         and bool(manifest.junit_digests),
         "review manifest or successful Judge evidence changed",
     )
+    serial_branch = re.fullmatch(r"agent/issue-([1-9][0-9]*)", branch)
+    _require(
+        serial_red == (serial_branch is not None)
+        and (
+            serial_branch is None or int(serial_branch.group(1)) == manifest.issue_iid
+        ),
+        "Red checkpoint ref differs from the source branch mode",
+    )
     _require(
         bool(manifest.receipts)
         and tuple(item.receipt_ref for item in manifest.receipts)
@@ -208,6 +271,12 @@ def append_published_commit(
         ),
         "accepted Green review ledger is missing or malformed",
     )
+    if serial_red:
+        if manifest.issue_iid is None:
+            raise PublishedCommitError("review manifest issue identity is missing")
+        _check_serial_red_checkpoint(
+            request, dependencies, issue_iid=manifest.issue_iid, branch=branch
+        )
     if not apply:
         return PublishedCommitReport(
             request.project_id,

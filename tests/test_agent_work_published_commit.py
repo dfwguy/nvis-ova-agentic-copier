@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 
 from agent_work.cli import _published_commit_dependencies, build_parser, main
+from agent_work.red_checkpoint import RedCheckpointEvidence, checkpoint_ref
 from agent_work.repository import CommandResult
 from agent_work.review_handoff import (
     ReviewHandoffManifest,
@@ -30,14 +31,34 @@ _PROJECT = 310967
 _MR = 342
 _ISSUE = 304
 _BRANCH = "clanker/issue304-published-commit"
+_SERIAL_BRANCH = f"agent/issue-{_ISSUE}"
 _ORIGIN = "https://gitlab.example.com/group/project.git"
 _OLD = "a" * 40
 _NEW = "b" * 40
 _TREE = "c" * 40
 _RED = "d" * 40
 _RED_REF = "refs/agent-work/red/310"
+_BASE = "9" * 40
+_RED_TREE = "8" * 40
+_SERIAL_RED_REF = checkpoint_ref(_ISSUE, _BASE)
 _SESSION = "session/review310"
 _MANIFEST_SHA = "e" * 64
+
+
+def _serial_evidence() -> RedCheckpointEvidence:
+    return RedCheckpointEvidence(
+        project_id=_PROJECT,
+        issue_iid=_ISSUE,
+        source_branch=_SERIAL_BRANCH,
+        base_sha=_BASE,
+        tree_oid=_RED_TREE,
+        ref=_SERIAL_RED_REF,
+        test_paths=("tests/test_agent_work_published_commit.py",),
+        argv=("uv", "run", "pytest", "tests/test_agent_work_published_commit.py"),
+        exit_code=1,
+        expected_failure="assert reviewed behavior",
+        output_sha256="7" * 64,
+    )
 
 
 @dataclass
@@ -99,6 +120,26 @@ class _World:
         )
     )
     commands: list[tuple[object, ...]] = field(default_factory=list)
+    red_commit: dict[str, object] = field(
+        default_factory=lambda: {
+            "sha": _RED,
+            "type": "commit",
+            "size": 1_024,
+            "parents": (_BASE,),
+            "tree": _RED_TREE,
+            "message": _serial_evidence().model_dump_json(),
+        }
+    )
+    base_is_ancestor: bool = True
+
+
+def _serial_world() -> _World:
+    world = _World()
+    world.local["branch"] = _SERIAL_BRANCH
+    world.local["head_ref"] = f"refs/heads/{_SERIAL_BRANCH}"
+    world.mrs[0]["source_branch"] = _SERIAL_BRANCH
+    world.manifest = _manifest(branch=_SERIAL_BRANCH)
+    return world
 
 
 def _module() -> Any:
@@ -136,6 +177,8 @@ def _dependencies(module: Any, world: _World) -> Any:
 
     def inspect(sha: str) -> dict[str, object]:
         world.commands.append(("inspect-commit", sha))
+        if sha == _RED:
+            return dict(world.red_commit)
         return {
             "sha": sha,
             "parents": (_OLD,),
@@ -153,6 +196,138 @@ def _dependencies(module: Any, world: _World) -> Any:
         compare_and_swap_ref=cas,
         inspect_commit=inspect,
     )
+
+
+def _serial_dependencies(
+    module: Any, world: _World, *, requested_worktree: Path = Path("/candidate")
+) -> Any:
+    original = _dependencies(module, world)
+    return module.PublishedCommitDependencies(
+        **(
+            vars(original)
+            | {
+                "is_ancestor": lambda worktree, base, source: (
+                    world.base_is_ancestor
+                    and worktree == requested_worktree
+                    and base == _BASE
+                    and source == _OLD
+                ),
+            }
+        )
+    )
+
+
+def _serial_request(module: Any, **changes: object) -> Any:
+    return _request(module, red_ref=_SERIAL_RED_REF, **changes)
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_authentic_serial_red_checkpoint_allows_reviewed_append(*, apply: bool) -> None:
+    module = _module()
+    world = _serial_world()
+
+    report = module.append_published_commit(
+        _serial_request(module),
+        apply=apply,
+        dependencies=_serial_dependencies(module, world),
+    )
+
+    assert report.applied is apply
+    assert ("inspect-commit", _RED) in world.commands
+    assert world.local["head_sha"] == (_NEW if apply else _OLD)
+    assert sum(call[0] == "commit-tree" for call in world.commands) == int(apply)
+    assert sum(call[0] == "update-ref" for call in world.commands) == int(apply)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "missing-ref",
+        "ref-oid-mismatch",
+        "non-commit-object",
+        "oversized-commit",
+        "malformed-evidence",
+        "wrong-project",
+        "wrong-issue",
+        "wrong-source-branch",
+        "wrong-ref",
+        "wrong-base",
+        "wrong-parent",
+        "wrong-tree",
+        "base-not-ancestor",
+        "missing-ancestry",
+        "wrong-manifest-issue",
+    ),
+)
+def test_serial_red_damage_rejects_before_any_visible_write(damage: str) -> None:
+    module = _module()
+    world = _serial_world()
+    if damage == "missing-ref":
+        world.local["red_sha"] = None
+    elif damage == "ref-oid-mismatch":
+        world.local["red_sha"] = _NEW
+    elif damage == "non-commit-object":
+        world.red_commit["type"] = "tree"
+    elif damage == "oversized-commit":
+        world.red_commit["size"] = 65_537
+    elif damage == "malformed-evidence":
+        world.red_commit["message"] = "not json"
+    elif damage in {
+        "wrong-project",
+        "wrong-issue",
+        "wrong-source-branch",
+        "wrong-ref",
+        "wrong-base",
+    }:
+        evidence = json.loads(_serial_evidence().model_dump_json())
+        field_name, value = {
+            "wrong-project": ("project_id", _PROJECT + 1),
+            "wrong-issue": ("issue_iid", _ISSUE + 1),
+            "wrong-source-branch": ("source_branch", "clanker/other"),
+            "wrong-ref": ("ref", "refs/agent-work/red-checkpoints/999/" + _BASE),
+            "wrong-base": ("base_sha", "6" * 40),
+        }[damage]
+        evidence[field_name] = value
+        world.red_commit["message"] = json.dumps(evidence)
+    elif damage == "wrong-parent":
+        world.red_commit["parents"] = (_NEW,)
+    elif damage == "wrong-tree":
+        world.red_commit["tree"] = _TREE
+    elif damage == "base-not-ancestor":
+        world.base_is_ancestor = False
+    elif damage == "wrong-manifest-issue":
+        world.manifest = _manifest(issue_iid=_ISSUE + 1, branch=_SERIAL_BRANCH)
+    before = dict(world.local)
+
+    with pytest.raises(module.PublishedCommitError):
+        module.append_published_commit(
+            _serial_request(module),
+            apply=True,
+            dependencies=(
+                _dependencies(module, world)
+                if damage == "missing-ancestry"
+                else _serial_dependencies(module, world)
+            ),
+        )
+
+    assert world.local == before
+    assert not any(call[0] in {"commit-tree", "update-ref"} for call in world.commands)
+
+
+@pytest.mark.parametrize("serial_branch", [False, True])
+def test_source_branch_cannot_downgrade_red_authentication(
+    *, serial_branch: bool
+) -> None:
+    module = _module()
+    world = _serial_world() if serial_branch else _World()
+    request = _request(module) if serial_branch else _serial_request(module)
+
+    with pytest.raises(module.PublishedCommitError, match="source branch mode"):
+        module.append_published_commit(
+            request, apply=True, dependencies=_serial_dependencies(module, world)
+        )
+
+    assert not any(call[0] in {"commit-tree", "update-ref"} for call in world.commands)
 
 
 def test_apply_appends_exact_judge_tree_as_one_child_of_published_source() -> None:
@@ -227,21 +402,26 @@ def test_append_command_is_dry_run_by_default() -> None:
 
 
 @pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("serial", [False, True])
 def test_cli_dispatch_respects_apply_at_mutating_boundary(
-    tmp_path: Path, *, apply: bool
+    tmp_path: Path, *, apply: bool, serial: bool
 ) -> None:
     module = _module()
-    world = _World()
+    world = _serial_world() if serial else _World()
     output: list[str] = []
     errors: list[str] = []
     arguments = _cli_arguments(tmp_path)
+    if serial:
+        arguments[arguments.index("--red-ref") + 1] = _SERIAL_RED_REF
     if apply:
         arguments.append("--apply")
 
     result = main(
         arguments,
-        build_published_commit_dependencies=lambda **_kwargs: _dependencies(
-            module, world
+        build_published_commit_dependencies=lambda **_kwargs: (
+            _serial_dependencies(module, world, requested_worktree=tmp_path)
+            if serial
+            else _dependencies(module, world)
         ),
         write_stdout=output.append,
         write_stderr=errors.append,
@@ -331,6 +511,88 @@ def test_live_boundary_searches_and_exactly_matches_slash_branch(
         )
         for command in called
     )
+
+
+def test_live_git_boundary_inspects_bounded_commit_and_checks_ancestry(
+    tmp_path: Path,
+) -> None:
+    called: list[tuple[str, ...]] = []
+    git_prefix = ("git", "-C", str(tmp_path))
+    source = _OLD
+    base = _BASE
+    object_kind = "commit"
+    object_size = "512"
+    ancestry_code = 0
+
+    def run_command(command: tuple[str, ...], **_options: object) -> CommandResult:
+        called.append(command)
+        if command[-3:] == ("remote", "get-url", "origin"):
+            return CommandResult(0, _ORIGIN, "")
+        if command[-2:] == ("rev-parse", "--absolute-git-dir"):
+            return CommandResult(0, str(tmp_path / ".git"), "")
+        if command == (*git_prefix, "cat-file", "-t", source):
+            return CommandResult(0, object_kind, "")
+        if command == (*git_prefix, "cat-file", "-s", source):
+            return CommandResult(0, object_size, "")
+        if command == (*git_prefix, "cat-file", "-p", source):
+            body = (
+                f"tree {_TREE}\nparent {base}\n"
+                "author Test <test@example.com> 0 +0000\n"
+                "committer Test <test@example.com> 0 +0000\n\nsource\n"
+            )
+            return CommandResult(0, body, "")
+        if command == (*git_prefix, "merge-base", "--is-ancestor", base, source):
+            return CommandResult(ancestry_code, "", "")
+        raise AssertionError(command)
+
+    dependencies = _published_commit_dependencies(
+        worktree=tmp_path,
+        environment={
+            "GITLAB_HOST": "gitlab.example.com",
+            "GITLAB_PROJECT_ID": str(_PROJECT),
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+        },
+        run_command=run_command,
+    )
+    commit = dependencies.inspect_commit(source)
+
+    assert commit["sha"] == source
+    assert commit["type"] == "commit"
+    assert commit["parents"] == (base,)
+    assert commit["tree"] == _TREE
+    assert commit["message"] == "source"
+    assert called[-3:] == [
+        (*git_prefix, "cat-file", "-t", source),
+        (*git_prefix, "cat-file", "-s", source),
+        (*git_prefix, "cat-file", "-p", source),
+    ]
+    assert dependencies.is_ancestor is not None
+    assert dependencies.is_ancestor(tmp_path, base, source) is True
+    assert called[-1] == (*git_prefix, "merge-base", "--is-ancestor", base, source)
+    ancestry_code = 1
+    assert dependencies.is_ancestor(tmp_path, base, source) is False
+    assert called[-1] == (*git_prefix, "merge-base", "--is-ancestor", base, source)
+    ancestry_code = 128
+    with pytest.raises(_module().PublishedCommitError):
+        dependencies.is_ancestor(tmp_path, base, source)
+    assert called[-1] == (*git_prefix, "merge-base", "--is-ancestor", base, source)
+    object_kind = "blob"
+    inspected = len(called)
+    with pytest.raises(_module().PublishedCommitError):
+        dependencies.inspect_commit(source)
+    assert called[inspected:] == [
+        (*git_prefix, "cat-file", "-t", source),
+        (*git_prefix, "cat-file", "-s", source),
+    ]
+    object_kind = "commit"
+    object_size = "65537"
+    inspected = len(called)
+    with pytest.raises(_module().PublishedCommitError):
+        dependencies.inspect_commit(source)
+    assert called[inspected:] == [
+        (*git_prefix, "cat-file", "-t", source),
+        (*git_prefix, "cat-file", "-s", source),
+    ]
 
 
 def test_preview_verifies_authority_without_creating_or_moving_commit() -> None:
