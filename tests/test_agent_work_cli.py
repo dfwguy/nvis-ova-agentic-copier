@@ -1147,6 +1147,7 @@ def test_validation_default_cli_runs_exact_license_preflight_before_hook(
         return run(command)
 
     output: list[str] = []
+    removed: list[Path] = []
     assert not (tmp_path / ".venv").exists()
 
     def invoke() -> int:
@@ -1160,6 +1161,7 @@ def test_validation_default_cli_runs_exact_license_preflight_before_hook(
                 "GITLAB_PROJECT_ID": "37",
             },
             write_stdout=output.append,
+            remove_validation_artifact=removed.append,
         )
 
     if hook_count:
@@ -1171,6 +1173,11 @@ def test_validation_default_cli_runs_exact_license_preflight_before_hook(
         assert json.loads(output[0])["state"] == "preflight-failure"
     assert calls.count(checker_command) == 1
     assert calls.count(("git", "hook", "run", "pre-commit")) == hook_count
+    assert removed == (
+        [Path("test-results-py311.xml"), Path("test-results-py314.xml")]
+        if hook_count
+        else []
+    )
     if hook_count:
         assert calls.index(checker_command) < calls.index(
             ("git", "hook", "run", "pre-commit")

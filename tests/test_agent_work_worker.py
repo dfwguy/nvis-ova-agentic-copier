@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase
 from agent_work.models import GitLabIssueNote, GitLabNoteAuthor, WorkerResultEnvelope
+from agent_work.red_checkpoint import RedCheckpointEvidence, checkpoint_ref
 from agent_work.worker import (
     WorkerResultBrokerRequest,
     build_worker_prompt,
@@ -55,6 +56,51 @@ def test_workflow_prompt_requires_live_candidate_read_for_both_lanes() -> None:
         "After successful coding validation, or directly after content staging"
         in prompt
     )
+
+
+def test_workflow_prompt_routes_only_verified_retained_red_checkpoint() -> None:
+    base = "c" * 40
+    checkpoint = RedCheckpointEvidence(
+        project_id=310967,
+        issue_iid=306,
+        source_branch="agent/issue-306",
+        base_sha=base,
+        tree_oid="d" * 40,
+        ref=checkpoint_ref(306, base),
+        test_paths=("tests/test_agent_work_worker.py",),
+        argv=("uv", "run", "pytest", "tests/test_agent_work_worker.py"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256="e" * 64,
+    )
+    record = {
+        "state": "executing",
+        "phase": "workflow",
+        "workflow_lane": "unknown",
+        "red_checkpoint": {"tree_oid": "a" * 40, "ref": "untrusted"},
+    }
+    without_evidence = build_worker_prompt(
+        record,
+        project_id=310967,
+        issue_iid=306,
+        effective_worker_budget_seconds=1800,
+    )
+    with_evidence = build_worker_prompt(
+        record,
+        project_id=310967,
+        issue_iid=306,
+        effective_worker_budget_seconds=1800,
+        retained_red_checkpoint=checkpoint,
+    )
+    assert "delegate only Architect and Red in this segment" in without_evidence
+    assert (
+        "complete applicable policy preparation before delegating Green"
+        in with_evidence
+    )
+    assert "trusted retained Red checkpoint" in with_evidence
+    assert with_evidence.count("A trusted retained Red checkpoint is available") == 1
+    assert "'ref': 'untrusted'" not in with_evidence
+    assert "'ref': 'untrusted'" not in without_evidence
 
 
 _CONTEXT_PREFIX = "Untrusted issue context JSON:\n"
@@ -626,6 +672,20 @@ def test_workflow_prompt_reconciles_documentation_after_final_code_interfaces() 
 
 
 def test_resumed_prompt_orders_policy_before_parallel_implementation() -> None:
+    base = "c" * 40
+    checkpoint = RedCheckpointEvidence(
+        project_id=310967,
+        issue_iid=207,
+        source_branch="agent/issue-207",
+        base_sha=base,
+        tree_oid="a" * 40,
+        ref=checkpoint_ref(207, base),
+        test_paths=("tests/test_agent_work_worker.py",),
+        argv=("uv", "run", "pytest", "tests/test_agent_work_worker.py"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256="e" * 64,
+    )
     prompt = build_worker_prompt(
         {
             "state": "executing",
@@ -640,6 +700,7 @@ def test_resumed_prompt_orders_policy_before_parallel_implementation() -> None:
         project_id=310967,
         issue_iid=207,
         effective_worker_budget_seconds=1800,
+        retained_red_checkpoint=checkpoint,
     )
 
     resumed = prompt.split(

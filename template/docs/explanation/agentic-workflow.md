@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -80,9 +80,17 @@ See [Configure agent capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` sets authority and safety. It sets classification and conditional
 loading. It gives the route to `$architect`. Architect owns lane manifests. It
-owns model mapping, admission, parentage, receipts, correction, and final
-decisions. Skills own procedure and capability metadata. `$git-flow` owns
-publication. `$work-item-runner` owns the serial controller/worker exception.
+maps skill tiers to models, admits work, and delegates roles. Skills define
+procedure and model-tier metadata. Architect judges applicability, review
+adequacy, corrections, and the final outcome. `$git-flow` owns publication.
+`$work-item-runner` owns the serial controller/worker exception.
+
+The serial worker also uses `agent_work.workflow_router.route_workflow()` to
+suggest next roles and report missing, stale, or unresolved receipt evidence
+from typed workflow facts. For a new worker prompt, the controller passes its
+verified retained Red checkpoint when one exists. Without that checkpoint, the
+prompt's advisory input has an unknown lane and suggests Architect. These
+suggestions do not verify specialist receipts or change controller state.
 
 ## Architect considers three independent designs
 

@@ -82,6 +82,7 @@ from agent_work.red_checkpoint import (
     RedCheckpointError,
     RedCheckpointEvidence,
     RedCheckpointRequest,
+    checkpoint_ref,
 )
 from agent_work.repository import (
     CommandResult,
@@ -2233,7 +2234,8 @@ class RedThenGreenInvoker:
                 broker_request=broker_request,
                 build_artifact=build_artifact,
             )
-        assert "red_checkpoint" in record
+        assert "red_checkpoint" not in record
+        assert "trusted retained Red checkpoint" in prompt
         self.repository.paths = (
             "src/example.py",
             "tests/test_agent_work_serial_runtime.py",
@@ -9700,18 +9702,34 @@ def test_worker_prompt_omits_controller_private_paths_in_workflow_and_recovery(
         },
         "next_action": f"Resume {worktree}",
     }
+    base = "a" * 40
+    retained = RedCheckpointEvidence(
+        project_id=310967,
+        issue_iid=196,
+        source_branch="agent/issue-196",
+        base_sha=base,
+        tree_oid="b" * 40,
+        ref=checkpoint_ref(196, base),
+        test_paths=("tests/test_candidate.py",),
+        argv=("uv", "run", "pytest", "tests/test_candidate.py"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256="e" * 64,
+    )
     for record in (base_record, recovery):
         prompt = build_worker_prompt(
             record,
             project_id=310967,
             issue_iid=196,
             effective_worker_budget_seconds=1800,
+            retained_red_checkpoint=retained if record is recovery else None,
         )
         assert str(private_root) not in prompt
         assert str(worktree) not in prompt
         assert "[controller-private]" in prompt
         if record is recovery:
-            assert "refs/agent-work/red/issue196" in prompt
+            assert retained.ref in prompt
+            assert "refs/agent-work/red/issue196" not in prompt
 
 
 def test_worker_prompt_assigns_main_advance_reconciliation_to_controller_boundary(
