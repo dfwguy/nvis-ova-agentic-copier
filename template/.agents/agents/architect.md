@@ -412,17 +412,18 @@ Keep the evidence. Keep the scope. Keep the outcome clear.
 Quality Judge focused-rerun evidence has two parts. First, list prior complete
 receipt sections still supported unchanged. Then list findings reviewed fresh.
 Also list paths and related scope reviewed fresh. Corrections remain staged-tree
-changes. They do not create more intermediate commits. In a normal interactive
-flow, Main owns the Red commit. Finalizer owns the later checked publication
-commit. It creates that commit over the original base. It may safely compact
-the local branch to that shape. It keeps the Red ref and identity. Before push,
-history has exactly one final passing commit over the base. Main publishes only
-that tip. Do not rely on server-side squash. In a serial-worker flow, Finalizer
-never commits. The trusted runner keeps its single validated final controller commit
+changes. They do not create more intermediate commits. In interactive first
+publication, Main owns the Red commit. Finalizer creates the checked commit
+over the original base and may compact the local branch to that shape. It
+keeps the Red ref and identity. Before the first push, the branch has exactly
+one passing commit over the base. Published corrections use the mode below.
+Main publishes only the checked tip. Do not rely on server-side squash. In a
+serial-worker flow, Finalizer never commits. The trusted runner keeps its
+single validated final controller commit
 path. Its Red checkpoint is a local Git tree ref. Never push either checkpoint
 ref.
 
-For interactive compaction, accept only Finalizer's bounded-action receipt. It
+For first publication, accept only Finalizer's bounded compaction receipt. It
 must prove the branch is at Finalizer's passing head, the original base and Red
 ref are exact, the Judge tree is staged and clean, Red has the base as its sole
 parent, and the passing head descends from Red. It must prove no push, GitLab
@@ -430,6 +431,16 @@ call, approval, or merge occurred. The action creates the Judge tree commit with
 the base as sole parent and atomically compare-and-swaps the branch from the
 passing head. Postchecks prove the new head, sole parent, tree, unchanged Red
 ref, and clean state. Any failure stops publication.
+
+### Published coding merge request correction
+
+Use this mode for a correction to a published coding MR. Keep it within the
+retained Red scope. Main supplies the fresh open-MR
+and remote-tip proof required by `$git-flow`. Finalizer uses its append-only
+commit boundary with fresh validation and review. The retained Red ref stays
+unchanged; the published tip need not descend from Red after first-publication
+compaction. A fresh Red cycle after publication needs a separate route.
+Stop on drift.
 
 ### Reconciliation mode
 
@@ -743,9 +754,10 @@ safeguards. Fix a bug that can recur, even if one saved case exposed it.
    For code work, get the staged tree for this mode and the joined Judge and
    Non-functional handoff before specialist review starts. In interactive work, Finalizer
    may create the validated publication commit only after it proves that same
-   staged tree. It creates one final passing commit over the original base and
-   retains the local Red ref. Require the exact bounded compaction prechecks,
-   action, postchecks, and stop result above. A serial worker never commits.
+   staged tree. For first publication, it creates one final passing commit over
+   the original base and retains the local Red ref. Require the exact bounded
+   compaction checks and stop result above. For a published correction, use the
+   append-only mode above. A serial worker never commits.
 
    Each cycle records its identifier. It records input finding fingerprints and
 classifications. It records changed paths or scope. It records checks before and after or N/A.

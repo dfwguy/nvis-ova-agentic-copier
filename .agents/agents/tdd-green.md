@@ -226,8 +226,9 @@ not add untested functionality.
    serial-worker flow, Finalizer never commits. The trusted runner keeps its
    single validated final controller commit path. Pass the retained Red
    checkpoint and ordinary final Red-to-Green diff to Finalizer. In interactive
-   work, Finalizer must produce one final passing publication commit over the
-   original base while retaining the local Red ref. In reconciliation mode, it
+   first publication, Finalizer uses original-base compaction and retains the
+   local Red ref. A published-MR correction uses its append-only mode. In
+   reconciliation mode, it
    directly commits the exact Judge-approved staged tree from the still-pending
    merge state. It consumes `MERGE_HEAD`. Old source is first. Exact
    target/`MERGE_HEAD` is second. Do not create an intermediate passing commit

@@ -357,6 +357,21 @@ preflight. Get one user approval for each remote-touching command.
    unsafe/unvalidated content or ambiguous publication authority.
 
 3b. **MR exists — push, then preserve or update its draft handoff**:
+
+For a correction to a published coding MR, use this path. The generic push
+example below does not apply. Before Finalizer acts,
+Main fetches and selects exactly one open MR by numeric project and source
+branch. Verify its numeric identity, source, target, and remote tip `P`.
+Local branch and `HEAD` must equal `P`. Give that proof to Finalizer. After
+it returns child `C`, fetch and recheck the same MR and remote tip `P` just
+before an ordinary fast-forward push to that source branch. Require local
+branch and `HEAD` at `C`, with sole parent `P`. Never force push. Read back
+the same MR and require source SHA `C`, the same identity and branches, and
+the intended title and description. Apply the Draft handoff rules below and
+read back any metadata update. Drift or failed readback stops without reset,
+overwrite, another commit, or a second MR.
+
+For other updates, use the following generic example:
    ```bash
    source_branch="$(git rev-parse --abbrev-ref HEAD)"
    selected_mr_json="$(glab api --hostname "$GITLAB_HOST" \

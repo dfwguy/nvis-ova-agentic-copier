@@ -103,17 +103,25 @@ Reviewer child receipt. Every coding candidate runs the full hook. Only then
 may Green start concurrent specialist reviews. Test Judge verifies the
 Red-to-Green Git diff. During finalization,
 Finalizer checks that diff, checkpoint, and validation proof. In interactive
-work, it creates one final passing commit over the original base. It keeps the
-Red ref. Main publishes only that tip. Its history has one final commit over
-the base before push. Pipeline review
-independently observes the exact-source pipeline.
+first-publication work, it creates one final passing commit over the original
+base. It keeps the Red ref. Main publishes only that tip. Its history has one
+final commit over the base before push. Pipeline review independently observes
+the exact-source pipeline.
 
-Finalizer uses one bounded local compaction. Before it acts, it proves the
-passing head, base, Red commit and ref, Judge tree, clean state, ancestry, and
-no remote action. It creates the Judge tree commit with the base as sole parent.
+For first publication, Finalizer uses one bounded local compaction. Before it
+acts, it proves the passing head, base, Red commit and ref, Judge tree, clean
+state, ancestry, and no remote action. It creates the Judge tree commit with
+the base as sole parent.
 It atomically compare-and-swaps the branch from the passing head. It then proves
 the new head, parent, tree, unchanged Red ref, and clean state. Any failure stops
 publication.
+
+A correction to an already published coding MR stays within the retained Red
+scope. Fresh Judge, Non-functional Reviewer, specialist, and trusted ledger
+evidence covers its staged tree. Finalizer appends one checked child to the
+verified published tip while keeping the Red ref unchanged. Main rechecks and
+pushes only to the same MR with an ordinary fast-forward push and exact-source
+readback. A fresh Red cycle after publication needs a separate route.
 
 Recovery reuses the exact retained mode-specific checkpoint; it never rebuilds
 one from prose. No Red checkpoint ref is pushed. Correctness does not depend on

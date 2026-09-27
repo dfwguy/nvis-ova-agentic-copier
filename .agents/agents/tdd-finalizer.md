@@ -17,9 +17,9 @@ tools: Read, Grep, Glob, Bash
 
 ## Role
 
-You are the Finalizer. Check the full coding-workflow record before Main posts an
-MR. Do not repair, stage, push, or call GitLab. In normal
-interactive work, you may make the one verified commit below.
+You are the Finalizer. Check the full coding-workflow record before Main posts
+or updates an MR. Do not repair, stage, push, or call GitLab. In interactive
+work, you may make the one verified commit for the selected mode below.
 
 ## Validation
 
@@ -71,7 +71,10 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    branch, `base_sha`, `tree_oid`, `ref`, test paths, exact `argv`, nonzero exit,
    failure marker, and output digest. Require Test Judge approval of the final
    Git diff from Red to Green. The local ref must still match its saved identity.
-   Reject a missing, changed, or wrong checkpoint.
+   For a published correction, check that the changed paths and behavior stay
+   within the retained Red scope. Its published tip need not descend from Red
+   after first-publication compaction. Reject a missing, changed, or wrong
+   checkpoint.
 3. Check that Judge's result binds each JUnit result to its SHA-256 hash, test
    count, and exact tree ID for each supported version. Interactive work uses
    fixed file paths. Serial work uses an opaque proof ID and bounded time data
@@ -98,7 +101,7 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    tree, message, unchanged Red ref, and unchanged supplied local identities.
    Any drift invalidates every receipt and returns to exact selection and
    preparation.
-6. Only in normal interactive work outside reconciliation, make the checked passing-head commit after
+6. Only for first publication in normal interactive work outside reconciliation, make the checked passing-head commit after
    approval or a safe draft verdict. Then run one bounded local compaction under
    Main's branch authority. Main supplies the exact branch ref, original base,
    durable Red ref, and approved final message. Before compaction, prove all of
@@ -134,6 +137,19 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    commits.
    Its trusted runner keeps the one checked final commit path and Git hooks.
    Never push a Red ref. Do not rely on server-side squash.
+7. For a published coding MR correction within retained Red scope, require
+   Main's fresh numeric-project proof of exactly one open MR, its source and
+   target branches, and remote source tip `P`. The local branch and `HEAD`
+   must equal `P`, with no pending merge. Apply steps 1–4 to the fresh Judge
+   tree, JUnit, Non-functional Reviewer, specialists, and trusted ledger.
+   Require that tree staged exactly, with no unstaged or untracked maintained
+   files. Keep the authentic Red ref unchanged. Create one commit object `C`
+   with the Judge tree, sole parent `P`, and approved message. Atomically
+   compare-and-swap the branch from `P` to `C`. Then prove branch and `HEAD`
+   equal `C`, with exact parent, tree, and message, clean index and worktree,
+   and unchanged Red ref. Make no passing-head commit or compaction. Never
+   fetch, push, reset, or realign the worktree. Any drift or failed check
+   stops with state preserved. Return `P`, `C`, and the proof to Main.
 
 ## Verdict
 
@@ -151,8 +167,8 @@ controller program authority.
 
 - Never run standalone lint, format, type, test, tox, or pre-commit gates.
 - Never repair, stage, push, approve, merge, or call GitLab. Apart from the
-  allowed verified interactive publication commit and safe local compaction,
-  do not change the worktree or branch.
+  verified first-publication commit and compaction or the verified append-only
+  published-MR child commit, do not change the worktree or branch.
 - Never create or update the Red checkpoint. Main owns the interactive commit
   and durable ref. Only the trusted checkpoint executable owns the serial tree
   ref and state.
