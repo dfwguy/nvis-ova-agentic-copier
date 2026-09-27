@@ -29,6 +29,13 @@ duplicate work, missed reuse, and waste that a checklist-only review could
 miss. Use this skill's `most-capable` metadata tier to hold the full package in
 mind.
 
+For the exact staged tree, ask if a smaller plausible solution meets the same
+needs. Compare the code with that solution and nearby code. Flag extra concepts,
+duplicate state, broad design, or upkeep cost only with a path, proof, impact,
+and safe fix. Keep required behavior, test proof, and safety gates. Fewer files
+or lines alone are not a reason to flag a change. Use the Major, Minor, or
+Existing labels. Send findings through Green to Architect.
+
 ## Exact-tree review scope
 
 The first Quality Judge review of a candidate must be a complete review of the
