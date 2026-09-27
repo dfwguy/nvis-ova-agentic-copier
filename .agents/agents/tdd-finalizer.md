@@ -98,42 +98,15 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    tree, message, unchanged Red ref, and unchanged supplied local identities.
    Any drift invalidates every receipt and returns to exact selection and
    preparation.
-6. Only in normal interactive work outside reconciliation, make the checked passing-head commit after
-   approval or a safe draft verdict. Then run one bounded local compaction under
-   Main's branch authority. Main supplies the exact branch ref, original base,
-   durable Red ref, and approved final message. Before compaction, prove all of
-   these facts:
-
-   - The branch and `HEAD` equal the passing head just created by Finalizer.
-   - The original base equals the accepted checkpoint base.
-   - The durable Red ref still equals the approved Red commit.
-   - `git write-tree` equals the Judge tree, and the worktree and index are clean.
-   - The Red commit's sole parent is the original base. The passing head descends
-     from that Red commit.
-   - No push, GitLab call, approval, or merge has occurred.
-
-   The one compaction action creates a commit object with the exact Judge tree,
-   sole parent original base, and approved final message. It then atomically
-   compare-and-swaps the branch ref from the passing head to that new commit:
-
-   ```bash
-   new_commit="$(git commit-tree "$judge_tree" -p "$base" -F "$message_file")"
-   git update-ref "$branch_ref" "$new_commit" "$passing_head"
-   ```
-
-   Do not move or delete the durable Red ref. After attempting compaction, run
-   only read-only postchecks. Never run `git reset`, including a reset to the
-   same commit, `git stash`, `git clean`, `git checkout`, `git switch`, or
-   `git restore`, and do not use any other mutating realignment or discard
-   action. Prove that the branch and `HEAD` equal `new_commit`, its sole parent
-   equals the base, its tree equals the Judge tree, the Red ref is unchanged,
-   and the worktree and index are clean. If any precheck, the action, or any
-   postcheck fails, preserve the observed refs, index, and worktree state and
-   stop without publication. Return the new SHA, checkpoint proof, and verdict.
-   Main may publish only this final passing tip. A serial-worker Finalizer never
-   commits.
-   Its trusted runner keeps the one checked final commit path and Git hooks.
-   Never push a Red ref. Do not rely on server-side squash.
+6. In normal interactive work, make the checked passing commit after approval
+   or a safe draft verdict. Then call `agent-work interactive-commit compact
+   --apply`. Give it Main's branch ref, the accepted base and Red checkpoint,
+   the passing commit, Judge tree, and approved message. The trusted command
+   checks them and returns `new_commit`. On failure, preserve state and stop
+   without publication. Return its IDs, checkpoint proof, and verdict. Main
+   may publish only the returned final tip through `$git-flow`. Never push a
+   Red ref. In reconciliation, use step 5 instead. A serial-worker Finalizer
+   never commits; its trusted runner owns the final commit and Git hooks.
 
 ## Verdict
 

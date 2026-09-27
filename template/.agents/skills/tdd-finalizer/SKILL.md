@@ -26,9 +26,10 @@ approval of the final Red-to-Green Git diff.
 During interactive finalization, Finalizer may commit with `--no-verify` only after all
 proof matches the Judge handoff. Match the staged tree. Match the JUnit files,
 digests, and counts. Match the Non-functional Reviewer receipt. Never stage.
-Create one final passing publication commit over the original base while
-retaining the local Red ref. Use the role's one compare-and-swap compaction and
-return every precheck and postcheck. A failed check stops publication. A serial
+Create the checked passing commit, then use the trusted
+`agent-work interactive-commit compact` boundary for the final publication
+tip. Retain the local Red ref and return the boundary result. A failed call
+stops publication. A serial
 worker never commits, stages, or runs `git write-tree`. It checks the
 controller-owned exact-tree proof and opaque validation evidence instead of
 private JUnit paths. Do not add a check or change the validated tree.
