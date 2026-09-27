@@ -690,6 +690,7 @@ def test_recovery_prompt_exposes_retained_checkpoint_without_publication_authori
         project_id=310967,
         issue_iid=81,
         effective_worker_budget_seconds=1800,
+        retained_red_checkpoint=_evidence(),
     )
 
     assert "retained Red checkpoint" in prompt

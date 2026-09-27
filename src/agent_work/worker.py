@@ -62,6 +62,7 @@ from .models import (
 )
 from .ports import CommandResult, CommandRunner
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
+from .workflow_router import WorkflowFacts, route_workflow
 
 
 class WorkerProtocolError(ValueError):
@@ -2199,9 +2200,11 @@ def build_worker_prompt(
     merge_request_feedback: tuple[object, ...] = (),
     worker_result_broker: WorkerResultBrokerRequest | None = None,
     worker_result_builder: Path | None = None,
+    retained_red_checkpoint: RedCheckpointEvidence | None = None,
 ) -> str:
     """Build the trusted protocol instructions for one bounded phase."""
     safe_record = dict(record)
+    safe_record.pop("red_checkpoint", None)
     diagnostic_context = ""
     attempt = safe_record.get("repair_attempt")
     if isinstance(attempt, Mapping):
@@ -2223,29 +2226,30 @@ def build_worker_prompt(
     record = safe_record
     phase = record.get("phase")
     checkpoint_context = ""
-    checkpoint = record.get("red_checkpoint")
-    if isinstance(checkpoint, dict):
-        checkpoint_fields = cast(dict[str, object], checkpoint)
-        tree_oid = checkpoint_fields.get("tree_oid")
-        ref = checkpoint_fields.get("ref")
-        test_paths = checkpoint_fields.get("test_paths")
-        if (
-            isinstance(tree_oid, str)
-            and isinstance(ref, str)
-            and isinstance(test_paths, (list, tuple))
-            and all(isinstance(path, str) for path in test_paths)
-        ):
-            checkpoint_context = (
-                "A trusted retained Red checkpoint is available for recovery: "
-                f"tree {tree_oid}, ref {ref}, test paths {tuple(test_paths)}. "
-                "Restore or inspect that exact local checkpoint; never rebuild it from prose. "
-            )
+    if retained_red_checkpoint is not None:
+        checkpoint_context = (
+            "A trusted retained Red checkpoint is available for recovery: "
+            f"tree {retained_red_checkpoint.tree_oid}, ref {retained_red_checkpoint.ref}, "
+            f"test paths {retained_red_checkpoint.test_paths}. "
+            "Restore or inspect that exact local checkpoint; never rebuild it from prose. "
+        )
+    route = route_workflow(
+        WorkflowFacts(
+            lane=(
+                WorkflowLane.CODING
+                if retained_red_checkpoint is not None
+                else WorkflowLane.UNKNOWN
+            ),
+            red_checkpoint=retained_red_checkpoint,
+        )
+    )
+    routed_roles = ", ".join(route.next_roles)
     coding_checkpoint_workflow = (
         "For the coding lane, the trusted Red checkpoint already exists. Do not "
         "rerun Red or manufacture replacement evidence. Reuse its exact identity, "
         "then complete applicable policy preparation before delegating Green and "
         "Diátaxis Writer concurrently with the retained Red receipt. "
-        if checkpoint_context
+        if retained_red_checkpoint is not None
         else (
             "For the coding lane, delegate only Architect and Red in this segment. "
             "Stop immediately after the approved failing tests exist. Do not delegate "
@@ -2315,6 +2319,7 @@ def build_worker_prompt(
             "The trusted runner, not worker, files and queues the child issues: no human approval step. "
             "Do not create or update child issues, do not execute proposed slices "
             "in this worker, and do not automatically retry. "
+            f"Trusted advisory next roles: {routed_roles}. "
             f"{coding_checkpoint_workflow}"
             "Retained main-advance reconciliation is controller-owned reconciliation: the "
             "workspace-write worker may resolve project files, but the worker must not write "
@@ -2323,49 +2328,32 @@ def build_worker_prompt(
             "For existing-MR feedback repair, retain the exact retained Red-to-source provenance "
             "separately from fresh three-way reconciliation proof; never substitute one for the other. "
             "Human approval remains required before publication or merge. "
-            "After the trusted coding checkpoint is present, Architect remains live: it delegates conditional $agent-policy-writer "
-            "with its design and acceptance criteria, receives its receipt or N/A, then delegates Green and Diátaxis Writer concurrently "
-            "with the design, Red receipt, failing-test diff, and shared worktree. The Policy Writer exclusively owns policy paths. "
-            "Green owns production and tests and must inspect the actual worktree. Diátaxis Writer owns docs/ and README. "
-            "Green shares final interface details; Diátaxis Writer reconciles documentation against final implemented code, "
-            "configuration, and interfaces; after both Green and Diátaxis Writer finish, Green asks the live controller "
-            "candidate boundary to stage their combined observed changes. Green then delegates the serial $tdd-judge alone "
-            "with that tree. Judge asks the controller to validate the exact tree and receives an opaque proof ID "
-            "with bounded test counts, digests, and timing. Judge delegates $nonfunctional-review "
-            "as its read-only child with that program-owned evidence and returns their combined handoff. Wait for it "
-            "before fanning out every remaining applicable independent specialist reviewer concurrently "
-            "as read-only work. Give each reviewer the final diff, its relevant instructions, and the "
-            "Judge's bounded controller evidence. Quality Judge receives the architecture; Test Judge "
-            "receives the Red receipt and test diff. Do not give reviewers credentials or publication "
-            "authority. The first review must establish that the initial $judge-quality review is complete "
-            "and is an independent $judge-quality review of the exact staged tree. After a bounded "
-            "correction, allow a targeted rerun only with the prior and current staged tree OIDs, the "
-            "prior complete $judge-quality receipt, stable finding fingerprints, the correction ledger, "
-            "and exact changed paths. If targeted-review provenance is missing or internally inconsistent, "
-            "require a non-code Overall: Provenance Reject receipt from Quality Judge to Green to Architect; "
-            "do not silently fall back to a complete review. Freshly review addressed findings, changed production "
-            "files, and relevant callers, consumers, shared helpers, and contracts. Widen to a complete "
-            "review for public interfaces, schemas, shared constants, finite state machines, dependency "
-            "inversion, security or authority boundaries, cross-module invariants, or unproven scope. The "
-            "focused receipt separates unchanged-supported prior sections from freshly reviewed scope. "
-            "The controller, not the model, records timing and compact, token-neutral scope metadata for "
-            "future #134 comparison; do not add timing storage. Use staged-tree identities and no intermediate "
-            "commits. In this serial workflow, the serial Finalizer never commits; the trusted runner retains "
-            "its normal controller commit path. In normal interactive work, Finalizer owns one verified commit. "
-            "Wait for every specialist reviewer "
-            "and collect the complete finding "
-            "set without failing fast. Green consolidates findings and repairs only production and tests. Documentation and README "
-            "findings return through Architect to Diátaxis Writer; policy findings return through Architect to Policy Writer. "
-            "After Green and Diátaxis Writer finish each correction and any policy repair stops, Green asks the controller "
-            "to stage the combined observed candidate before a fresh Judge receipt. "
-            "Green then runs evidence-based correction cycles while material progress exists; repeated or reopened fingerprint, "
-            "unchanged relevant evidence, scope, authority, or controversy blockers stop the work. It reruns affected "
-            "checks and reviews, and returns all receipts and unresolved findings to the still-"
-            "live Architect. Architect decides whether to finalize, revise its design, "
-            "or return needs_human. Run the applicable finalizer only after Green returns an "
-            "approved consolidated result. Content-only work uses Architect, one sole-mutator "
-            "Documentation Writer, controller stage/read of the final tree, a current Consistency Judge "
-            "review of the exact old/new content and deletions, and Documentation Finalizer without Red or code judges. "
+            "After the trusted coding checkpoint is present, Architect remains live. It resolves optional "
+            "applicability, delegates conditional $agent-policy-writer, receives its receipt or N/A, "
+            "then delegates Green and Diátaxis Writer concurrently. The Policy Writer exclusively owns policy paths. "
+            "Green owns production and tests; Diátaxis Writer owns docs/ and README. "
+            "Green shares final interface details; Diátaxis Writer reconciles documentation against final implemented code, configuration, and interfaces. "
+            "Only after both Green and Diátaxis Writer finish, Green asks the controller to stage the observed candidate, "
+            "then delegates the serial $tdd-judge alone with that tree. Judge uses the trusted validation boundary and "
+            "delegates $nonfunctional-review as its read-only child. Wait for both results before concurrent specialist review. "
+            "Quality Judge receives the architecture; Test Judge receives the Red receipt and test diff. "
+            "The initial $judge-quality review is complete and is an independent $judge-quality review of the exact tree. "
+            "A focused rerun needs prior and current staged tree OIDs, prior complete $judge-quality receipt, "
+            "stable finding fingerprints, correction ledger, and exact changed paths. If targeted-review provenance is missing or internally inconsistent, "
+            "return a non-code Overall: Provenance Reject from Quality Judge to Green to Architect; do not silently fall back to a complete review. "
+            "Review addressed findings, changed production files, and relevant callers, consumers, shared helpers, and contracts. "
+            "Widen for public interfaces, schemas, shared constants, finite state machines, dependency inversion, "
+            "security or authority boundaries, cross-module invariants, and unproven scope. Separate unchanged-supported prior sections from freshly reviewed scope. "
+            "The controller, not the model, records timing and compact, token-neutral scope metadata for future #134 comparison; do not add timing storage. "
+            "Wait for every reviewer and collect findings without failing fast. Green repairs production and tests; "
+            "documentation findings return through Architect to Diátaxis Writer and policy findings to Policy Writer. "
+            "After both writers finish each correction, stage a new candidate and get a fresh Judge receipt. "
+            "Green runs evidence-based correction cycles while material progress exists; repeated or reopened fingerprint, unchanged relevant evidence, scope, authority, or controversy stops correction. "
+            "Green returns all receipts and "
+            "unresolved findings to the still-live Architect. Architect decides finalization, revision, or needs_human. "
+            "Use staged-tree identities and no intermediate commits. The serial Finalizer never commits; the trusted runner retains its normal controller commit path. In normal interactive work, Finalizer owns one verified commit. "
+            "Content-only work uses a sole Documentation Writer, controller stage/read, applicable reviews, "
+            "and Documentation Finalizer without Red or code judges. "
         )
     if worker_result_broker is not None and worker_result_builder is None:
         raise ValueError("worker result builder is required for a broker")

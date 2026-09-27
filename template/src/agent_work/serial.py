@@ -3223,6 +3223,7 @@ def _execute(
             worker_result_builder=(
                 repository.config.checkout / "bin" / "agent-work-from-checkout"
             ),
+            retained_red_checkpoint=retained_checkpoint,
         )
     except RedCheckpointError:
         return _block_red_checkpoint(
@@ -3626,6 +3627,7 @@ def _execute(
                     worker_result_builder=(
                         repository.config.checkout / "bin" / "agent-work-from-checkout"
                     ),
+                    retained_red_checkpoint=retained_checkpoint,
                 )
         except (RedCheckpointError, RepositoryError, ValueError):
             return _block_red_checkpoint(
