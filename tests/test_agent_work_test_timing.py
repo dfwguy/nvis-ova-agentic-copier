@@ -242,7 +242,7 @@ def test_changed_shared_helper_requires_explicit_consumer_impact() -> None:
         _review({CASE: 0.2}, {CASE: 0.2}, changed_tests=("tests/conftest.py",))
 
 
-def test_helper_affected_case_over_100ms_receives_focused_review() -> None:
+def test_helper_affected_existing_subsecond_case_uses_full_junit_pair() -> None:
     requests: list[dict[str, Any]] = []
 
     def focused(**request: Any) -> dict[str, Any]:
@@ -257,9 +257,9 @@ def test_helper_affected_case_over_100ms_receives_focused_review() -> None:
     )
 
     assert result.outcome == "correction_required"
-    assert {
-        (request["environment"], request["case_names"]) for request in requests
-    } == {(env, (CASE,)) for env in ENVIRONMENTS}
+    assert requests == []
+    assert result.outcome == "correction_required"
+    assert all(item.reason == "touched_slow" for item in result.findings)
 
 
 def test_changed_test_file_marks_its_parameterized_cases_as_touched() -> None:
@@ -271,6 +271,174 @@ def test_changed_test_file_marks_its_parameterized_cases_as_touched() -> None:
     assert {(item.environment, item.name) for item in result.findings} == {
         (env, NEW_CASE) for env in ENVIRONMENTS
     }
+
+
+def test_many_existing_subsecond_cases_in_changed_file_need_no_focused_runs() -> None:
+    cases = {f"tests/test_speed.py::test_case_{index}": 0.101 for index in range(40)}
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        return _focused(**request)
+
+    result = _review(
+        cases, cases, changed_tests=("tests/test_speed.py",), focused=focused
+    )
+
+    assert result.outcome == "correction_required"
+    assert {(item.environment, item.name, item.reason) for item in result.findings} == {
+        (environment, name, "touched_slow")
+        for environment in ENVIRONMENTS
+        for name in cases
+    }
+    assert requests == []
+
+
+def test_many_touched_slow_cases_keep_bounded_findings_and_omission_count() -> None:
+    cases = {f"tests/test_speed.py::test_case_{index}": 0.101 for index in range(86)}
+
+    result = _review(
+        cases,
+        cases,
+        changed_tests=("tests/test_speed.py",),
+        focused=lambda **_request: pytest.fail("existing subsecond case was focused"),
+    )
+
+    assert result.outcome == "correction_required"
+    assert len(result.findings) == 128
+    assert result.omitted_findings == 44
+    assert all(item.reason == "touched_slow" for item in result.findings)
+
+
+def test_critical_cases_across_versions_are_retained_before_subsecond_findings() -> (
+    None
+):
+    subsecond_cases = {
+        f"tests/test_speed.py::test_case_{index}": 0.101 for index in range(64)
+    }
+    critical_case = "tests/test_speed.py::test_critical"
+    result = _review(
+        subsecond_cases,
+        subsecond_cases | {critical_case: 1.001},
+        changed_tests=("tests/test_speed.py",),
+    )
+
+    assert result.outcome == "correction_required"
+    assert len(result.findings) == 128
+    assert result.omitted_findings == 2
+    assert {(item.environment, item.name) for item in result.findings} >= {
+        (environment, critical_case) for environment in ENVIRONMENTS
+    }
+
+
+def test_more_than_128_critical_findings_fails_closed() -> None:
+    from agent_work.test_timing import FindingBudgetExhausted
+
+    critical_cases = {
+        f"tests/test_speed.py::test_critical_{index}": 1.001 for index in range(65)
+    }
+
+    with pytest.raises(FindingBudgetExhausted, match="finding budget exhausted"):
+        _review({}, critical_cases)
+
+
+def test_focused_budget_counts_invocations_across_both_versions() -> None:
+    from agent_work.test_timing import FocusedTimingBudgetExhausted
+
+    cases = {f"tests/test_speed.py::test_case_{index}": 0.11 for index in range(513)}
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        return _focused(**request)
+
+    with pytest.raises(FocusedTimingBudgetExhausted, match="budget exhausted"):
+        _review({}, cases, focused=focused)
+
+    assert len(requests) == 32
+    assert all(1 <= len(request["case_names"]) <= 32 for request in requests)
+
+
+def test_many_new_cases_are_focused_in_bounded_batches() -> None:
+    cases = {f"tests/test_speed.py::test_case_{index}": 0.11 for index in range(86)}
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        return _focused(**request)
+
+    result = _review({}, cases, changed_tests=("tests/test_speed.py",), focused=focused)
+
+    assert result.outcome == "correction_required"
+    assert len(requests) == 6
+    assert all(request["source_tree"] == CANDIDATE_TREE for request in requests)
+    assert {name for request in requests for name in request["case_names"]} == set(
+        cases
+    )
+    assert len(result.findings) == 128
+    assert result.omitted_findings == 44
+
+
+def test_many_one_second_regressions_keep_paired_focused_evidence() -> None:
+    baseline = {f"tests/test_speed.py::test_case_{index}": 0.9 for index in range(64)}
+    candidate = {name: 1.1 for name in baseline}
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        result = _focused(**request)
+        result["cases"] = {
+            name: {
+                "setup": 0.01,
+                "call": 1.08 if request["source_tree"] == CANDIDATE_TREE else 0.88,
+                "teardown": 0.01,
+            }
+            for name in request["case_names"]
+        }
+        return result
+
+    result = _review(baseline, candidate, focused=focused)
+
+    assert len(requests) == 16
+    assert result.outcome == "correction_required"
+    assert len(result.findings) == 128
+    assert result.omitted_findings == 0
+    assert all(item.reason == "corroborated_regression" for item in result.findings)
+    for environment in ENVIRONMENTS:
+        per_source = {
+            source: [
+                request
+                for request in requests
+                if request["environment"] == environment
+                and request["source_tree"] == source
+            ]
+            for source in (BASE_TREE, CANDIDATE_TREE)
+        }
+        assert all(len(group) == 4 for group in per_source.values())
+        assert all(
+            sorted(name for request in group for name in request["case_names"])
+            == sorted(list(baseline) * 2)
+            for group in per_source.values()
+        )
+
+
+def test_bounded_findings_retain_a_corrective_reason_after_many_reports() -> None:
+    inherited = {
+        f"tests/test_speed.py::test_inherited_{index}": 1.1 for index in range(63)
+    }
+    cases = inherited | {CASE: 0.101}
+
+    result = _review(
+        cases,
+        cases,
+        changed_tests=(CASE,),
+        focused=lambda **_request: pytest.fail("no focused run expected"),
+    )
+
+    assert result.outcome == "correction_required"
+    assert len(result.findings) == 128
+    assert result.omitted_findings == 0
+    assert any(item.reason == "touched_slow" for item in result.findings)
 
 
 def test_crossing_one_second_with_slow_baseline_repeat_is_spike() -> None:

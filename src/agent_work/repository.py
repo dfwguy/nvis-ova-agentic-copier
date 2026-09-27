@@ -1484,6 +1484,57 @@ class GitRepository:
             raise RepositoryError("candidate validation state is invalid")
         if (state == "terminal-success") != (result.returncode == 0):
             raise RepositoryError("candidate validation exit is inconsistent")
+        raw_failure = report.get("artifact_failure")
+        safe_failure: dict[str, str] | None = None
+        if state == "terminal-artifact-failure":
+            allowed_reasons = {
+                "pre_hook_cleanup": {"os_error"},
+                "post_hook_failed_evidence_read": {"os_error"},
+                "post_hook_failed_cleanup": {"os_error"},
+                "post_hook_success_evidence_read": {
+                    "os_error",
+                    "missing",
+                    "invalid_xml",
+                    "oversized",
+                    "invalid_count",
+                },
+                "post_hook_success_cleanup": {"os_error"},
+                "immutable_snapshot": {"os_error", "invalid_snapshot"},
+                "timing_review": {
+                    "invalid_timing",
+                    "finding_budget_exhausted",
+                    "focused_budget_exhausted",
+                },
+            }
+            if not isinstance(raw_failure, dict) or set(raw_failure) != {
+                "stage",
+                "reason",
+                "environment",
+                "path",
+            }:
+                raise RepositoryError("candidate artifact failure is invalid")
+            failure_stage = raw_failure["stage"]
+            failure_reason = raw_failure["reason"]
+            failure_environment = raw_failure["environment"]
+            if (
+                not isinstance(failure_stage, str)
+                or failure_stage not in allowed_reasons
+                or not isinstance(failure_reason, str)
+                or failure_reason not in allowed_reasons[failure_stage]
+                or failure_environment is not None
+                and failure_environment not in ("py311", "py314")
+                or not isinstance(raw_failure["path"], (str, type(None)))
+                or (failure_environment is None) != (raw_failure["path"] is None)
+                or failure_environment is not None
+                and raw_failure["path"] != f"test-results-{failure_environment}.xml"
+            ):
+                raise RepositoryError("candidate artifact failure is invalid")
+            safe_failure = {
+                "stage": failure_stage,
+                "reason": failure_reason,
+            }
+        elif raw_failure is not None:
+            raise RepositoryError("candidate artifact failure is invalid")
         if (
             timing_review_required
             and state == "terminal-success"
@@ -1542,6 +1593,13 @@ class GitRepository:
             findings = timing_review.get("findings")
             if not isinstance(findings, list) or len(findings) > 128:
                 raise RepositoryError("candidate timing proof is invalid")
+            omitted_findings = timing_review.get("omitted_findings", 0)
+            if (
+                not isinstance(omitted_findings, int)
+                or isinstance(omitted_findings, bool)
+                or not 0 <= omitted_findings <= 32_768
+            ):
+                raise RepositoryError("candidate timing proof is invalid")
             for finding in findings:
                 if not isinstance(finding, dict):
                     raise RepositoryError("candidate timing proof is invalid")
@@ -1591,11 +1649,11 @@ class GitRepository:
             )
             if (
                 timing_review["outcome"] == "clear"
-                and safe_findings
+                and (safe_findings or omitted_findings)
                 or timing_review["outcome"] == "correction_required"
                 and not has_correction
                 or timing_review["outcome"] == "report_only"
-                and (not safe_findings or has_correction)
+                and (not (safe_findings or omitted_findings) or has_correction)
             ):
                 raise RepositoryError("candidate timing proof is invalid")
             safe_timing_review = {
@@ -1607,6 +1665,8 @@ class GitRepository:
                 "runs": safe_runs,
                 "findings": safe_findings,
             }
+            if "omitted_findings" in timing_review:
+                safe_timing_review["omitted_findings"] = omitted_findings
             for artifact in safe_artifacts:
                 environment = str(artifact["environment"])
                 candidate_run = safe_runs[environment]["candidate"]
@@ -1751,8 +1811,10 @@ class GitRepository:
                 "elapsed_seconds",
                 "junit_timings",
                 "timing_review",
+                "artifact_failure",
             )
         }
+        durable_evidence["artifact_failure"] = safe_failure
         return {
             "candidate_tree": candidate_tree,
             "state": state,
@@ -1769,6 +1831,7 @@ class GitRepository:
             "elapsed_seconds": elapsed,
             "junit_timings": safe_timings,
             "timing_review": safe_timing_review,
+            "artifact_failure": safe_failure,
             "evidence_id": sha256(
                 json.dumps(
                     durable_evidence, sort_keys=True, separators=(",", ":")

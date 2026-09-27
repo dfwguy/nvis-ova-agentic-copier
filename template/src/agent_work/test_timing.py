@@ -25,6 +25,9 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _PHASES = ("setup", "call", "teardown")
 _MAX_JUNIT_BYTES = 1_048_576
 _MAX_CASES = 8_192
+_MAX_FINDINGS = 128
+_MAX_FOCUSED_RUNS = 32
+_MAX_FOCUSED_CASES = 32
 _SAFE_CASE_ID = re.compile(
     r"^tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py"
     r"(?:::Test[A-Za-z0-9_]+)*::test_[A-Za-z0-9_]+"
@@ -155,6 +158,15 @@ class TimingReview:
 
     outcome: Literal["clear", "report_only", "correction_required"]
     findings: tuple[TimingFinding, ...]
+    omitted_findings: int = 0
+
+
+class FocusedTimingBudgetExhausted(ValueError):
+    """The exact-source focused comparison would exceed its run budget."""
+
+
+class FindingBudgetExhausted(ValueError):
+    """The timing review cannot retain every critical finding."""
 
 
 def _run(
@@ -284,7 +296,46 @@ def review_test_timings(
         and not affected_by_helper
     ):
         raise ValueError("timing review identity or impact is incomplete")
-    findings: list[TimingFinding] = []
+    critical_findings: list[TimingFinding] = []
+    subsecond_findings: list[TimingFinding] = []
+    focused_runs = 0
+
+    def add_finding(finding: TimingFinding, seconds: float) -> None:
+        if seconds >= 1:
+            critical_findings.append(finding)
+        else:
+            subsecond_findings.append(finding)
+
+    def run_bounded_focused(**request: Any) -> dict[str, dict[str, float]]:
+        nonlocal focused_runs
+        if focused_runs >= _MAX_FOCUSED_RUNS:
+            raise FocusedTimingBudgetExhausted("focused timing budget exhausted")
+        focused_runs += 1
+        return _focused(run_focused, **request)
+
+    def focused_batches(
+        names: list[str],
+        *,
+        source_tree: str,
+        environment: str,
+        prepared: str,
+        argv: tuple[str, ...],
+        seed: str,
+    ) -> dict[str, dict[str, float]]:
+        evidence: dict[str, dict[str, float]] = {}
+        for offset in range(0, len(names), _MAX_FOCUSED_CASES):
+            evidence.update(
+                run_bounded_focused(
+                    source_tree=source_tree,
+                    environment=environment,
+                    prepared_environment=prepared,
+                    argv=argv,
+                    seed=seed,
+                    case_names=tuple(names[offset : offset + _MAX_FOCUSED_CASES]),
+                )
+            )
+        return evidence
+
     for environment in _ENVIRONMENTS:
         baseline, base_seed, base_prepared, base_argv = _run(
             baseline_runs[environment], tree=baseline_tree, environment=environment
@@ -294,77 +345,86 @@ def review_test_timings(
         )
         if (base_seed, base_prepared, base_argv) != (seed, prepared, argv):
             raise ValueError("full JUnit environments are incomparable")
-        focused_names: set[str] = set()
+        new_names = [
+            name
+            for name, seconds in candidate.items()
+            if name not in baseline and seconds > 0.100
+        ]
+        regression_names = [
+            name
+            for name, seconds in candidate.items()
+            if name in baseline
+            and seconds >= 1
+            and (baseline[name] < 1 or seconds > baseline[name])
+        ]
+        critical_count = sum(
+            1
+            + int(
+                name in baseline
+                and (baseline[name] < 1 or seconds > baseline[name])
+                and (_changed(name, changed_tests) or name in affected_by_helper)
+            )
+            for name, seconds in candidate.items()
+            if seconds >= 1
+        )
+        if len(critical_findings) + critical_count > _MAX_FINDINGS:
+            raise FindingBudgetExhausted("finding budget exhausted")
+        focused_batches(
+            new_names,
+            source_tree=candidate_tree,
+            environment=environment,
+            prepared=prepared,
+            argv=argv,
+            seed=seed,
+        )
+        baseline_repeats = [
+            focused_batches(
+                regression_names,
+                source_tree=baseline_tree,
+                environment=environment,
+                prepared=prepared,
+                argv=argv,
+                seed=seed,
+            )
+            for _ in range(2)
+        ]
+        candidate_repeats = [
+            focused_batches(
+                regression_names,
+                source_tree=candidate_tree,
+                environment=environment,
+                prepared=prepared,
+                argv=argv,
+                seed=seed,
+            )
+            for _ in range(2)
+        ]
         for name, seconds in candidate.items():
             original = baseline.get(name)
             touched = _changed(name, changed_tests) or name in affected_by_helper
-            needs_focus = seconds > 0.100 and (
-                original is None
-                or touched
-                or original is not None
-                and seconds >= 1
-                and (original < 1 or seconds > original)
-            )
-            if needs_focus:
-                focused_names.add(name)
-                if len(focused_names) > 32:
-                    raise ValueError("focused timing fanout exceeds bound")
             if original is None and seconds > 0.100:
-                _focused(
-                    run_focused,
-                    source_tree=candidate_tree,
-                    environment=environment,
-                    prepared_environment=prepared,
-                    argv=argv,
-                    seed=seed,
-                    case_names=(name,),
-                )
-                findings.append(TimingFinding(environment, name, "new_slow"))
+                add_finding(TimingFinding(environment, name, "new_slow"), seconds)
             elif (
                 original is not None
                 and seconds >= 1
                 and (original < 1 or seconds > original)
             ):
-                baseline_repeats = [
-                    _focused(
-                        run_focused,
-                        source_tree=baseline_tree,
-                        environment=environment,
-                        prepared_environment=prepared,
-                        argv=argv,
-                        seed=seed,
-                        case_names=(name,),
-                    )[name]
-                    for _ in range(2)
-                ]
-                candidate_repeats = [
-                    _focused(
-                        run_focused,
-                        source_tree=candidate_tree,
-                        environment=environment,
-                        prepared_environment=prepared,
-                        argv=argv,
-                        seed=seed,
-                        case_names=(name,),
-                    )[name]
-                    for _ in range(2)
-                ]
                 corroborated = all(
-                    (original >= 1 or sum(baseline_repeats[index].values()) < 1)
-                    and sum(candidate_repeats[index].values()) >= 1
-                    and sum(candidate_repeats[index].values())
-                    > sum(baseline_repeats[index].values())
+                    (original >= 1 or sum(baseline_repeats[index][name].values()) < 1)
+                    and sum(candidate_repeats[index][name].values()) >= 1
+                    and sum(candidate_repeats[index][name].values())
+                    > sum(baseline_repeats[index][name].values())
                     for index in range(2)
                 )
                 deltas = {
                     phase: round(
-                        sum(item[phase] for item in candidate_repeats) / 2
-                        - sum(item[phase] for item in baseline_repeats) / 2,
+                        sum(item[name][phase] for item in candidate_repeats) / 2
+                        - sum(item[name][phase] for item in baseline_repeats) / 2,
                         6,
                     )
                     for phase in _PHASES
                 }
-                findings.append(
+                add_finding(
                     TimingFinding(
                         environment,
                         name,
@@ -372,30 +432,37 @@ def review_test_timings(
                         if corroborated
                         else "uncorroborated_spike",
                         deltas,
-                    )
+                    ),
+                    seconds,
                 )
                 if touched:
-                    findings.append(TimingFinding(environment, name, "touched_slow"))
+                    add_finding(
+                        TimingFinding(environment, name, "touched_slow"), seconds
+                    )
             elif touched and seconds > 0.100:
-                _focused(
-                    run_focused,
-                    source_tree=candidate_tree,
-                    environment=environment,
-                    prepared_environment=prepared,
-                    argv=argv,
-                    seed=seed,
-                    case_names=(name,),
-                )
-                findings.append(TimingFinding(environment, name, "touched_slow"))
+                add_finding(TimingFinding(environment, name, "touched_slow"), seconds)
             elif original is not None and original >= 1 and seconds >= 1:
-                findings.append(TimingFinding(environment, name, "inherited_slow"))
-    if any(
+                add_finding(TimingFinding(environment, name, "inherited_slow"), seconds)
+    findings = (
+        critical_findings + subsecond_findings[: _MAX_FINDINGS - len(critical_findings)]
+    )
+    omitted_findings = len(subsecond_findings) - (
+        len(findings) - len(critical_findings)
+    )
+    retained_correction = any(
         item.reason in {"new_slow", "touched_slow", "corroborated_regression"}
         for item in findings
-    ):
+    )
+    omitted_correction = any(
+        item.reason in {"new_slow", "touched_slow", "corroborated_regression"}
+        for item in subsecond_findings[len(findings) - len(critical_findings) :]
+    )
+    if omitted_correction and not retained_correction:
+        raise FindingBudgetExhausted("finding budget exhausted")
+    if retained_correction or omitted_correction:
         outcome = "correction_required"
     elif findings:
         outcome = "report_only"
     else:
         outcome = "clear"
-    return TimingReview(outcome, tuple(findings))
+    return TimingReview(outcome, tuple(findings), omitted_findings)

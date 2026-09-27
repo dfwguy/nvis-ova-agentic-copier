@@ -2749,6 +2749,7 @@ def main(
                     "outcome": transcript["outcome"],
                     "runs": transcript["runs"],
                     "findings": transcript["findings"],
+                    "omitted_findings": transcript.get("omitted_findings", 0),
                 }
             except (JudgeValidationError, TimingCaptureError, KeyError, ValueError):
                 write_stderr("serial timing transcript is unavailable")

@@ -31,6 +31,7 @@ from agent_work.ports import CommandResult as PortCommandResult
 from agent_work.repository import CommandResult
 from agent_work.test_timing import parse_full_junit_records
 from agent_work.timing_admission import TimingAdmissionLease
+from agent_work.timing_capture import FocusedTimingCaptureError
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
@@ -1416,6 +1417,104 @@ def test_required_source_bound_capture_missing_after_successful_hook_fails_close
     }
     assert report.state == "terminal-artifact-failure"
     assert state.records[_CANDIDATE]["state"] == "terminal-artifact-failure"
+
+
+def test_focused_budget_exhaustion_has_distinct_diagnostic_and_keeps_snapshots() -> (
+    None
+):
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    snapshots: dict[str, tuple[tuple[str, bytes, int], ...]] = {}
+
+    def capture_snapshots(
+        candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        snapshots[candidate_tree] = artifacts
+        return tuple(
+            Path("/snapshots") / candidate_tree / f"test-results-{environment}.xml"
+            for environment, _contents, _count in artifacts
+        )
+
+    def exhausted(
+        _candidate_tree: str,
+        _artifacts: tuple[tuple[str, bytes, int], ...],
+        _output: str,
+    ) -> None:
+        raise FocusedTimingCaptureError("focused timing budget exhausted")
+
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_junit_artifacts=capture_snapshots,
+        capture_timing_review=exhausted,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert (report.artifact_failure.stage, report.artifact_failure.reason) == (
+        "timing_review",
+        "focused_budget_exhausted",
+    )
+    assert snapshots[_CANDIDATE] == (
+        ("py311", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
+        ("py314", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
+    )
+
+
+def test_finding_budget_exhaustion_has_distinct_diagnostic_and_keeps_snapshots() -> (
+    None
+):
+    from agent_work.timing_capture import FindingBudgetCaptureError
+
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    snapshots: dict[str, tuple[tuple[str, bytes, int], ...]] = {}
+
+    def capture_snapshots(
+        candidate_tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        snapshots[candidate_tree] = artifacts
+        return tuple(
+            Path("/snapshots") / candidate_tree / f"test-results-{environment}.xml"
+            for environment, _contents, _count in artifacts
+        )
+
+    def exhausted(
+        _candidate_tree: str,
+        _artifacts: tuple[tuple[str, bytes, int], ...],
+        _output: str,
+    ) -> None:
+        raise FindingBudgetCaptureError("finding budget exhausted")
+
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_junit_artifacts=capture_snapshots,
+        capture_timing_review=exhausted,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert (report.artifact_failure.stage, report.artifact_failure.reason) == (
+        "timing_review",
+        "finding_budget_exhausted",
+    )
+    assert snapshots[_CANDIDATE] == (
+        ("py311", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
+        ("py314", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
+    )
 
 
 def test_status_rejects_missing_required_timing_transcript_for_successful_tree() -> (

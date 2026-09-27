@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tomllib
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -23,6 +25,7 @@ from jinja2 import StrictUndefined, Template
 from agent_work.ports import CommandRunner
 from agent_work.repository import CommandResult
 from agent_work.timing_capture import (
+    FocusedTimingCaptureError,
     TimingCaptureDependencies,
     TimingCaptureError,
     _changed_fixture_names,
@@ -176,10 +179,233 @@ def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
 
     assert captured["outcome"] == "clear"
     assert replayed is not None and replayed["runs"] == captured["runs"]
+    assert replayed["omitted_findings"] == 0
+    legacy = dict(captured)
+    del legacy["omitted_findings"]
+    (dependencies.state_root / f"{CANDIDATE_TREE}.timing.json").write_text(
+        json.dumps(legacy, sort_keys=True, separators=(",", ":"))
+    )
+    legacy_replay = read_serial_timing_transcript(
+        candidate_tree=CANDIDATE_TREE, dependencies=dependencies
+    )
+    assert legacy_replay == json.loads(json.dumps(legacy))
     assert observed_commands.count(("git", "hook", "run", "pre-commit")) == 1
     assert any(
         command[:3] == ("git", "worktree", "remove") for command in observed_commands
     )
+
+
+def test_changed_file_with_many_existing_slow_cases_retains_complete_junit_proof(
+    tmp_path: Path,
+) -> None:
+    artifact = (
+        b"<testsuite tests='86' failures='0' errors='0'>"
+        + b"".join(
+            f"<testcase classname='tests.test_speed' name='test_case_{index}' time='0.101'/>".encode()
+            for index in range(86)
+        )
+        + b"</testsuite>"
+    )
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        cwd = cast(Path, kwargs.get("current_directory"))
+        if len(command) == 6 and command[:4] == (
+            "git",
+            "worktree",
+            "add",
+            "--detach",
+        ):
+            Path(command[4]).mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            assert cwd.name == "baseline"
+            for environment in ("py311", "py314"):
+                (cwd / f"test-results-{environment}.xml").write_bytes(artifact)
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(
+                0, BASE_TREE if cwd.name == "baseline" else CANDIDATE_TREE, ""
+            )
+        if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+            return CommandResult(0, BASE_TREE, "")
+        if command in {
+            ("git", "rev-parse", "HEAD"),
+            ("git", "rev-parse", "HEAD^{tree}"),
+        }:
+            return CommandResult(
+                0, BASE_SHA if command[-1] == "HEAD" else BASE_TREE, ""
+            )
+        if command[:3] == ("git", "diff", "--name-only"):
+            return CommandResult(0, "tests/test_speed.py\n", "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+            ("git", "status", "--porcelain"),
+        } or command[:3] == ("git", "worktree", "remove"):
+            return CommandResult(0, "", "")
+        if len(command) >= 3 and command[1] == "-c":
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "interpreter": ["3.11", "cpython-311", "linux-x86_64"],
+                        "distributions": [["pytest", "9.0"]],
+                    },
+                    sort_keys=True,
+                ),
+                "",
+            )
+        raise AssertionError(f"unexpected timing capture command: {command}")
+
+    dependencies = _dependencies(tmp_path, run)
+    captured = capture_serial_timing_review(
+        baseline_sha=BASE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        candidate_artifacts=(("py311", artifact, 86), ("py314", artifact, 86)),
+        changed_paths=("tests/test_speed.py",),
+        dependencies=dependencies,
+    )
+    replayed = read_serial_timing_transcript(
+        candidate_tree=CANDIDATE_TREE, dependencies=dependencies
+    )
+
+    assert captured["outcome"] == "correction_required"
+    assert len(cast(list[object], captured["findings"])) == 128
+    assert captured["omitted_findings"] == 44
+    assert replayed is not None
+    for field in (
+        "baseline_sha",
+        "baseline_tree",
+        "candidate_tree",
+        "outcome",
+        "runs",
+        "findings",
+        "omitted_findings",
+    ):
+        assert replayed[field] == captured[field]
+    runs = cast(dict[str, dict[str, dict[str, object]]], captured["runs"])
+    inventories = cast(
+        dict[str, dict[str, dict[str, object]]], replayed["full_inventories"]
+    )
+    for environment in ("py311", "py314"):
+        for source, tree in (("baseline", BASE_TREE), ("candidate", CANDIDATE_TREE)):
+            assert runs[environment][source] == {
+                "sha256": hashlib.sha256(artifact).hexdigest(),
+                "test_count": 86,
+                "timing_complete": True,
+            }
+            assert inventories[source][environment]["source_tree"] == tree
+            assert inventories[source][environment]["test_count"] == 86
+            assert inventories[source][environment]["timing_complete"] is True
+
+
+def test_focused_runner_binds_multiple_selectors_to_one_exact_source(
+    tmp_path: Path,
+) -> None:
+    from agent_work.timing_capture import _focused_runner
+
+    names = ("tests/test_speed.py::test_first", "tests/test_speed.py::test_second")
+    observed: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        cwd = cast(Path, kwargs["current_directory"])
+        if command[0].endswith("/pytest"):
+            observed.append(command)
+            environment = cast(dict[str, str], kwargs["environment"])
+            Path(environment["AGENT_TIMING_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        name: {"setup": 0.01, "call": 0.2, "teardown": 0.01}
+                        for name in names
+                    }
+                )
+            )
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(0, CANDIDATE_TREE, "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+        }:
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected command: {command} in {cwd}")
+
+    dependencies = _dependencies(tmp_path, run)
+    private = tmp_path / "private"
+    private.mkdir()
+    focused = _focused_runner(
+        dependencies,
+        base=tmp_path / "baseline",
+        private=private,
+        baseline_tree=BASE_TREE,
+        candidate_tree=CANDIDATE_TREE,
+        environment={},
+        selectors={
+            CANDIDATE_TREE: {"py311": {name: name for name in names}},
+            BASE_TREE: {"py311": {}},
+        },
+    )
+
+    result = focused(
+        source_tree=CANDIDATE_TREE,
+        environment="py311",
+        prepared_environment="fingerprint",
+        argv=("hook",),
+        seed="123",
+        case_names=names,
+    )
+
+    assert len(observed) == 1
+    assert observed[0][-2:] == names
+    assert set(cast(dict[str, object], result["cases"])) == set(names)
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "expected_error"),
+    (
+        (901.0, FocusedTimingCaptureError),
+        (1.0, TimingCaptureError),
+    ),
+)
+def test_focused_runner_classifies_failed_final_pytest_call(
+    tmp_path: Path, elapsed: float, expected_error: type[TimingCaptureError]
+) -> None:
+    from agent_work.timing_capture import _focused_runner
+
+    now = [0.0]
+    case = "tests/test_speed.py::test_slow"
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[0].endswith("/pytest"):
+            now[0] = elapsed
+            return CommandResult(1, "", "timeout")
+        raise AssertionError(f"unexpected command: {command}")
+
+    private = tmp_path / "private"
+    private.mkdir()
+    focused = _focused_runner(
+        replace(_dependencies(tmp_path, run), monotonic_clock=lambda: now[0]),
+        base=tmp_path / "baseline",
+        private=private,
+        baseline_tree=BASE_TREE,
+        candidate_tree=CANDIDATE_TREE,
+        environment={},
+        selectors={
+            CANDIDATE_TREE: {"py311": {case: case}},
+            BASE_TREE: {"py311": {}},
+        },
+    )
+
+    with pytest.raises(expected_error) as failure:
+        focused(
+            source_tree=CANDIDATE_TREE,
+            environment="py311",
+            prepared_environment="fingerprint",
+            argv=("hook",),
+            seed="123",
+            case_names=(case,),
+        )
+    assert type(failure.value) is expected_error
 
 
 def test_tox_matrix_passes_explicit_serial_pytest_seed_into_both_versions(
