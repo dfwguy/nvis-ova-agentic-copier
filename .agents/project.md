@@ -29,6 +29,12 @@ rules for authority, safety, and agent routing. The live router is
 `.agents/agents/architect.md`. Humans approve and merge requests. This keeps
 portable instructions short.
 
+Put factory decisions, state transitions, and receipt validation in executable
+code with behavior tests when code can express them. Keep agent instructions
+for authority, role scope, handoffs, and commands. Architect and reviewers
+reject behavioral contracts stated only or redundantly in prose when code can
+enforce them.
+
 ## Architecture
 
 ### Template Configuration (`copier.yaml`)
