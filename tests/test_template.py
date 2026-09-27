@@ -1469,6 +1469,153 @@ def test_agent_loop_wrapper_drains_terminal_handoffs_while_work_remains_eligible
     assert _test_git_output(checkout, "rev-parse", "--show-toplevel") == str(checkout)
 
 
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+def test_agent_loop_wrapper_yields_at_service_budget_then_resumes_on_new_invocation(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path
+) -> None:
+    """A nearly spent service keeps its report and leaves eligible work for the timer."""
+    checkout, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    uptime = tmp_path / "uptime"
+    uptime.write_text("1000.00 0.00\n")
+    environment["AGENT_WORK_UPTIME_FILE"] = str(uptime)
+    first_report = _applied_report("complete")
+    eligible = _preview_report("eligible")
+    durable_record = tmp_path / "durable-activation"
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (
+            first_report,
+            eligible,
+            _applied_report("complete"),
+            eligible,
+            _applied_report("idle"),
+        ),
+        uptime_after_first_apply="1481.00 0.00",
+        uptime_after_second_apply="2480.00 0.00",
+        durable_record=durable_record,
+    )
+
+    first = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert first.stdout.count(first_report) == 1
+    assert first.stdout.count(eligible) == 1
+    assert first.stderr.count("service_time_limit") == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+    assert (checkout / "version").read_text() == "one\n"
+    assert durable_record.read_text() == "accepted\n"
+
+    uptime.write_text("2000.00 0.00\n")
+    resumed = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert resumed.stdout.count(_applied_report("complete")) == 1
+    assert resumed.stdout.count(eligible) == 1
+    assert resumed.stdout.count(_applied_report("idle")) == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+        "one|run agent-work loop run --apply --json",
+    ]
+    assert durable_record.read_text() == "accepted\n"
+
+
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+@pytest.mark.parametrize("reading", ("invalid", "-1.00 0.00"))
+def test_agent_loop_wrapper_rejects_invalid_uptime_before_first_worker(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path, reading: str
+) -> None:
+    """An unusable clock fails closed before any applied activation."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    uptime = tmp_path / "uptime"
+    uptime.write_text(f"{reading}\n")
+    environment["AGENT_WORK_UPTIME_FILE"] = str(uptime)
+    calls = _scripted_wrapper_worker(tmp_path, environment, (_applied_report("idle"),))
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+@pytest.mark.parametrize("reading", ("invalid", "999.00 0.00"))
+def test_agent_loop_wrapper_rejects_invalid_or_backward_uptime_after_preview(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path, reading: str
+) -> None:
+    """A bad later reading retains the first report without starting another worker."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    uptime = tmp_path / "uptime"
+    uptime.write_text("1000.00 0.00\n")
+    environment["AGENT_WORK_UPTIME_FILE"] = str(uptime)
+    first_report = _applied_report("complete")
+    eligible = _preview_report("eligible")
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (first_report, eligible, _applied_report("idle")),
+        uptime_after_first_apply=reading,
+    )
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout.count(first_report) == 1
+    assert result.stdout.count(eligible) == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json",
+        "one|run agent-work loop run --json",
+    ]
+
+
 def test_agent_loop_wrapper_only_continues_after_new_publication_pipeline_wait(
     project_root: Path,
     tmp_path: Path,
@@ -2860,6 +3007,9 @@ def _scripted_wrapper_worker(
     reports: tuple[str, ...],
     *,
     advance_after_first_apply: bool = False,
+    uptime_after_first_apply: str | None = None,
+    uptime_after_second_apply: str | None = None,
+    durable_record: Path | None = None,
 ) -> Path:
     """Install a JSON-reporting UV seam and return its ordered invocation record."""
     reports_path = tmp_path / "worker-reports.jsonl"
@@ -2873,6 +3023,12 @@ def _scripted_wrapper_worker(
         'if [ "$*" = "run agent-work loop run --apply --json" ]; then\n'
         '  apply_count="$(grep -c -- "--apply --json" "$UV_CALLS")"\n'
         '  if [ "$apply_count" = 1 ] && [ -n "${UV_ADVANCE:-}" ]; then "$UV_ADVANCE"; fi\n'
+        '  if [ "$apply_count" = 1 ] && [ -n "${UV_UPTIME_AFTER_FIRST_APPLY:-}" ]; then '
+        'printf "%s\\n" "$UV_UPTIME_AFTER_FIRST_APPLY" > "$AGENT_WORK_UPTIME_FILE"; fi\n'
+        '  if [ "$apply_count" = 2 ] && [ -n "${UV_UPTIME_AFTER_SECOND_APPLY:-}" ]; then '
+        'printf "%s\\n" "$UV_UPTIME_AFTER_SECOND_APPLY" > "$AGENT_WORK_UPTIME_FILE"; fi\n'
+        '  if [ "$apply_count" = 1 ] && [ -n "${UV_DURABLE_RECORD:-}" ]; then '
+        'printf "accepted\\n" > "$UV_DURABLE_RECORD"; fi\n'
         "fi\n"
         'sed -n "${call_count}p" "$UV_REPORTS"',
     )
@@ -2883,6 +3039,12 @@ def _scripted_wrapper_worker(
     }
     if not advance_after_first_apply:
         environment.pop("UV_ADVANCE", None)
+    if uptime_after_first_apply is not None:
+        environment["UV_UPTIME_AFTER_FIRST_APPLY"] = uptime_after_first_apply
+    if uptime_after_second_apply is not None:
+        environment["UV_UPTIME_AFTER_SECOND_APPLY"] = uptime_after_second_apply
+    if durable_record is not None:
+        environment["UV_DURABLE_RECORD"] = str(durable_record)
     return calls
 
 

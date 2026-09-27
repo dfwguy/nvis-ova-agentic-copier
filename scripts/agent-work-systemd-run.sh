@@ -91,6 +91,21 @@ case "$agent_name" in
 esac
 require_path AGENT_WORK_DIRENV
 
+uptime_file="${AGENT_WORK_UPTIME_FILE:-/proc/uptime}"
+if [[ "$uptime_file" != /* || ! -f "$uptime_file" || -L "$uptime_file" ]]; then
+  stop 'AGENT_WORK_UPTIME_FILE must be an absolute regular file'
+fi
+read_uptime() {
+  local line=''
+  local pattern='^([0-9]{1,15})\.([0-9]{2})[[:space:]]+[0-9]{1,15}\.[0-9]{2}[[:space:]]*$'
+  if ! IFS= read -r line < "$uptime_file" || [[ ! "$line" =~ $pattern ]]; then
+    stop 'AGENT_WORK_UPTIME_FILE has an invalid uptime reading'
+  fi
+  uptime_centiseconds=$((10#${BASH_REMATCH[1]} * 100 + 10#${BASH_REMATCH[2]}))
+}
+read_uptime
+service_started_centiseconds="$uptime_centiseconds"
+
 checkout="$(cd -P "$AGENT_WORK_CHECKOUT" && pwd)"
 credential_helper="$checkout/src/agent-work-git-credential.sh"
 if [[ ! -f "$credential_helper" || -L "$credential_helper" || ! -x "$credential_helper" ]]; then
@@ -324,6 +339,14 @@ preview_outcome() {
 }
 
 while :; do
+  read_uptime
+  if (( uptime_centiseconds < service_started_centiseconds )); then
+    stop 'AGENT_WORK_UPTIME_FILE moved backward'
+  fi
+  if (( uptime_centiseconds - service_started_centiseconds + 1080000 + 12000 > 1140000 )); then
+    printf '%s\n' 'stopped: service_time_limit (insufficient time for another activation)' >&2
+    exit 0
+  fi
   if ! applied_report="$(authenticated "$AGENT_WORK_UV" run agent-work loop run --apply --json)"; then
     stop 'agent-work applied activation failed'
   fi

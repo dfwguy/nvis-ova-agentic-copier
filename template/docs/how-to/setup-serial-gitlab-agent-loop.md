@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -437,17 +437,18 @@ systemctl --user status "$unit_name.timer"
 ```
 
 The timer schedules the next bounded run 20 minutes after the service goes
-inactive. It checks for new work only when the factory is idle with no ready or
-resumable work. It does not set the pace for an active pipeline wait. In a run,
-one worker owns the issue's full flow session. Its Architect, Red, Green, and
+inactive. That run checks for new and resumable work. The timer does not set
+the pace for an active pipeline wait. In a run, one worker owns the issue's
+full flow session. Its Architect, Red, Green, and
 read-only judges pass context to each other. The runner restores the saved
 worktree and coarse `WORKFLOW` state, not a sidecar checkpoint for each role.
 The service has a 190-minute outer timeout. It includes the approved 180-minute
 worker budget and 10 minutes for wrapper checkout, GitLab, publication, and
 reporting work. Other wrapper housekeeping calls have a 120-second deadline.
-The applied worker remains governed by its remaining 10,800-second budget. On
-expiry, systemd terminates the whole control group. It gives the group 30
-seconds to exit and records the timeout in the journal. The durable ledger and
+The applied worker remains governed by its remaining 10,800-second budget.
+If the outer timeout expires, systemd
+terminates the whole control group. It gives the group 30 seconds to exit and
+records the timeout in the journal. The durable ledger and
 issue worktree remain for normal retry or human diagnosis. Run only one timer
 host for a project. The service's environment and XDG state directory must be
 writable only by the operator. If `systemctl --user`
