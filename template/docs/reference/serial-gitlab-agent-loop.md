@@ -724,7 +724,7 @@ work.
 | `loop status` | Read-only. It reports durable ledger records with verified configured-project identity and best-effort live corroboration. Without `--issue-iid`, it returns at most 100 records in fixed order and reports the total and whether the result was truncated. With `--issue-iid`, it looks up that item exactly. |
 | `loop retry` | Reuses the evidence-bound recovery checks for one recorded blocked item and also requires exactly one `safely_retryable` inventory result. A successful preview returns `retry_preview` with an evidence-bound retry plan. `--apply` needs that exact plan file and rechecks current evidence under the project lock before it returns `retry_scheduled` or, for an eligible retained correction, `correction_activated`. A valid retry needs no new human unblocking approval. |
 | Immediate owner set | `PREPARING`, `EXECUTING`, `PUBLISHING`, `OBSERVING`, and `REPAIR`. |
-| `BLOCKED` | Not an immediate owner. It needs action and is not runnable. |
+| `BLOCKED` | Not an immediate owner. An applied activation may resume one clean, untouched ordinary pre-checkpoint record after exact proof; other blocked work needs reviewed recovery. |
 | `RETRY_WAIT` | Queued, not a competing immediate owner when an exact IID is selected. |
 | Reviewed exact retry | The durable handoff. The selected IID stays pinned through a multi-segment continuation. It moves one chosen `BLOCKED` IID to `PREPARING`, or keeps `PUBLISHING` for a publication replay, without making untouched blocked or queued-retry records compete. |
 | Another immediate owner | Retry fails closed. More than one true immediate owner needs reconciliation. |
@@ -779,10 +779,10 @@ accepted for consistent invocation and changes nothing.
 | Corroborated evidence | Lifecycle-projected GitLab issues; local ledger; each retained issue's passive advisory owner marker; fixed branch and retained worktree; merge request and exact-source pipeline; default-branch pipeline; configured project and credential identity; and controller, service, and short-lived project-lock evidence. |
 | JSON and human aggregates | `total`, `open`, `closed`, `active`, `blocked`, `dependency_gated`, `human_action`, and `no_action`. |
 | Detailed candidate | Per-issue owner state; active state; `human_action_required`; bounded blocked cause; dependency explanation naming direct open prerequisites and required open descendants of closed decomposition parents; current and intended prerequisite-label projections; exact next action. |
-| Classification | Legitimately waiting, dependency-gated, safely retryable, superseded or duplicate, closure candidate, or needing a specific human decision. A retained dependent remains `dependency_gated` while any required descendant is open. After all required descendants close, preserved retained work can qualify as `safely_retryable`; the explicit retry preview remains the final gate. For a blocked dirty worktree, inventory runs the retained-artifact evidence checks shared with retry preview. |
+| Classification | Legitimately waiting, dependency-gated, safely retryable, superseded or duplicate, closure candidate, or needing a specific human decision. A retained dependent remains `dependency_gated` while any required descendant is open. After all required descendants close, preserved retained work can qualify as `safely_retryable`. Manual retry still needs an exact preview; guarded clean pre-checkpoint work may resume during an applied activation. For a blocked dirty worktree, inventory runs the retained-artifact evidence checks shared with retry preview. |
 | Ineligible retained candidate | When those shared checks reject dirty retained evidence, including a legacy candidate, report `needs_human_decision` with a bounded reason. The next action is to inspect the retained worktree and ledger before choosing a reviewed resolution. Preserve both artifacts; inventory does not authorize a retry. |
 | Report order | Failed default-branch and open-merge-request pipelines; retained issues by deterministic owner-evidence and IID ordering; safely retryable blocked items; dependency reconciliation; awaiting-human items; fresh ordinary work. |
-| Fresh work | Reports it only. Never claims it. When direct prerequisites and required descendants clear, recommends an explicit retry rather than starting a child item. |
+| Fresh work | Reports it only. Never claims it. When direct prerequisites and required descendants clear, the saved issue may use guarded clean retry or an explicit retry; it does not start a child item. |
 | `closed_no_action` | Takes precedence for a closed recordless split issue and a closed `COMPLETE` record. These terminal states need no action even when retained worktree, head, merge-request, or pipeline evidence drifted. |
 | Closed records | Closed nonterminal records need human review. An untargeted inventory collapses settled closed-item detail but keeps aggregate counts. `--issue-iid IID` returns that item's exact evidence. |
 
@@ -942,7 +942,7 @@ This table gives the safe diagnostic rules.
 | Third request after two rejected JSON objects | `worker_result_broker: correction limit exceeded after rejected JSON object`. |
 | Request after acceptance | `worker_result_broker: request after acceptance`. |
 | Controller record | The controller carries the same safe diagnostic in condition history, status, recovery inventory, and the GitLab handoff. |
-| Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. After correcting the condition, the operator creates and applies the exact `loop retry` plan for that IID. |
+| Repeated automatic failure | One coarse phase with the same error code and diagnostic blocks the item. Exact clean pre-checkpoint proof may allow guarded auto-resume after a cooldown; otherwise, the operator corrects the condition and applies an exact `loop retry` plan. |
 | Changed evidence | A changed error code, diagnostic, or phase is changed evidence and follows the existing bounded retry path. |
 
 ### Upstream-finding manifest v1
@@ -1056,7 +1056,7 @@ work.
 | --- | --- | --- |
 | `agent::running` | preparing, executing, retry-wait, publishing, observing, or repair | Work is active or safely resumable. |
 | `agent::awaiting-human` | awaiting-human | An exact MR, its named source commit, and one factory-authored actionable issue handoff await human review. |
-| `agent::blocked` | blocked | A human must take the recorded next action. |
+| `agent::blocked` | blocked | The record awaits guarded clean retry or the recorded human action. |
 | `agent::failed` | failed | The runner could not safely reconcile or record an exceptional condition. |
 | `agent::needs_repair` | needs-repair | Legacy or reviewed repair, exhausted required-job proof after a successful exact-source pipeline, or a canceled exact current-source pipeline for a retained observing owner awaits exact recovery. An ordinary failed pipeline uses its diagnostic repair path. |
 | `agent::repair_failed` | repair-failed | An automatic or explicitly reviewed repair attempt failed or its exact evidence changed. It retains the evidence needed for safe follow-up. |
@@ -1207,7 +1207,7 @@ project or item is safe to run.
 | `NEEDS_REPAIR` | A legacy or reviewed recovery record exists, or required-job proof was exhausted after a successful exact-source pipeline. | Defer. Expose reviewed recovery for the exact IID. Scan on. |
 | `REPAIR_FAILED` | Per-item repair timing and attempt evidence exists. | Resume only when it is due. It must be safe. Otherwise, defer or quarantine locally. Scan on. |
 | `SUGGEST_CLOSE` | Closure evidence is corroborated. | Skip. Expose the human closure decision. |
-| `BLOCKED` | A human action or unresolved item evidence is recorded. | Skip automatic work. Expose the exact action. |
+| `BLOCKED` | A human action or unresolved item evidence is recorded. | Resume one clean pre-checkpoint issue only after exact proof; otherwise expose the needed action. |
 | `AWAITING_HUMAN` | The review handoff is verified. Its MR source SHA is exact. | Skip automatic work. Preserve the human handoff. |
 | `FAILED` | An item-local exceptional failure and next action are recorded. | Skip automatic work. Expose recovery action. |
 | `COMPLETE` | The issue is closed or the record is complete. | No action. |
@@ -1644,6 +1644,13 @@ from its retained worktree and durable record without a new human unblocking
 approval. It does not select a replacement issue or discard retained recovery
 evidence.
 
+An applied activation may resume one clean, untouched ordinary blocked record
+after proof checks under the project and issue locks. The same failure sets a
+20-minute cooldown. Dirty or unclear work and records with publication
+evidence still need reviewed recovery. Exact worker protocol faults and
+exhausted worker exits or timeouts can qualify before a Red checkpoint.
+Cause text and a blocked label alone never grant retry authority.
+
 Worker exits, timeouts, malformed worker protocol, and an explicit `retryable`
 worker result are due at once. Legacy records may also retain an invalid-receipt
 condition; its receipt prose is not authority. These conditions continue in the
@@ -1674,10 +1681,11 @@ the issue at once without using another retry. It keeps the worktree, phase, and
 safe cause. It publishes the usual blocked projection and comment. A changed
 code, diagnostic, or phase is changed evidence and follows the usual bounded
 retry path. This does not change retries for non-protocol transient failures.
-After correcting the condition, create and apply an exact `loop retry` plan for
-that IID. Its preview must pass the shared recovery checks and the
-`safely_retryable` inventory gate before the command resets the automatic
-retry budget.
+An applied activation may resume clean pre-checkpoint work after exact proof
+and a repeated-failure cooldown. Otherwise, correct the condition and apply an
+exact `loop retry` plan for that IID. Its preview must pass the shared recovery
+checks and the `safely_retryable` inventory gate before the command resets the
+automatic retry budget.
 
 Automatic exact-pipeline repair has its own budget: at most three repair
 workflows for one exact retained owner. After each failed attempt, the ledger

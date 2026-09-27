@@ -93,7 +93,7 @@ stateDiagram-v2
     Preparing --> Blocked: human action required
     Executing --> Blocked: worker result is needs_human
     Repair --> Blocked: retained owner or pipeline evidence is ambiguous or unsafe
-    Blocked --> Preparing: explicit retry after human action
+    Blocked --> Preparing: guarded clean retry or reviewed resolution
     AwaitingHuman --> [*]: human merges or closes
 ```
 
@@ -102,7 +102,7 @@ GitLab labels stay broad:
 - `agent::running`: active or self-resuming work.
 - `agent::awaiting-human`: exact MR, named source commit, and factory-authored
   actionable issue handoff await human review.
-- `agent::blocked`: documented human action is needed.
+- `agent::blocked`: saved work may retry after checks or need a human choice.
 - `agent::failed`: a rare, fatal state prevented safe checking or recording.
 - `agent::needs_repair`: legacy or reviewed repair, exhausted required-job
   proof after a successful exact-source pipeline, or a canceled exact-source
@@ -200,7 +200,7 @@ The scheduler treats each saved state as follows:
   then keep scanning.
 - `SUGGEST_CLOSE`: proved duplicate, replacement, or poor fit skips work and
   shows the close choice.
-- `BLOCKED`: human action or open proof skips work. Show that action.
+- `BLOCKED`: try clean saved work after checks; else show the next step.
 - `AWAITING_HUMAN`: a checked handoff for an exact MR SHA skips work and stays.
 - `FAILED`: a rare item fault skips work. Show recovery action.
 - `COMPLETE`: a closed issue or complete record needs no action.
@@ -226,7 +226,7 @@ internal agent handoffs.
 | --- | --- | --- | --- |
 | Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
 | Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, inaccessible, or nonterminal default-branch evidence blocks and polls in place. A new exact observer returns `activation_complete/pipeline_wait` without polling. Later ordinary admission parks a live MR only when its SHA, owner, worktree, project, and target match. Parking does not hand off; it may select another item or be idle. Ownerless evidence is non-owning and item-local. A stale or inexact claim stays visible for `_observe`. It runs before fresh work and blocks or repairs if identity is unclear. An exact failed MR pipeline enters `repair` only with one proven retained owner. |
-| Retained-work recovery | Resume one durable immediate `agent::running` record. Reclassify one blocked IID only with that issue's passive owner-marker corroboration and reviewed `loop recover --issue-iid IID`. | Status and inventory report each retained issue independently. A reviewed exact-IID plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
+| Retained-work recovery | Resume one durable immediate `agent::running` record. Guarded clean pre-checkpoint `BLOCKED` work may resume after exact proof; other blocked work needs its applicable reviewed recovery plan. | Status and inventory report each retained issue independently. A reviewed exact-IID `loop recover` plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
 | Human block | A failed or canceled default-branch pipeline blocks unrelated work. An ownerless failed or canceled open-MR pipeline stays item-local. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
 | Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, open split prerequisite, or required open descendant of a closed decomposition parent. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |

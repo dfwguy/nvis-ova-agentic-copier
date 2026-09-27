@@ -641,8 +641,12 @@ exits with an error, not `retry_ineligible`; do not apply a plan. See the
 
 The first try and three retries are automatic. A run yields when a retry due
 time is in the future. When retries run out, the issue is `agent::blocked`.
-Follow its saved next action. After the evidence is corrected, create and apply
-the retry plan for that exact IID. A failed predicate changes nothing. Do not
+An applied run may resume one clean, untouched ordinary blocked record before
+the Red checkpoint, but only after exact failure and recovery checks under the
+project and issue locks. A repeated identical failure adds a 20-minute
+cooldown. For other blocked records, follow the saved next action. After
+correcting the evidence, create and apply a reviewed retry plan for that exact
+IID. A failed predicate changes nothing. Do not
 change labels to resume blocked work. Leave a dirty saved worktree in place. If
 status lists a stash, keep it for review. Do not use `git stash apply` or `git
 stash drop` as an automatic restore step.

@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -51,6 +51,7 @@ from .human_recovery import (
     RecoveryCandidate,
     RecoveryClassification,
     RecoveryObservation,
+    RecoveryOwnerCapacity,
     ResolutionChoice,
     ResolutionRequest,
     build_inventory,
@@ -116,6 +117,7 @@ from .serial import (
     AUTOMATIC_REPAIR_MAX_ATTEMPTS,
     SegmentError,
     activate_exact_pipeline_repair,
+    automatic_blocked_static_rejection,
     build_authored_candidate_correction_identity,
     build_publication_correction_identity,
     collect_exact_failed_job_diagnostics,
@@ -124,6 +126,7 @@ from .serial import (
     reconcile_closed_issues,
     record_failed_job_diagnostic_unavailable,
     resume_candidates,
+    retained_precheckpoint_failure_is_untouched,
     run_segment,
 )
 from .state_machine import retained_ordinary_is_untouched, transition_record
@@ -547,6 +550,8 @@ def _recovery_observation(
         in {
             ErrorCode.WORKER_PROTOCOL_INVALID,
             ErrorCode.WORKER_RECEIPT_INVALID,
+            ErrorCode.WORKER_EXIT,
+            ErrorCode.WORKER_TIMEOUT,
             ErrorCode.RED_CHECKPOINT_FAILED,
             ErrorCode.RETRY_EXHAUSTED,
         }
@@ -572,6 +577,12 @@ def _recovery_observation(
                     ErrorCode.WORKER_RECEIPT_INVALID.value,
                 }
                 and _is_safe_worker_protocol_diagnostic(latest.detail)
+            )
+            or (
+                record.error_code is ErrorCode.RETRY_EXHAUSTED
+                and latest.code
+                in {ErrorCode.WORKER_EXIT.value, ErrorCode.WORKER_TIMEOUT.value}
+                and retained_precheckpoint_failure_is_untouched(record)
             )
         ):
             blocked_cause = latest.detail
@@ -1178,6 +1189,310 @@ def _require_safely_retryable_automatic_retry(
         raise RuntimeError(
             "automatic blocked retry requires safely retryable recovery evidence"
         )
+
+
+@dataclass(frozen=True)
+class _AutomaticResumeReview:
+    """One reason and its exact live inputs for a blocked issue."""
+
+    reason: str | None
+    owner_status: str = "missing"
+    issue: GitLabIssue | None = None
+    observation: RecoveryObservation | None = None
+    capacity: RecoveryOwnerCapacity | None = None
+
+
+def _automatic_resume_review(
+    record: LedgerRecord,
+    *,
+    records: tuple[LedgerRecord, ...],
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    now: datetime,
+    dependency_inventory: tuple[GitLabIssue, ...] | None = None,
+    target_owner_status: str | None = None,
+) -> _AutomaticResumeReview:
+    """Classify static and current live proof, returning a specific rejection."""
+    reason = automatic_blocked_static_rejection(
+        record, now=now, project_id=project.id, state_root=wired.config.state_root
+    )
+    if reason is not None:
+        return _AutomaticResumeReview(reason)
+    inventory = (
+        wired.gitlab.prerequisite_projection_inventory()
+        if dependency_inventory is None
+        else dependency_inventory
+    )
+    issue = next((item for item in inventory if item.iid == record.issue_iid), None)
+    if issue is None:
+        return _AutomaticResumeReview("issue is absent from prerequisite inventory")
+    if wired.gitlab.fetch_issue(record.issue_iid) != issue:
+        return _AutomaticResumeReview(
+            "issue evidence changed during observation", issue=issue
+        )
+    if issue.state != "opened":
+        return _AutomaticResumeReview("issue is not open", issue=issue)
+    if "agent::blocked" not in issue.labels:
+        return _AutomaticResumeReview("blocked lifecycle label is missing", issue=issue)
+    if set(issue.labels).intersection(LIFECYCLE_LABELS) != {"agent::blocked"}:
+        return _AutomaticResumeReview(
+            "blocked lifecycle label is not exact", issue=issue
+        )
+    try:
+        classification = classify_work(issue, project_id=project.id)
+    except ClassificationError:
+        return _AutomaticResumeReview(
+            "issue classification requires review", issue=issue
+        )
+    if classification.kind is not WorkKind.ORDINARY:
+        return _AutomaticResumeReview("issue is not ordinary work", issue=issue)
+    owner_status = target_owner_status or _issue_owner_status(wired, record.issue_iid)
+    capacity = _owner_capacity(
+        records,
+        target_iid=record.issue_iid,
+        wired=wired,
+        target_owner_status=owner_status,
+    )
+    if capacity.identity_conflict:
+        return _AutomaticResumeReview(
+            "competing retained identity", owner_status, issue, capacity=capacity
+        )
+    if capacity.live_owner_iid is not None or capacity.unknown_owner_iid is not None:
+        return _AutomaticResumeReview(
+            "another retained owner has serial priority",
+            owner_status,
+            issue,
+            capacity=capacity,
+        )
+    if owner_status != "missing":
+        return _AutomaticResumeReview(
+            f"retained owner is {owner_status}", owner_status, issue, capacity=capacity
+        )
+    try:
+        dependencies = _recovery_split_dependencies(
+            record.issue_iid, project=project, issues=inventory
+        )
+    except ValueError:
+        return _AutomaticResumeReview(
+            "split prerequisite evidence is unavailable",
+            owner_status,
+            issue,
+            capacity=capacity,
+        )
+    if any(state != "closed" for _, state in dependencies):
+        return _AutomaticResumeReview(
+            "split prerequisite is still open", owner_status, issue, capacity=capacity
+        )
+    try:
+        observation, _ = _recovery_observation(
+            record,
+            issue_iid=record.issue_iid,
+            gitlab=wired.gitlab,
+            issue=issue,
+            merge_requests=wired.gitlab.open_merge_requests(),
+            repository=wired.repository,
+            project=project,
+            owner_status=owner_status,
+            split_dependencies=dependencies,
+            select_retained_evidence=False,
+        )
+    except RepositoryError:
+        return _AutomaticResumeReview(
+            "retained worktree evidence is unavailable",
+            owner_status,
+            issue,
+            capacity=capacity,
+        )
+    reason = _automatic_observation_rejection(record, observation)
+    if reason is not None:
+        return _AutomaticResumeReview(
+            reason, owner_status, issue, observation, capacity
+        )
+    if wired.load_red_checkpoint is None:
+        reason = "retained Red checkpoint evidence is unavailable"
+    else:
+        try:
+            checkpoint = wired.load_red_checkpoint(
+                record.project_id, record.issue_iid, record.source_sha or ""
+            )
+        except (OSError, RuntimeError, ValueError):
+            reason = "retained Red checkpoint evidence is unavailable"
+        else:
+            reason = "retained Red checkpoint is present" if checkpoint else None
+    if reason is not None:
+        return _AutomaticResumeReview(
+            reason, owner_status, issue, observation, capacity
+        )
+    try:
+        wired.repository.verify_worktree(
+            record.worktree, record.source_branch, record.source_sha or ""
+        )
+    except RepositoryError:
+        reason = "retained branch or baseline is not exact"
+    return _AutomaticResumeReview(reason, owner_status, issue, observation, capacity)
+
+
+def _automatic_observation_rejection(
+    record: LedgerRecord, observation: RecoveryObservation
+) -> str | None:
+    """Explain why shared recovery observation cannot authorize clean retry."""
+    if observation.ambiguous:
+        return "conflicting merge request evidence"
+    if observation.worktree_exists is not True:
+        return "retained worktree is absent"
+    if observation.worktree_dirty is None:
+        return "retained worktree status is unavailable"
+    if observation.worktree_dirty or observation.worktree_changed_paths:
+        return "retained worktree is dirty"
+    if observation.worktree_head != record.source_sha:
+        return "retained worktree head differs from the baseline"
+    if observation.merge_request_iid is not None:
+        return "retained merge request evidence requires reviewed recovery"
+    if observation.retry_ineligible_reason is not None:
+        return observation.retry_ineligible_reason
+    if (
+        build_inventory((observation,)).candidates[0].classification
+        is not RecoveryClassification.SAFELY_RETRYABLE
+    ):
+        return "shared recovery classification requires review"
+    if observation.blocked_cause is not None:
+        return None
+    if (
+        record.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+        and record.phase is WorkflowPhase.WORKFLOW
+        and record.retry_count == 0
+        and len(record.condition_history) == 1
+        and retained_precheckpoint_failure_is_untouched(record)
+    ):
+        return None
+    return "retained failure diagnostic is not controller-verified"
+
+
+def _identical_blocked_failure_repeated(record: LedgerRecord) -> bool:
+    """Detect repeated controller failure across transient and terminal retry rows."""
+    history = record.condition_history
+    if len(history) < 2 or record.retry_at is not None:
+        return False
+    latest = history[-1]
+    if latest.code in {ErrorCode.WORKER_EXIT.value, ErrorCode.WORKER_TIMEOUT.value}:
+        return latest.detail == "Automatic retry budget exhausted." and any(
+            item.code == latest.code for item in history[-4:-1]
+        )
+    previous = history[-2]
+    return previous.code == latest.code and previous.detail == latest.detail
+
+
+def _retain_automatic_resume_rejection(
+    record: LedgerRecord,
+    review: _AutomaticResumeReview,
+    *,
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    now: datetime,
+) -> None:
+    """Persist one current skip reason while preserving human recovery instructions."""
+    assert review.reason is not None
+    note = f"Automatic resume deferred: {review.reason}."
+    if record.next_action and not record.next_action.startswith(
+        "Automatic resume deferred:"
+    ):
+        original_summary = record.summary.split("Automatic resume deferred:", 1)[
+            0
+        ].rstrip()
+        updates = {"summary": f"{original_summary} {note}".strip()}
+    else:
+        updates = {"next_action": note}
+    if all(getattr(record, key) == value for key, value in updates.items()):
+        return
+    lock = (
+        nullcontext()
+        if review.owner_status != "missing"
+        else wired.issue_lock(record.issue_iid)
+    )
+    with lock:
+        current = wired.ledger.load(record.issue_iid)
+        if current is None or current != record:
+            return
+        refreshed = _automatic_resume_review(
+            current,
+            records=tuple(wired.ledger.list_records()),
+            wired=wired,
+            project=project,
+            now=now,
+            target_owner_status=(
+                review.owner_status if review.owner_status == "missing" else None
+            ),
+        )
+        if refreshed.reason == review.reason:
+            wired.ledger.persist(record.model_copy(update=updates))
+
+
+def _automatic_clean_blocked_retry(
+    *,
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    dependency_inventory: tuple[GitLabIssue, ...],
+    now: datetime,
+) -> LedgerRecord | None:
+    """Resume at most one clean blocked issue under the caller's project lock."""
+    records = tuple(wired.ledger.list_records())
+    if resume_candidates(records, now=now):
+        return None
+    candidates = tuple(
+        record
+        for record in sorted(records, key=lambda item: item.issue_iid)
+        if record.state is RunnerState.BLOCKED and record.work_kind is WorkKind.ORDINARY
+    )
+    for record in candidates:
+        review = _automatic_resume_review(
+            record,
+            records=records,
+            wired=wired,
+            project=project,
+            now=now,
+            dependency_inventory=dependency_inventory,
+        )
+        if review.reason is not None:
+            _retain_automatic_resume_rejection(
+                record, review, wired=wired, project=project, now=now
+            )
+            continue
+        with wired.issue_lock(record.issue_iid):
+            current = wired.ledger.load(record.issue_iid)
+            if current is None or current != record:
+                continue
+            refreshed = _automatic_resume_review(
+                current,
+                records=tuple(wired.ledger.list_records()),
+                wired=wired,
+                project=project,
+                now=now,
+                target_owner_status=review.owner_status,
+            )
+            if refreshed != review:
+                continue
+            if _identical_blocked_failure_repeated(record):
+                wired.ledger.persist(
+                    record.model_copy(update={"retry_at": now + timedelta(minutes=20)})
+                )
+                continue
+            resumed = wired.ledger.persist(
+                transition_record(
+                    record,
+                    RunnerState.PREPARING,
+                    retry_at=None,
+                    retry_count=0,
+                    error_code=None,
+                    worker_exit=None,
+                    summary="Automatically resumed after exact recovery checks.",
+                    next_action="Continue ordinary preparation.",
+                )
+            )
+            wired.gitlab.transition_labels(
+                record.issue_iid, label_for_state(resumed.state)
+            )
+            return resumed
+    return None
 
 
 def _retained_dirty_recovery_evidence(
@@ -4562,6 +4877,18 @@ def dispatch(
                 return repair_report
             if activated_repair is not None:
                 immediate_owners = (activated_repair,)
+
+        if not immediate_owners and not resume_candidates(
+            tuple(ledger.list_records()), now=wired.clock()
+        ):
+            recovered = _automatic_clean_blocked_retry(
+                wired=wired,
+                project=project,
+                dependency_inventory=gitlab.prerequisite_projection_inventory(),
+                now=wired.clock(),
+            )
+            if recovered is not None:
+                immediate_owners = (recovered,)
 
         prior_state = immediate_owners[0].state if len(immediate_owners) == 1 else None
         prior_revision = (

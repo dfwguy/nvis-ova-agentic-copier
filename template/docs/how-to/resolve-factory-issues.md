@@ -31,6 +31,11 @@ human makes one bounded lifecycle decision. The guide never approves or merges
 a merge request. It does not claim fresh work, discard a retained worktree, or
 change project policy.
 
+An ordinary blocked record with a clean, untouched worktree may resume during
+an applied loop activation after the shared recovery checks pass. Use the
+procedure below when that automatic path does not apply or a human decision is
+needed.
+
 Do not use this procedure for an exact failed current-source merge-request
 pipeline with one uniquely corroborated retained owner. Use an applied ordinary
 `agent-work loop run --apply` activation instead. It transitions that owner to
@@ -59,7 +64,8 @@ Closing a direct prerequisite is not enough when it was split. The inventory
 stays `dependency_gated` while any required descendant is open. Let the normal
 timer check again. Do not start a tight retry or worker. When all required
 descendants close, the saved record can become `safely_retryable`. It then
-continues through the reviewed recovery path.
+uses guarded clean retry when exact proof permits; other cases need reviewed
+recovery.
 
 Treat `closed_no_action` as settled for a closed recordless split issue or a
 closed `COMPLETE` record. Worktree, head, MR, or pipeline drift does not
@@ -68,10 +74,10 @@ untargeted inventory lists settled closed items, while `--issue-iid` gives
 exact evidence.
 
 Treat stale running work as `needs_human_decision`, never as a retry target.
-Use `agent-work loop recover` for retained state. Retry a retained `BLOCKED`
-record only when inventory marks it `safely_retryable` and an explicit retry
-preview accepts its current evidence. Automatic retry uses shared recovery
-checks. It also needs exactly one `safely_retryable` inventory result.
+Use `agent-work loop recover` for retained state that needs review. For an
+explicit retry of a `BLOCKED` record, require a `safely_retryable` inventory
+result and a passing retry preview. Automatic retry uses shared recovery
+checks and also needs exactly one `safely_retryable` inventory result.
 Inventory checks dirty retained artifacts, including eligible legacy forms.
 It shares those rules with retry preview. Its result alone does not pass all
 preview checks. For `needs_human_decision`, inspect the retained worktree and
@@ -86,8 +92,10 @@ Keep no-action inventories with the supervisor, and never bulk-resolve a
 count-only report.
 
 Immediate owners are `PREPARING`, `EXECUTING`, `PUBLISHING`, `OBSERVING`, or
-`REPAIR`. A `BLOCKED` owner requires action and is not
-runnable. A `RETRY_WAIT` owner is queued and non-competing. A `RETRY_WAIT`
+`REPAIR`. A `BLOCKED` record is not an immediate owner. One clean, untouched
+ordinary pre-checkpoint record may resume after exact proof in an applied
+activation; other blocked work needs reviewed recovery. A `RETRY_WAIT` owner is
+queued and non-competing. A `RETRY_WAIT`
 owner never competes with a selected IID. A reviewed retry changes only the selected IID
 from `BLOCKED` to `PREPARING` and retains `PUBLISHING` for publication replay;
 untouched blocked and queued records remain non-competing. Stop for a
