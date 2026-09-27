@@ -510,6 +510,7 @@ The timer remains irrelevant. Keep each proof. Check each result.
 | Writing | `$documentation-writer` | Sole mutable-worktree child; reports sources, mirrors, and docs evidence. |
 | Consistency review | Conditional `$consistency-judge` | Read-only comparison of changed repeated facts on the exact candidate tree, using controller-owned stage/read proof in serial work. |
 | Temporality review | Conditional `$temporality-judge` | Read-only review when changed docs or policy adds, changes, or removes time-bound guidance or run proof. Use the exact candidate tree; return findings to Writer and restage. |
+| Policy review | `$agent-policy-judge` | Outside an accepted `narrow_validation_plan`, review the same tree after applicable Consistency and Temporality reviews; send findings through Architect to Writer. |
 | Finalization | `$documentation-finalizer` | Consolidated content, policy, mirror, consistency, temporality, and source-of-truth verdict. Final changed-file readability is the last content gate. |
 | Publication | `$git-flow` | Main publishes after Architect accepts the finalizer. |
 
@@ -545,11 +546,6 @@ unavailable in the selected mode, record exactly
 with the mode and capability evidence. A missing, rejected, failed, or stale
 expected read blocks finalization.
 
-For guarded template updates, put the judge verdict or exact N/A and its
-evidence inside the existing `$documentation-finalizer:` completion receipt
-and durable audit. Do not add a top-level `WORKFLOW_RECEIPTS` tuple item.
-The internal review does not grant controller program authority.
-
 Run `$temporality-judge` after Writer and before Finalizer only when changed
 content-owned documentation or policy adds, changes, or removes time-bound
 guidance, run-result claims, or historical proof. Give it the same exact
@@ -568,8 +564,22 @@ to the content owner and review the restaged tree. Code-only changes and
 timeless content edits use an N/A with a reason. The review does not inspect
 test timing or change executable validation gates.
 
+Outside an accepted `narrow_validation_plan`, send the same tree to Agent
+Policy Judge after the candidate read and applicable Consistency and
+Temporality reviews. Give it the design, changed paths, and exact tree proof.
+Architect sends findings to Writer. After a fix, repeat stage/read and all
+applicable reviews before Documentation Finalizer. Do not add a top-level
+receipt or state.
+
+For guarded template updates, put the Consistency and Temporality Judge
+verdicts or their exact N/A, and the Agent Policy Judge verdict when required,
+with their evidence inside the existing `$documentation-finalizer:` completion
+receipt and durable audit. Do not add a top-level `WORKFLOW_RECEIPTS` tuple
+item. These reviews do not grant controller program authority.
+
 Finalizer receives that report, the final diff, the consistency and temporality
-receipts or exact N/A, and applicable Diátaxis or policy context. It returns one
+receipts or exact N/A, the Agent Policy Judge receipt outside an accepted
+`narrow_validation_plan`, and applicable Diátaxis or policy context. It returns one
 consolidated verdict here. After approval,
 `$git-flow` returns commit, push, verified MR, and exact-source pipeline
 evidence. A Writer or Finalizer rejection goes

@@ -41,17 +41,17 @@ clear outcomes. Name one safe next step.
    unrelated work. Get its base commit, changed paths, staged tree OID,
    base-to-tree diff, and clean-tree proof. Get the Consistency Judge receipt
    for that OID or Architect's exact `$consistency-judge: not applicable —
-   <reason>`. Get the Temporality Judge receipt for the same OID when changed
+   <reason>`. Get the Temporality Judge receipt for that OID if changed
    content adds, changes, or removes time-bound guidance, run claims, or
-   historical proof. Otherwise get Architect's exact
-   `$temporality-judge: not applicable — <reason>` with its scope rationale.
+   past proof. Otherwise get Architect's exact
+   `$temporality-judge: not applicable — <reason>` with its scope reason.
    For a reconciliation, check source, target, and joined-tree
    proof. In serial work, an applicable receipt must approve the final
    candidate tree using a live controller-owned `candidate read` snapshot made
    before this review. Check its immutable issue and session identity, base
    commit and tree, candidate tree OID, and canonical changed-path manifest.
-   Apply the same exact read and restaging rules to an applicable Temporality
-   Judge receipt. A full inline old/new response needs no `--complete`.
+   Use the same exact read and restaging rules for Temporality Judge.
+   A full inline old/new response needs no `--complete`.
    For a paged read, check proof of every old/new side byte. Chunks must be in
    order and at most 128 KiB. Check that `candidate read --complete` passed
    before scope or fact review. Restaging voids either mode's coverage.
@@ -60,6 +60,11 @@ clear outcomes. Name one safe next step.
    with mode and capability evidence. A missing, rejected, failed, or stale
    expected read is a block, not N/A. Check Writer's edited paths and source
    comparisons; do not require worker-side staging.
+   Outside an accepted `narrow_validation_plan`, require Agent Policy Judge's
+   approval for this tree after applicable Consistency and Temporality reviews.
+   A missing, rejected, or stale policy receipt blocks that route.
+   After a Writer correction, require fresh stage/read and applicable judge
+   receipts before reviewing the new tree.
    On the narrow route, verify the captured source, target, and merge-base IDs;
    authentic Red provenance and the saved full-hook receipt bound to the exact
    captured source tree for a coding source; source and target exact-SHA CI
@@ -90,8 +95,8 @@ clear outcomes. Name one safe next step.
 10. Last, run
     `uv run python -m agent_work.readability --root . --scope files --paths`
     with every changed Markdown path. Record the command and result. If no
-    Markdown changed, record readability as N/A. A repair requires a new
-    staged tree and fresh applicable reviews before this last check.
+    Markdown changed, record readability as N/A. A fix needs a new staged tree
+    and fresh reviews before this last check.
 
 ## Verdict
 
@@ -102,8 +107,8 @@ recorded. Send
 repeated findings, unchanged evidence, scope expansion, or authority ambiguity
 to Architect for human direction or coding-lane reclassification.
 
-For a guarded template update, include the Consistency Judge and Temporality
-Judge verdicts or exact N/A and their evidence within the existing
-`$documentation-finalizer:` completion receipt and durable audit. Never add
-a top-level `WORKFLOW_RECEIPTS` tuple item for either judge. Internal reviews
-do not grant controller program authority.
+For a guarded template update, keep the Consistency and Temporality Judge
+results or exact N/A, plus the Agent Policy Judge result when required, with
+their proof in the existing `$documentation-finalizer:` receipt and durable
+audit. Never add a top-level `WORKFLOW_RECEIPTS` tuple item for these reviews.
+These reviews do not grant controller program authority.
