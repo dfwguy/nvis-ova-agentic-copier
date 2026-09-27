@@ -125,9 +125,11 @@ tree, test proof, doc status, findings, and repairs too. `src/agent_work/workflo
 next-role/completeness routing only; public JSON and model prose cannot
 instantiate trusted specialist receipts. Finalizer decides review adequacy.
 
-`$tdd-finalizer` checks receipts, tree, and commit. Interactive Finalizer
-makes one passing commit over the base. It keeps the local Red ref. Serial Finalizer never commits; the trusted controller owns
-its final commit. Merge Finalizer commits the approved staged tree from the pending merge.
+`$tdd-finalizer` checks receipts, tree, and commit. For unpublished interactive
+work, it makes one passing commit over the base. For an open, published MR
+correction, it uses `agent-work published-commit append`. It keeps the local Red
+ref. Serial Finalizer never commits; the trusted controller owns its final
+commit. Merge Finalizer commits the approved staged tree from the pending merge.
 The old source and exact target are its ordered parents.
 Do not create an intermediate commit, push a Red ref, or rely on server-side
 squash. Keep each proof and report its exact result.

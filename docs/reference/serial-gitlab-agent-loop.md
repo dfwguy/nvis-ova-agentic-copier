@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -72,6 +72,12 @@ bin/agent-work-from-checkout review-handoff manifest --worktree PATH
 bin/agent-work-from-checkout review-handoff read --worktree PATH
     --session-id ID --receipt-id ID
     [--expected-manifest-sha256 SHA256] [--json]
+agent-work published-commit append --project-id ID --mr-iid IID
+                                   --worktree PATH --expected-source-sha SHA
+                                   --judge-tree TREE --red-ref REF --red-sha SHA
+                                   --review-session-id ID
+                                   --review-manifest-sha256 SHA256
+                                   --commit-message TEXT [--apply] [--json] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -123,6 +129,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `review-handoff submit` | Worktree, session ID, Green role, review version, correction-ledger kind, and private input file | Green calls `--apply` while active to save its full bounded ledger. |
 | `review-handoff manifest` | Worktree and session ID | Reads the current receipt set and its digest. Optional expected digest rejects drift. |
 | `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
+| `published-commit append` | Exact project, open MR, worktree, published source, Judge tree, Red checkpoint, review session and manifest, and commit message | Bare invocation previews; `--apply` appends one checked local child commit. Main pushes and checks the same MR. `--json` returns the result. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. |

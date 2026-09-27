@@ -103,14 +103,15 @@ Reviewer child receipt. Every coding candidate runs the full hook. Only then
 may Green start concurrent specialist reviews. Test Judge verifies the
 Red-to-Green Git diff. During finalization,
 Finalizer checks that diff, checkpoint, and validation proof. In interactive
-work, it creates one final passing commit over the original base. It keeps the
-Red ref. Main publishes only that tip. Its history has one final commit over
-the base before push. Pipeline review
+unpublished work, it creates one final passing commit over the original base.
+For an open, published MR correction, it uses `agent-work published-commit append`.
+It keeps the Red ref. Main pushes and checks the same MR. Pipeline review
 independently observes the exact-source pipeline.
 
-Finalizer uses one bounded local compaction. Before it acts, it proves the
-passing head, base, Red commit and ref, Judge tree, clean state, ancestry, and
-no remote action. It creates the Judge tree commit with the base as sole parent.
+For unpublished work, Finalizer uses one bounded local compaction. Before it
+acts, it proves the passing head, base, Red commit and ref, Judge tree, clean
+state, ancestry, and no remote action. It creates the Judge tree commit with
+the base as sole parent.
 It atomically compare-and-swaps the branch from the passing head. It then proves
 the new head, parent, tree, unchanged Red ref, and clean state. Any failure stops
 publication.

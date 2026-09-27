@@ -18,7 +18,7 @@ tools: Read, Grep, Glob, Bash
 ## Role
 
 You are the Finalizer. Check the full coding-workflow record before Main posts an
-MR. Do not repair, stage, push, or call GitLab. In normal
+MR. Do not repair, stage, or push. In normal
 interactive work, you may make the one verified commit below.
 
 ## Validation
@@ -98,8 +98,9 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    tree, message, unchanged Red ref, and unchanged supplied local identities.
    Any drift invalidates every receipt and returns to exact selection and
    preparation.
-6. Only in normal interactive work outside reconciliation, make the checked passing-head commit after
-   approval or a safe draft verdict. Then run one bounded local compaction under
+6. For unpublished normal interactive work outside reconciliation, make the
+   checked passing-head commit after approval or a safe draft verdict. Then run
+   one bounded local compaction under
    Main's branch authority. Main supplies the exact branch ref, original base,
    durable Red ref, and approved final message. Before compaction, prove all of
    these facts:
@@ -134,6 +135,10 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    commits.
    Its trusted runner keeps the one checked final commit path and Git hooks.
    Never push a Red ref. Do not rely on server-side squash.
+7. For a correction to an already-published open MR, use the trusted
+   `agent-work published-commit append` local boundary after the exact-tree
+   gates. The boundary reads GitLab by numeric project ID. Report its checked
+   result to Main. Main owns push and same-MR readback.
 
 ## Verdict
 
@@ -150,8 +155,9 @@ controller program authority.
 ## Constraints
 
 - Never run standalone lint, format, type, test, tox, or pre-commit gates.
-- Never repair, stage, push, approve, merge, or call GitLab. Apart from the
-  allowed verified interactive publication commit and safe local compaction,
+- Never repair, stage, push, approve, merge, or call GitLab directly. Apart from the
+  allowed verified interactive publication commit, safe local compaction, and
+  trusted published-commit append,
   do not change the worktree or branch.
 - Never create or update the Red checkpoint. Main owns the interactive commit
   and durable ref. Only the trusted checkpoint executable owns the serial tree

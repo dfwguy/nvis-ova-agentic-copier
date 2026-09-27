@@ -31,7 +31,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from . import (
     registry_cleanup,
@@ -73,6 +73,13 @@ from .models import (
 )
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
+from .published_commit import (
+    PublishedCommitDependencies,
+    PublishedCommitError,
+    PublishedCommitInput,
+    PublishedCommitRequest,
+    append_published_commit,
+)
 from .red_checkpoint import (
     RedCheckpointEvidence,
 )
@@ -1103,6 +1110,24 @@ def build_parser() -> argparse.ArgumentParser:
             else "accepted for read-only inspection",
         )
     repository = resources.add_parser("repository", help="inspect repository policy")
+    published = resources.add_parser(
+        "published-commit", help="append one reviewed local commit to an open MR source"
+    )
+    published_actions = published.add_subparsers(dest="action", required=True)
+    append = published_actions.add_parser(
+        "append", help="verify and append a Judge tree"
+    )
+    append.add_argument("--project-id", type=_positive_integer, required=True)
+    append.add_argument("--mr-iid", type=_positive_integer, required=True)
+    append.add_argument("--worktree", type=Path, required=True)
+    append.add_argument("--expected-source-sha", type=_candidate_tree, required=True)
+    append.add_argument("--judge-tree", type=_candidate_tree, required=True)
+    append.add_argument("--red-ref", required=True)
+    append.add_argument("--red-sha", type=_candidate_tree, required=True)
+    append.add_argument("--review-session-id", required=True)
+    append.add_argument("--review-manifest-sha256", type=_sha256_digest, required=True)
+    append.add_argument("--commit-message", required=True)
+    _common(append, apply_help="append the reviewed commit to the local source branch")
     repository_actions = repository.add_subparsers(dest="action", required=True)
     cleanup_policy = repository_actions.add_parser(
         "cleanup-policy", help="read the container registry cleanup policy"
@@ -1333,6 +1358,167 @@ def _review_handoff_dependencies(
         list_objects=store.list_prefix,
         nonce=lambda: secrets.token_hex(16),
         clock=time.time,
+    )
+
+
+def _published_commit_dependencies(
+    *,
+    worktree: Path,
+    environment: Mapping[str, str],
+    run_command: CommandRunner,
+) -> PublishedCommitDependencies:
+    """Bind the append operation to real Git and fresh private Judge evidence."""
+    host = environment.get("GITLAB_HOST", "")
+    project_text = environment.get("GITLAB_PROJECT_ID", "")
+    if not host or "://" in host or "/" in host or ":" in host:
+        raise PublishedCommitError("GITLAB_HOST must be a bare hostname")
+    if not project_text.isdigit() or int(project_text) <= 0:
+        raise PublishedCommitError("GITLAB_PROJECT_ID must be numeric")
+    configured_project = int(project_text)
+    candidate = worktree.resolve(strict=True)
+    handoff = _review_handoff_dependencies(
+        worktree=candidate,
+        issue_iid=None,
+        environment=environment,
+        run_command=run_command,
+    )
+    git_environment = {
+        key: value for key, value in environment.items() if not key.startswith("GIT_")
+    }
+    git_environment["GIT_OPTIONAL_LOCKS"] = "0"
+
+    def command(*arguments: str, stdin: str | None = None) -> str:
+        result = run_command(
+            arguments,
+            stdin=stdin,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            environment=git_environment,
+        )
+        if result.returncode != 0:
+            raise PublishedCommitError("published commit boundary command failed")
+        return result.stdout.strip()
+
+    def git(*arguments: str, stdin: str | None = None) -> str:
+        return command("git", "-C", str(candidate), *arguments, stdin=stdin)
+
+    def api(path: str) -> object:
+        raw = command("glab", "api", "--hostname", host, path)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise PublishedCommitError("GitLab returned invalid JSON") from error
+
+    def read_project(project_id: int) -> dict[str, object]:
+        if project_id != configured_project:
+            raise PublishedCommitError(
+                "project differs from configured numeric project"
+            )
+        value = api(f"projects/{project_id}")
+        if not isinstance(value, dict):
+            raise PublishedCommitError("GitLab project payload is invalid")
+        return cast("dict[str, object]", value)
+
+    def read_open_mrs(project_id: int, branch: str) -> list[dict[str, object]]:
+        path = (
+            f"projects/{project_id}/merge_requests?state=opened"
+            f"&source_branch={quote(branch, safe='')}&per_page=100"
+        )
+        value = api(path)
+        if not isinstance(value, list) or len(value) >= 100:
+            raise PublishedCommitError("open merge request inventory is incomplete")
+        if not all(isinstance(item, dict) for item in value):
+            raise PublishedCommitError("open merge request payload is invalid")
+        return cast("list[dict[str, object]]", value)
+
+    def read_remote_source(branch: str) -> str:
+        value = api(
+            f"projects/{configured_project}/repository/branches"
+            f"?search={quote(branch, safe='')}&per_page=100"
+        )
+        if not isinstance(value, list) or len(value) >= 100:
+            raise PublishedCommitError("remote branch inventory is incomplete")
+        if not all(isinstance(item, dict) for item in value):
+            raise PublishedCommitError("remote branch inventory is malformed")
+        branches = cast("list[dict[str, object]]", value)
+        matching = [item for item in branches if item.get("name") == branch]
+        if len(matching) != 1:
+            raise PublishedCommitError("remote source branch is missing or ambiguous")
+        branch_data = matching[0]
+        commit = branch_data.get("commit")
+        if not isinstance(commit, dict):
+            raise PublishedCommitError("remote source commit is malformed")
+        commit_data = cast("dict[str, object]", commit)
+        if not isinstance(commit_data.get("id"), str):
+            raise PublishedCommitError("remote source commit is malformed")
+        return cast("str", commit_data["id"])
+
+    def observe_local(checkout: Path, red_ref: str) -> dict[str, object]:
+        if checkout.resolve(strict=True) != candidate:
+            raise PublishedCommitError("requested worktree changed")
+        judged = handoff.observe_candidate()
+        branch = git("symbolic-ref", "--short", "HEAD")
+        head_ref = git("symbolic-ref", "HEAD")
+        for marker in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"):
+            result = run_command(
+                ("git", "-C", str(candidate), "rev-parse", "-q", "--verify", marker),
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+                environment=git_environment,
+            )
+            if result.returncode == 0:
+                raise PublishedCommitError("merge or rewrite is in progress")
+        return {
+            "branch": branch,
+            "head_ref": head_ref,
+            "head_sha": git("rev-parse", "HEAD"),
+            "staged_tree": judged["candidate_tree"],
+            "red_sha": git("rev-parse", "--verify", red_ref),
+            "origin_url": git("remote", "get-url", "origin"),
+            "merge_in_progress": False,
+            "unstaged_changes": bool(git("diff", "--name-only")),
+            "untracked_files": bool(git("ls-files", "--others", "--exclude-standard")),
+        }
+
+    def create_commit(tree: str, parent: str, message: str) -> str:
+        return git("commit-tree", tree, "-p", parent, "-F", "-", stdin=message)
+
+    def compare_and_swap_ref(ref: str, new: str, old: str) -> bool:
+        result = run_command(
+            ("git", "-C", str(candidate), "update-ref", ref, new, old),
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            environment=git_environment,
+        )
+        return result.returncode == 0
+
+    def inspect_commit(sha: str) -> dict[str, object]:
+        raw = git("cat-file", "-p", sha)
+        header, separator, message = raw.partition("\n\n")
+        if not separator:
+            raise PublishedCommitError("new commit object is malformed")
+        lines = header.splitlines()
+        trees = [
+            line.removeprefix("tree ") for line in lines if line.startswith("tree ")
+        ]
+        parents = tuple(
+            line.removeprefix("parent ") for line in lines if line.startswith("parent ")
+        )
+        return {
+            "sha": sha,
+            "parents": parents,
+            "tree": trees[0] if len(trees) == 1 else None,
+            "message": message,
+        }
+
+    return PublishedCommitDependencies(
+        read_project=read_project,
+        read_open_mrs=read_open_mrs,
+        read_remote_source=read_remote_source,
+        observe_local=observe_local,
+        read_review_manifest=lambda checkout, session: review_handoff_manifest(
+            session_ref=session, dependencies=handoff
+        ),
+        create_commit=create_commit,
+        compare_and_swap_ref=compare_and_swap_ref,
+        inspect_commit=inspect_commit,
     )
 
 
@@ -1816,11 +2002,61 @@ def main(
     slow_root_reconcile_action: Callable[..., SlowRootReport] | None = None,
     slow_root_manifest_reader: Callable[[Path], bytes] | None = None,
     read_bounded_regular_file: Callable[..., bytes | None] = read_bounded_regular,
+    build_published_commit_dependencies: Callable[
+        ..., PublishedCommitDependencies
+    ] = _published_commit_dependencies,
     write_stdout: Callable[[str], None] = _stdout,
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "published-commit":
+        try:
+            user_input = PublishedCommitInput.model_validate(vars(parsed))
+            request = PublishedCommitRequest(
+                project_id=user_input.project_id,
+                mr_iid=user_input.mr_iid,
+                worktree=user_input.worktree.resolve(strict=True),
+                expected_source_sha=user_input.expected_source_sha,
+                judge_tree=user_input.judge_tree,
+                red_ref=user_input.red_ref,
+                red_sha=user_input.red_sha,
+                review_session_id=user_input.review_session_id,
+                review_manifest_sha256=user_input.review_manifest_sha256,
+                commit_message=user_input.commit_message,
+            )
+            report = append_published_commit(
+                request,
+                apply=parsed.apply,
+                dependencies=build_published_commit_dependencies(
+                    worktree=request.worktree,
+                    environment=environment,
+                    run_command=run_command,
+                ),
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        payload = {
+            "project_id": report.project_id,
+            "mr_iid": report.mr_iid,
+            "old_sha": report.old_sha,
+            "new_sha": report.new_sha,
+            "tree": report.tree,
+            "applied": report.applied,
+        }
+        write_stdout(
+            json.dumps(payload, separators=(",", ":"))
+            if parsed.json
+            else (
+                f"appended {report.new_sha} to merge request {report.mr_iid}"
+                if report.applied
+                else f"[dry-run] reviewed tree {report.tree} is ready to append"
+            )
+        )
+        return 0
     if parsed.resource == "slow-root" and parsed.action == "reconcile":
         try:
             project_id = int(environment.get("GITLAB_PROJECT_ID", ""))

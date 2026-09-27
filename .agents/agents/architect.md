@@ -171,11 +171,13 @@ waive or relabel a finding to claim progress. Diagnose recoverable failures
 and try one bounded safeguard-preserving alternative.
 
 `$tdd-finalizer` owns exact checkpoint, tree, receipt, and final commit checks.
-In interactive work it makes one passing commit over the original base and
-retains the local Red ref. Main publishes only that tip; neither Red ref is
-pushed. Serial Finalizer never commits; the trusted controller owns its single
-validated final commit. Do not depend on server-side squash. `$git-flow` owns
-push, MR readback, and exact-source pipeline handoff.
+For unpublished interactive work it compacts the passing commit over the
+original base. For a correction to an already-published open MR, it calls the
+trusted `agent-work published-commit append` local boundary and reports its
+checked result. Retain the local Red ref; never push it. Serial Finalizer never
+commits; the trusted controller owns its validated final commit. Do not depend
+on server-side squash. `$git-flow` owns Main's push, same-MR readback, and
+exact-source pipeline handoff.
 
 ## Content route
 

@@ -2960,12 +2960,18 @@ def test_serial_runner_assets_have_exact_root_template_and_generated_parity(
     generated_project: Path, project_root: Path, relative_path: str
 ) -> None:
     """The Copier source and output ship one identical serial runner contract."""
-    root_file = project_root / relative_path
-    template_file = project_root / "template" / relative_path
-    generated_file = generated_project / relative_path
+    paths = (
+        (relative_path, "src/agent_work/published_commit.py")
+        if relative_path == "src/agent_work/cli.py"
+        else (relative_path,)
+    )
+    for path in paths:
+        root_file = project_root / path
+        template_file = project_root / "template" / path
+        generated_file = generated_project / path
 
-    assert root_file.read_bytes() == template_file.read_bytes()
-    assert root_file.read_bytes() == generated_file.read_bytes()
+        assert root_file.read_bytes() == template_file.read_bytes()
+        assert root_file.read_bytes() == generated_file.read_bytes()
 
 
 def test_serial_runner_ships_completion_relative_user_systemd_units(

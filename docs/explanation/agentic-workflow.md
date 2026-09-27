@@ -129,9 +129,12 @@ not-applicable reason in its existing receipt. A skip needs a specific reason.
 
 Red keeps a verified failing-test boundary. In an interactive workflow, Main
 creates one approved checkpoint commit and local ref after Red proves the
-expected failures. The Finalizer later replaces the branch tip with one passing
-commit over the original base and keeps the local Red ref. The failing tip is
-never pushed. GitLab squash does not affect correctness.
+expected failures. For work that has not been published, Finalizer later
+replaces the branch tip with one passing commit over the original base. For a
+correction to an open, published MR, it appends one checked commit to the
+published source tip through a trusted local boundary. Both paths keep the
+local Red ref; the failing tip is never pushed. GitLab squash does not affect
+correctness.
 
 In a serial workflow, the AI worker cannot commit. While the Red producer is
 still live, it calls the trusted broker boundary. The boundary sets the coding
@@ -208,9 +211,10 @@ lists the commands and recovery checks.
 During finalization, Finalizer may use `--no-verify`. It may do so only after matching
 that evidence. The serial runner uses its normal commit path. Pipeline review
 checks the exact source commit after publication. It never replaces Judge.
-Interactive Finalizer makes the verified local commit. This comes before
-main-thread publication. In serial work, Finalizer does not commit. The trusted
-controller commits with its hook.
+Interactive Finalizer makes the verified local commit before main-thread
+publication. For a published MR correction, the trusted boundary checks the
+open MR and exact source before it appends the commit. In serial work,
+Finalizer does not commit. The trusted controller commits with its hook.
 
 The documentation lane needs a complete diff limited to docs and agent-work
 instructions. It never invents passing prose tests. Its writer records sources.
@@ -558,8 +562,8 @@ or authority boundary, cross-module rule, or scope not proved safe.
 
 The receipt marks prior sections that still have support. It also marks the
 scope checked again against the current tree. The reviewer uses staged tree
-identities, not intermediate commits. In normal interactive work, Finalizer
-owns one verified commit. In serial-worker work, Finalizer never commits. The
+identities, not intermediate commits. In interactive work, Finalizer owns the
+verified local commit. In serial-worker work, Finalizer never commits. The
 trusted runner keeps its normal controller commit path.
 
 The controller, not the reviewer, measures review time. The receipt starts with
