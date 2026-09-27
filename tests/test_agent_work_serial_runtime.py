@@ -22181,7 +22181,7 @@ def test_retry_replays_retained_publication_intent_without_restarting_workflow(
     assert gitlab.labels == ["agent::running"]
 
 
-def test_run_segment_transitions_one_eligible_blocked_record(
+def test_run_segment_does_not_resume_blocked_record_from_cause_text_alone(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -22218,9 +22218,9 @@ def test_run_segment_transitions_one_eligible_blocked_record(
         now=NOW,
     )
 
-    assert outcome is not None
-    assert ledger.states.count(RunnerState.AWAITING_HUMAN) == 1
-    assert gitlab.labels[0] == "agent::awaiting-human"
+    assert outcome is None or outcome.state is RunnerState.BLOCKED
+    assert ledger.states == [RunnerState.BLOCKED]
+    assert gitlab.labels == []
 
 
 def test_explicit_retry_of_blocked_issue_87_preserves_its_retained_worktree(
@@ -22777,6 +22777,611 @@ def test_guarded_feedback_repair_fails_closed_for_invalid_retained_red(
     assert selected is None, failure
     assert repository.prepared is False
     assert repository.pushes == 0
+
+
+def _clean_blocked_automatic_retry_record(tmp_path: Path) -> LedgerRecord:
+    """Build an untouched blocked worker failure with controller diagnostic proof."""
+    return _record(
+        tmp_path, state=RunnerState.BLOCKED, phase=WorkflowPhase.PREPARING
+    ).model_copy(
+        update={
+            "workflow_lane": WorkflowLane.UNKNOWN,
+            "main_sha": "a" * 40,
+            "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+            "blocked_cause": "transient runtime failure",
+            "condition_history": (
+                ConditionEvidence(
+                    occurred_at=NOW,
+                    code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                    detail="worker_result_capture: input artifact missing or unreadable",
+                ),
+            ),
+        }
+    )
+
+
+def test_loop_run_automatically_resumes_one_clean_proven_blocked_issue(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_clean_blocked_automatic_retry_record(tmp_path))
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert resumed is not None and resumed.state is not RunnerState.BLOCKED
+    assert "agent::running" in gitlab.labels
+
+
+def test_loop_run_keeps_blocked_issue_with_conflicting_lifecycle_labels(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_clean_blocked_automatic_retry_record(tmp_path))
+    gitlab = FakeGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked", "agent::running")})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    launched: list[int | None] = []
+
+    def record_segment(**kwargs: object) -> None:
+        launched.append(cast(int | None, kwargs["issue_iid"]))
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+                run_segment_boundary=record_segment,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert retained.retry_at is None
+    assert "blocked lifecycle label is not exact" in retained.next_action
+    assert gitlab.labels == []
+    assert launched == [None]
+
+
+def test_loop_run_resumes_only_first_of_two_clean_blocked_issues(
+    tmp_path: Path,
+) -> None:
+    class TwoBlockedIssuesGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            first = _issue(iid=12).model_copy(update={"labels": ("agent::blocked",)})
+            second = _issue(iid=13).model_copy(update={"labels": ("agent::blocked",)})
+            super().__init__(first)
+            self.issues = {12: first, 13: second}
+            self.transitions: list[tuple[int, str | None]] = []
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return tuple(self.issues.values())
+
+        def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+            self.transitions.append((iid, label))
+            issue = self.issues[iid].model_copy(update={"labels": (label,)})
+            self.issues[iid] = issue
+            return issue
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = ledger.persist(_clean_blocked_automatic_retry_record(tmp_path))
+    second = ledger.persist(
+        _clean_blocked_automatic_retry_record(tmp_path).model_copy(
+            update={
+                "issue_iid": 13,
+                "source_branch": "agent/issue-13",
+                "worktree": config.state_root / "worktrees" / "13",
+            }
+        )
+    )
+    gitlab = TwoBlockedIssuesGitLab()
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    resumed = ledger.load(first.issue_iid)
+    assert resumed is not None and resumed.state is not RunnerState.BLOCKED
+    assert ledger.load(second.issue_iid) == second
+    assert gitlab.transitions == [(12, "agent::running")]
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "exit_evidence"),
+    (
+        (
+            ErrorCode.WORKER_EXIT,
+            WorkerExitEvidence(returncode=9, diagnostic="Architect delegation failed"),
+        ),
+        (ErrorCode.WORKER_TIMEOUT, None),
+    ),
+)
+def test_loop_run_resumes_clean_precheckpoint_architect_worker_failure(
+    tmp_path: Path,
+    failure_code: ErrorCode,
+    exit_evidence: WorkerExitEvidence | None,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _clean_blocked_automatic_retry_record(tmp_path).model_copy(
+            update={
+                "phase": WorkflowPhase.WORKFLOW,
+                "blocked_cause": None,
+                "error_code": ErrorCode.RETRY_EXHAUSTED,
+                "worker_exit": exit_evidence,
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        code=failure_code.value,
+                        detail="Automatic retry budget exhausted.",
+                    ),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert resumed is not None and resumed.state is not RunnerState.BLOCKED
+    assert "agent::running" in gitlab.labels
+
+
+def test_loop_run_resumes_exact_retained_architect_delegation_failure(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _clean_blocked_automatic_retry_record(tmp_path).model_copy(
+            update={
+                "phase": WorkflowPhase.WORKFLOW,
+                "blocked_cause": None,
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                        detail=(
+                            "Architect delegation runtime unavailable; no files were "
+                            "changed and no Red checkpoint exists."
+                        ),
+                    ),
+                ),
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    resumed = ledger.load(record.issue_iid)
+    assert resumed is not None and resumed.state is not RunnerState.BLOCKED
+    assert "agent::running" in gitlab.labels
+
+
+@pytest.mark.parametrize(
+    ("record_update", "repository_update", "owner_status", "expected_reason"),
+    (
+        ({"condition_history": ()}, {}, "missing", "failure condition is not exact"),
+        ({"source_sha": "b" * 40}, {}, "missing", "source does not match"),
+        ({}, {"worktree_present": False}, "missing", "worktree is absent"),
+        ({}, {"current_head": "b" * 40}, "missing", "head differs from the baseline"),
+        ({}, {"dirty": True}, "missing", "worktree is dirty"),
+        ({"worktree_dirty": True}, {}, "missing", "worktree is dirty"),
+        ({}, {}, "active", "owner is active"),
+        (
+            {"workflow_lane": WorkflowLane.CODING},
+            {},
+            "missing",
+            "lane already has progress",
+        ),
+    ),
+)
+def test_loop_run_keeps_unproven_blocked_issue_and_label(
+    tmp_path: Path,
+    record_update: dict[str, object],
+    repository_update: dict[str, object],
+    owner_status: str,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _clean_blocked_automatic_retry_record(tmp_path).model_copy(update=record_update)
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    for key, value in repository_update.items():
+        setattr(repository, key, value)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: owner_status,
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None
+    assert (
+        retained.model_copy(
+            update={"next_action": record.next_action, "revision": record.revision}
+        )
+        == record
+    )
+    assert expected_reason in retained.next_action
+    assert gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    ("dirty", "competing_identity", "expected_reason"),
+    (
+        (True, False, "retained worktree is dirty"),
+        (False, True, "competing retained identity"),
+    ),
+)
+def test_loop_run_retains_specific_auto_resume_rejection(
+    tmp_path: Path,
+    *,
+    dirty: bool,
+    competing_identity: bool,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_clean_blocked_automatic_retry_record(tmp_path))
+    if competing_identity:
+        ledger.persist(
+            record.model_copy(update={"issue_iid": 13, "state": RunnerState.COMPLETE})
+        )
+
+    class RecordingGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(
+                _issue().model_copy(update={"labels": ("agent::blocked",)})
+            )
+            self.label_iids: list[int] = []
+
+        def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+            self.label_iids.append(iid)
+            return super().transition_labels(iid, label)
+
+    gitlab = RecordingGitLab()
+    if competing_identity:
+        gitlab.issues[13] = _issue(iid=13, state="closed")
+    repository = FakeRepository(config)
+    repository.paths = ()
+    repository.dirty = dirty
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None
+    assert (
+        retained.model_copy(
+            update={"next_action": record.next_action, "revision": record.revision}
+        )
+        == record
+    )
+    assert expected_reason in retained.next_action
+    assert record.issue_iid not in gitlab.label_iids
+
+
+def test_loop_run_refuses_blocked_issue_with_open_split_prerequisite(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _clean_blocked_automatic_retry_record(tmp_path).model_copy(
+            update={"split_prerequisites": ((11, "closed"),)}
+        )
+    )
+
+    class OpenPrerequisiteGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (self.issue, _issue(iid=11))
+
+    issue = _issue(description=render_split_marker(310967, 1, "target", (11,)))
+    gitlab = OpenPrerequisiteGitLab(
+        issue.model_copy(update={"labels": ("agent::blocked", "agent-prereq_11")})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert "split prerequisite is still open" in retained.next_action
+    assert gitlab.labels == []
+
+
+def test_loop_run_refuses_blocked_issue_with_retained_red_checkpoint(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(_clean_blocked_automatic_retry_record(tmp_path))
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            _dependencies(config, ledger, gitlab, repository),
+            lambda _iid: "missing",
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert "retained Red checkpoint is present" in retained.next_action
+    assert gitlab.labels == []
+
+
+def test_loop_run_retains_publication_intent_and_human_action_on_auto_skip(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _clean_blocked_automatic_retry_record(tmp_path).model_copy(
+        update={
+            "intent": TransitionIntentRecord(
+                operation_id="12:publish:0",
+                kind="publish_merge_request",
+                expected_evidence={"source_sha": "a" * 40},
+            ),
+            "next_action": "Review the retained publication intent before retrying.",
+        }
+    )
+    record = ledger.persist(original)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    retained = ledger.load(record.issue_iid)
+    assert retained is not None
+    assert retained.next_action == record.next_action
+    assert retained.intent == record.intent and retained.state is RunnerState.BLOCKED
+    assert "retained transition intent requires reviewed recovery" in retained.summary
+    assert gitlab.labels == []
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    (
+        ErrorCode.WORKER_PROTOCOL_INVALID,
+        ErrorCode.WORKER_EXIT,
+        ErrorCode.WORKER_TIMEOUT,
+    ),
+)
+def test_loop_run_cools_down_identical_repeated_blocked_failure(
+    tmp_path: Path, failure_code: ErrorCode
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _clean_blocked_automatic_retry_record(tmp_path)
+    if failure_code is ErrorCode.WORKER_PROTOCOL_INVALID:
+        repeated = original.condition_history * 2
+        updates: dict[str, object] = {"condition_history": repeated}
+    else:
+        repeated = tuple(
+            ConditionEvidence(
+                occurred_at=NOW,
+                retry_count=attempt,
+                code=failure_code.value,
+                detail=(
+                    "Automatic retry budget exhausted."
+                    if attempt == 3
+                    else "Transient failure; retry scheduled."
+                ),
+            )
+            for attempt in range(4)
+        )
+        updates = {
+            "error_code": ErrorCode.RETRY_EXHAUSTED,
+            "retry_count": 3,
+            "worker_exit": (
+                WorkerExitEvidence(
+                    returncode=9, diagnostic="Architect delegation failed"
+                )
+                if failure_code is ErrorCode.WORKER_EXIT
+                else None
+            ),
+            "condition_history": repeated,
+            "blocked_cause": None,
+        }
+    record = ledger.persist(original.model_copy(update=updates))
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.paths = ()
+    dependencies = _with_issue_owner_probe(
+        replace(
+            _dependencies(config, ledger, gitlab, repository),
+            load_red_checkpoint=lambda *_args: None,
+        ),
+        lambda _iid: "missing",
+    )
+
+    def no_worker_segment(**_kwargs: object) -> None:
+        return None
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=replace(dependencies, run_segment_boundary=no_worker_segment),
+    )
+
+    cooled = ledger.load(record.issue_iid)
+    assert cooled is not None and cooled.state is RunnerState.BLOCKED
+    assert cooled.retry_at == NOW + timedelta(minutes=20)
+    assert gitlab.labels == []
+
+
+def test_loop_run_skips_cooled_blocked_issue_and_resumes_later_clean_issue(
+    tmp_path: Path,
+) -> None:
+    class TwoBlockedIssuesGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            first = _issue(iid=12).model_copy(update={"labels": ("agent::blocked",)})
+            second = _issue(iid=13).model_copy(update={"labels": ("agent::blocked",)})
+            super().__init__(first)
+            self.issues = {12: first, 13: second}
+            self.transitions: list[tuple[int, str | None]] = []
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return tuple(self.issues.values())
+
+        def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+            self.transitions.append((iid, label))
+            issue = self.issues[iid].model_copy(update={"labels": (label,)})
+            self.issues[iid] = issue
+            return issue
+
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _clean_blocked_automatic_retry_record(tmp_path)
+    first = ledger.persist(
+        original.model_copy(
+            update={"condition_history": original.condition_history * 2}
+        )
+    )
+    second = ledger.persist(
+        original.model_copy(
+            update={
+                "issue_iid": 13,
+                "source_branch": "agent/issue-13",
+                "worktree": config.state_root / "worktrees" / "13",
+            }
+        )
+    )
+    gitlab = TwoBlockedIssuesGitLab()
+    repository = FakeRepository(config)
+    repository.paths = ()
+    launched: list[int | None] = []
+
+    def record_segment(**kwargs: object) -> None:
+        launched.append(cast(int | None, kwargs["issue_iid"]))
+
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                load_red_checkpoint=lambda *_args: None,
+                run_segment_boundary=record_segment,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    cooled = ledger.load(first.issue_iid)
+    resumed = ledger.load(second.issue_iid)
+    assert cooled is not None and cooled.state is RunnerState.BLOCKED
+    assert cooled.retry_at == NOW + timedelta(minutes=20)
+    assert resumed is not None and resumed.state is not RunnerState.BLOCKED
+    assert gitlab.transitions == [(13, "agent::running")]
+    assert launched == [13]
 
 
 @pytest.mark.parametrize("initial_state", (RunnerState.EXECUTING, RunnerState.REPAIR))

@@ -134,6 +134,9 @@ An activation is bounded, but its evidence lasts. The ledger records the selecte
 
 After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. Its new Architect repeats the three-proposal gate before any mutable child. This also applies to a fresh Red-first segment. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
 
+A clean blocked issue can start again after exact pre-checkpoint proof. Dirty,
+unclear, or published work keeps its reviewed recovery path.
+
 Only the ledger keeps the concise audit. Status is an operational projection of that record plus best-effort live evidence. This avoids presenting an old retry or failure as current. It also keeps unavailable, stale, or conflicting observations honestly unknown. The exact fields, bounded output, and state mapping are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
 
 Scheduled repair backoff and repair quarantine are item-local. They are not `RETRY_WAIT`, the ordinary workflow retry state, and are not global blockers. By contrast, ambiguous or inexact identity, active ownership, credential, policy, or authority conflicts fail closed. Issue and merge-request text cannot set repair priority, the attempt budget, or a backoff.

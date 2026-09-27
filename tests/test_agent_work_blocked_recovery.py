@@ -16,9 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_work.domain import RunnerState, WorkflowPhase
-from agent_work.models import LedgerRecord, MergeRequestEvidence, TransitionIntentRecord
-from agent_work.serial import recover_blocked_records
+from agent_work.domain import ErrorCode, RunnerState, WorkflowPhase
+from agent_work.models import (
+    ConditionEvidence,
+    LedgerRecord,
+    MergeRequestEvidence,
+    TransitionIntentRecord,
+)
+from agent_work.serial import automatic_blocked_static_rejection
 
 NOW = datetime(2026, 9, 25, tzinfo=UTC)
 
@@ -36,21 +41,17 @@ def _blocked(
         source_branch=f"agent/issue-{issue_iid}",
         worktree=tmp_path / f"worktree-{issue_iid}",
         source_sha="a" * 40,
+        main_sha="a" * 40,
+        error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+        condition_history=(
+            ConditionEvidence(
+                occurred_at=NOW,
+                code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                detail="worker_result_capture: input artifact missing or unreadable",
+            ),
+        ),
     )
     return record.model_copy(update=updates)
-
-
-def test_recovery_selects_at_most_one_proof_complete_blocked_record(
-    tmp_path: Path,
-) -> None:
-    records = (
-        _blocked(tmp_path, 241, blocked_cause="transient runtime failure"),
-        _blocked(tmp_path, 242, blocked_cause="transient runtime failure"),
-    )
-
-    selected = recover_blocked_records(records, now=NOW)
-
-    assert [record.issue_iid for record in selected] == [241]
 
 
 @pytest.mark.parametrize(
@@ -67,9 +68,9 @@ def test_recovery_leaves_unsafe_blocked_records_unchanged(
 ) -> None:
     record = _blocked(tmp_path, 243, **updates)
 
-    selected = recover_blocked_records((record,), now=NOW)
+    rejection = automatic_blocked_static_rejection(record, now=NOW)
 
-    assert selected == ()
+    assert rejection is not None
     assert record.state is RunnerState.BLOCKED
 
 
@@ -88,9 +89,9 @@ def test_recovery_rechecks_lock_and_evidence_before_transition(
         ),
     )
 
-    selected = recover_blocked_records((record,), now=NOW)
+    rejection = automatic_blocked_static_rejection(record, now=NOW)
 
-    assert selected == ()
+    assert rejection is not None
     assert record.intent is not None
     assert record.intent.kind == "publish_merge_request"
     assert record.merge_request_iid is None
@@ -121,8 +122,8 @@ def test_recovery_cannot_approve_or_merge_a_publication(
         sha=record.source_sha or "",
     )
 
-    selected = recover_blocked_records((record,), now=NOW)
+    rejection = automatic_blocked_static_rejection(record, now=NOW)
 
-    assert selected == ()
+    assert rejection is not None
     assert observed_mr.state == "opened"
     assert observed_mr.is_draft is False
