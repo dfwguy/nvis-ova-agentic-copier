@@ -65,6 +65,7 @@ env_list = ["py311", "py314"]
 [tool.tox.env.py311]
 description = "Run tests with Python 3.11"
 set_env = { COVERAGE_FILE = ".coverage.py311" }
+pass_env = ["PYTEST_ADDOPTS"]
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",
@@ -82,6 +83,7 @@ commands = [["pytest", "-v", "--cov", "--cov-fail-under=85", "--cov-report=xml:c
 [tool.tox.env.py314]
 description = "Run tests with Python 3.14"
 set_env = { COVERAGE_FILE = ".coverage.py314" }
+pass_env = ["PYTEST_ADDOPTS"]
 deps = [
     "hypothesis>=6.0",
     "pytest>=8.3.5",

@@ -27,9 +27,12 @@ model. Each frontend uses its own configured map. Do not name a provider model
 in this skill.
 
 The TDD Judge delegates this review after the validation session's one hook
-run. In interactive work, use its exact staged tree and immutable JUnit
-snapshots, digests, and counts. In serial work, use only the controller-owned
-result's tree identity, opaque evidence identity, and bounded program-derived
-counts, digests, and timing summary. Never request controller-private snapshot
-paths or treat model prose as validation evidence. Return the timing receipt to
-the Judge, never to specialist review.
+run. In interactive work, use the exact staged tree and its immutable candidate
+JUnit snapshots, digests, and counts. In serial work, require complete Python
+3.11 and 3.14 baseline and candidate timing proof bound to their exact source
+trees. Use only controller-owned source/run digests, counts, completeness,
+candidate slow-case data, findings, and transcript outcome. The controller
+keeps full inventories and exact-source repeats private. Reject missing, partial,
+or mismatched serial proof. Never request controller-private snapshot paths or treat
+model prose as validation evidence. Return the timing receipt to the Judge,
+never to specialist review.

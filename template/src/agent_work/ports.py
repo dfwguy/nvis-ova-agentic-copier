@@ -258,6 +258,7 @@ class RepositoryPort(Protocol):
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
+        timing_review_required: bool = False,
     ) -> dict[str, object]: ...
 
     def observe_legacy_publication_candidate(

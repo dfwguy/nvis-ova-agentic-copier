@@ -134,6 +134,14 @@ snapshots, digests, and counts for supported environments. Non-functional Review
 the 0.100-second test rule. It judges exceptions and causes. Its receipt retains complete evidence;
 Architect routes its findings without inventing a timing pass.
 
+For serial work, the controller supplies `timing_review` bound to the baseline
+SHA and tree and candidate tree. Its handoff includes transcript digest and
+outcome, Python 3.11 and 3.14 baseline and candidate run digests, counts,
+`timing_complete` flags, bounded findings, and phase deltas. Candidate
+`junit_timings` includes the complete bounded `over_100ms_cases` list. Judge
+passes that trusted proof to Non-functional Review. Missing or mismatched
+proof returns to its owner; model prose cannot establish a timing pass.
+
 Green starts read-only reviews only after Judge and Non-functional Review
 pass the same tree. Required reviewers are
 `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`,

@@ -5,7 +5,7 @@ summary: Run local tests and CI checks for a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -114,6 +114,7 @@ At the child shell prompt, run:
 
 ```bash
 candidate_tree="$(git write-tree)"
+export PYTEST_ADDOPTS='--randomly-seed=262'
 agent-work validation run --candidate-tree "$candidate_tree" --apply
 "$baseline_dir/.tox/py311/bin/python" --version
 "$candidate_dir/.tox/py311/bin/python" --version
@@ -140,9 +141,10 @@ Inside the admitted child shell:
 2. The Judge hook above runs the full supported matrix for the staged tree.
    Preserve its complete `test-results-py311.xml` and
    `test-results-py314.xml` JUnit snapshots. Record each file's SHA-256
-   digest, case count, failure count, error count, and pytest seed. The fixed
-   tox commands do not pass a requested seed through `PYTEST_ADDOPTS` or extra arguments
-   after `tox --`. Use the full JUnit files to list **every** candidate case
+   digest, case count, failure count, error count, and pytest seed. Both tox
+   environments pass `PYTEST_ADDOPTS` to pytest, so the exported seed reaches
+   the full runs. Check the reported seed rather than assuming it did. Use
+   the full JUnit files to list **every** candidate case
    above 100 ms and at or above 1 second, by full case ID and environment.
 3. Find new and changed tests, including each parameter. Include cases that
    use changed shared fixtures or helpers. If you cannot tell which cases the
@@ -186,9 +188,11 @@ from one run. An inherited case that stays above 100 ms but is unchanged or
 faster remains in the report without automatic rejection. Give each confirmed
 cost an owner and a reduction or integration-exception plan in the durable
 audit or linked issue record. Keep the full per-run inventory and proof there.
-Candidate-only serial timing proof cannot establish a baseline or phase
-comparison. Judge it on its complete candidate inventory; use paired proof
-only when the active worker provides it.
+The serial controller collects full-suite baseline and candidate proof by
+default for both supported Python versions. It checks the same seed and
+prepared environments, then runs focused comparisons where needed. Use its
+source-bound timing findings and complete candidate inventory for review.
+Missing or mismatched paired proof stops serial validation.
 
 ### Resume after an interrupted successful hook
 

@@ -5,7 +5,7 @@ summary: Look up test design, validation layers, and local case timing rules.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/validate-template-changes.md
     why: Shows how to run the local and CI validation checks.
@@ -59,52 +59,45 @@ matrix and other checks before the review handoff.
 ## Local case timing
 
 The local goal is **100 ms or less** per test case in each supported Python
-version. Exactly 100 ms meets the goal. Use the JUnit `testcase` `time`.
-It includes setup, the test body, and teardown charged to that case.
-Keep each test parameter as a distinct case. A session fixture can charge
-shared setup to its first case. Check phase proof before naming the cause.
+version. Exactly 100 ms meets the goal. Use the JUnit `testcase` `time`, which
+includes setup, call, and teardown charged to that case. Each test parameter
+is a distinct case. A session fixture can charge setup to its first case.
+List every case above 100 ms. Report every case at or above **1 second**
+by Python version, even when another finding needs a fix. Keep its proof,
+classification, owner, and plan to cut cost or review an exception in the
+durable audit or linked issue record. An inherited case that is no slower
+does not block an unrelated change on cost alone.
 
-List **every** local case above 100 ms and at or above **1 second** for
-each supported Python version. Each case at or above 1 second needs a full
-report and review. Report each case and version even if another timing
-finding sends the change back. Keep a slow inherited case in view.
-If it is no slower, its cost alone does not reject the change. One inherited
-setup spike does not prove a regression or block an unrelated change.
+The serial controller checks full-suite baseline and candidate proof for
+Python 3.11 and 3.14. It binds both runs to exact source trees and checks
+full case lists, test environments, commands, and seeds.
+Missing or mismatched proof stops review. The reviewer receives bounded
+identities, findings, an outcome, and the candidate's complete list above
+100 ms. The three slowest cases are not a complete inventory. A touched
+case above 100 ms, a new slow case, or a corroborated ordinary regression
+needs correction unless an approved integration exception applies. When an
+existing case first reaches or gets slower above 1 second, the controller
+checks two focused repeats from each exact tree and reports setup, call,
+and teardown changes. Missing repeat proof blocks a decision that needs it.
 
-An added ordinary test that stays above 100 ms in repeat runs goes back to
-its owner unless it has an approved integration exception. A changed test
-goes back if it adds a cost above 100 ms. It also goes back for a proven
-slowdown caused by the test, fixture, or code. Include cases that use a
-changed shared fixture or helper when they can be found. Map the affected
-cases before approval. Apply any tighter task limit as well.
+For interactive work, [investigate local test timing](../how-to/validate-template-changes.md#investigate-local-test-timing)
+with paired focused runs on the exact trees. An added ordinary test that
+stays above 100 ms in repeats, a changed test that adds cost above 100 ms,
+or a proven slowdown caused by a test, fixture, or code goes back to its
+owner. Map cases using changed shared fixtures or helpers before approval.
+Apply any tighter task limit. One run or a comparator `review` flag does not
+prove a regression; mixed case trends need diagnosis.
 
-In interactive work, compare at least two focused runs on each exact
-baseline and candidate tree. Use equal run counts and the same environment.
-To claim a regression, show repeat slowdown, phase proof, like environments,
-and a diff that backs the cause. A comparator `review` flag or one run does
-not prove cause.
-Missing, mismatched, or partial paired proof blocks approval. Full paired
-proof may show mixed case trends. Keep those cases for diagnosis. Such doubt
-alone does not block an unrelated change if its impact is clear and no other
-rule blocks it. Do not call a mixed case a pass or a regression.
-
-When the active serial worker supplies candidate-only timing proof, a touched
-case above 100 ms goes back to the test owner unless it has a documented
-integration exception. Candidate-only proof cannot show a baseline or compare
-phases. Require the full case list and its `timing_complete` flag for each
-Python version. The three slowest cases do not show the full list.
+Job duration helps diagnosis; it is not a publication gate. Image pulls,
+setup, and scheduling may lengthen jobs without increasing JUnit case time.
+The controller's human handoff requires at least one current required job
+and success from every current required job for the exact MR source SHA.
 
 ## Slow cases and exceptions
 
-Keep the full list for each run in the durable audit or linked issue record.
-Keep JUnit digests, tree and Python version, phase proof, and the review
-decision there too. Record a newly seen ordinary case at or above 1 second
-there. Then repeat the run and find the cause. Give confirmed inherited debt
-an owner and a plan to cut its cost. An integration exception needs its case,
-Python version, reason for the cost, owner, plan to cut or review it, and
-review trigger in that record. It must still fit the task budget. One run
-does not set a stable baseline.
-
-Generated project setup, real Copier updates, repo scans, and shared
-fixtures may make a case slow. Measure setup, call, and teardown before
-blaming the test body. Keep run times and case decisions with their proof.
+Keep full per-run case lists, JUnit digests, trees, Python versions, phase
+proof, and decisions in the durable audit or linked issue record. Give
+confirmed inherited debt an owner and reduction plan. An integration
+exception needs its case, Python version, reason for cost, owner, plan to
+reduce or review it, and review trigger. It must fit the task budget.
+One run does not set a stable baseline.

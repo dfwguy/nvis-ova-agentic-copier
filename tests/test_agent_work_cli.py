@@ -1005,6 +1005,56 @@ def test_validation_status_cli_never_treats_running_as_success() -> None:
     assert json.loads(output[0])["junit_artifacts"] == []
 
 
+@pytest.mark.parametrize(
+    ("action", "flags"),
+    (
+        ("run", ("--baseline-sha", "a" * 40)),
+        ("retry", ("--baseline-sha", "a" * 40)),
+        ("run", ("--changed-path", "tests/test_speed.py")),
+        ("retry", ("--changed-path", "tests/test_speed.py")),
+    ),
+)
+def test_serial_validation_rejects_incomplete_flag_pair_as_usage_before_git(
+    action: str, flags: tuple[str, str]
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(0, "", "")
+
+    with pytest.raises(SystemExit) as usage:
+        main(
+            [
+                "validation",
+                action,
+                "--candidate-tree",
+                "b" * 40,
+                *flags,
+                "--apply",
+            ],
+            run_command=run,
+        )
+
+    assert usage.value.code == 2
+    assert commands == []
+
+
+def test_serial_validation_status_allows_baseline_without_changed_paths() -> None:
+    parsed = build_parser().parse_args(
+        [
+            "validation",
+            "status",
+            "--candidate-tree",
+            "b" * 40,
+            "--baseline-sha",
+            "a" * 40,
+        ]
+    )
+    assert parsed.baseline_sha == "a" * 40
+    assert parsed.changed_path == []
+
+
 def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> None:
     calls: list[tuple[str, bool]] = []
 

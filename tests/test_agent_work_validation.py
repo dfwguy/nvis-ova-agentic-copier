@@ -29,6 +29,7 @@ from agent_work.cli import _read_validation_artifact
 from agent_work.ledger import state_home
 from agent_work.ports import CommandResult as PortCommandResult
 from agent_work.repository import CommandResult
+from agent_work.test_timing import parse_full_junit_records
 from agent_work.timing_admission import TimingAdmissionLease
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
@@ -42,6 +43,27 @@ _CANDIDATE = "a" * 40
 _OTHER_CANDIDATE = "b" * 40
 _PARAM_ID_FIRST = ascii_letters + digits + "_-"
 _PARAM_ID_REST = _PARAM_ID_FIRST + "."
+
+
+def _timing_transcript() -> dict[str, object]:
+    digest = hashlib.sha256(
+        b"<testsuite tests='1' failures='0' errors='0'/>"
+    ).hexdigest()
+    return {
+        "baseline_tree": _OTHER_CANDIDATE,
+        "candidate_tree": _CANDIDATE,
+        "outcome": "clear",
+        "runs": {
+            environment: {
+                "candidate": {
+                    "sha256": digest,
+                    "test_count": 1,
+                    "timing_complete": True,
+                }
+            }
+            for environment in ("py311", "py314")
+        },
+    }
 
 
 @pytest.mark.parametrize("environment", ({}, {"XDG_STATE_HOME": ""}))
@@ -1358,6 +1380,222 @@ def test_success_timing_is_durable_and_status_does_not_rerun_hook() -> None:
 
     assert ran.elapsed_seconds == status.elapsed_seconds == 1.25
     assert calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_required_source_bound_capture_missing_after_successful_hook_fails_closed() -> (
+    None
+):
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    capture_calls: list[tuple[str, tuple[tuple[str, bytes, int], ...], str]] = []
+
+    def missing_capture(
+        candidate_tree: str,
+        artifacts: tuple[tuple[str, bytes, int], ...],
+        hook_output: str,
+    ) -> None:
+        capture_calls.append((candidate_tree, artifacts, hook_output))
+
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_timing_review=missing_capture,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert len(capture_calls) == 1
+    assert capture_calls[0][0] == _CANDIDATE
+    assert {environment for environment, _artifact, _count in capture_calls[0][1]} == {
+        "py311",
+        "py314",
+    }
+    assert report.state == "terminal-artifact-failure"
+    assert state.records[_CANDIDATE]["state"] == "terminal-artifact-failure"
+
+
+def test_status_rejects_missing_required_timing_transcript_for_successful_tree() -> (
+    None
+):
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    original = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert original.state == "terminal-success"
+    status_dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        read_timing_transcript=lambda _candidate_tree: None,
+    )
+
+    with pytest.raises(JudgeValidationError):
+        observe_judge_validation(
+            candidate_tree=_CANDIDATE, dependencies=status_dependencies
+        )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_required_timing_transcript_replays_only_for_unchanged_source_pair() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    transcript = _timing_transcript()
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_timing_review=lambda _tree, _artifacts, _output: transcript,
+        read_timing_transcript=lambda _tree: transcript,
+    )
+
+    ran = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert ran.state == status.state == "terminal-success"
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert state.records[_CANDIDATE]["timing_baseline_tree"] == _OTHER_CANDIDATE
+    assert isinstance(state.records[_CANDIDATE]["timing_transcript_sha256"], str)
+
+    transcript["outcome"] = "report_only"
+    with pytest.raises(JudgeValidationError):
+        observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
+
+
+@pytest.mark.parametrize("action", ("status", "replayed_run"))
+def test_persisted_serial_success_cannot_bypass_proof_without_baseline_flag(
+    action: str,
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    transcript = _timing_transcript()
+    serial = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_timing_review=lambda _tree, _artifacts, _output: transcript,
+        read_timing_transcript=lambda _tree: transcript,
+    )
+    assert (
+        run_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=serial
+        ).state
+        == "terminal-success"
+    )
+    omitted_flag = replace(
+        serial,
+        timing_review_required=False,
+        read_timing_transcript=lambda _tree: None,
+    )
+
+    with pytest.raises(JudgeValidationError, match="timing"):
+        if action == "status":
+            observe_judge_validation(
+                candidate_tree=_CANDIDATE, dependencies=omitted_flag
+            )
+        else:
+            run_judge_validation(
+                candidate_tree=_CANDIDATE, apply=True, dependencies=omitted_flag
+            )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_serial_candidate_slow_ids_match_full_inventory_ids() -> None:
+    artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_case[plain]' time='0.2'/>"
+        b"<testcase classname='tests.test_speed' name='test_case[unsafe / value]' time='0.3'/>"
+        b"</testsuite>"
+    )
+    cases, _selectors = parse_full_junit_records(artifact)
+    summary = validation._junit_timing_summary("py311", artifact, serial=True)
+
+    assert summary is not None and summary.timing_complete
+    assert {case.name for case in summary.over_100ms_cases} == set(cases)
+    assert all(name.startswith("tests/test_speed.py::") for name in cases)
+
+
+def test_required_timing_review_passes_explicit_seed_to_candidate_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    environments: list[object] = []
+    transcript = _timing_transcript()
+
+    def run(_command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        environments.append(kwargs.get("environment"))
+        return CommandResult(0, "", "")
+
+    dependencies = replace(
+        dependencies,
+        run_command=run,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        hook_environment={"PYTEST_ADDOPTS": "--randomly-seed=12345"},
+        capture_timing_review=lambda _tree, _artifacts, _output: transcript,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "terminal-success"
+    assert environments == [{"PYTEST_ADDOPTS": "--randomly-seed=12345"}]
+
+
+def test_existing_success_rechecks_required_private_timing_transcript() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    transcript = _timing_transcript()
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_timing_review=lambda _tree, _artifacts, _output: transcript,
+        read_timing_transcript=lambda _tree: transcript,
+    )
+    run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    damaged = replace(dependencies, read_timing_transcript=lambda _tree: None)
+
+    with pytest.raises(JudgeValidationError):
+        run_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=damaged
+        )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+
+
+def test_pre_hook_failure_retry_rejects_changed_timing_baseline() -> None:
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        remove_junit_artifact=lambda _path: (_ for _ in ()).throw(OSError("failed")),
+    )
+    failed = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert failed.state == "terminal-artifact-failure"
+
+    with pytest.raises(JudgeValidationError):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE,
+            apply=True,
+            dependencies=replace(dependencies, expected_baseline_tree="c" * 40),
+        )
 
 
 def test_success_junit_timing_summary_is_bounded_and_durable() -> None:

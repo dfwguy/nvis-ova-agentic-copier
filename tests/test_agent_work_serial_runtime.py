@@ -830,6 +830,7 @@ class FakeRepository:
         self.allow_base_ancestor_calls: list[bool] = []
         self.candidate_reads: list[tuple[str, bool, tuple[str, ...]]] = []
         self.judged_paths: list[tuple[str, ...]] = []
+        self.timing_outcome = "clear"
         self.red_candidate_tree_calls: list[tuple[str, tuple[str, ...]]] = []
 
     def refresh_base(self) -> None:
@@ -963,11 +964,13 @@ class FakeRepository:
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
+        timing_review_required: bool = False,
     ) -> dict[str, object]:
         del worktree, timeout_seconds
         self.allow_base_ancestor_calls.append(allow_base_ancestor)
         self.judged_paths.append(changed_paths)
         assert action in {"validate", "status"}
+        assert timing_review_required is True
         assert candidate_tree == self.candidate_tree
         assert base_sha in {self.current_head, self.single_parent_result}
         assert allow_base_ancestor is (base_sha == self.single_parent_result)
@@ -977,7 +980,15 @@ class FakeRepository:
             else self.paths
         )
         assert changed_paths == tuple(sorted(set(expected_paths)))
-        return {"candidate_tree": candidate_tree, "state": "terminal-success"}
+        return {
+            "candidate_tree": candidate_tree,
+            "state": "terminal-success",
+            "timing_review": {
+                "baseline_sha": base_sha,
+                "candidate_tree": candidate_tree,
+                "outcome": self.timing_outcome,
+            },
+        }
 
     def observe_legacy_publication_candidate(
         self, worktree: Path, *, status: WorktreeStatus | None = None
@@ -2430,115 +2441,22 @@ def test_coding_publication_requires_controller_validated_candidate(
     assert persisted.state is not RunnerState.PUBLISHING
 
 
-@pytest.mark.parametrize("initial_state", (RunnerState.EXECUTING, RunnerState.REPAIR))
-def test_project_timing_contention_requeues_without_spending_retry_budget(
-    tmp_path: Path,
-    initial_state: RunnerState,
-) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    record = ledger.persist(
-        _record(
-            tmp_path,
-            state=initial_state,
-            phase=WorkflowPhase.WORKFLOW,
-            repair_attempt=(
-                RepairAttemptEvidence(fingerprint="a" * 64, started_at=NOW.isoformat())
-                if initial_state is RunnerState.REPAIR
-                else None
-            ),
-        )
-    )
-
-    class DeferredRepository(FakeRepository):
-        def judge_candidate(
-            self,
-            worktree: Path,
-            candidate_tree: str,
-            *,
-            base_sha: str,
-            allow_base_ancestor: bool = False,
-            changed_paths: tuple[str, ...],
-            action: str,
-            timeout_seconds: int,
-        ) -> dict[str, object]:
-            return {"candidate_tree": candidate_tree, "state": "deferred"}
-
-    class DeferredInvoker(SingleSessionInvoker):
-        def invoke(
-            self,
-            checkout: Path,
-            prompt: str,
-            timeout: int,
-            *,
-            broker_request: WorkerResultBrokerRequest | None = None,
-            build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
-            | None = None,
-        ) -> WorkerInvocation:
-            assert candidate_action is not None
-            tree = candidate_action("stage", None)["candidate_tree"]
-            assert isinstance(tree, str)
-            assert candidate_action("validate", tree)["state"] == "deferred"
-            return WorkerInvocation(1, "", "timing admission busy")
-
-    repository = DeferredRepository(config)
-    repository.paths = ("src/example.py",)
-    checkpoint = _red_checkpoint_evidence_for_segment(record)
-    for attempt in range(2):
-        attempt_started = NOW + timedelta(minutes=attempt * 2)
-        completed_at = attempt_started + timedelta(seconds=31)
-        result = run_segment(
-            ledger=ledger,
-            gitlab=FakeGitLab(),
-            repository=repository,
-            invoke=DeferredInvoker(),
-            timeout_seconds=10,
-            now=attempt_started,
-            clock=lambda completed_at=completed_at: completed_at,
-            load_red_checkpoint=lambda *_args: checkpoint,
-        )
-        assert result is not None
-        assert result.state is RunnerState.RETRY_WAIT
-        assert result.error_code is ErrorCode.TIMING_ADMISSION_BUSY
-        assert result.retry_count == 0
-        assert result.retry_at == completed_at + timedelta(seconds=30)
-        assert result.worktree == record.worktree
-        if initial_state is RunnerState.REPAIR:
-            assert result.repair_attempt == record.repair_attempt
-
-
 @pytest.mark.parametrize(
-    ("states", "expected_code"),
-    [
-        (("terminal-success", "deferred"), ErrorCode.TIMING_ADMISSION_BUSY),
-        (("deferred", "terminal-success"), ErrorCode.WORKER_EXIT),
-    ],
+    ("timing_outcome", "may_publish"),
+    (("correction_required", False), ("report_only", True)),
 )
-def test_latest_exact_tree_validation_controls_timing_deferral(
-    tmp_path: Path, states: tuple[str, str], expected_code: ErrorCode
+def test_serial_publication_respects_trusted_timing_outcome(
+    tmp_path: Path, timing_outcome: str, may_publish: bool
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     record = ledger.persist(
         _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
     )
+    repository = FakeRepository(config)
+    repository.timing_outcome = timing_outcome
 
-    class SequencedRepository(FakeRepository):
-        def judge_candidate(
-            self,
-            worktree: Path,
-            candidate_tree: str,
-            *,
-            base_sha: str,
-            allow_base_ancestor: bool = False,
-            changed_paths: tuple[str, ...],
-            action: str,
-            timeout_seconds: int,
-        ) -> dict[str, object]:
-            return {"candidate_tree": candidate_tree, "state": observed.pop(0)}
-
-    class SequencedInvoker(SingleSessionInvoker):
+    class TimingProbeInvoker(SingleSessionInvoker):
         def invoke(
             self,
             checkout: Path,
@@ -2550,86 +2468,45 @@ def test_latest_exact_tree_validation_controls_timing_deferral(
             candidate_action: Callable[[str, str | None], dict[str, object]]
             | None = None,
         ) -> WorkerInvocation:
+            if timing_outcome == "report_only":
+                return super().invoke(
+                    checkout,
+                    prompt,
+                    timeout,
+                    broker_request=broker_request,
+                    build_artifact=build_artifact,
+                    candidate_action=candidate_action,
+                )
             assert candidate_action is not None
-            tree = candidate_action("stage", None)["candidate_tree"]
-            assert isinstance(tree, str)
-            for expected in states:
-                assert candidate_action("validate", tree)["state"] == expected
-            return WorkerInvocation(1, "", "worker stopped")
+            staged = candidate_action("stage", None)
+            tree = cast(str, staged["candidate_tree"])
+            validated = candidate_action("validate", tree)
+            assert cast(dict[str, object], validated["timing_review"])["outcome"] == (
+                "correction_required"
+            )
+            with pytest.raises(
+                WorkerProtocolError, match="candidate request is invalid"
+            ):
+                candidate_action("read", tree)
+            return WorkerInvocation(1)
 
-    observed = list(states)
-    repository = SequencedRepository(config)
-    repository.paths = ("src/example.py",)
+    invoker = TimingProbeInvoker()
+    invoker.changed_paths = repository.paths
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+
     result = run_segment(
         ledger=ledger,
         gitlab=FakeGitLab(),
         repository=repository,
-        invoke=SequencedInvoker(),
+        invoke=invoker,
         timeout_seconds=10,
         now=NOW,
-        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
-    )
-    assert result is not None
-    assert result.error_code is expected_code
-
-
-def test_staging_new_tree_discards_prior_timing_deferral(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
-    )
-
-    class DeferredRepository(FakeRepository):
-        def judge_candidate(
-            self,
-            worktree: Path,
-            candidate_tree: str,
-            *,
-            base_sha: str,
-            allow_base_ancestor: bool = False,
-            changed_paths: tuple[str, ...],
-            action: str,
-            timeout_seconds: int,
-        ) -> dict[str, object]:
-            return {"candidate_tree": candidate_tree, "state": "deferred"}
-
-    class RestagingInvoker(SingleSessionInvoker):
-        def invoke(
-            self,
-            checkout: Path,
-            prompt: str,
-            timeout: int,
-            *,
-            broker_request: WorkerResultBrokerRequest | None = None,
-            build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
-            | None = None,
-        ) -> WorkerInvocation:
-            assert candidate_action is not None
-            first = candidate_action("stage", None)["candidate_tree"]
-            assert isinstance(first, str)
-            assert candidate_action("validate", first)["state"] == "deferred"
-            repository.candidate_tree = "c" * 40
-            second = candidate_action("stage", None)["candidate_tree"]
-            assert second == repository.candidate_tree
-            return WorkerInvocation(1, "", "worker stopped after restaging")
-
-    repository = DeferredRepository(config)
-    repository.paths = ("src/example.py",)
-    result = run_segment(
-        ledger=ledger,
-        gitlab=FakeGitLab(),
-        repository=repository,
-        invoke=RestagingInvoker(),
-        timeout_seconds=10,
-        now=NOW,
-        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
+        load_red_checkpoint=lambda *_args: checkpoint,
     )
 
     assert result is not None
-    assert result.error_code is ErrorCode.WORKER_EXIT
-    assert result.retry_count == 1
+    assert (result.state is RunnerState.PUBLISHING) is may_publish
+    assert repository.judged_paths == [repository.paths]
 
 
 @pytest.mark.parametrize("lane", (WorkflowLane.CODING, WorkflowLane.UNKNOWN))
@@ -19054,7 +18931,20 @@ def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    gitlab = FakeGitLab(_issue())
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Change", description="Details"
+                )
+            }
+        )
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
     gitlab.pipeline = PipelineEvidence(
         id=4, status="failed", sha="a" * 40, web_url="https://pipeline/4"
     )
@@ -19063,18 +18953,27 @@ def test_apply_defers_failed_pipeline_assessment_to_the_next_activation(
         _dependencies(config, ledger, gitlab, FakeRepository(config)), invoke=invoker
     )
 
+    first = dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=3600),
+        apply=True,
+        dependencies=dependencies,
+    )
+    deferred = ledger.load(12)
+    assert first.segments_run == 1
+    assert deferred is not None and deferred.state is RunnerState.REPAIR
+    assert deferred.phase is WorkflowPhase.WORKFLOW
+    assert invoker.phases == []
+
     report = dispatch(
-        CommandRequest(
-            command="loop.run", max_segments=16, max_activation_seconds=3600
-        ),
+        CommandRequest(command="loop.run", max_segments=2, max_activation_seconds=3600),
         apply=True,
         dependencies=dependencies,
     )
 
     persisted = ledger.load(12)
     assert report.stop_reason == "repair_failed"
-    assert report.segments_run == 5
-    assert invoker.phases == ["workflow", "workflow"]
+    assert report.segments_run == 2
+    assert invoker.phases == ["workflow"]
     assert persisted is not None and persisted.state is RunnerState.REPAIR_FAILED
     assert persisted.phase is WorkflowPhase.POST_PUBLICATION
     assert persisted.error_code is ErrorCode.PIPELINE_REJECTED
@@ -22241,3 +22140,208 @@ def test_guarded_feedback_repair_fails_closed_for_invalid_retained_red(
     assert selected is None, failure
     assert repository.prepared is False
     assert repository.pushes == 0
+
+
+@pytest.mark.parametrize("initial_state", (RunnerState.EXECUTING, RunnerState.REPAIR))
+def test_project_timing_contention_requeues_without_spending_retry_budget(
+    tmp_path: Path,
+    initial_state: RunnerState,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=initial_state,
+            phase=WorkflowPhase.WORKFLOW,
+            repair_attempt=(
+                RepairAttemptEvidence(fingerprint="a" * 64, started_at=NOW.isoformat())
+                if initial_state is RunnerState.REPAIR
+                else None
+            ),
+        )
+    )
+
+    class DeferredRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+            timing_review_required: bool = False,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": "deferred"}
+
+    class DeferredInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            tree = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(tree, str)
+            assert candidate_action("validate", tree)["state"] == "deferred"
+            return WorkerInvocation(1, "", "timing admission busy")
+
+    repository = DeferredRepository(config)
+    repository.paths = ("src/example.py",)
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+    for attempt in range(2):
+        attempt_started = NOW + timedelta(minutes=attempt * 2)
+        completed_at = attempt_started + timedelta(seconds=31)
+        result = run_segment(
+            ledger=ledger,
+            gitlab=FakeGitLab(),
+            repository=repository,
+            invoke=DeferredInvoker(),
+            timeout_seconds=10,
+            now=attempt_started,
+            clock=lambda completed_at=completed_at: completed_at,
+            load_red_checkpoint=lambda *_args: checkpoint,
+        )
+        assert result is not None
+        assert result.state is RunnerState.RETRY_WAIT
+        assert result.error_code is ErrorCode.TIMING_ADMISSION_BUSY
+        assert result.retry_count == 0
+        assert result.retry_at == completed_at + timedelta(seconds=30)
+        assert result.worktree == record.worktree
+        if initial_state is RunnerState.REPAIR:
+            assert result.repair_attempt == record.repair_attempt
+
+
+@pytest.mark.parametrize(
+    ("states", "expected_code"),
+    [
+        (("terminal-success", "deferred"), ErrorCode.TIMING_ADMISSION_BUSY),
+        (("deferred", "terminal-success"), ErrorCode.WORKER_EXIT),
+    ],
+)
+def test_latest_exact_tree_validation_controls_timing_deferral(
+    tmp_path: Path, states: tuple[str, str], expected_code: ErrorCode
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class SequencedRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+            timing_review_required: bool = False,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": observed.pop(0)}
+
+    class SequencedInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            tree = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(tree, str)
+            for expected in states:
+                assert candidate_action("validate", tree)["state"] == expected
+            return WorkerInvocation(1, "", "worker stopped")
+
+    observed = list(states)
+    repository = SequencedRepository(config)
+    repository.paths = ("src/example.py",)
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=SequencedInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
+    )
+    assert result is not None
+    assert result.error_code is expected_code
+
+
+def test_staging_new_tree_discards_prior_timing_deferral(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class DeferredRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+            timing_review_required: bool = False,
+        ) -> dict[str, object]:
+            return {"candidate_tree": candidate_tree, "state": "deferred"}
+
+    class RestagingInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+            first = candidate_action("stage", None)["candidate_tree"]
+            assert isinstance(first, str)
+            assert candidate_action("validate", first)["state"] == "deferred"
+            repository.candidate_tree = "c" * 40
+            second = candidate_action("stage", None)["candidate_tree"]
+            assert second == repository.candidate_tree
+            return WorkerInvocation(1, "", "worker stopped after restaging")
+
+    repository = DeferredRepository(config)
+    repository.paths = ("src/example.py",)
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=RestagingInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(record),
+    )
+
+    assert result is not None
+    assert result.error_code is ErrorCode.WORKER_EXIT
+    assert result.retry_count == 1
