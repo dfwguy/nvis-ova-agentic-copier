@@ -404,6 +404,9 @@ class RepairAttemptEvidence(_Evidence):
     )
     origin: Literal["reviewed-plan", "automatic-exact-pipeline"] = "reviewed-plan"
     diagnostic: FailedJobDiagnosticEvidence | None = None
+    additional_diagnostics: tuple[FailedJobDiagnosticEvidence, ...] = Field(
+        default=(), max_length=7
+    )
     evidence_delta: dict[str, object] = Field(default_factory=dict)
     failure_reason: str = Field(default="", max_length=2048)
     started_at: str = Field(default="", max_length=128)

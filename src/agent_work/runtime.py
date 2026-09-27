@@ -117,7 +117,7 @@ from .serial import (
     activate_exact_pipeline_repair,
     build_authored_candidate_correction_identity,
     build_publication_correction_identity,
-    collect_exact_failed_job_diagnostic,
+    collect_exact_failed_job_diagnostics,
     correction_identity_matches,
     new_record,
     reconcile_closed_issues,
@@ -1855,7 +1855,7 @@ def _activate_pipeline_repair_gate(
     pipeline = gate.pipeline
     assert pipeline is not None
     try:
-        job, trace = collect_exact_failed_job_diagnostic(
+        diagnostics = collect_exact_failed_job_diagnostics(
             jobs=gitlab.list_pipeline_jobs(pipeline.id, pipeline.sha),
             pipeline_id=pipeline.id,
             source_sha=pipeline.sha,
@@ -1872,8 +1872,9 @@ def _activate_pipeline_repair_gate(
             owner,
             merge_request=gate.merge_request,
             pipeline=pipeline,
-            failed_job=job,
-            diagnostic=trace,
+            failed_job=diagnostics[0][0],
+            diagnostic=diagnostics[0][1],
+            additional_job_diagnostics=diagnostics[1:],
             ledger=ledger,
             gitlab=gitlab,
             now=now,
