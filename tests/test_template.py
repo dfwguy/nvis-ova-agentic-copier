@@ -1688,6 +1688,9 @@ def test_agent_loop_wrapper_continues_after_prerequisite_label_reconciliation_wh
         "two|run agent-work loop run --json",
     ]
     assert (checkout / "version").read_text() == "two\n"
+    assert {path for path in tmp_path.iterdir() if (path / ".git").exists()} == {
+        checkout
+    }, "future default branch preparation created an extra working copy"
 
 
 @pytest.mark.parametrize(
@@ -2724,16 +2727,12 @@ def _prepare_future_default_branch(
     checkout: Path, tmp_path: Path, environment: dict[str, str]
 ) -> None:
     """Prepare a default-branch advance for the first applied worker call."""
-    writer = checkout.parent / "future-writer"
-    subprocess.run(
-        ["git", "clone", str(checkout.parent / "origin.git"), str(writer)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (writer / "version").write_text("two\n")
-    _commit_repository_state(writer, "prepare future default branch")
-    _run_test_git(writer, "push", "origin", "HEAD:future")
+    _run_test_git(checkout, "switch", "-c", "future")
+    (checkout / "version").write_text("two\n")
+    _commit_repository_state(checkout, "prepare future default branch")
+    _run_test_git(checkout, "push", str(checkout.parent / "origin.git"), "HEAD:future")
+    _run_test_git(checkout, "switch", "agent/work-base")
+    _run_test_git(checkout, "branch", "-D", "future")
     advance = tmp_path / "advance-default-branch"
     _write_command(
         advance,
