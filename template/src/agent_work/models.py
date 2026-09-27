@@ -50,6 +50,15 @@ class BoundaryModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class InterruptedClaimReceipt(BoundaryModel):
+    """Durable identity of a reviewed dirty-claim handoff."""
+
+    issue_iid: int = Field(gt=0)
+    plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dirty_snapshot_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    blocked_record_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class AgentWorkConfig(BoundaryModel):
     """Non-secret configuration discovered from a confirmed checkout."""
 
@@ -898,6 +907,7 @@ class LedgerRecord(BoundaryModel):
     completed_at: datetime | None = None
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = "unknown"
     correction_identity: PublicationCorrectionIdentity | None = None
+    interrupted_claim_receipt: InterruptedClaimReceipt | None = None
     condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
     phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
     summary: str = ""

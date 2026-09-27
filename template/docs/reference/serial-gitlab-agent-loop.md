@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -676,8 +676,10 @@ work.
 | `loop canary` | An operational checkpoint, not an issue run. Bare invocation creates a redacted, immutable plan. The plan verifies public service and project identity, durable recovery evidence, and current pipeline evidence. It names the expected checkpoint and next action. It never selects an eligible issue, claims work, changes a lifecycle label, creates a ledger record or worktree, or invokes a worker. |
 | `loop canary --apply --plan-file PATH` | After review, rechecks the plan's exact evidence while holding the project lock before taking its bounded checkpoint action. Changed identity or evidence needs a new preview. |
 | `loop recover --issue-iid IID` | Targets one interrupted, ambiguous, or otherwise unsafe retained item. For a `BLOCKED` target, preview and apply reuse the recovery checks, require exactly one `safely_retryable` inventory result, and return the retry outcomes below. For a nonblocked target, bare invocation creates the usual redacted recovery plan without changing anything. |
+| Stale dirty `EXECUTING`/`WORKFLOW` claim | An exact-IID preview may return `handoff_stale_dirty_claim` for an `UNKNOWN` or `CODING` lane with a stale or missing owner and verifiable dirty work. It requires the fixed issue branch and worktree, an open running issue, and no publication or merge request. The recorded source `HEAD` may differ from current main. The plan binds the ledger revision, owner, branch, `HEAD`, index, dirty snapshot, and the digest of an existing Red checkpoint or its absence. Live or unknown ownership, untracked or unmerged files, renames, missing proof, or changed evidence cannot use this handoff. |
 | Exact failed current-source MR pipeline with one uniquely corroborated retained owner | Does not need `loop recover`: an applied ordinary loop activation moves that owner directly to `repair`. |
-| `loop recover` apply | Needs both `--apply` and the reviewed `--plan-file`. For a blocked target, it rechecks current recovery evidence and the `safely_retryable` inventory result; ineligible evidence changes nothing. For a nonblocked target, it rechecks the configured project, default branch, authenticated username, ledger revision and state, lifecycle label, fixed branch, retained-worktree HEAD and cleanliness, merge-request project/source/target/source-SHA identity, and the current exact-SHA pipeline. It cannot advance another IID. |
+| `loop recover` apply | Needs both `--apply` and the reviewed `--plan-file`. For a blocked target, it rechecks current recovery evidence and the `safely_retryable` inventory result; ineligible evidence changes nothing. For a nonblocked target, it rechecks the configured project, default branch, authenticated username, ledger revision and state, lifecycle label, fixed branch, retained-worktree HEAD and cleanliness or exact dirty snapshot, merge-request project/source/target/source-SHA identity, and the current exact-SHA pipeline. It cannot advance another IID. |
+| Dirty-claim handoff result | Apply returns `dirty_claim_handed_off`, records `BLOCKED` with `state_reconciliation_failed` and a manual recovery receipt bound to the plan and dirty snapshot, and projects `agent::blocked`. It releases the active claim. It preserves the worktree, index, branch, unstaged changes, and any existing Red checkpoint; it does not invoke a worker or publish. A failed label projection can replay the same reviewed plan without adding a ledger revision. |
 | `loop recover` limits | `--max-segments` and `--max-activation-seconds` retain `loop run`'s bounded activation controls. |
 | Plans | Bind the command and action to public service identity, configured project and default branch, ledger revision, and the exact target, issue, repository, merge-request, and pipeline evidence the action needs. They never contain secrets. Apply fails closed with the safe next action when the plan is stale, tampered, for another identity, or no longer matches evidence. |
 
@@ -1201,6 +1203,7 @@ The ledger is the durable audit record. It keeps facts a restart must use.
 | Dirty worktree and stashes | A dirty durable worktree stays for its next workflow attempt. The runner inventories recovery stashes only; it never applies or drops them. |
 | Ambiguity and corruption | Ambiguous worktrees, branches, labels, or stashes become blocked for human review. A corrupt record is blocked when reportable and failed only when it cannot be recorded safely. |
 | Clean unpublished interruption | Before worker invocation, normalization needs agreement among the open issue and lifecycle label, fixed branch and worktree, and recorded baseline; the baseline worktree must be clean; and there must be no MR, publication, draft, intent, feedback, receipt, or decomposition evidence. The runner keeps all artifacts, changes the record to `blocked`, gives actionable retry guidance, and never deletes a ledger, branch, or worktree. |
+| Dirty unpublished interruption | A reviewed `handoff_stale_dirty_claim` plan can block one stale `EXECUTING`/`WORKFLOW` claim while preserving its dirty worktree and any saved Red checkpoint. The plan binds either the checkpoint digest or its absence. The receipt binds the plan fingerprint and dirty snapshot fingerprint for a later manual decision. Independent issues may proceed after that claim becomes blocked. |
 
 ## Status projection
 
