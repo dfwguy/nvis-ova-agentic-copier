@@ -149,7 +149,11 @@ pass the same tree. Required reviewers are
 for Python or Bash layout and packaging. Use `$agent-policy-judge` for agent
 rules. Use
 `$consistency-judge` when a copied fact or root/template contract changes,
-or when unsure. Use `$temporality-judge` only when changed docs or policy add,
+or when dependency declarations, tool configuration or versions, hooks, tox,
+CI, lockfiles, or Jinja change. The Judge checks semantic parity against the
+owning source and affected consumers, including rendered-project output when
+template changes can affect it. Use the Judge when unsure. Use
+`$temporality-judge` only when changed docs or policy add,
 change, or remove time-bound guidance, run claims, or historical proof. Record
 exact N/A with reason otherwise. `candidate_boundary.py` owns full candidate reads. If an expected read is
 missing, stale, rejected, or failed, stop finalization. `state_machine.WORKFLOW_RECEIPTS` owns the fixed

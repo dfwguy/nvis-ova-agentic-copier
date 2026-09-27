@@ -27,6 +27,9 @@ from an expected boundary blocks finalization.
 Read [the role](../../agents/consistency-judge.md)
 before review. The [review examples](references/eval-scenarios.md) show the
 method. They are not tests or a source of truth.
+Check matching behavior for dependency, tool, hook, tox, CI, lockfile, and
+Jinja changes. Policy mirrors must match byte for byte. Inspect a Copier
+render when a template change can alter output.
 
 ## Model selection
 

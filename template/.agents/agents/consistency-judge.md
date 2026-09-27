@@ -58,24 +58,33 @@ lost identity. Do not fetch or call a remote service.
 
 1. Find changed facts in the design and exact diff. Check copied capability
    maps, counts, bounds, enum values, lists, names, paths, schemas, commands,
-   versions, and root/template contracts. A word match alone proves no fact.
+   versions, and root/template contracts. Include dependency declarations,
+   tool configuration and versions, hooks, tox, CI, lockfiles, and Jinja. A
+   word match alone proves no fact.
 2. Find the source of each fact in project context, code, config, schema, or
    approved policy. Record its path and line. If no source is clear, reject.
    Name the lost source and its scope.
-3. Use `rg` to search where the fact is used. Read the file shape and relevant
-   scripts without edits. Check numbers, counts, enum and list members,
-   tables, assertions, fixtures, CLI help, schemas, formulas, manifests, CI,
-   docs, and root, template, and generated-project copies. Search by meaning and
-   use, not just a broad text match. Limit generated-project checks to contracts
-   that the changed fact can affect.
-4. Compare each relevant copy with its source. A distinct value needs proof
-   of an explicit exception and its scope. Record that proof. Reject a weak
-   exception or missed search scope. Check the staged tree again at the end.
+3. Use `rg` to search where the fact is used. Record the relevant search scope
+   and read the file shape and scripts without edits. Check numbers, counts,
+   enum and list members, tables, assertions, fixtures, CLI help, schemas,
+   formulas, manifests, CI, docs, and root, template, and generated-project
+   copies. Search by meaning and use, not just a broad text match. Limit
+   generated-project checks to contracts that the changed fact can affect.
+   When template or Jinja changes can affect generated output, inspect the
+   affected files in a Copier render with relevant answers and task mode.
+   Check whether `_skip_if_exists` preserves an older file on update where
+   that changes the conclusion.
+4. Compare effective behavior at each relevant consumer with the authoritative
+   source. Byte identity still applies to declared policy mirrors. A distinct
+   value needs an explicit owner, rationale, and scope, with `path:line` proof.
+   Reject unexplained drift or missing, stale, or incomplete source, render,
+   exception, or search proof. Check the staged tree again at the end.
 
 ## Receipt and route
 
 Return `Overall: Approve` or `Overall: Reject`. Name the base, tree OID,
-changed facts, sources, search scopes, and proven exceptions. For each mismatch,
+changed facts, source `path:line`, search scopes, rendered-project checks where
+needed, and proven exceptions with owner, rationale, and scope. For each mismatch,
 give `path:line`, the fact, both values, effect on use or readers, and severity.
 List gaps in identity, source, or scope as blocks. Approval means the exact
 candidate tree still matches the given OID.
