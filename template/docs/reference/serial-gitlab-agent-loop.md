@@ -62,6 +62,9 @@ agent-work worker-result build --issue-iid IID --input-file PATH
                                [--broker-socket PATH]
                                [--broker-nonce NONCE]
                                [--json] [--apply] [--debug]
+agent-work interactive-commit compact --worktree PATH --branch-ref REF
+    --base-sha SHA --red-ref REF --red-sha SHA --passing-sha SHA
+    --judge-tree TREE --message-file PATH [--json] [--apply] [--debug]
 bin/agent-work-from-checkout review-handoff begin --worktree PATH
     [--issue-iid IID] [--apply] [--json]
 bin/agent-work-from-checkout review-handoff submit --worktree PATH
@@ -122,6 +125,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
+| `interactive-commit compact` | Worktree, branch ref, original base, Red ref and commit, passing commit, Judge tree, and approved message file | Previews by default; `--apply` replaces the passing branch tip with the verified base-parent commit. |
 | `review-handoff begin` | Candidate worktree; optional issue number matching its branch | `--apply` saves one candidate-bound session after successful Judge validation. |
 | `review-handoff submit` | Worktree, session ID, Green role, review version, correction-ledger kind, and private input file | Green calls `--apply` while active to save its full bounded ledger. |
 | `review-handoff manifest` | Worktree and session ID | Reads the current receipt set and its digest. Optional expected digest rejects drift. |
@@ -181,6 +185,20 @@ change smoke output.
 | Finding against a merged MR | An open finding issue with an exact remediation marker starts ordinary work on a fresh `agent/issue-<IID>` branch from refreshed `main` only after the runner verifies the configured project, source branch, target branch, and that the marker commit belongs to the merged MR. The merged MR remains context for the finding; publication uses the new issue's branch and MR. A blocked mismatch with no retained worktree may be rechecked against the same evidence. Missing or ambiguous evidence stays blocked. |
 
 The tables list the commands and their use.
+
+### Interactive commit compaction
+
+After the Finalizer creates the reviewed passing commit, it gives
+`interactive-commit compact` the exact identities in the command list. The
+command checks the current branch, clean worktree, Red checkpoint, passing
+commit, and Judge tree. Without `--apply`, it checks those inputs and leaves
+the branch alone. With `--apply`, it replaces the branch tip with one commit
+over the original base, keeping the approved tree and local Red ref. Publish
+only the returned `new_commit`; never push the Red ref. A pending merge uses
+the reconciliation path instead.
+
+`--json` returns `applied` and `new_commit`. A preview returns `null` for
+`new_commit`. Invalid input exits `2`; a failed proof or Git action exits `1`.
 
 ### Interactive correction-ledger handoff
 

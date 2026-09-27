@@ -208,9 +208,11 @@ lists the commands and recovery checks.
 During finalization, Finalizer may use `--no-verify`. It may do so only after matching
 that evidence. The serial runner uses its normal commit path. Pipeline review
 checks the exact source commit after publication. It never replaces Judge.
-Interactive Finalizer makes the verified local commit. This comes before
-main-thread publication. In serial work, Finalizer does not commit. The trusted
-controller commits with its hook.
+Interactive Finalizer makes the verified local passing commit. It then uses the
+[interactive commit command](../reference/serial-gitlab-agent-loop.md#interactive-commit-compaction)
+to replace the branch tip with one commit over the original base while keeping
+the Red checkpoint local. Main publishes the returned final tip. In serial
+work, Finalizer does not commit. The trusted controller commits with its hook.
 
 The documentation lane needs a complete diff limited to docs and agent-work
 instructions. It never invents passing prose tests. Its writer records sources.

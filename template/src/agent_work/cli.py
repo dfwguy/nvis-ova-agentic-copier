@@ -62,6 +62,16 @@ from .gitlab import (
 )
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
+from .interactive_commit import (
+    InteractiveCommitDependencies,
+    InteractiveCommitError,
+    InteractiveCommitRequest,
+    compact_interactive_commit,
+    run_commit_git,
+)
+from .interactive_commit import (
+    run_git as run_interactive_git,
+)
 from .interactive_receipts import AtomicObjectStore, read_bounded_regular
 from .ledger import LedgerCorrupt, LockBusy, state_home
 from .models import (
@@ -716,6 +726,27 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
     parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
+    interactive_commit = resources.add_parser(
+        "interactive-commit", help="compact one reviewed interactive commit"
+    )
+    interactive_actions = interactive_commit.add_subparsers(
+        dest="action", required=True
+    )
+    compact = interactive_actions.add_parser(
+        "compact", help="prove and optionally apply one base-parent commit"
+    )
+    for name in ("worktree", "message-file"):
+        compact.add_argument(f"--{name}", type=Path, required=True)
+    for name in (
+        "branch-ref",
+        "base-sha",
+        "red-ref",
+        "red-sha",
+        "passing-sha",
+        "judge-tree",
+    ):
+        compact.add_argument(f"--{name}", required=True)
+    _common(compact, apply_help="atomically replace the passing branch tip")
     slow_root = resources.add_parser("slow-root", help="reconcile confirmed slow roots")
     slow_root_actions = slow_root.add_subparsers(dest="action", required=True)
     reconcile = slow_root_actions.add_parser(
@@ -1852,6 +1883,50 @@ def main(
 ) -> int:
     """Dispatch one command and return the documented exit status."""
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "interactive-commit" and parsed.action == "compact":
+        try:
+            request = InteractiveCommitRequest(
+                worktree=parsed.worktree,
+                branch_ref=parsed.branch_ref,
+                base_sha=parsed.base_sha,
+                red_ref=parsed.red_ref,
+                red_sha=parsed.red_sha,
+                passing_sha=parsed.passing_sha,
+                judge_tree=parsed.judge_tree,
+                message_file=parsed.message_file,
+            )
+        except ValueError as error:
+            write_stderr(str(error))
+            return 2
+        try:
+            report = compact_interactive_commit(
+                request,
+                InteractiveCommitDependencies(
+                    run_git=partial(
+                        run_interactive_git,
+                        run_command=run_command,
+                        environment=environment,
+                    ),
+                    commit_tree=partial(
+                        run_commit_git,
+                        run_command=run_command,
+                        environment=environment,
+                    ),
+                ),
+                apply=parsed.apply,
+            )
+        except InteractiveCommitError as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        payload = {"applied": report.applied, "new_commit": report.new_commit}
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else f"applied={str(report.applied).lower()} new_commit={report.new_commit}"
+        )
+        return 0
     if parsed.resource == "slow-root" and parsed.action == "reconcile":
         try:
             project_id = int(environment.get("GITLAB_PROJECT_ID", ""))

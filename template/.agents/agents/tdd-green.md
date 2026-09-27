@@ -126,8 +126,10 @@ next-role/completeness routing only; public JSON and model prose cannot
 instantiate trusted specialist receipts. Finalizer decides review adequacy.
 
 `$tdd-finalizer` checks receipts, tree, and commit. Interactive Finalizer
-makes one passing commit over the base. It keeps the local Red ref. Serial Finalizer never commits; the trusted controller owns
-its final commit. Merge Finalizer commits the approved staged tree from the pending merge.
-The old source and exact target are its ordered parents.
-Do not create an intermediate commit, push a Red ref, or rely on server-side
-squash. Keep each proof and report its exact result.
+makes a checked passing commit on Red. It then uses the trusted
+`agent-work interactive-commit compact --apply` boundary to return the final
+tip over the base. It keeps the local Red ref. Main alone publishes that tip
+through `$git-flow`; never push the Red ref. Serial Finalizer never commits;
+the trusted controller owns its final commit. Merge Finalizer commits the
+approved staged tree from the pending merge. The old source and exact target
+are its ordered parents. Keep each proof and report its exact result.
