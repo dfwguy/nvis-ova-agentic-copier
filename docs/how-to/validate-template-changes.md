@@ -14,7 +14,7 @@ related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the merge-request publication command.
   - path: ../reference/testing-strategy.md
-    why: Defines per-test timing targets and records long-running cases.
+    why: Defines local per-test timing targets and slow-case review rules.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -80,9 +80,9 @@ Any test, coverage-floor, or report failure fails the pipeline. For a failed
 job, inspect its JUnit and Cobertura reports when they exist; otherwise, use
 the job log. Root coverage excludes the generated Copier payload.
 
-The [testing strategy](../reference/testing-strategy.md) records per-case
-timing targets and the long-running test register. Use the JUnit case times to
-review changed tests; job duration is diagnostic evidence.
+The [testing strategy](../reference/testing-strategy.md) defines per-case
+timing targets and slow-case review rules. Use the JUnit case times to review
+changed tests.
 
 ## Investigate local test timing
 
@@ -183,10 +183,12 @@ block an unrelated change when its impact map is clear and no other timing
 rule blocks it. Do not call the mixed case a timing pass or a regression.
 Check host load and fixture setup before assigning cause. Do not infer cause
 from one run. An inherited case that stays above 100 ms but is unchanged or
-faster remains in the report without automatic rejection. Give each
-confirmed cost an owner and a reduction or integration-exception plan in the
-[long-running register](../reference/testing-strategy.md#long-running-local-test-register).
-The serial worker still uses trusted candidate-only timing proof.
+faster remains in the report without automatic rejection. Give each confirmed
+cost an owner and a reduction or integration-exception plan in the durable
+audit or linked issue record. Keep the full per-run inventory and proof there.
+Candidate-only serial timing proof cannot establish a baseline or phase
+comparison. Judge it on its complete candidate inventory; use paired proof
+only when the active worker provides it.
 
 ### Resume after an interrupted successful hook
 
@@ -215,10 +217,9 @@ interruption, old-worker check, new window, identities, saved full-suite files,
 focused files, and contention checks in the durable audit. Non-functional
 Review and Finalizer wait for sound proof.
 
-This is a simple CI DAG, not a state machine. The separate images aim to reduce
-unrelated work. Check that the exact-source
+This is a simple CI DAG, not a state machine. Check that the exact-source
 pipeline has at least one current required job and that all current required
-jobs pass. Record job and queue times when they help diagnose a failed run.
+jobs pass.
 
 Before validation, each shared `.base_uv` setup trusts only its current
 `$CI_PROJECT_DIR` checkout with Git. This applies only in the temporary

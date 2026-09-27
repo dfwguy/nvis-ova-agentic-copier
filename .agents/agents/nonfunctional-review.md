@@ -70,8 +70,8 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
 
 1. Read the task, Architect design, changed tests, and exact tree. Read the
    proof Judge gave you for this mode. Read
-   `docs/reference/testing-strategy.md` for the per-case targets and current
-   long-running test register.
+   `docs/reference/testing-strategy.md` for the per-case targets and review
+   rules.
 2. Check that the proof lists finished cases and times. Report the total time
    and slowest relevant cases. Use full JUnit in interactive work or the full
    trusted `over_100ms_cases` list in serial work. List every case above
@@ -90,8 +90,9 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    becomes `[param_<64 lowercase SHA-256 hex>]` after the safe base test name.
    Treat each emitted ID as a distinct case. Map a touched base test to all its
    parameterizations, and match the emitted ID and Python environment to the
-   register. Do not request raw unsafe parameter text. In interactive work,
-   compare repeated baseline and candidate times and their signed deltas. An
+   durable audit or linked issue record. Do not request raw unsafe parameter
+   text. In interactive work, compare repeated baseline and candidate times
+   and their signed deltas. An
    added ordinary test above 0.100 s in repeated runs in either environment
    goes back to the test owner unless an integration exception is approved. A
    changed test goes back if it adds a cost above 0.100 s or causes a proven
@@ -105,18 +106,17 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    sound proof. In serial work, keep the trusted candidate-only
    rule: a touched case above 0.100 s goes back to the test owner unless a
    documented integration exception applies. Serial proof has no baseline or
-   phase data. Also check every case at or above 1.000 s in each environment
-   against the strategy register. List every missing case and environment, even
-   when another finding already requires return. Ask Architect to route those
-   cases and their proof to the documentation owner. In interactive work, add
-   a stable register row only after repeat and phase diagnosis or an explicit
-   owner decision. Keep a one-run inherited setup spike as a dated observation
-   with a case-specific diagnosis queue. It alone does not block unrelated
-   work. Distinguish inherited slow cases, documented integration exceptions,
-   and newly observed ordinary cases. Check setup, body, and environment costs
-   where proof supports it.
-   One time is an observation, not a stable baseline. Report a missing owner,
-   cause, or reduction plan for a case that needs a stable row. Do not
+   phase data. Report every case at or above 1.000 s in each environment,
+   even when another finding already requires return. Ask Architect to retain
+   each case and its proof in the durable audit or linked issue record. Keep a
+   one-run inherited setup spike there as an observation with a case-specific
+   diagnosis queue. It alone does not block unrelated work. Distinguish
+   inherited slow cases, documented integration exceptions, and newly observed
+   ordinary cases. Check setup, body, and environment costs where proof
+   supports it. One time is an observation, not a stable baseline. Report a
+   missing case, environment, rationale, owner, plan, or review trigger for a
+   claimed integration exception. Report a missing owner or reduction plan
+   for confirmed debt. Do not
    invent a limit. CI case times give context; local goals are not CI gates.
 5. Reject missing, incomplete, or bad proof. Reject if it lacks time data or
    tests for a stated speed or resource need, an applicable ordinary-test
@@ -125,13 +125,14 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    In interactive work, a comparator `review` flag requires adjudication, not
    automatic rejection. A structurally bad `inconclusive` report cannot pass.
    A sound report with mixed case directions may support approval under the
-   rule above; record the doubt and the case-specific queue. A case at or above 1.000 s alone is a register
-   review trigger, not a rejection reason. Assess a documented integration
-   exception against its plan and the task budget. Route code gaps to the
-   Implementer and test gaps to the Test Writer. Report every unregistered
-   case at or above 1.000 s and its environment to Architect, regardless
-   of the verdict. State whether it needs a stable row or a dated observation
-   and diagnosis queue.
+   rule above; record the doubt and the case-specific queue. A case at or above
+   1.000 s alone triggers full reporting and review, not rejection. Assess a
+   documented integration exception against its plan and the task budget.
+   Route code gaps to the Implementer and test gaps to the Test Writer. Report
+   every case at or above
+   1.000 s and its environment to Architect, regardless of the verdict. State
+   whether it needs diagnosis, a debt plan, or an exception review in durable
+   evidence.
 
 ## Output
 
@@ -142,7 +143,7 @@ signed deltas for reviewed cases. Name any mixed cases and their diagnosis
 or repair queue.
 Give total and slowest run times, every case above 0.100 s and at or above
 1.000 s in each supported local environment, its classification and next
-action, every unregistered case and its environment, each touched case
+action, each touched case
 above 0.100 s and its environment, and each stated limit. In serial work,
 report whether `timing_complete` is true for each environment.
 Give any rejection reason. On approval, hand off to the TDD Judge. It returns
