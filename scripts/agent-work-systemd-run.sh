@@ -302,6 +302,7 @@ validate_applied_report() {
         .outcome == "pipeline_inventory_blocked") or
        (.stop_reason == "retry_wait" and .outcome == "activation_complete") or
        (.stop_reason == "repair" and .outcome == "activation_complete") or
+       (.stop_reason == "needs_repair" and .outcome == "activation_complete") or
        (.stop_reason == "time_limit" and .outcome == "activation_complete") or
        (.stop_reason == "segment_limit" and .outcome == "activation_complete"))
     ))

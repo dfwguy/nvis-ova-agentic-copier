@@ -1774,6 +1774,68 @@ def test_agent_loop_wrapper_rejects_invalid_prerequisite_label_reconciliation_re
 
 
 @pytest.mark.parametrize(
+    "relative_wrapper",
+    (
+        Path("scripts/agent-work-systemd-run.sh"),
+        Path("template/scripts/agent-work-systemd-run.sh"),
+    ),
+)
+def test_agent_loop_wrapper_accepts_applied_needs_repair_report_and_yields(
+    project_root: Path, tmp_path: Path, relative_wrapper: Path
+) -> None:
+    """An unavailable failed-job diagnostic yields its valid applied report."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    report = json.dumps(
+        {
+            "schema_version": 1,
+            "command": "loop.run",
+            "applied": True,
+            "outcome": "activation_complete",
+            "stop_reason": "needs_repair",
+        }
+    )
+    calls = _scripted_wrapper_worker(tmp_path, environment, (report,))
+
+    result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count(report) == 1
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+    invalid_report = json.dumps({**json.loads(report), "outcome": "idle"})
+    invalid_case = tmp_path / "invalid-needs-repair"
+    invalid_case.mkdir()
+    invalid_calls = _scripted_wrapper_worker(
+        invalid_case, environment, (invalid_report,)
+    )
+    invalid_result = subprocess.run(
+        ["bash", str(project_root / relative_wrapper), "--apply"],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert invalid_result.returncode == 2
+    assert (
+        "agent-work applied activation returned an invalid report"
+        in invalid_result.stderr
+    )
+    assert invalid_report not in invalid_result.stdout
+    assert invalid_calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
+@pytest.mark.parametrize(
     "stop_reason", ("awaiting_human", "blocked", "failed", "complete")
 )
 def test_agent_loop_wrapper_terminal_handoff_previews_once_then_yields_on_idle(
