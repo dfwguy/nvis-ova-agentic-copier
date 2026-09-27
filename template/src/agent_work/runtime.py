@@ -73,6 +73,7 @@ from .models import (
     ConditionEvidence,
     GitLabIssue,
     GitLabProject,
+    InterruptedClaimReceipt,
     LedgerRecord,
     MergeRequestEvidence,
     MigrationAction,
@@ -339,6 +340,7 @@ def _operational_evidence(
     repository: RepositoryPort,
     lifecycle_label_drift: tuple[str, ...],
     owner_states: tuple[tuple[int, str], ...] = (),
+    extra_evidence: Mapping[str, str] | None = None,
 ) -> OperationalPlan:
     """Build compact public evidence for a reviewed non-claiming operation."""
     selected = next(
@@ -384,6 +386,8 @@ def _operational_evidence(
             f"{issue_iid}={status}" for issue_iid, status in owner_states
         ),
     }
+    if extra_evidence is not None:
+        evidence.update(extra_evidence)
     if selected is not None:
         try:
             issue = gitlab.fetch_issue(selected.issue_iid)
@@ -1464,8 +1468,115 @@ def _normalization_is_exact(
         return False
 
 
+def _dirty_claim_evidence(
+    record: LedgerRecord,
+    *,
+    owner_status: str,
+    project_id: int,
+    gitlab: GitLabPort,
+    repository: RepositoryPort,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+    state_root: Path,
+) -> dict[str, str] | None:
+    """Bind one stale dirty pre-worker claim to its retained content and Red."""
+    unprogressed = retained_ordinary_is_untouched(
+        record.model_copy(update={"main_sha": record.source_sha})
+    )
+    if (
+        owner_status not in {"stale", "missing"}
+        or record.project_id != project_id
+        or record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.workflow_lane not in {WorkflowLane.UNKNOWN, WorkflowLane.CODING}
+        or record.source_branch != f"agent/issue-{record.issue_iid}"
+        or record.worktree.resolve()
+        != (state_root / "worktrees" / str(record.issue_iid)).resolve()
+        or record.main_sha is None
+        or not unprogressed
+        or record.prior_state is not None
+        or record.prior_phase is not None
+        or record.retry_count != 0
+        or record.retry_at is not None
+        or record.correction_identity is not None
+        or record.outcome_projection is not None
+        or record.completed_at is not None
+        or load_red_checkpoint is None
+    ):
+        return None
+    try:
+        issue = gitlab.fetch_issue(record.issue_iid)
+        checkpoint = load_red_checkpoint(
+            record.project_id, record.issue_iid, record.source_sha or ""
+        )
+        candidate = repository.observe_legacy_publication_candidate(record.worktree)
+        if (
+            issue.state != "opened"
+            or set(issue.labels).intersection(LIFECYCLE_LABELS) != {"agent::running"}
+            or not repository.worktree_exists(record.worktree)
+            or not repository.has_changes(record.worktree)
+            or candidate.branch != record.source_branch
+            or candidate.head != record.source_sha
+            or candidate.merge_head is not None
+            or candidate.has_untracked
+            or candidate.has_unmerged
+            or candidate.has_renames
+            or not (candidate.staged_paths or candidate.unstaged_paths)
+            or gitlab.open_merge_requests_by_branch(record.source_branch)
+            or (
+                checkpoint is not None
+                and (
+                    checkpoint.project_id != record.project_id
+                    or checkpoint.issue_iid != record.issue_iid
+                    or checkpoint.source_branch != record.source_branch
+                    or checkpoint.base_sha != record.source_sha
+                )
+            )
+        ):
+            return None
+        repository.verify_worktree(
+            record.worktree, record.source_branch, record.source_sha or ""
+        )
+        return {
+            "dirty_index_fingerprint": candidate.index_fingerprint,
+            "dirty_snapshot_fingerprint": repository.retained_worktree_fingerprint(
+                record.worktree
+            ),
+            "dirty_red_fingerprint": (
+                "absent"
+                if checkpoint is None
+                else hashlib.sha256(checkpoint.model_dump_json().encode()).hexdigest()
+            ),
+            "dirty_branch": candidate.branch,
+            "dirty_head": candidate.head,
+            "dirty_staged_paths": json.dumps(candidate.staged_paths),
+            "dirty_unstaged_paths": json.dumps(candidate.unstaged_paths),
+            "dirty_changed_paths": json.dumps(
+                repository.changed_paths(record.worktree)
+            ),
+        }
+    except (GitLabError, OSError, RepositoryError, RuntimeError, ValueError):
+        return None
+
+
+def _handoff_record_fingerprint(record: LedgerRecord) -> str:
+    """Bind the blocked record while excluding ledger-managed timestamps and revision."""
+    snapshot = record.model_dump_json(
+        exclude={
+            "revision",
+            "activation_started_at",
+            "latest_meaningful_update_at",
+            "interrupted_claim_receipt",
+        }
+    )
+    return hashlib.sha256(snapshot.encode()).hexdigest()
+
+
 def _owner_capacity(
-    records: tuple[LedgerRecord, ...], *, target_iid: int, wired: RuntimeDependencies
+    records: tuple[LedgerRecord, ...],
+    *,
+    target_iid: int,
+    wired: RuntimeDependencies,
+    target_owner_status: str | None = None,
 ):
     """Read every retained issue marker once for an evidence-bound recovery plan."""
     observations = tuple(
@@ -1476,7 +1587,11 @@ def _owner_capacity(
             worktree=str(record.worktree),
             merge_request_iid=record.merge_request_iid,
             merge_request_url=record.merge_request_url,
-            owner_status=_issue_owner_status(wired, record.issue_iid),
+            owner_status=(
+                target_owner_status
+                if record.issue_iid == target_iid and target_owner_status is not None
+                else _issue_owner_status(wired, record.issue_iid)
+            ),
         )
         for record in sorted(records, key=lambda item: item.issue_iid)
     )
@@ -1502,6 +1617,7 @@ def _operational_preview(
     wired: RuntimeDependencies,
     project: GitLabProject,
     username: str,
+    target_owner_status: str | None = None,
 ) -> CommandReport:
     """Choose one harmless canary/recovery checkpoint without selecting work."""
     records = tuple(wired.ledger.list_records())
@@ -1515,12 +1631,18 @@ def _operational_preview(
     )
     target = request.issue_iid
     action = "checkpoint"
+    dirty_claim_evidence: dict[str, str] | None = None
     next_action = "Review the operational checkpoint; no issue was claimed."
     outcome = "checkpoint"
     label_drift = wired.lifecycle_label_drift()
     capacity = None
     if request.command == "loop.recover" and target is not None:
-        capacity = _owner_capacity(records, target_iid=target, wired=wired)
+        capacity = _owner_capacity(
+            records,
+            target_iid=target,
+            wired=wired,
+            target_owner_status=target_owner_status,
+        )
     if request.command == "loop.canary" and label_drift:
         action = "provision_lifecycle_labels"
         next_action = "Review and apply the fixed lifecycle-label provisioning plan."
@@ -1640,15 +1762,28 @@ def _operational_preview(
             record.state is RunnerState.EXECUTING
             and record.phase is WorkflowPhase.WORKFLOW
         ):
+            dirty_claim_evidence = _dirty_claim_evidence(
+                record,
+                owner_status=dict(capacity.owner_states).get(target, "unknown"),
+                project_id=project.id,
+                gitlab=wired.gitlab,
+                repository=wired.repository,
+                load_red_checkpoint=wired.load_red_checkpoint,
+                state_root=wired.config.state_root,
+            )
             action = (
                 "normalize_interrupted_claim"
                 if _normalization_is_exact(
                     record, gitlab=wired.gitlab, repository=wired.repository
                 )
+                else "handoff_stale_dirty_claim"
+                if dirty_claim_evidence is not None
                 else "normalization_unverified"
             )
             next_action = (
-                f"Apply the reviewed normalization for retained issue {target}."
+                f"Apply the reviewed dirty-claim handoff for retained issue {target}."
+                if action == "handoff_stale_dirty_claim"
+                else f"Apply the reviewed normalization for retained issue {target}."
             )
         elif record is not None:
             action = (
@@ -1673,6 +1808,7 @@ def _operational_preview(
         repository=wired.repository,
         lifecycle_label_drift=label_drift,
         owner_states=() if capacity is None else capacity.owner_states,
+        extra_evidence=dirty_claim_evidence,
     )
     return _report(
         request,
@@ -2796,6 +2932,28 @@ def _dispatch_reviewed_blocked_retry(
     )
 
 
+def _is_reviewed_dirty_handoff_replay(
+    request: CommandRequest, record: LedgerRecord, wired: RuntimeDependencies
+) -> bool:
+    """Route only the original handoff plan to its idempotent label replay."""
+    receipt = record.interrupted_claim_receipt
+    if request.plan_file is None or receipt is None:
+        return False
+    try:
+        payload = json.loads(wired.read_plan(request.plan_file))
+        if isinstance(payload, dict) and "operational_plan" in payload:
+            payload = payload["operational_plan"]
+        reviewed = OperationalPlan.model_validate(payload)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        reviewed.command == "loop.recover"
+        and reviewed.action == "handoff_stale_dirty_claim"
+        and reviewed.target_iid == request.issue_iid == receipt.issue_iid
+        and reviewed.fingerprint == receipt.plan_fingerprint
+    )
+
+
 def dispatch(
     request: CommandRequest,
     *,
@@ -2817,7 +2975,12 @@ def dispatch(
         and request.issue_iid is not None
         and (record := ledger.load(request.issue_iid)) is not None
         and (
-            record.state is RunnerState.BLOCKED
+            (
+                record.state is RunnerState.BLOCKED
+                and not (
+                    apply and _is_reviewed_dirty_handoff_replay(request, record, wired)
+                )
+            )
             or (
                 apply
                 and request.plan_file is not None
@@ -3643,6 +3806,151 @@ def dispatch(
             current_username = gitlab.verify_authenticated_user()
             if not isinstance(current_username, str) or not current_username:
                 raise RuntimeError("authenticated identity evidence is unavailable")
+            if reviewed.action == "handoff_stale_dirty_claim":
+                target = reviewed.target_iid
+                if target is None:
+                    raise RuntimeError("dirty handoff target is missing")
+                if (
+                    reviewed.project
+                    != {
+                        "host": config.host,
+                        "project_id": current_project.id,
+                        "default_branch": current_project.default_branch,
+                    }
+                    or reviewed.authenticated_username != current_username
+                ):
+                    raise RuntimeError("dirty handoff identity evidence changed")
+                target_owner_status = _issue_owner_status(wired, target)
+                if target_owner_status not in {"stale", "missing"}:
+                    raise RuntimeError("dirty handoff owner evidence changed")
+                with wired.issue_lock(target):
+                    retained = ledger.load(target)
+                    if retained is None:
+                        raise RuntimeError("dirty handoff record disappeared")
+                    receipt = retained.interrupted_claim_receipt
+                    if receipt is not None:
+                        if wired.load_red_checkpoint is None:
+                            raise RuntimeError("dirty handoff Red evidence unavailable")
+                        candidate = repository.observe_legacy_publication_candidate(
+                            retained.worktree
+                        )
+                        repository.verify_worktree(
+                            retained.worktree,
+                            retained.source_branch,
+                            retained.source_sha or "",
+                        )
+                        checkpoint = wired.load_red_checkpoint(
+                            retained.project_id,
+                            target,
+                            retained.source_sha or "",
+                        )
+                        issue = gitlab.fetch_issue(target)
+                        if (
+                            retained.state is not RunnerState.BLOCKED
+                            or retained.phase is not WorkflowPhase.WORKFLOW
+                            or retained.project_id != current_project.id
+                            or retained.revision
+                            != int(reviewed.evidence.get("record_revision") or -1) + 1
+                            or retained.source_branch
+                            != reviewed.evidence.get("source_branch")
+                            or retained.source_sha
+                            != reviewed.evidence.get("source_sha")
+                            or receipt.issue_iid != target
+                            or receipt.plan_fingerprint != reviewed.fingerprint
+                            or receipt.blocked_record_fingerprint
+                            != _handoff_record_fingerprint(retained)
+                            or receipt.dirty_snapshot_fingerprint
+                            != repository.retained_worktree_fingerprint(
+                                retained.worktree
+                            )
+                            or candidate.index_fingerprint
+                            != reviewed.evidence.get("dirty_index_fingerprint")
+                            or candidate.branch != reviewed.evidence.get("dirty_branch")
+                            or candidate.head != reviewed.evidence.get("dirty_head")
+                            or candidate.merge_head is not None
+                            or candidate.has_untracked
+                            or candidate.has_unmerged
+                            or candidate.has_renames
+                            or json.dumps(candidate.staged_paths)
+                            != reviewed.evidence.get("dirty_staged_paths")
+                            or json.dumps(candidate.unstaged_paths)
+                            != reviewed.evidence.get("dirty_unstaged_paths")
+                            or json.dumps(repository.changed_paths(retained.worktree))
+                            != reviewed.evidence.get("dirty_changed_paths")
+                            or (
+                                "absent"
+                                if checkpoint is None
+                                else hashlib.sha256(
+                                    checkpoint.model_dump_json().encode()
+                                ).hexdigest()
+                            )
+                            != reviewed.evidence.get("dirty_red_fingerprint")
+                            or f"{target}={target_owner_status}"
+                            not in str(reviewed.evidence.get("owner_states", "")).split(
+                                ","
+                            )
+                            or issue.state != "opened"
+                            or set(issue.labels).intersection(LIFECYCLE_LABELS)
+                            not in ({"agent::running"}, {"agent::blocked"})
+                            or gitlab.open_merge_requests_by_branch(
+                                retained.source_branch
+                            )
+                        ):
+                            raise RuntimeError("dirty handoff replay evidence changed")
+                        gitlab.transition_labels(
+                            target, label_for_state(retained.state)
+                        )
+                        return _report(
+                            request,
+                            applied=True,
+                            outcome="dirty_claim_handed_off",
+                            records=(retained,),
+                            project=identity,
+                            operational_plan=reviewed,
+                        )
+                    current = _operational_preview(
+                        request,
+                        wired=wired,
+                        project=current_project,
+                        username=current_username,
+                        target_owner_status=target_owner_status,
+                    )
+                    if current.operational_plan != reviewed:
+                        raise RuntimeError(
+                            "dirty handoff evidence changed; create a new preview"
+                        )
+                    blocked_record = transition_record(
+                        retained,
+                        RunnerState.BLOCKED,
+                        error_code=ErrorCode.STATE_RECONCILIATION_FAILED,
+                        summary="Interrupted dirty claim retained for manual recovery.",
+                        next_action=f"Review retained issue {target} and its dirty checkout before a new recovery decision.",
+                    )
+                    blocked = ledger.persist(
+                        blocked_record.model_copy(
+                            update={
+                                "interrupted_claim_receipt": InterruptedClaimReceipt(
+                                    issue_iid=target,
+                                    plan_fingerprint=reviewed.fingerprint,
+                                    dirty_snapshot_fingerprint=str(
+                                        reviewed.evidence["dirty_snapshot_fingerprint"]
+                                    ),
+                                    blocked_record_fingerprint=_handoff_record_fingerprint(
+                                        blocked_record
+                                    ),
+                                )
+                            }
+                        )
+                    )
+                    gitlab.transition_labels(target, label_for_state(blocked.state))
+                    return _report(
+                        request,
+                        applied=True,
+                        outcome="dirty_claim_handed_off",
+                        records=(blocked,),
+                        project=identity,
+                        operational_plan=reviewed,
+                    )
             current = _operational_preview(
                 request, wired=wired, project=current_project, username=current_username
             )

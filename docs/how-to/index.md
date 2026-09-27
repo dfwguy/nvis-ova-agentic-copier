@@ -12,9 +12,9 @@ type: index
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
-Pick a guide for the work you need to do. Each guide has steps that you can run
-and check. If a check fails, fix the cause and run it once more. Use the links
-to learn the facts and rules that help you make a good change.
+Use this list to find a guide for the work you need to do. Each guide gives you
+steps you can do and checks you can run. Do each step and check the work. If a
+check fails, fix the cause and try again.
 
 <!-- framing: hand-written, 2-4 sentences, EDITABLE -->
 
@@ -31,6 +31,6 @@ to learn the facts and rules that help you make a good change.
 
 ### Agent Workflow
 - [Configure agent capacity](configure-agent-capacity.md) — Set live-agent capacity for a workflow lane.
-- [How to resolve factory issue recovery](resolve-factory-issues.md) — Recover saved work.
+- [How to resolve factory issue recovery](resolve-factory-issues.md) — Check saved proof for a blocked issue and pick a safe next step.
 - [How to set up the recoverable serial GitLab agent loop](setup-serial-gitlab-agent-loop.md) — Set up a recoverable serial agent loop.
 <!-- END GENERATED -->

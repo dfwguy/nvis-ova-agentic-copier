@@ -19,7 +19,7 @@ import logging
 import re
 import sys
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,7 +52,13 @@ from agent_work.domain import (
     render_split_marker,
 )
 from agent_work.gitlab import GitLabError
-from agent_work.ledger import JsonLedger, LedgerCorrupt, LedgerError
+from agent_work.ledger import (
+    JsonLedger,
+    LedgerCorrupt,
+    LedgerError,
+    XdgIssueLock,
+    observe_issue_lock,
+)
 from agent_work.models import (
     AgentWorkConfig,
     AuditCapacity,
@@ -821,6 +827,7 @@ class FakeRepository:
         self.retained_refresh_result = "b" * 40
         self.retained_refresh_error: RepositoryError | None = None
         self.legacy_index_fingerprint = "d" * 64
+        self.retained_worktree_fingerprint_value = "f" * 64
         self.legacy_branch = "agent/issue-12"
         self.legacy_staged_paths: tuple[str, ...] = ("src/example.py",)
         self.legacy_unstaged_paths: tuple[str, ...] = ("src/example.py",)
@@ -1010,6 +1017,11 @@ class FakeRepository:
             has_unmerged=self.legacy_has_unmerged,
             has_renames=self.legacy_has_renames,
         )
+
+    def retained_worktree_fingerprint(self, worktree: Path) -> str:
+        """Expose an independently mutable digest of retained dirty bytes."""
+        del worktree
+        return self.retained_worktree_fingerprint_value
 
     def single_parent(self, worktree: Path, candidate_sha: str) -> str | None:
         """Model the one original parent retained for an authored candidate."""
@@ -4361,7 +4373,6 @@ def test_direct_retry_exact_intent_replay_finishes_after_preparing_persist(
             }
         )
     )
-
     replay = dispatch(
         replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
     )
@@ -7291,7 +7302,6 @@ def test_credential_identity_rotation_between_preview_and_apply_invalidates_plan
         "nonordinary_work",
         "missing_worktree",
         "invalid_binding",
-        "dirty",
         "wrong_head",
         "open_mr",
         "published",
@@ -7345,8 +7355,6 @@ def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
         repository.worktree_present = False
     elif mismatch == "invalid_binding":
         repository.worktree_valid = False
-    elif mismatch == "dirty":
-        repository.dirty = True
     elif mismatch == "wrong_head":
         repository.current_head = "b" * 40
     elif mismatch == "open_mr":
@@ -7476,6 +7484,330 @@ def test_recover_normalization_fails_closed_when_a_preworker_claim_is_not_exact(
     assert ledger.load(77) == record
     assert gitlab.labels == []
     assert repository.prepared is False
+
+
+def _dirty_stale_claim(
+    tmp_path: Path,
+) -> tuple[JsonLedger, FakeGitLab, FakeRepository, RuntimeDependencies]:
+    """Build an exact retained claim with independent staged and unstaged work."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"main_sha": "a" * 40})
+    )
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::running",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.paths = ("src/example.py", "tests/test_agent_work_serial_runtime.py")
+    repository.legacy_staged_paths = ("tests/test_agent_work_serial_runtime.py",)
+    repository.legacy_unstaged_paths = ("src/example.py",)
+    return ledger, gitlab, repository, _dependencies(config, ledger, gitlab, repository)
+
+
+def test_recover_exact_stale_dirty_claim_hands_off_without_losing_retained_work(
+    tmp_path: Path,
+) -> None:
+    """The controller blocks a stale claim while retaining its dirty checkout and Red."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    original = ledger.load(12)
+    assert original is not None
+    checkpoint = dependencies.load_red_checkpoint
+    assert checkpoint is not None
+    retained_red = checkpoint(
+        original.project_id, original.issue_iid, original.source_sha or ""
+    )
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=12),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "handoff_stale_dirty_claim"
+    assert ledger.load(12) == original
+    assert gitlab.labels == []
+    plan_file = tmp_path / "dirty-handoff.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    applied = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=12, plan_file=plan_file),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    blocked = ledger.load(12)
+    assert applied.applied and blocked is not None
+    assert blocked.state is RunnerState.BLOCKED
+    assert blocked.error_code is ErrorCode.STATE_RECONCILIATION_FAILED
+    assert blocked.source_branch == original.source_branch
+    assert blocked.source_sha == original.source_sha
+    assert blocked.worktree == original.worktree
+    assert blocked.phase is WorkflowPhase.WORKFLOW
+    assert blocked.revision == original.revision + 1
+    assert blocked.summary and len(blocked.summary) <= 2_048
+    receipt = blocked.interrupted_claim_receipt
+    assert receipt is not None
+    assert receipt.issue_iid == 12
+    assert receipt.plan_fingerprint == preview.operational_plan.fingerprint
+    assert receipt.dirty_snapshot_fingerprint == (
+        repository.retained_worktree_fingerprint_value
+    )
+    assert (
+        checkpoint(blocked.project_id, blocked.issue_iid, blocked.source_sha or "")
+        == retained_red
+    )
+    assert gitlab.labels == ["agent::blocked"]
+    assert repository.dirty
+    assert repository.legacy_staged_paths == (
+        "tests/test_agent_work_serial_runtime.py",
+    )
+    assert repository.legacy_unstaged_paths == ("src/example.py",)
+    assert repository.binds == repository.prepares == repository.pushes == 0
+    next_gitlab = FakeGitLabWithEligibleIssues(
+        gitlab.issue.model_copy(update={"labels": ("agent::blocked",)}),
+        _issue(iid=13),
+    )
+    selected, issue = select_record(ledger, next_gitlab, now=NOW, repository=repository)
+    assert selected is not None and selected.issue_iid == 13
+    assert issue is not None and issue.iid == 13
+    assert ledger.load(12) == blocked
+
+
+@pytest.mark.parametrize(
+    ("owner_status", "expected_action"),
+    (
+        ("stale", "handoff_stale_dirty_claim"),
+        ("missing", "handoff_stale_dirty_claim"),
+        ("active", "normalization_unverified"),
+        ("live", "normalization_unverified"),
+        ("unknown", "ownership_unverified"),
+    ),
+)
+def test_recover_dirty_handoff_preview_requires_stale_or_missing_target_owner(
+    tmp_path: Path, owner_status: str, expected_action: str
+) -> None:
+    """An active or unverified target owner cannot authorize a dirty handoff."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    dependencies = _with_issue_owner_probe(dependencies, lambda _iid: owner_status)
+
+    preview = dispatch(
+        CommandRequest(command="loop.recover", issue_iid=12),
+        apply=False,
+        dependencies=dependencies,
+    )
+
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == expected_action
+    assert ledger.load(12) is not None
+    assert gitlab.labels == []
+    assert repository.dirty
+
+
+def test_recover_dirty_handoff_accepts_its_own_issue_lock_owner(tmp_path: Path) -> None:
+    """The controller's issue lock must not invalidate a reviewed stale claim."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    state_root = dependencies.config.state_root
+    dependencies = replace(
+        dependencies,
+        issue_lock=lambda iid: XdgIssueLock(state_root, iid),
+        issue_owner_probe=lambda iid: observe_issue_lock(
+            state_root, iid, process_alive=lambda _pid: True
+        ),
+    )
+    request = CommandRequest(command="loop.recover", issue_iid=12)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "handoff_stale_dirty_claim"
+    plan_file = tmp_path / "real-issue-lock.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    result = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    retained = ledger.load(12)
+    assert result.outcome == "dirty_claim_handed_off"
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.labels == ["agent::blocked"]
+    assert repository.dirty
+
+
+def test_recover_dirty_handoff_replays_label_with_real_issue_lock(
+    tmp_path: Path,
+) -> None:
+    """A retrying label projection also tolerates this controller's lock marker."""
+    ledger, gitlab, _, dependencies = _dirty_stale_claim(tmp_path)
+    state_root = dependencies.config.state_root
+    dependencies = replace(
+        dependencies,
+        issue_lock=lambda iid: XdgIssueLock(state_root, iid),
+        issue_owner_probe=lambda iid: observe_issue_lock(
+            state_root, iid, process_alive=lambda _pid: True
+        ),
+    )
+    request = CommandRequest(command="loop.recover", issue_iid=12)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    plan_file = tmp_path / "real-issue-lock-replay.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.label_failures = 1
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+    blocked = ledger.load(12)
+    assert blocked is not None and blocked.state is RunnerState.BLOCKED
+
+    result = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    assert result.outcome == "dirty_claim_handed_off"
+    assert ledger.load(12) == blocked
+    assert gitlab.labels == ["agent::blocked"]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "staged_content",
+        "unstaged_content",
+        "same_path_content",
+        "untracked_content",
+        "head",
+        "branch",
+        "issue_label",
+        "owner_live",
+        "owner_unknown",
+        "merge_request",
+        "missing_red_checkpoint",
+        "ledger_revision",
+    ),
+)
+def test_recover_dirty_handoff_rechecks_reviewed_evidence_before_effects(
+    tmp_path: Path, drift: str
+) -> None:
+    """A changed snapshot or identity invalidates the reviewed handoff."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    owner = {"status": "stale"}
+    dependencies = _with_issue_owner_probe(dependencies, lambda _iid: owner["status"])
+    request = CommandRequest(command="loop.recover", issue_iid=12)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "handoff_stale_dirty_claim"
+    plan_file = tmp_path / "dirty-drift.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    if drift == "staged_content":
+        repository.legacy_index_fingerprint = "e" * 64
+    elif drift == "unstaged_content":
+        repository.paths = ("src/changed.py", *repository.paths[1:])
+    elif drift == "same_path_content":
+        repository.retained_worktree_fingerprint_value = "0" * 64
+    elif drift == "untracked_content":
+        repository.legacy_has_untracked = True
+    elif drift == "head":
+        repository.current_head = "b" * 40
+    elif drift == "branch":
+        repository.legacy_branch = "agent/issue-99"
+    elif drift == "issue_label":
+        gitlab.issue = gitlab.issue.model_copy(update={"labels": ("agent::blocked",)})
+    elif drift == "owner_live":
+        owner["status"] = "live"
+    elif drift == "owner_unknown":
+        owner["status"] = "unknown"
+    elif drift == "merge_request":
+        gitlab.open_branch_merge_requests = (_mr(),)
+    elif drift == "missing_red_checkpoint":
+        dependencies = replace(dependencies, load_red_checkpoint=lambda *_args: None)
+    else:
+        current = ledger.load(12)
+        assert current is not None
+        ledger.persist(current)
+    retained = ledger.load(12)
+
+    with pytest.raises(RuntimeError, match="evidence|plan|handoff|owner"):
+        dispatch(
+            replace(request, plan_file=plan_file),
+            apply=True,
+            dependencies=dependencies,
+        )
+
+    assert ledger.load(12) == retained
+    assert gitlab.labels == []
+    assert repository.binds == repository.prepares == repository.pushes == 0
+
+
+def test_recover_dirty_handoff_holds_target_issue_lock_through_label_transition(
+    tmp_path: Path,
+) -> None:
+    """The target lock encloses the durable transition and lifecycle projection."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    held = {"issue": False}
+
+    @contextmanager
+    def issue_lock(iid: int):
+        assert iid == 12
+        held["issue"] = True
+        try:
+            yield
+        finally:
+            held["issue"] = False
+
+    class LockCheckingGitLab(FakeGitLab):
+        def transition_labels(self, iid: int, label: str | None) -> GitLabIssue:
+            assert held["issue"]
+            persisted = ledger.load(iid)
+            assert persisted is not None and persisted.state is RunnerState.BLOCKED
+            return super().transition_labels(iid, label)
+
+    locked_gitlab = LockCheckingGitLab(gitlab.issue)
+    dependencies = replace(dependencies, gitlab=locked_gitlab, issue_lock=issue_lock)
+    request = CommandRequest(command="loop.recover", issue_iid=12)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "handoff_stale_dirty_claim"
+    plan_file = tmp_path / "dirty-lock.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+
+    dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    assert not held["issue"]
+    assert locked_gitlab.labels == ["agent::blocked"]
+    assert repository.binds == repository.prepares == repository.pushes == 0
+
+
+def test_recover_dirty_handoff_replays_label_after_persist_failure_without_new_revision(
+    tmp_path: Path,
+) -> None:
+    """A failed label projection can replay the same reviewed handoff once."""
+    ledger, gitlab, repository, dependencies = _dirty_stale_claim(tmp_path)
+    request = CommandRequest(command="loop.recover", issue_iid=12)
+    preview = dispatch(request, apply=False, dependencies=dependencies)
+    assert preview.operational_plan is not None
+    assert preview.operational_plan.action == "handoff_stale_dirty_claim"
+    plan_file = tmp_path / "dirty-replay.json"
+    plan_file.write_bytes(_operational_plan_bytes(preview))
+    gitlab.label_failures = 1
+
+    with pytest.raises(GitLabError, match="temporary label failure"):
+        dispatch(
+            replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+        )
+
+    persisted = ledger.load(12)
+    assert persisted is not None and persisted.state is RunnerState.BLOCKED
+    replay = dispatch(
+        replace(request, plan_file=plan_file), apply=True, dependencies=dependencies
+    )
+
+    assert replay.applied
+    assert ledger.load(12) == persisted
+    assert gitlab.labels == ["agent::blocked"]
+    assert repository.dirty
+    assert repository.binds == repository.prepares == repository.pushes == 0
 
 
 @given(st.text(min_size=1, max_size=24).filter(lambda value: value != "original"))

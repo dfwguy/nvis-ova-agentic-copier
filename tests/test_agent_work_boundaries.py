@@ -3859,6 +3859,63 @@ def test_observe_legacy_publication_candidate_reads_exact_dirty_identity(
     )
 
 
+@pytest.mark.parametrize("conflict_status", ("AA", "DD"))
+def test_observe_legacy_publication_candidate_rejects_both_sides_conflict(
+    tmp_path: Path, conflict_status: str
+) -> None:
+    """Both-added and both-deleted Git conflicts are unmerged work."""
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = command[3:]
+        if arguments == ("status", "--porcelain=v1", "-z"):
+            return CommandResult(0, f"{conflict_status} src/conflict.py\0", "")
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{'a' * 40}\n", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments in {
+            ("diff", "--cached", "--raw", "-z"),
+            ("diff", "--cached", "--name-only", "-z"),
+            ("diff", "--name-only", "-z"),
+        }:
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Git command: {arguments}")
+
+    candidate = GitRepository(
+        _config(tmp_path), fake
+    ).observe_legacy_publication_candidate(tmp_path / "worktree")
+
+    assert candidate.has_unmerged
+
+
+def test_retained_worktree_fingerprint_separates_two_file_content_boundaries(
+    tmp_path: Path,
+) -> None:
+    """Moving delimiter-like bytes between files changes snapshot identity."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    first_path = worktree / "a"
+    second_path = worktree / "b"
+    header = b"b\0file\0" + b"0644\0"
+    first_path.write_bytes(b"x\0" + header + b"y")
+    second_path.write_bytes(b"z")
+    first_path.chmod(0o644)
+    second_path.chmod(0o644)
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        assert command[3:] == ("diff", "--name-only", "-z")
+        return CommandResult(0, "a\0b\0", "")
+
+    repository = GitRepository(_config(tmp_path), fake)
+    first = repository.retained_worktree_fingerprint(worktree)
+    first_path.write_bytes(b"x")
+    second_path.write_bytes(b"y\0" + header + b"z")
+
+    assert repository.retained_worktree_fingerprint(worktree) != first
+
+
 @pytest.mark.parametrize(
     ("status", "branch", "parents", "count", "subject"),
     (

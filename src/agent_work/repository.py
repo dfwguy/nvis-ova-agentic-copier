@@ -16,13 +16,14 @@ import math
 import os
 import re
 import select
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import IO
 from urllib.parse import urlparse
@@ -525,7 +526,11 @@ class GitRepository:
             raise RepositoryTransientError("Git operation timed out") from error
 
     def _git(
-        self, *arguments: str, cwd: Path | None = None, transient: bool = False
+        self,
+        *arguments: str,
+        cwd: Path | None = None,
+        transient: bool = False,
+        preserve_output: bool = False,
     ) -> str:
         transport_operation = arguments[:1] in {
             ("fetch",),
@@ -571,7 +576,7 @@ class GitRepository:
                 raise PublicationError(failure)
             error_type = RepositoryTransientError if transient else RepositoryError
             raise error_type("Git operation failed")
-        return result.stdout.strip()
+        return result.stdout if preserve_output else result.stdout.strip()
 
     def _merge_head(self, worktree: Path) -> str | None:
         """Return the pending merge target, if this worktree is merging."""
@@ -843,8 +848,15 @@ class GitRepository:
         porcelain = (
             status.porcelain
             if status is not None
-            else self._git("status", "--porcelain=v1", "-z", cwd=worktree)
+            else self._git(
+                "status",
+                "--porcelain=v1",
+                "-z",
+                cwd=worktree,
+                preserve_output=True,
+            )
         )
+
         entries = porcelain.split("\0")
         flags = [entry[:2] for entry in entries if entry]
         return LegacyPublicationCandidate(
@@ -852,26 +864,98 @@ class GitRepository:
             head=self.head(worktree),
             merge_head=self._merge_head(worktree),
             index_fingerprint=sha256(
-                self._git("diff", "--cached", "--raw", "-z", cwd=worktree).encode()
+                self._git(
+                    "diff",
+                    "--cached",
+                    "--raw",
+                    "-z",
+                    cwd=worktree,
+                    preserve_output=True,
+                ).encode()
             ).hexdigest(),
             staged_paths=tuple(
                 path
                 for path in self._git(
-                    "diff", "--cached", "--name-only", "-z", cwd=worktree
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "-z",
+                    cwd=worktree,
+                    preserve_output=True,
                 ).split("\0")
                 if path
             ),
             unstaged_paths=tuple(
                 path
-                for path in self._git("diff", "--name-only", "-z", cwd=worktree).split(
-                    "\0"
-                )
+                for path in self._git(
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    cwd=worktree,
+                    preserve_output=True,
+                ).split("\0")
                 if path
             ),
             has_untracked=any(flag == "??" for flag in flags),
-            has_unmerged=any("U" in flag for flag in flags),
+            has_unmerged=any(
+                flag in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"} for flag in flags
+            ),
             has_renames=any("R" in flag for flag in flags),
         )
+
+    def retained_worktree_fingerprint(self, worktree: Path) -> str:
+        """Hash tracked unstaged bytes and file types without changing the index."""
+        paths = tuple(
+            path
+            for path in self._git(
+                "diff",
+                "--name-only",
+                "-z",
+                cwd=worktree,
+                preserve_output=True,
+            ).split("\0")
+            if path
+        )
+        digest = sha256()
+        remaining_bytes = 64 * 1024 * 1024
+        for path in sorted(set(paths)):
+            relative = PurePosixPath(path)
+            if relative.is_absolute() or ".." in relative.parts or not path:
+                raise RepositoryError("retained worktree path is unsafe")
+            if any(
+                (worktree.joinpath(*relative.parts[:depth])).is_symlink()
+                for depth in range(1, len(relative.parts))
+            ):
+                raise RepositoryError("retained worktree parent is a symlink")
+            target = worktree.joinpath(*relative.parts)
+            digest.update(path.encode())
+            digest.update(b"\0")
+            try:
+                mode = target.lstat().st_mode
+            except FileNotFoundError:
+                digest.update(b"deleted\0")
+                continue
+            if stat.S_ISREG(mode):
+                digest.update(b"file\0")
+                digest.update(f"{stat.S_IMODE(mode):04o}".encode())
+                digest.update(b"\0")
+                file_digest = sha256()
+                with target.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        remaining_bytes -= len(chunk)
+                        if remaining_bytes < 0:
+                            raise RepositoryError(
+                                "retained worktree snapshot is too large"
+                            )
+                        file_digest.update(chunk)
+                digest.update(file_digest.digest())
+            elif stat.S_ISLNK(mode):
+                digest.update(b"symlink\0")
+                digest.update(os.readlink(target).encode())
+            else:
+                raise RepositoryError("retained worktree entry is unsupported")
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def single_parent(self, worktree: Path, candidate_sha: str) -> str | None:
         """Return the sole parent of one exact candidate commit, if it has one."""

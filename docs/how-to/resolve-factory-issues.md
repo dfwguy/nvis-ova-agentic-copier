@@ -1,11 +1,11 @@
 ---
 title: How to resolve factory issue recovery
 type: how-to
-summary: Recover saved work.
+summary: Check saved proof for a blocked issue and pick a safe next step.
 audience: maintainer
 tags: [agent-workflow]
 status: draft
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the recovery inventory and resolution command contract.
@@ -279,7 +279,42 @@ Stop for human review without verified normalization.
 This route never approves a merge request.
 This route never merges a merge request.
 
-## 7. Resume a saved candidate after a failed publish check.
+## 7. Hand off a stale dirty claim for issue #36.
+
+Use this route when a retained `EXECUTING`/`WORKFLOW` claim has a stale or
+missing owner and its saved worktree contains changes. The lane may be
+`UNKNOWN` or `CODING`. A Red checkpoint may be present or absent; the plan
+binds that fact. The recorded source `HEAD` may differ from the current main
+commit. There must be no publication or merge request. Keep the checkout as
+it is. Do not clean, stash, or restage files, or replace an existing Red
+checkpoint. Review a plan for that exact issue:
+
+```bash
+uv run agent-work loop recover --issue-iid 36 --json >agent-work-recover-36-plan.json
+```
+
+Confirm the plan's action is `handoff_stale_dirty_claim`. Check the issue,
+owner, branch, worktree, `HEAD`, staged or unstaged changes, ledger revision,
+and whether a saved Red checkpoint exists. Apply only that reviewed plan:
+
+```bash
+uv run agent-work loop recover --issue-iid 36 --apply \
+  --plan-file agent-work-recover-36-plan.json --json
+```
+
+The `dirty_claim_handed_off` result records a blocked handoff for manual
+recovery of issue #36. It keeps the branch, worktree, index, unstaged
+changes, and any existing Red checkpoint. Its durable receipt binds the
+reviewed plan and dirty worktree snapshot. The blocked issue releases the
+active claim. A later loop pass can select independent work. The command does
+not run a worker or publish a merge request.
+
+If the owner or any reviewed evidence changes, apply rejects the plan before
+changing the claim. Inspect the current inventory and create a fresh plan;
+do not edit the old one. Use the one-issue resolution procedure above when a
+human has decided how to resume or close the retained work.
+
+## 8. Resume a saved candidate after a failed publish check.
 
 Use this route only when the inventory finds a staged-only candidate held after
 an eligible `worker_protocol_invalid`, or the exact
