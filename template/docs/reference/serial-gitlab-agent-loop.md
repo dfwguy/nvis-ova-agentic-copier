@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -85,10 +85,13 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          [--priority TEXT] [--severity TEXT]
                          [--label TEXT] [--issue-iid IID] [--feedback-audit]
                          [--apply] [--json] [--debug]
-agent-work validation run --candidate-tree TREE [--apply] [--json]
-agent-work validation retry --candidate-tree TREE [--apply] [--json]
+agent-work validation run --candidate-tree TREE [--baseline-sha SHA]
+                          [--changed-path PATH]... [--apply] [--json]
+agent-work validation retry --candidate-tree TREE [--baseline-sha SHA]
+                            [--changed-path PATH]... [--apply] [--json]
 agent-work validation window [--apply] [--json] -- COMMAND [ARG ...]
 agent-work validation status --candidate-tree TREE
+                             [--baseline-sha SHA] [--changed-path PATH]...
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
                            [--broker-nonce NONCE] [--apply] [--json]
@@ -125,10 +128,10 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
-| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. |
-| `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. |
+| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. The serial controller supplies `--baseline-sha SHA` and repeatable `--changed-path PATH` for paired timing proof. |
+| `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. Serial work repeats the baseline SHA and changed paths. |
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
-| `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. |
+| `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. The serial controller repeats the baseline SHA and changed paths; status checks the saved timing proof. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
 | `candidate read` | Same identity and returned tree; optional manifest, chunk, or completion selector | Reads bounded, controller-derived base-to-tree file evidence for Consistency Judge. |
 | `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
@@ -395,6 +398,27 @@ later status reads. They contain no controller state or JUnit file path. After
 the worker exits, the controller checks the tree and changed files again before
 publication. It keeps no extra authorization ledger.
 
+Serial timing review also requires trusted full-suite baseline and candidate
+proof for both `py311` and `py314`, bound to their exact source trees. The
+trusted controller privately checks complete case inventories and matching
+prepared environments, commands, and seeds. It rejects missing, partial, or
+mismatched proof. The worker receives bounded proof identities, an outcome,
+findings, and the candidate's complete list of cases above 0.100 s.
+The outcome is `clear` when there are no findings, `report_only` for findings
+that need review but no correction, or `correction_required` when a new slow,
+touched slow, or corroborated regressed case needs correction.
+
+The reviewer routes a touched case above 0.100 s to the test owner for
+correction. For every candidate case at or above 1.000 s, the reviewer checks
+the controller's finding and records its classification, owner, and reduction
+or exception plan in the durable audit or linked issue record, even if another
+finding already needs correction. When an existing case first reaches or gets
+slower above 1.000 s,
+the controller checks two focused repeats per tree and Python version under
+matching conditions. Its finding reports setup, call, and teardown deltas.
+Missing or mismatched repeat proof blocks a decision that depends on it. One
+slow observation alone does not establish a regression.
+
 The socket has a private directory and a fixed deadline. A read permits at
 most 128 paths, 2 MiB per Git blob, and 16 MiB of combined old and new
 content. A session permits at most 512 requests, 4 MiB of incoming frames,
@@ -499,6 +523,22 @@ On terminal success, the hook saves fixed `py311` and `py314` JUnit snapshots.
 It saves them under the candidate tree in the state root. Each result gives its
 environment, absolute path, SHA-256 digest, and `test_count`. Status reads this
 saved evidence. It never reads checkout XML or runs the hook again.
+
+For serial work, the controller supplies the checked baseline commit and
+canonical changed paths with `--baseline-sha` and `--changed-path`. Applied
+serial validation rejects an empty changed-path list before the hook starts.
+The candidate hook uses an explicit seed. After it succeeds, the controller
+runs the full baseline suite from a private detached checkout of that commit
+with the same seed and prepared environments. It
+compares complete JUnit case inventories for `py311` and `py314`, then runs
+bounded focused checks where a case needs timing diagnosis. The private
+transcript binds the source trees, JUnit digests and counts, case findings,
+and setup, call, and teardown changes. A serial status read verifies the
+saved transcript against its digest without rerunning tests. Missing or
+changed proof fails closed. A status read or retry cannot bypass the timing
+baseline identity saved for that candidate. Status also checks the saved timing
+transcript before it reports success. The worker sees bounded timing findings
+and proof identities, with no private paths.
 
 Capture clears source artifacts before and after the hook. It fails closed if
 cleanup fails or the full set is missing, bad, or cannot be saved. The session

@@ -22,6 +22,7 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .test_timing import safe_timing_case_id
 from .validation import is_safe_junit_test_name
 
 _MAX_ARTIFACT_BYTES = 1_048_576
@@ -166,9 +167,12 @@ def _junit_cases(
         test_name = case.get("name", "")
         if not classname.startswith("tests."):
             raise ValueError("unsafe JUnit class")
-        name = _canonical_test_id(f"{classname.replace('.', '/')}.py::{test_name}")
-        if name is None or name in cases:
-            raise ValueError("unsafe or duplicate JUnit test ID")
+        try:
+            name = safe_timing_case_id(classname, test_name)
+        except ValueError as error:
+            raise ValueError("unsafe JUnit test ID") from error
+        if name in cases:
+            raise ValueError("duplicate JUnit test ID")
         cases[name] = _seconds(case.get("time", ""))
         if len(cases) > max_cases:
             raise ValueError("too many JUnit cases")

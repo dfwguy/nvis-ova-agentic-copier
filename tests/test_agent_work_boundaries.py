@@ -5113,3 +5113,177 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
             == prepared
         )
         assert any(_git_arguments(call)[:2] == ("fetch", "origin") for call in calls)
+
+
+def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
+    tmp_path: Path,
+) -> None:
+    baseline_sha = "a" * 40
+    candidate_tree = "b" * 40
+    observed_commands: list[tuple[str, ...]] = []
+    report: dict[str, object] = {
+        "candidate_tree": candidate_tree,
+        "state": "terminal-success",
+        "exit_code": 0,
+        "junit_artifacts": [],
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "junit_timings": [],
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        observed_commands.append(command)
+        return CommandResult(
+            0,
+            candidate_tree if command[-1] == "write-tree" else json.dumps(report),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return baseline_sha
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("tests/test_speed.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return candidate_tree
+
+    with pytest.raises(RepositoryError, match="timing proof"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path,
+            candidate_tree,
+            base_sha=baseline_sha,
+            changed_paths=("tests/test_speed.py",),
+            action="validate",
+            timeout_seconds=30,
+            timing_review_required=True,
+        )
+
+    validation_command = next(
+        command for command in observed_commands if "validation" in command
+    )
+    assert validation_command[validation_command.index("--baseline-sha") + 1] == (
+        baseline_sha
+    )
+
+    class_case = "tests/test_speed.py::TestWidget::test_existing"
+    hashed_class_case = f"{class_case}[param_{'a' * 64}]"
+    report["timing_review"] = {
+        "baseline_sha": baseline_sha,
+        "baseline_tree": "c" * 40,
+        "candidate_tree": candidate_tree,
+        "outcome": "correction_required",
+        "transcript_sha256": "d" * 64,
+        "runs": {
+            environment: {
+                source: {
+                    "sha256": "e" * 64,
+                    "test_count": 2,
+                    "timing_complete": True,
+                }
+                for source in ("baseline", "candidate")
+            }
+            for environment in ("py311", "py314")
+        },
+        "findings": [
+            {
+                "environment": "py311",
+                "name": "tests/test_speed.py::test_existing",
+                "reason": "corroborated_regression",
+                "phase_deltas": {"setup": 0.0, "call": 0.8, "teardown": 0.0},
+            },
+            {
+                "environment": "py314",
+                "name": hashed_class_case,
+                "reason": "inherited_slow",
+                "phase_deltas": None,
+            },
+        ],
+    }
+    report["junit_artifacts"] = [
+        {
+            "environment": environment,
+            "path": str(tmp_path / f"private-{environment}.xml"),
+            "sha256": "e" * 64,
+            "test_count": 2,
+        }
+        for environment in ("py311", "py314")
+    ]
+    report["junit_timings"] = [
+        {
+            "environment": "py314",
+            "total_seconds": 1.1,
+            "slowest_cases": [
+                {"name": class_case, "seconds": 0.7},
+                {"name": hashed_class_case, "seconds": 0.4},
+            ],
+            "timing_complete": True,
+            "over_100ms_cases": [
+                {"name": class_case, "seconds": 0.7},
+                {"name": hashed_class_case, "seconds": 0.4},
+            ],
+        }
+    ]
+    observed = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path,
+        candidate_tree,
+        base_sha=baseline_sha,
+        changed_paths=("tests/test_speed.py",),
+        action="validate",
+        timeout_seconds=30,
+        timing_review_required=True,
+    )
+
+    assert observed["timing_review"] == report["timing_review"]
+    assert (
+        cast(list[dict[str, object]], observed["junit_timings"])[0]["over_100ms_cases"]
+        == cast(list[dict[str, object]], report["junit_timings"])[0]["over_100ms_cases"]
+    )
+
+    report["junit_timings"] = [
+        {
+            "environment": "py314",
+            "total_seconds": 0.4,
+            "slowest_cases": [
+                {"name": "tests.test_speed::test_existing", "seconds": 0.4}
+            ],
+            "timing_complete": True,
+            "over_100ms_cases": [
+                {"name": "tests.test_speed::test_existing", "seconds": 0.4}
+            ],
+        }
+    ]
+    interactive = ObservedRepository(_config(tmp_path), run).judge_candidate(
+        tmp_path,
+        candidate_tree,
+        base_sha=baseline_sha,
+        changed_paths=("tests/test_speed.py",),
+        action="validate",
+        timeout_seconds=30,
+    )
+    assert (
+        cast(list[dict[str, object]], interactive["junit_timings"])[0][
+            "over_100ms_cases"
+        ]
+        == cast(list[dict[str, object]], report["junit_timings"])[0]["over_100ms_cases"]
+    )
+
+    timing = cast(dict[str, object], report["timing_review"])
+    runs = cast(dict[str, object], timing["runs"])
+    del runs["py314"]
+    with pytest.raises(RepositoryError, match="timing proof"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path,
+            candidate_tree,
+            base_sha=baseline_sha,
+            changed_paths=("tests/test_speed.py",),
+            action="validate",
+            timeout_seconds=30,
+            timing_review_required=True,
+        )

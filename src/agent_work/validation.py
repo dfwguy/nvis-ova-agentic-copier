@@ -28,6 +28,7 @@ from xml.etree import ElementTree
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandResult, CommandRunner
+from .test_timing import is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
 
 _TREE = re.compile(r"^[0-9a-f]{40}$")
@@ -230,7 +231,9 @@ class _PersistedSlowCase(BaseModel):
     seconds: float = Field(ge=0, le=1_000_000)
 
     def model_post_init(self, _context: object) -> None:
-        if not is_safe_junit_test_name(self.name):
+        if not (
+            is_safe_junit_test_name(self.name) or is_safe_timing_case_id(self.name)
+        ):
             raise ValueError("invalid slow test name")
 
 
@@ -266,6 +269,7 @@ class ArtifactFailure:
         "post_hook_success_evidence_read",
         "post_hook_success_cleanup",
         "immutable_snapshot",
+        "timing_review",
     ]
     reason: Literal[
         "os_error",
@@ -274,6 +278,7 @@ class ArtifactFailure:
         "oversized",
         "invalid_count",
         "invalid_snapshot",
+        "invalid_timing",
     ]
     environment: Literal["py311", "py314"] | None
     path: Path | None
@@ -288,6 +293,7 @@ class _PersistedArtifactFailure(BaseModel):
         "post_hook_success_evidence_read",
         "post_hook_success_cleanup",
         "immutable_snapshot",
+        "timing_review",
     ]
     reason: Literal[
         "os_error",
@@ -296,6 +302,7 @@ class _PersistedArtifactFailure(BaseModel):
         "oversized",
         "invalid_count",
         "invalid_snapshot",
+        "invalid_timing",
     ]
     environment: Literal["py311", "py314"] | None = None
     path: str | None = None
@@ -308,12 +315,19 @@ class _PersistedArtifactFailure(BaseModel):
             and self.path != f"test-results-{self.environment}.xml"
         ):
             raise ValueError("invalid fixed artifact path")
-        if self.environment is None and self.stage != "immutable_snapshot":
+        if self.environment is None and self.stage not in {
+            "immutable_snapshot",
+            "timing_review",
+        }:
             raise ValueError("missing fixed artifact path")
         if self.reason == "invalid_snapshot" and (
             self.stage != "immutable_snapshot" or self.environment is not None
         ):
             raise ValueError("invalid snapshot reason")
+        if self.reason == "invalid_timing" and (
+            self.stage != "timing_review" or self.environment is not None
+        ):
+            raise ValueError("invalid timing review reason")
 
 
 class _Record(BaseModel):
@@ -334,6 +348,12 @@ class _Record(BaseModel):
     elapsed_seconds: float | None = Field(default=None, ge=0, le=10_800)
     junit_timings: tuple[_PersistedJUnitTiming, ...] = Field(default=(), max_length=2)
     artifact_failure: _PersistedArtifactFailure | None = None
+    requested_baseline_tree: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    requested_baseline_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    timing_baseline_tree: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    timing_transcript_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
 
     def model_post_init(self, _context: object) -> None:
         terminal = self.state in {
@@ -362,6 +382,12 @@ class _Record(BaseModel):
             raise ValueError("post-hook artifact failure requires a hook exit")
         if self.state == "terminal-success" and self.returncode != 0:
             raise ValueError("success requires zero exit")
+        if (self.timing_baseline_tree is None) != (
+            self.timing_transcript_sha256 is None
+        ) or (
+            self.state != "terminal-success" and self.timing_baseline_tree is not None
+        ):
+            raise ValueError("invalid timing proof identity")
         if self.state == "terminal-failure" and self.returncode == 0:
             raise ValueError("failure requires nonzero exit")
         if self.diagnostic is not None:
@@ -499,6 +525,17 @@ class JudgeValidationDependencies:
     atomic_write_retry_record: Callable[[str, dict[str, object]], None] = (
         lambda _tree, _record: None
     )
+    timing_review_required: bool = False
+    expected_baseline_tree: str | None = None
+    expected_baseline_sha: str | None = None
+    capture_timing_review: Callable[
+        [str, tuple[tuple[str, bytes, int], ...], str], Mapping[str, object] | None
+    ] = lambda _tree, _artifacts, _output: None
+    read_timing_transcript: Callable[[str], Mapping[str, object] | None] = (
+        lambda _tree: None
+    )
+    hook_environment: Mapping[str, str] | None = None
+    verify_candidate_source: Callable[[str], bool] = lambda _tree: True
 
 
 def _valid_tree(value: str) -> bool:
@@ -748,7 +785,7 @@ def _unusable_artifact_reason(artifact: bytes | None) -> str:
 
 
 def _junit_timing_summary(
-    environment: Literal["py311", "py314"], artifact: bytes
+    environment: Literal["py311", "py314"], artifact: bytes, *, serial: bool = False
 ) -> _PersistedJUnitTiming | None:
     """Summarize safe per-test time from one already bounded JUnit artifact."""
     try:
@@ -779,7 +816,14 @@ def _junit_timing_summary(
             return None
         raw_name = case.get("name", "")
         raw_class = case.get("classname", "")
-        name = _safe_timing_case_name(raw_class, raw_name)
+        try:
+            name = (
+                safe_timing_case_id(raw_class, raw_name)
+                if serial
+                else _safe_timing_case_name(raw_class, raw_name)
+            )
+        except ValueError:
+            name = None
         if name is None or len(name.encode("utf-8")) > MAX_TIMING_CASE_NAME_BYTES:
             timing_complete = False
             continue
@@ -1125,11 +1169,88 @@ def _write_terminal(
     candidate_tree: str, record: _Record, dependencies: JudgeValidationDependencies
 ) -> JudgeValidationReport:
     """Persist a terminal record and project its bounded public report."""
+    if dependencies.timing_review_required:
+        baseline_tree = dependencies.expected_baseline_tree
+        if baseline_tree is None or not _valid_tree(baseline_tree):
+            raise JudgeValidationError("timing baseline tree is invalid")
+        record = _Record.model_validate(
+            record.model_dump(exclude_none=True)
+            | {
+                "requested_baseline_tree": baseline_tree,
+                **(
+                    {"requested_baseline_sha": dependencies.expected_baseline_sha}
+                    if dependencies.expected_baseline_sha is not None
+                    else {}
+                ),
+            }
+        )
     dependencies.atomic_write_record(
         candidate_tree,
         record.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
     )
     return _report(candidate_tree, applied=True, action="ran", record=record)
+
+
+def _timing_transcript_digest(
+    transcript: Mapping[str, object] | None,
+    *,
+    baseline_tree: str,
+    candidate_tree: str,
+    baseline_sha: str | None = None,
+) -> str:
+    """Validate a bounded source pair and bind its private transcript by digest."""
+    if (
+        transcript is None
+        or transcript.get("baseline_tree") != baseline_tree
+        or transcript.get("candidate_tree") != candidate_tree
+        or baseline_sha is not None
+        and transcript.get("baseline_sha") != baseline_sha
+        or transcript.get("outcome")
+        not in {
+            "clear",
+            "report_only",
+            "correction_required",
+        }
+    ):
+        raise JudgeValidationError("timing transcript source pair is invalid")
+    try:
+        payload = json.dumps(
+            transcript, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise JudgeValidationError("timing transcript is malformed") from error
+    if len(payload) > 4_194_304:
+        raise JudgeValidationError("timing transcript exceeds bound")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _timing_artifacts_match(
+    transcript: Mapping[str, object] | None,
+    artifacts: tuple[_PersistedJUnitArtifact, ...],
+) -> bool:
+    """Bind private candidate full-run summaries to immutable JUnit snapshots."""
+    if transcript is None or len(artifacts) != len(_JUNIT_ARTIFACTS):
+        return False
+    runs = transcript.get("runs")
+    if not isinstance(runs, Mapping) or set(runs) != {"py311", "py314"}:
+        return False
+    runs = cast(Mapping[str, object], runs)
+    for artifact in artifacts:
+        pair = runs.get(artifact.environment)
+        if not isinstance(pair, Mapping):
+            return False
+        pair = cast(Mapping[str, object], pair)
+        candidate = pair.get("candidate")
+        if not isinstance(candidate, Mapping):
+            return False
+        candidate = cast(Mapping[str, object], candidate)
+        if (
+            candidate.get("sha256") != artifact.sha256
+            or candidate.get("test_count") != artifact.test_count
+            or candidate.get("timing_complete") is not True
+        ):
+            return False
+    return True
 
 
 def run_judge_validation(
@@ -1144,12 +1265,17 @@ def run_judge_validation(
         )
     if dependencies.current_staged_tree() != candidate_tree:
         raise JudgeValidationError("candidate tree is not the current staged tree")
+    if dependencies.timing_review_required and not dependencies.verify_candidate_source(
+        candidate_tree
+    ):
+        raise JudgeValidationError("candidate source is not exact before hook")
     with (
         dependencies.project_admission() as lease,
         dependencies.candidate_lock(candidate_tree),
     ):
         record = _record(candidate_tree, dependencies.read_record(candidate_tree))
         if record is not None:
+            _verify_required_timing(candidate_tree, record, dependencies)
             return _report(
                 candidate_tree, applied=True, action="existing", record=record
             )
@@ -1163,7 +1289,19 @@ def run_judge_validation(
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("candidate tree is not the current staged tree")
         running = _Record(
-            candidate_tree=candidate_tree, schema_version=2, state="running"
+            candidate_tree=candidate_tree,
+            schema_version=2,
+            state="running",
+            requested_baseline_tree=(
+                dependencies.expected_baseline_tree
+                if dependencies.timing_review_required
+                else None
+            ),
+            requested_baseline_sha=(
+                dependencies.expected_baseline_sha
+                if dependencies.timing_review_required
+                else None
+            ),
         )
         dependencies.atomic_write_record(
             candidate_tree,
@@ -1188,7 +1326,11 @@ def run_judge_validation(
         started = dependencies.monotonic_clock()
         hook_command = ("git", "hook", "run", "pre-commit")
         result = (
-            dependencies.run_command(hook_command)
+            dependencies.run_command(
+                hook_command, environment=dependencies.hook_environment
+            )
+            if dependencies.timing_review_required and dependencies.run_hook is None
+            else dependencies.run_command(hook_command)
             if dependencies.run_hook is None
             else dependencies.run_hook(
                 hook_command,
@@ -1321,6 +1463,21 @@ def run_judge_validation(
                 ),
                 dependencies,
             )
+        if (
+            dependencies.timing_review_required
+            and not dependencies.verify_candidate_source(candidate_tree)
+        ):
+            return _write_terminal(
+                candidate_tree,
+                _artifact_failure_record(
+                    candidate_tree,
+                    result.returncode,
+                    elapsed,
+                    stage="timing_review",
+                    reason="invalid_timing",
+                ),
+                dependencies,
+            )
         try:
             paths = dependencies.capture_junit_artifacts(
                 candidate_tree, tuple(captured)
@@ -1366,6 +1523,40 @@ def run_judge_validation(
                 ),
                 dependencies,
             )
+        timing_baseline_tree: str | None = None
+        timing_transcript_sha256: str | None = None
+        if dependencies.timing_review_required:
+            timing_baseline_tree = dependencies.expected_baseline_tree
+            try:
+                if (
+                    timing_baseline_tree is None
+                    or not _valid_tree(timing_baseline_tree)
+                    or timing_baseline_tree == candidate_tree
+                ):
+                    raise JudgeValidationError("timing baseline tree is invalid")
+                transcript = dependencies.capture_timing_review(
+                    candidate_tree, tuple(captured), result.stdout
+                )
+                timing_transcript_sha256 = _timing_transcript_digest(
+                    transcript,
+                    baseline_tree=timing_baseline_tree,
+                    candidate_tree=candidate_tree,
+                    baseline_sha=dependencies.expected_baseline_sha,
+                )
+                if not _timing_artifacts_match(transcript, persisted):
+                    raise JudgeValidationError("timing transcript JUnit pair differs")
+            except (JudgeValidationError, OSError, ValueError, TypeError, RuntimeError):
+                return _write_terminal(
+                    candidate_tree,
+                    _artifact_failure_record(
+                        candidate_tree,
+                        result.returncode,
+                        elapsed,
+                        stage="timing_review",
+                        reason="invalid_timing",
+                    ),
+                    dependencies,
+                )
         return _write_terminal(
             candidate_tree,
             _Record(
@@ -1375,12 +1566,16 @@ def run_judge_validation(
                 returncode=0,
                 junit_artifacts=persisted,
                 elapsed_seconds=elapsed,
+                timing_baseline_tree=timing_baseline_tree,
+                timing_transcript_sha256=timing_transcript_sha256,
                 junit_timings=tuple(
                     summary
                     for environment, artifact, _count in captured
                     if (
                         summary := _junit_timing_summary(
-                            cast(Literal["py311", "py314"], environment), artifact
+                            cast(Literal["py311", "py314"], environment),
+                            artifact,
+                            serial=dependencies.timing_review_required,
                         )
                     )
                     is not None
@@ -1418,6 +1613,17 @@ def retry_judge_validation(
         raise JudgeValidationError("candidate tree is malformed")
     original_raw = dependencies.read_record(candidate_tree)
     original = _record(candidate_tree, original_raw)
+    if original is not None:
+        _verify_required_timing(candidate_tree, original, dependencies)
+    if (
+        dependencies.timing_review_required
+        and original is not None
+        and (
+            original.requested_baseline_tree != dependencies.expected_baseline_tree
+            or original.requested_baseline_sha != dependencies.expected_baseline_sha
+        )
+    ):
+        raise JudgeValidationError("timing baseline changed before retry")
     if (
         original is None
         or original.state != "terminal-artifact-failure"
@@ -1539,4 +1745,42 @@ def observe_judge_validation(
         )
         if record is None:
             raise JudgeValidationError("validation record is missing")
+    _verify_required_timing(candidate_tree, record, dependencies)
     return _report(candidate_tree, applied=False, action="status", record=record)
+
+
+def _verify_required_timing(
+    candidate_tree: str,
+    record: _Record,
+    dependencies: JudgeValidationDependencies,
+) -> None:
+    """Reject changed baseline requests and missing or tampered success proof."""
+    if (
+        record.requested_baseline_tree is not None
+        or record.requested_baseline_sha is not None
+        or record.timing_transcript_sha256 is not None
+    ) and not dependencies.timing_review_required:
+        raise JudgeValidationError("required timing baseline was omitted")
+    if not dependencies.timing_review_required:
+        return
+    if record.requested_baseline_tree != dependencies.expected_baseline_tree:
+        raise JudgeValidationError("required timing baseline changed")
+    if record.requested_baseline_sha != dependencies.expected_baseline_sha:
+        raise JudgeValidationError("required timing baseline commit changed")
+    if record.state == "terminal-success":
+        baseline_tree = dependencies.expected_baseline_tree
+        transcript = dependencies.read_timing_transcript(candidate_tree)
+        if (
+            baseline_tree is None
+            or record.timing_baseline_tree != baseline_tree
+            or record.timing_transcript_sha256 is None
+            or not _timing_artifacts_match(transcript, record.junit_artifacts)
+            or _timing_transcript_digest(
+                transcript,
+                baseline_tree=baseline_tree,
+                candidate_tree=candidate_tree,
+                baseline_sha=dependencies.expected_baseline_sha,
+            )
+            != record.timing_transcript_sha256
+        ):
+            raise JudgeValidationError("required timing transcript is unavailable")

@@ -65,11 +65,16 @@ You review one exact tree. Do not edit files.
 3. For interactive work, run `git write-tree` again. Reject tree or worktree
    drift. For serial work, require the trusted unchanged-tree proof. Reject
    new paths or missing proof.
-4. For interactive work, record immutable absolute JUnit file paths, SHA-256
-   hashes, and test counts for each supported version. For serial work, use
-   only the opaque proof ID and bounded JUnit counts, hashes, and time data
-   from trusted code.
-   Do not ask for private JUnit files or state-root paths. The hook runs Ruff,
+4. For interactive work, record immutable absolute candidate JUnit paths,
+   SHA-256 hashes, and test counts for Python 3.11 and 3.14. For serial work,
+   require `timing_review` with baseline SHA/tree, candidate tree, transcript
+   digest, outcome, both versions' baseline/candidate run digests, counts, and
+   `timing_complete` flags, plus bounded findings and phase deltas. The
+   candidate `junit_timings` has the complete bounded `over_100ms_cases` list.
+   The controller privately checks full inventories, matching environment,
+   command, and seed, and required exact-source repeats. Missing, partial, or
+   mismatched serial proof is no pass. Do not ask for
+   private JUnit files or state-root paths. The hook runs Ruff,
    format, type, tox, and all other configured checks. Do not run them alone.
    Do not rerun tests.
 5. In interactive work, retain the one full-hook JUnit snapshot for each of
@@ -89,9 +94,10 @@ You review one exact tree. Do not edit files.
    automatic code-caused finding or call mixed timing a pass.
 6. Start `$nonfunctional-review` as your read-only child. Pass the exact tree,
    the proof for this mode, and the interactive comparator report when
-   applicable. Wait for its full result. Return both results to Green before
-   other reviews start. Serial work retains only its trusted candidate timing
-   proof; do not imply that it has baseline runs or phase logs.
+   applicable. For serial work, pass both source trees and the trusted
+   `timing_review`, including its baseline and candidate proof and bounded
+   phase findings. Wait for the full result. Return both results to Green
+   before other reviews start.
 
 For reconciliation, name two proofs. One rechecks the saved Red to source
 history. The other checks the new source and target merge. Keep them apart.

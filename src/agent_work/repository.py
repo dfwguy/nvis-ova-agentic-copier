@@ -40,6 +40,7 @@ from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
+from .test_timing import is_safe_timing_case_id
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
     MAX_TIMING_CASE_NAME_BYTES,
@@ -1309,6 +1310,7 @@ class GitRepository:
         changed_paths: tuple[str, ...],
         action: str,
         timeout_seconds: int,
+        timing_review_required: bool = False,
     ) -> dict[str, object]:
         """Run or observe durable Judge evidence from the trusted checkout."""
         if action not in {"validate", "status"}:
@@ -1322,6 +1324,13 @@ class GitRepository:
                 "run" if action == "validate" else "status",
                 "--candidate-tree",
                 candidate_tree,
+                *(("--baseline-sha", base_sha) if timing_review_required else ()),
+                *(
+                    part
+                    for path in changed_paths
+                    if timing_review_required
+                    for part in ("--changed-path", path)
+                ),
                 *(("--apply",) if action == "validate" else ()),
                 "--json",
             ),
@@ -1391,6 +1400,137 @@ class GitRepository:
             raise RepositoryError("candidate validation state is invalid")
         if (state == "terminal-success") != (result.returncode == 0):
             raise RepositoryError("candidate validation exit is inconsistent")
+        if (
+            timing_review_required
+            and state == "terminal-success"
+            and {item["environment"] for item in safe_artifacts} != {"py311", "py314"}
+        ):
+            raise RepositoryError("candidate timing proof is invalid")
+        timing_review = report.get("timing_review")
+        safe_timing_review: dict[str, object] | None = None
+        if timing_review_required and state == "terminal-success":
+            if (
+                not isinstance(timing_review, dict)
+                or timing_review.get("baseline_sha") != base_sha
+                or timing_review.get("candidate_tree") != candidate_tree
+                or not isinstance(timing_review.get("baseline_tree"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", timing_review["baseline_tree"]) is None
+                or timing_review.get("outcome")
+                not in {
+                    "clear",
+                    "report_only",
+                    "correction_required",
+                }
+                or not isinstance(timing_review.get("transcript_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", timing_review["transcript_sha256"])
+                is None
+            ):
+                raise RepositoryError("candidate timing proof is invalid")
+            runs = timing_review.get("runs")
+            if not isinstance(runs, dict) or set(runs) != {"py311", "py314"}:
+                raise RepositoryError("candidate timing proof is invalid")
+            safe_runs: dict[str, dict[str, dict[str, object]]] = {}
+            for environment, pair in runs.items():
+                if not isinstance(pair, dict) or set(pair) != {"baseline", "candidate"}:
+                    raise RepositoryError("candidate timing proof is invalid")
+                safe_pair: dict[str, dict[str, object]] = {}
+                for source, run in pair.items():
+                    if not isinstance(run, dict):
+                        raise RepositoryError("candidate timing proof is invalid")
+                    digest = run.get("sha256")
+                    count = run.get("test_count")
+                    if (
+                        not isinstance(digest, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                        or not isinstance(count, int)
+                        or isinstance(count, bool)
+                        or not 1 <= count <= 8_192
+                        or run.get("timing_complete") is not True
+                    ):
+                        raise RepositoryError("candidate timing proof is invalid")
+                    safe_pair[source] = {
+                        "sha256": digest,
+                        "test_count": count,
+                        "timing_complete": True,
+                    }
+                safe_runs[environment] = safe_pair
+            safe_findings: list[dict[str, object]] = []
+            findings = timing_review.get("findings")
+            if not isinstance(findings, list) or len(findings) > 128:
+                raise RepositoryError("candidate timing proof is invalid")
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    raise RepositoryError("candidate timing proof is invalid")
+                name = finding.get("name")
+                reason = finding.get("reason")
+                environment = finding.get("environment")
+                deltas = finding.get("phase_deltas")
+                if (
+                    environment not in {"py311", "py314"}
+                    or not isinstance(name, str)
+                    or not is_safe_timing_case_id(name)
+                    or reason
+                    not in {
+                        "new_slow",
+                        "touched_slow",
+                        "inherited_slow",
+                        "corroborated_regression",
+                        "uncorroborated_spike",
+                    }
+                    or deltas is not None
+                    and (
+                        not isinstance(deltas, dict)
+                        or set(deltas) != {"setup", "call", "teardown"}
+                        or any(
+                            not isinstance(value, (int, float))
+                            or isinstance(value, bool)
+                            or not math.isfinite(value)
+                            or abs(value) > 1_000_000
+                            for value in deltas.values()
+                        )
+                    )
+                ):
+                    raise RepositoryError("candidate timing proof is invalid")
+                safe_findings.append(
+                    {
+                        "environment": environment,
+                        "name": name,
+                        "reason": reason,
+                        "phase_deltas": deltas,
+                    }
+                )
+            if len(json.dumps(safe_findings, separators=(",", ":")).encode()) > 65_536:
+                raise RepositoryError("candidate timing proof is invalid")
+            corrective = {"new_slow", "touched_slow", "corroborated_regression"}
+            has_correction = any(
+                finding["reason"] in corrective for finding in safe_findings
+            )
+            if (
+                timing_review["outcome"] == "clear"
+                and safe_findings
+                or timing_review["outcome"] == "correction_required"
+                and not has_correction
+                or timing_review["outcome"] == "report_only"
+                and (not safe_findings or has_correction)
+            ):
+                raise RepositoryError("candidate timing proof is invalid")
+            safe_timing_review = {
+                "baseline_sha": base_sha,
+                "baseline_tree": timing_review["baseline_tree"],
+                "candidate_tree": candidate_tree,
+                "outcome": timing_review["outcome"],
+                "transcript_sha256": timing_review["transcript_sha256"],
+                "runs": safe_runs,
+                "findings": safe_findings,
+            }
+            for artifact in safe_artifacts:
+                environment = str(artifact["environment"])
+                candidate_run = safe_runs[environment]["candidate"]
+                if (
+                    candidate_run["sha256"] != artifact["sha256"]
+                    or candidate_run["test_count"] != artifact["test_count"]
+                ):
+                    raise RepositoryError("candidate timing proof is invalid")
         failed_tests = report.get("failed_tests")
         failed_digests = report.get("failed_junit_digests")
         if (
@@ -1420,6 +1560,11 @@ class GitRepository:
         raw_timings = report.get("junit_timings")
         if not isinstance(raw_timings, list) or len(raw_timings) > 2:
             raise RepositoryError("candidate JUnit timing evidence is invalid")
+        timing_name_is_safe = (
+            is_safe_timing_case_id
+            if timing_review_required
+            else is_safe_junit_test_name
+        )
         safe_timings: list[dict[str, object]] = []
         for item in raw_timings:
             if not isinstance(item, dict) or item.get("environment") not in {
@@ -1451,7 +1596,7 @@ class GitRepository:
                 seconds = case.get("seconds")
                 if (
                     not isinstance(name, str)
-                    or not is_safe_junit_test_name(name)
+                    or not timing_name_is_safe(name)
                     or not isinstance(seconds, (int, float))
                     or not math.isfinite(seconds)
                     or seconds < 0
@@ -1467,7 +1612,7 @@ class GitRepository:
                 seconds = case.get("seconds")
                 if (
                     not isinstance(name, str)
-                    or not is_safe_junit_test_name(name)
+                    or not timing_name_is_safe(name)
                     or len(name.encode("utf-8")) > MAX_TIMING_CASE_NAME_BYTES
                     or not isinstance(seconds, (int, float))
                     or not math.isfinite(seconds)
@@ -1521,6 +1666,7 @@ class GitRepository:
                 "failed_junit_digests",
                 "elapsed_seconds",
                 "junit_timings",
+                "timing_review",
             )
         }
         return {
@@ -1538,6 +1684,7 @@ class GitRepository:
             "failed_junit_digests": failed_digests,
             "elapsed_seconds": elapsed,
             "junit_timings": safe_timings,
+            "timing_review": safe_timing_review,
             "evidence_id": sha256(
                 json.dumps(
                     durable_evidence, sort_keys=True, separators=(",", ":")

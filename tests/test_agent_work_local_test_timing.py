@@ -19,6 +19,8 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+from agent_work.local_test_timing import _junit_cases
+
 BASE_TREE = "a" * 40
 CANDIDATE_TREE = "b" * 40
 SLOW = "tests/test_template.py::test_rendered_project[py-3.11]"
@@ -29,6 +31,19 @@ PARITY = (
     "test_serial_runner_assets_have_exact_root_template_and_generated_parity"
     "[src/agent_work/template_update_publication.py]"
 )
+
+
+def test_junit_class_case_matches_pytest_selector() -> None:
+    artifact = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed.TestCase' "
+        b"name='test_case' time='0.08'/>"
+        b"</testsuite>"
+    )
+
+    assert _junit_cases(artifact, 1) == {
+        "tests/test_speed.py::TestCase::test_case": 0.08
+    }
 
 
 def _xml(times: Mapping[str, float]) -> bytes:

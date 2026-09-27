@@ -32,9 +32,13 @@ trusted status boundary for the same candidate or return to Green for safe
 recovery. The
 durable tree-keyed session prevents duplicate hook runs. A terminal nonzero
 returns to Green. Only terminal zero permits Judge to check the unchanged tree
-and controller-derived JUnit counts, digests, and timing summary bound to an
-opaque evidence identity. Do not request controller-private snapshot paths.
-Delegate `$nonfunctional-review` with this bounded evidence. Return the joined
+and, in serial work, require controller-owned baseline and candidate JUnit
+timing proof for Python 3.11 and 3.14, bound to their exact source trees and
+opaque evidence identities. Use bounded run digests, counts, completeness,
+candidate slow-case data, findings, and transcript outcome. Full inventories
+and exact-source repeats stay private. Missing, partial, or mismatched serial proof is
+no pass. Do not request controller-private snapshot paths. Delegate
+`$nonfunctional-review` with this source-bound evidence. Return the joined
 handoff to Green before specialist review.
 
 For reconciliation, distinguish retained Red-to-source provenance from fresh

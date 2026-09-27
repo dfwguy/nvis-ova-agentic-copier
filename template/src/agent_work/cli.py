@@ -27,7 +27,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -120,6 +120,13 @@ from .timing_admission import (
     run_project_timing_window,
     run_subprocess_child,
     run_supervised_command,
+)
+from .timing_capture import (
+    TimingCaptureDependencies,
+    TimingCaptureError,
+    candidate_source_matches,
+    capture_serial_timing_review,
+    read_serial_timing_transcript,
 )
 from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
 from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
@@ -663,6 +670,18 @@ class _AgentWorkParser(argparse.ArgumentParser):
             and (parsed.candidate_socket is None or parsed.broker_nonce is None)
         ):
             self.error("--apply requires --candidate-socket and --broker-nonce")
+        if getattr(parsed, "resource", None) == "validation" and getattr(
+            parsed, "action", None
+        ) in {"run", "retry", "status"}:
+            if parsed.changed_path and parsed.baseline_sha is None:
+                self.error("--changed-path requires --baseline-sha")
+            if (
+                parsed.action in {"run", "retry"}
+                and parsed.apply
+                and parsed.baseline_sha is not None
+                and not parsed.changed_path
+            ):
+                self.error("--apply with --baseline-sha requires --changed-path")
         return parsed
 
 
@@ -1067,6 +1086,18 @@ def build_parser() -> argparse.ArgumentParser:
     validation_retry_parser.add_argument(
         "--candidate-tree", type=_candidate_tree, required=True
     )
+    for command in (validation_run, validation_status, validation_retry_parser):
+        command.add_argument(
+            "--baseline-sha",
+            type=_candidate_tree,
+            help="trusted serial baseline commit; repeat it for status or retry",
+        )
+        command.add_argument(
+            "--changed-path",
+            action="append",
+            default=[],
+            help="one canonical changed path for serial timing review; repeat as needed",
+        )
     _common(validation_retry_parser, apply_help="run the one permitted cleanup retry")
     handoff = resources.add_parser(
         "review-handoff", help="retain Green's interactive correction ledger"
@@ -1917,7 +1948,7 @@ def main(
         except (OSError, RuntimeError, SystemdSmokeError) as error:
             write_stderr(str(error))
             return 1
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "command": "loop.smoke",
             "applied": True,
@@ -2319,24 +2350,43 @@ def main(
                         yield
 
                 snapshot_store = FilesystemJUnitSnapshotStore(root=state_root)
+                baseline_sha = parsed.baseline_sha
+                if baseline_sha is not None and environment.get("PYTEST_ADDOPTS"):
+                    raise JudgeValidationError(
+                        "ambient pytest options prevent serial seed binding"
+                    )
+                baseline_tree = (
+                    git_read(("git", "rev-parse", f"{baseline_sha}^{{tree}}"))
+                    if baseline_sha is not None
+                    else None
+                )
                 project_identity = (
                     _validation_project_identity(environment)
                     if parsed.action in {"run", "retry"} and parsed.apply
                     else None
                 )
+                active_lease: TimingAdmissionLease | None = None
 
-                def project_admission() -> AbstractContextManager[object]:
+                @contextmanager
+                def project_admission() -> Iterator[object]:
+                    nonlocal active_lease
                     if project_identity is None:
-                        return nullcontext()
+                        yield None
+                        return
                     host, project_id = project_identity
-                    return project_timing_admission(
+                    with project_timing_admission(
                         host=host,
                         project_id=project_id,
                         environment=environment,
                         wait_seconds=30.0,
                         monotonic_clock=time.monotonic,
                         sleeper=sleeper,
-                    )
+                    ) as lease:
+                        active_lease = lease
+                        try:
+                            yield lease
+                        finally:
+                            active_lease = None
 
                 def validation_hook(
                     command: tuple[str, ...], lease: TimingAdmissionLease | None
@@ -2344,14 +2394,76 @@ def main(
                     if run_validation_hook is not None:
                         return run_validation_hook(command, lease)
                     if lease is None:
-                        return run_command(command)
+                        return run_command(
+                            command,
+                            environment=(
+                                dict(environment)
+                                | {
+                                    "PYTEST_ADDOPTS": f"--randomly-seed={int(parsed.candidate_tree[:8], 16)}"
+                                }
+                                if baseline_sha is not None
+                                else None
+                            ),
+                        )
                     result = run_supervised_command(
-                        command, lease=lease, environment=environment
+                        command,
+                        lease=lease,
+                        environment=(
+                            dict(environment)
+                            | {
+                                "PYTEST_ADDOPTS": f"--randomly-seed={int(parsed.candidate_tree[:8], 16)}"
+                            }
+                            if baseline_sha is not None
+                            else environment
+                        ),
                     )
                     return CommandResult(
                         result.returncode, result.stdout, result.stderr
                     )
 
+                process_environment = environment
+
+                def timing_command(
+                    command: tuple[str, ...],
+                    *,
+                    stdin: str | None = None,
+                    current_directory: Path | None = None,
+                    environment: Mapping[str, str] | None = None,
+                    timeout_seconds: float | None = None,
+                ) -> CommandResultProtocol:
+                    if active_lease is None or run_validation_hook is not None:
+                        return run_command(
+                            command,
+                            stdin=stdin,
+                            current_directory=current_directory,
+                            environment=environment,
+                            timeout_seconds=timeout_seconds,
+                        )
+                    if stdin is not None:
+                        raise RuntimeError("timing capture does not support stdin")
+                    result = run_supervised_command(
+                        command,
+                        lease=active_lease,
+                        environment=environment or process_environment,
+                        current_directory=current_directory,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    return CommandResult(
+                        result.returncode, result.stdout, result.stderr
+                    )
+
+                timing_dependencies = (
+                    TimingCaptureDependencies(
+                        run_command=timing_command,
+                        monotonic_clock=time.monotonic,
+                        candidate_worktree=current_checkout(),
+                        state_root=state_root,
+                        environment=environment,
+                        atomic_write=atomic_write,
+                    )
+                    if baseline_sha is not None
+                    else None
+                )
                 validation_dependencies = JudgeValidationDependencies(
                     current_staged_tree=lambda: git_read(("git", "write-tree")),
                     read_record=read_record,
@@ -2382,6 +2494,49 @@ def main(
                     ),
                     read_retry_record=read_retry_record,
                     atomic_write_retry_record=write_retry_record,
+                    timing_review_required=baseline_sha is not None,
+                    expected_baseline_tree=baseline_tree,
+                    expected_baseline_sha=baseline_sha,
+                    hook_environment=(
+                        dict(environment)
+                        | {
+                            "PYTEST_ADDOPTS": (
+                                f"--randomly-seed={int(parsed.candidate_tree[:8], 16)}"
+                            )
+                        }
+                        if baseline_sha is not None
+                        else None
+                    ),
+                    verify_candidate_source=(
+                        lambda tree: (
+                            candidate_source_matches(timing_dependencies, tree)
+                            if timing_dependencies is not None
+                            else True
+                        )
+                    ),
+                    capture_timing_review=(
+                        lambda tree, artifacts, _output: (
+                            capture_serial_timing_review(
+                                baseline_sha=baseline_sha,
+                                candidate_tree=tree,
+                                candidate_artifacts=artifacts,
+                                changed_paths=tuple(parsed.changed_path),
+                                dependencies=timing_dependencies,
+                            )
+                            if baseline_sha is not None
+                            and timing_dependencies is not None
+                            else None
+                        )
+                    ),
+                    read_timing_transcript=(
+                        lambda tree: (
+                            read_serial_timing_transcript(
+                                candidate_tree=tree, dependencies=timing_dependencies
+                            )
+                            if timing_dependencies is not None
+                            else None
+                        )
+                    ),
                 )
                 if parsed.action == "run":
                     validation_run = partial(
@@ -2443,7 +2598,7 @@ def main(
         except (JudgeValidationError, OSError, RuntimeError, ValueError) as error:
             write_stderr(str(error))
             return 1
-        payload = {
+        payload: dict[str, object] = {
             "candidate_tree": report.candidate_tree,
             "applied": report.applied,
             "action": report.action,
@@ -2487,6 +2642,42 @@ def main(
                 for artifact in report.junit_artifacts
             ],
         }
+        if parsed.baseline_sha is not None and report.state == "terminal-success":
+            try:
+                if timing_dependencies is None:
+                    raise JudgeValidationError("serial timing boundary is unavailable")
+                transcript = read_serial_timing_transcript(
+                    candidate_tree=parsed.candidate_tree,
+                    dependencies=timing_dependencies,
+                )
+                if (
+                    transcript is None
+                    or transcript.get("baseline_sha") != parsed.baseline_sha
+                    or transcript.get("candidate_tree") != parsed.candidate_tree
+                ):
+                    raise JudgeValidationError(
+                        "serial timing transcript is unavailable"
+                    )
+                digest = hashlib.sha256(
+                    json.dumps(
+                        transcript,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode()
+                ).hexdigest()
+                payload["timing_review"] = {
+                    "baseline_sha": parsed.baseline_sha,
+                    "baseline_tree": transcript["baseline_tree"],
+                    "candidate_tree": parsed.candidate_tree,
+                    "transcript_sha256": digest,
+                    "outcome": transcript["outcome"],
+                    "runs": transcript["runs"],
+                    "findings": transcript["findings"],
+                }
+            except (JudgeValidationError, TimingCaptureError, KeyError, ValueError):
+                write_stderr("serial timing transcript is unavailable")
+                return 1
         if (failure := getattr(report, "artifact_failure", None)) is not None:
             payload = {
                 **payload,

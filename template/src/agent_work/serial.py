@@ -3408,8 +3408,17 @@ def _execute(
                 changed_paths=validated_candidate_paths,
                 action=action,
                 timeout_seconds=worker_timeout,
+                timing_review_required=True,
             )
-            if report.get("state") == "terminal-success":
+            timing_review = report.get("timing_review")
+            if report.get("state") != "deferred" and pending_deferred_tree == tree:
+                pending_deferred_tree = None
+            if (
+                report.get("state") == "terminal-success"
+                and isinstance(timing_review, dict)
+                and cast(dict[str, object], timing_review).get("outcome")
+                in {"clear", "report_only"}
+            ):
                 successfully_validated_tree = tree
                 pending_deferred_tree = None
             elif action == "validate" and report.get("state") == "deferred":
