@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -87,7 +87,7 @@ The controller keeps selection and recovery safe and visible.
 | Shared gate | The same exact checks protect manual applied runs and timer-driven activations. Default-branch failure stays global. Ownerless MR evidence is non-owning and item-local. A retained inexact claimant remains scheduler-visible for reconciliation, which blocks or repairs if it cannot establish identity. |
 | Repair limits | Resume a failed merge-request pipeline only with a retained owner and exact project, merge-request, branch, current-source-SHA, and worktree evidence. Each owner gets at most three automatic repair attempts. Record a durable 20-minute per-item backoff after each failed attempt. A later activation can scan for another eligible repair or ordinary work. After three failed attempts, quarantine or defer the item for human review. Keep it visible in status and preview, but do not create a loop-wide checkpoint. A failed or canceled default-branch pipeline blocks unrelated work; an ownerless failed or canceled open-MR pipeline stays item-local. |
 | Attributable recovery | Favor visible, attributable recovery over guessing which issue should repair shared or unclear pipeline evidence. The [reference contract](../reference/serial-gitlab-agent-loop.md#preselection-pipeline-gate) defines statuses and exact checks. |
-| Safe diagnostics | For an eligible repair, select one current failed job from the exact pipeline and ignore superseded retries. Read only that job's trace, remove secret-like text and control sequences, and keep a bounded diagnostic. Validate and save it before repair begins, so a restart uses the same verified context. Never pass a raw trace to the ledger, report, or workflow prompt. Missing, ambiguous, stale, or malformed job or trace evidence stops repair; the workflow does not guess, retry, or cancel a job or pipeline. |
+| Safe diagnostics | For an eligible repair, collect up to eight current failed jobs from the exact pipeline and ignore superseded retries. Read each trace in job ID order, remove secret-like text and control sequences, and keep bounded diagnostics. One repair attempt uses all checked diagnostics; a restart reuses the same saved evidence. The workflow sees each diagnostic labeled as untrusted, never a raw trace. More than eight failed jobs, or any missing, stale, or malformed job or trace evidence, stops repair. The workflow does not guess, retry, or cancel a job or pipeline. |
 
 ## The work uses bounded AI sessions.
 

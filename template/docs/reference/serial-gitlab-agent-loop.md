@@ -1153,15 +1153,15 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 
 | Repair inventory | Rule |
 | --- | --- |
-| Before an eligible repair | Read a bounded job inventory for the verified project, merge request, source SHA, and pipeline. Include retry attempts. Ignore failed `retried=true` jobs because a later attempt replaced them. Exactly one current failed `retried=false` job must remain. |
+| Before an eligible repair | Read a bounded job inventory for the verified project, merge request, source SHA, and pipeline. Include retry attempts. Ignore failed `retried=true` jobs because a later attempt replaced them. Require 1–8 current failed `retried=false` jobs. More than eight stops repair before any trace read. Order the current failed jobs by job ID. |
 
 | Evidence step | Required handling |
 | --- | --- |
-| Job trace | Fetch only the selected job's trace. Strip control sequences and secret-like content, then cap the retained diagnostic. |
-| Typed evidence | Bind project, merge request, source SHA, pipeline identity, pipeline SHA and status, and the job's ID, name, stage, status, failure reason, trace provenance, and trace status. |
-| Persistence and restart | Save checked, bounded evidence before the repair workflow. On restart, check and reuse it; give the workflow prompt the same bounded diagnostic. |
+| Job traces | Fetch each current failed job's trace in job ID order. Strip control sequences and secret-like content, then cap each retained diagnostic. A missing or empty trace stops repair. |
+| Typed evidence | Bind project, merge request, source SHA, pipeline identity, pipeline SHA and status, and each job's ID, name, stage, status, failure reason, trace provenance, and trace status. |
+| Persistence and restart | Save all checked, bounded evidence before one repair workflow. The first job uses the existing `diagnostic` field; up to seven more use `additional_diagnostics`. On restart, check and reuse the same ordered, fingerprint-bound evidence. Give the workflow prompt every retained diagnostic, labeled as untrusted. |
 | Excluded data | Raw job traces never enter the ledger, status report, or workflow prompt. |
-| Invalid evidence | A wrong or changing identity or status, multiple or no current failed jobs, an empty trace, or a schema or API failure stops repair without starting a worker. This process never retries or cancels jobs or pipelines. |
+| Invalid evidence | A wrong or changing identity or status, no current failed jobs, more than eight current failed jobs, any missing or empty trace, or a schema or API failure stops repair without starting a worker. The handoff reports that an exact diagnostic is unavailable. This process never retries or cancels jobs or pipelines. |
 
 | Stage | Required order and boundary |
 | --- | --- |

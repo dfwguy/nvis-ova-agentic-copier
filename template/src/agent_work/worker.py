@@ -2210,16 +2210,30 @@ def build_worker_prompt(
     if isinstance(attempt, Mapping):
         safe_attempt = dict(attempt)
         diagnostic = safe_attempt.get("diagnostic")
+        additional = safe_attempt.get("additional_diagnostics", ())
         if isinstance(diagnostic, Mapping):
-            safe_diagnostic = dict(diagnostic)
-            for field in ("job_name", "job_stage", "failure_reason", "trace"):
-                value = safe_diagnostic.get(field)
-                if isinstance(value, str):
-                    safe_diagnostic[field] = sanitize_diagnostic(value)
+            raw_diagnostics = (
+                (diagnostic, *additional)
+                if isinstance(additional, (list, tuple))
+                else (diagnostic,)
+            )
+            safe_diagnostics = []
+            for item in raw_diagnostics:
+                if not isinstance(item, Mapping):
+                    continue
+                safe_diagnostic = dict(item)
+                for field in ("job_name", "job_stage", "failure_reason", "trace"):
+                    value = safe_diagnostic.get(field)
+                    if isinstance(value, str):
+                        safe_diagnostic[field] = sanitize_diagnostic(value)
+                safe_diagnostics.append(safe_diagnostic)
             diagnostic_context = json.dumps(
-                safe_diagnostic, sort_keys=True, separators=(",", ":")
+                safe_diagnostics, sort_keys=True, separators=(",", ":")
             )
             safe_attempt["diagnostic"] = (
+                "[untrusted failed-job evidence rendered below]"
+            )
+            safe_attempt["additional_diagnostics"] = (
                 "[untrusted failed-job evidence rendered below]"
             )
         safe_record["repair_attempt"] = safe_attempt
