@@ -101,3 +101,10 @@ confirmed inherited debt an owner and reduction plan. An integration
 exception needs its case, Python version, reason for cost, owner, plan to
 reduce or review it, and review trigger. It must fit the task budget.
 One run does not set a stable baseline.
+
+In this template's source repository, the case
+`tests/test_template.py::test_copier_update_preserves_legacy_project_context`
+has a human-approved integration exception on Python 3.11 and 3.14. It may
+exceed 1 second because it runs a real Copier update. The maintainer owns this
+exception and reviews it when the Copier or template update path changes, or
+when case timing regresses. Keep reporting the case in the timing inventory.
