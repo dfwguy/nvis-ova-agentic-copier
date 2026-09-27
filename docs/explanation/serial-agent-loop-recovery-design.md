@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -264,16 +264,18 @@ left. Exhaustion follows durable-worktree retry and recovery. Retryable worker
 failures are immediately due and continue. Nonterminal default-branch or exact
 current-MR evidence rechecks in place. Delays are 5, 10, then 20 seconds,
 capped at 30. It resumes when evidence is terminal. The 20-minute timer starts
-only after service inactivity for idle, no eligible work, or no resumable work.
-It never paces an active pipeline wait.
+after the service becomes inactive, including a service-time yield. It never
+paces an active pipeline wait.
 
 Future retries, human or safety blocks, missing, failed, or unrecognized
-evidence, activation deadline, and systemd timeout are durable handoffs. The
-oneshot outer envelope is 190 minutes. It combines the approved 180-minute
-worker budget and ten minutes for checkout, GitLab, publication, and reports.
+evidence, activation deadline, service-time yield, and systemd timeout are
+durable handoffs. The oneshot outer envelope is 190 minutes. It combines the
+approved 180-minute worker budget and ten minutes for checkout, GitLab,
+publication, and reports.
 It bounds hangs without shrinking 10,800-second worker budget. Housekeeping
-has 120-second deadlines. Workers get remaining budget. On expiry, systemd
-ends the control group after 30-second TERM-to-KILL grace. It retains
+has 120-second deadlines. Workers get remaining budget. If the outer limit
+expires, systemd ends the
+control group after 30-second TERM-to-KILL grace. It retains
 `Result=timeout` and journal evidence. This stops hangs predictably. The ledger
 and worktree support retry and diagnosis. The timer owns no workflow state or
 checkout cleanup.

@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -1181,7 +1181,7 @@ project or item is safe to run.
 | Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. For an ordinary terminal handoff, start another applied activation only for `eligible`. Immediately after the exact `activation_complete/pipeline_wait` publication handoff, one preview may start another applied activation for `eligible`, `resume_available`, or `repair_ready`. A top-level `pipeline_wait/pipeline_wait` exits. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
 | Exact failed current-source pipeline | Activate `repair`. Run the repair workflow. Run it in the same applied activation. |
 | Handoff or idle | A future `retry-wait` remains a handoff. A future `time-limit` or `segment-limit` remains a handoff. A human or safety block remains a handoff. Missing, failed, or unrecognized evidence remains a handoff. `idle` means no eligible or resumable work exists. |
-| Timer and scope | `OnUnitInactiveSec=20min` starts only after a genuine idle service exit. It then checks for new work. It is not the active-pipeline polling cadence. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |
+| Timer and scope | `OnUnitInactiveSec=20min` starts after the service exits, including a `service_time_limit` yield. The next timer activation checks for work and may resume retained work. It is not the active-pipeline polling cadence. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |
 
 ## Ledger, worktrees, and audit
 
@@ -1258,6 +1258,7 @@ The oneshot service has a bounded outer limit. `TimeoutStartSec=190min`.
 | Worker budget | Reserve the approved 10,800-second (180-minute) worker budget for the applied `agent-work` call. |
 | Wrapper allowance | Leave 10 minutes for wrapper checkout, GitLab, publication, and reporting. |
 | Housekeeping limit | Non-worker Git, GitLab, `direnv`, and bootstrap calls have a 120-second limit. |
+| Service-window admission | Before each applied loop run, require 10,800 seconds for the next activation plus 120 seconds of housekeeping within the 190-minute window. The clock input defaults to `/proc/uptime`; `AGENT_WORK_UPTIME_FILE` can override it with an absolute, regular, non-symlink file. The first line must end in a newline and contain two nonnegative decimal fields separated by whitespace, each with exactly two fractional digits. An invalid input or backward reading stops with status `2`. If less time remains, print a `service_time_limit` diagnostic on stderr and exit with status `0`. Validated JSON reports remain on stdout; the ledger and worktree remain for the next timer run. |
 | Applied worker limit | Give the worker the time left in its 10,800-second budget. |
 | Timeout action | At the outer limit, systemd sends TERM to the full service control group. It gives TERM 30 seconds before KILL, then kills survivors. |
 | Timeout evidence | The unit journal records `Result=timeout` and relevant sanitized wrapper diagnostics. The durable ledger and retained issue worktree stay in place. Normal retry and human diagnosis use that evidence. |
