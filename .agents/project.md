@@ -18,17 +18,16 @@ importable production code in `src/agent_work/`. Copier contract tests are in
 
 ## Factory objective and project context
 
-This repository owns the primary objective of a running, self-improving
-factory. It allows merge requests that improve that factory. This file owns
-that context. `AGENTS.md` owns portable standing authority, safeguards, and
-human approval and merge boundaries.
+This repository's purpose is
+"a software factory that adds a software factory to other codebases".
+It runs as a self-improving factory and accepts merge
+requests that improve it. This file holds the local context.
 
-For the local recovery scenario in issue #158 and merge request !236, reject
-the proposed 25-file pre-checkpoint migration. It serves a retained snapshot,
-not a state the current workflow can recreate after merge. Reimplement any
-still-needed behavior under the current workflow with authentic Red evidence.
-Do not fabricate a Red checkpoint or weaken recovery safeguards to carry the
-old snapshot forward.
+The Python runner in `src/agent_work/` enforces the serial issue workflow. It
+checks state, identity, and evidence. `AGENTS.md` and the roles set shared
+rules for authority, safety, and agent routing. The live router is
+`.agents/agents/architect.md`. Humans approve and merge requests. This keeps
+portable instructions short.
 
 ## Architecture
 
