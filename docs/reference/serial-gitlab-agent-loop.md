@@ -125,11 +125,11 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
 | `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` makes a test-only Red commit with `--no-verify`. |
-| `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the tree, `--apply` makes the sole normal Green commit; its hook runs the full suite. |
+| `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the exact tree, `--apply` runs its license preflight and shared cheap gate, then makes the sole normal Green commit; its installed hook runs the full suite. |
 | `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
-| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. Serial work adds `--serial-timing`, `--baseline-sha SHA`, and repeatable `--changed-path PATH` for paired timing proof. |
+| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight and shared cheap gate on the exact staged tree before the one full hook run. Serial work adds `--serial-timing`, `--baseline-sha SHA`, and repeatable `--changed-path PATH` for paired timing proof. |
 | `validation retry` | `--candidate-tree TREE` with an eligible saved failure | Bare invocation previews. `--apply` retries pre-hook cleanup, or performs one timing-only retry after a successful hook. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths. |
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths; status checks the saved timing proof or retry result. |
@@ -391,10 +391,10 @@ current tree reviewed. Incomplete coverage, drift, replay, and stale reads
 cannot satisfy finalization.
 
 In coding work, `validate` requires the tree ID and runs the Validation Judge
-while the producer is active. Judge checks that tree's licenses before it
-starts a full-hook session. A license violation, checker error, or malformed
-result fails closed without JUnit cleanup or a hook run. The producer can fix
-the content and stage a new tree. A failed full-hook result returns safe test
+while the producer is active. Judge checks the tree's license, then runs the
+shared cheap gate. Both checks finish before the full hook starts. A failed
+check or tree drift stops before JUnit cleanup or a hook run. The producer can
+fix the files and stage a new tree. A failed full-hook result returns safe test
 names and JUnit digests when available. `status` reads a saved result without
 another hook run. Saved `validate` and `status` results return an opaque evidence ID, test
 counts, digests, and hook time when available. For success, JUnit also gives
@@ -546,12 +546,17 @@ change state or start a hook without `--apply`.
 
 With `--apply`, `validation run` first checks that `TREE` is the current staged
 tree. It runs the read-only license checker against that exact Git tree and
-requires a valid, compliant result. A violation, checker error, malformed
-result, or staged-tree drift ends this attempt before JUnit cleanup and before
-the durable full-hook session. A failed license preflight returns
-`preflight-failure` without saving a session. After fixing a violation, stage a
-new tree and validate it. A passing preflight allows Judge to record the
-session as running.
+requires a valid, compliant result. The shared cheap gate then checks the tree
+in a read-only snapshot. It runs yamllint, ShellCheck when Bash files are
+present, readability for all Markdown, ty, staged Kingfisher, Ruff check, and
+Ruff format check. Ruff uses no cache. A failed check or tree drift stops before
+JUnit cleanup or a full-hook session. A failed check returns
+`preflight-failure` with no saved session. Running the same tree again checks
+the same files. After a fix, stage a new tree. Its checks run again. A preflight
+failure cannot use
+`validation retry` because it has no saved session. Judge records a running
+session only after both checks pass. The full installed hook still decides
+whether the tree passes.
 It invokes exactly one `git hook run pre-commit` command. It then atomically
 records that command's terminal exit code. A terminal-failure record can also
 have the existing bounded, canonical
@@ -636,8 +641,8 @@ match the exact baseline commit and tree, candidate tree, and JUnit pair. The
 retry adds one attempt bound to the original record's SHA-256 digest. It saves
 `running` before capture, then saves the terminal result in that retry record.
 If interrupted, status reports `running`; another apply returns that record
-without capture. The timing retry never reruns the license preflight,
-candidate hook, or candidate full suite. A normal `validation run`
+without capture. The timing retry never reruns the license preflight, cheap
+gate, candidate hook, or candidate full suite. A normal `validation run`
 still returns the original result. Other post-hook failures require a fresh
 candidate tree.
 
@@ -1184,7 +1189,9 @@ evidence to check copied facts when they changed. A missing or rejected read
 blocks finalization. The Documentation Finalizer records the verdict or exact
 not-applicable reason in its existing receipt. Content work has no coding
 Judge hook or JUnit evidence. A correction requires another stage and read
-before the finalizer reviews the new tree.
+before the finalizer reviews the new tree. After other checks and corrections,
+the finalizer checks readability on each changed Markdown file in the exact
+staged tree. It records N/A when no Markdown changed.
 
 ### Preselection pipeline gate
 

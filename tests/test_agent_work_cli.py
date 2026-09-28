@@ -189,6 +189,7 @@ def test_applied_validation_with_project_identity_runs_hook_under_shared_admissi
     commands: list[tuple[str, ...]] = []
     removed: list[Path] = []
     hook_leases: list[TimingAdmissionLease | None] = []
+    gated: list[str] = []
 
     def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         commands.append(command)
@@ -222,10 +223,11 @@ def test_applied_validation_with_project_identity_runs_hook_under_shared_admissi
         hook_leases.append(lease)
         return run(command)
 
-    result = main(
+    result = cast(Callable[..., int], main)(
         ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
         environment=environment,
         run_command=run,
+        candidate_gate=lambda tree: gated.append(tree) or CommandResult(0, "", ""),
         run_validation_hook=run_hook,
         read_validation_artifact=lambda _path: (
             b"<testsuite tests='1' failures='0' errors='0'/>"
@@ -238,6 +240,7 @@ def test_applied_validation_with_project_identity_runs_hook_under_shared_admissi
         host="gitlab.example.test", project_id=276, environment=environment
     )
     assert result == 0
+    assert gated == ["a" * 40]
     assert commands.count(("git", "hook", "run", "pre-commit")) == 1
     assert len(hook_leases) == 1
     assert isinstance(hook_leases[0], TimingAdmissionLease)
@@ -248,6 +251,59 @@ def test_applied_validation_with_project_identity_runs_hook_under_shared_admissi
         Path("test-results-py314.xml"),
     ]
     assert any(path.is_file() for path in project_root.rglob("*"))
+
+
+def test_default_serial_validation_runs_cheap_gate_before_hook(tmp_path: Path) -> None:
+    tree = "a" * 40
+    source = tmp_path / "source"
+    (source / ".git" / "objects").mkdir(parents=True)
+    commands: list[tuple[str, ...]] = []
+    removed: list[Path] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        commands.append(command)
+        if command == ("git", "rev-parse", "--git-dir"):
+            return CommandResult(0, str(source / ".git"), "")
+        if command == ("git", "rev-parse", "--git-common-dir"):
+            return CommandResult(0, ".git", "")
+        if command == ("git", "rev-parse", "HEAD"):
+            return CommandResult(0, "b" * 40, "")
+        if command == ("git", "init", "--quiet"):
+            directory = kwargs["current_directory"]
+            assert isinstance(directory, Path)
+            (directory / ".git" / "objects").mkdir(parents=True)
+        if command == ("git", "write-tree"):
+            return CommandResult(0, tree, "")
+        if command[:2] == (sys.executable, "scripts/check_licenses.py"):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {"schema_version": 1, "outcome": "compliant", "violations": []}
+                ),
+                "",
+            )
+        if command[:2] == ("uv", "run"):
+            return CommandResult(1, "", "yamllint failed")
+        return CommandResult(0, "", "")
+
+    result = main(
+        ["validation", "run", "--candidate-tree", tree, "--apply"],
+        current_checkout=lambda: source,
+        environment={
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "GITLAB_HOST": "git.example.test",
+            "GITLAB_PROJECT_ID": "37",
+        },
+        run_command=run,
+        run_validation_hook=lambda command, _lease: run(command),
+        remove_validation_artifact=removed.append,
+        write_stdout=lambda _message: None,
+    )
+
+    assert result == 1
+    assert any(command[:2] == ("uv", "run") for command in commands)
+    assert ("git", "hook", "run", "pre-commit") not in commands
+    assert removed == []
 
 
 def test_applied_validation_contention_returns_json_deferred_result() -> None:
@@ -1406,9 +1462,10 @@ def test_validation_default_cli_runs_exact_license_preflight_before_hook(
     output: list[str] = []
 
     def invoke() -> int:
-        return main(
+        return cast(Callable[..., int], main)(
             ["validation", "run", "--candidate-tree", tree, "--apply", "--json"],
             run_command=run,
+            candidate_gate=lambda _tree: CommandResult(0, "", ""),
             run_validation_hook=run_hook,
             remove_validation_artifact=removed.append,
             environment={

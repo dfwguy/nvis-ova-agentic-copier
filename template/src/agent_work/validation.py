@@ -61,6 +61,9 @@ _MAX_HOOK_LINES = 4
 _MAX_HOOK_LINE_BYTES = 256
 _MAX_HOOK_FAILURE_BYTES = 4_096
 _HOOK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_CHEAP_GATE_ID = re.compile(
+    r"^(yamllint|shellcheck|readability|ty|kingfisher|ruff-check|ruff-format) failed(?:$|:)"
+)
 _SAFE_PATH = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$")
 _READABILITY_LINE = re.compile(
     r"^(?P<path>[^:\s]+): grade (?P<grade>[0-9]+(?:\.[0-9]+)?)$"
@@ -577,6 +580,7 @@ class JudgeValidationDependencies:
     )
     read_saved_snapshot: Callable[[Path], bytes | None] | None = None
     is_snapshot_symlink: Callable[[Path], bool] = Path.is_symlink
+    check_candidate_gate: Callable[[str], CommandResult] | None = None
 
 
 def _valid_tree(value: str) -> bool:
@@ -644,6 +648,19 @@ def _preflight_failure(
         None,
         (HookFailure("license-check", details),),
     )
+
+
+def license_preflight_compliant(candidate_tree: str, result: object) -> bool:
+    """Accept only the existing bounded license checker success envelope."""
+    return _preflight_failure(candidate_tree, result) is None
+
+
+def cheap_gate_failure_id(result: CommandResult | None) -> str:
+    """Return a fixed check ID without exposing command output."""
+    if result is None or not isinstance(result.stderr, str):
+        return "cheap-gate"
+    match = _CHEAP_GATE_ID.match(result.stderr)
+    return match.group(1) if match is not None else "cheap-gate"
 
 
 def _valid_junit_artifacts(
@@ -1347,6 +1364,34 @@ def run_judge_validation(
         preflight = _preflight_failure(candidate_tree, preflight_result)
         if preflight is not None:
             return preflight
+        try:
+            gate_result = (
+                dependencies.check_candidate_gate(candidate_tree)
+                if dependencies.check_candidate_gate is not None
+                else None
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            gate_result = None
+            gate_failed = True
+        else:
+            gate_failed = gate_result is None or gate_result.returncode != 0
+        if dependencies.current_staged_tree() != candidate_tree:
+            raise JudgeValidationError("staged tree changed during cheap gate")
+        if gate_failed:
+            return JudgeValidationReport(
+                candidate_tree,
+                True,
+                "ran",
+                "preflight-failure",
+                False,
+                None,
+                "cheap candidate gate failed",
+                (
+                    HookFailure(
+                        cheap_gate_failure_id(gate_result), (_FALLBACK_HOOK_LINE,)
+                    ),
+                ),
+            )
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("candidate tree is not the current staged tree")
         running = _Record(

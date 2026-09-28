@@ -92,11 +92,13 @@ clear outcomes. Name one safe next step.
    to check the index against Writer's OID and the judge's OID, if used.
    This check makes no object. Reject any unstaged or untracked maintained
    file. In serial work, do not stage or require an index tree.
-10. Last, run
+10. Check prose last, after all reviews and fixes. Use the final staged
+    tree. Read its snapshot, or check that each input file matches its staged
+    blob. Run
     `uv run python -m agent_work.readability --root . --scope files --paths`
-    with every changed Markdown path. Record the command and result. If no
-    Markdown changed, record readability as N/A. A fix needs a new staged tree
-    and fresh reviews before this last check.
+    with each changed Markdown path in that tree. Record the command, tree
+    OID, and result. If no Markdown changed, record N/A. Any fix needs a new
+    tree. Review it again before this last check.
 
 ## Verdict
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from pydantic import BaseModel, field_validator
 from .domain import sanitize_diagnostic
 from .ports import CommandRunner
 from .repository import CommandResult, RepositoryError, run_subprocess
+from .validation import cheap_gate_failure_id, license_preflight_compliant
 
 
 class InteractiveCommitError(RuntimeError):
@@ -71,6 +73,8 @@ class InteractiveCommitDependencies:
 
     run_git: Callable[[Path, tuple[str, ...]], CommandResult]
     commit_worktree: Callable[[Path, tuple[str, ...]], CommandResult] | None = None
+    run_license_preflight: Callable[[str], CommandResult] | None = None
+    check_candidate_gate: Callable[[str], CommandResult] | None = None
 
 
 @dataclass(frozen=True)
@@ -369,6 +373,27 @@ def commit_interactive_green(
     _tests_frozen(dependencies, worktree, request.red_sha)
     if not apply:
         return InteractiveCommitReport(applied=False, new_commit=None)
+    if dependencies.run_license_preflight is None:
+        raise InteractiveCommitError("license preflight is unavailable")
+    try:
+        license_result = dependencies.run_license_preflight(request.judge_tree)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise InteractiveCommitError("license preflight failed") from error
+    if not license_preflight_compliant(request.judge_tree, license_result):
+        raise InteractiveCommitError("license preflight failed")
+    if dependencies.check_candidate_gate is None:
+        raise InteractiveCommitError("cheap candidate gate is unavailable")
+    try:
+        gate = dependencies.check_candidate_gate(request.judge_tree)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise InteractiveCommitError("cheap candidate gate failed") from error
+    if gate.returncode != 0:
+        raise InteractiveCommitError(f"{cheap_gate_failure_id(gate)} failed")
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        request.judge_tree,
+        "staged Judge tree after cheap gate",
+    )
     if dependencies.commit_worktree is None:
         raise InteractiveCommitError("worktree commit boundary is unavailable")
     if request.message_file is None:

@@ -26,6 +26,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .cheap_gate import check_candidate_gate
 from .gitlab import GitLabMergeRequestPublisher
 from .ledger import XdgProjectLock
 from .models import AgentWorkConfig
@@ -384,6 +385,9 @@ class _DefaultDependencies:
     run_supervised_hook: Callable[..., subprocess.CompletedProcess[str]] = (
         run_supervised_command
     )
+    candidate_gate: Callable[[Path, str, Mapping[str, str]], CommandResult] | None = (
+        None
+    )
 
     def project(self) -> TemplateUpdateProject:
         """Return the already verified numeric project and target."""
@@ -645,6 +649,17 @@ class _DefaultDependencies:
                 sleeper=time.sleep,
             ),
             run_command=self.run_command,
+            check_candidate_gate=lambda candidate: (
+                self.candidate_gate(path, candidate, safe_environment)
+                if self.candidate_gate is not None
+                else check_candidate_gate(
+                    candidate,
+                    source=path,
+                    current_staged_tree=lambda: self._git(path, "write-tree"),
+                    run_command=self.run_command,
+                    environment=safe_environment,
+                )
+            ),
             run_hook=run_hook,
             monotonic_clock=time.monotonic,
             sleeper=time.sleep,
