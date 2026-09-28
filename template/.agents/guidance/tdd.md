@@ -49,7 +49,8 @@ Use explicit stages. Each stage has a distinct role:
   same skill and tier. If that fails, stop before edits. Plans cannot enter
   trusted boundary input.
 - **Implementer** — starts after the applicable policy preparation receipt/N/A
-  and the exact mode-specific Red checkpoint. Writes production and tests only.
+  and exact Red checkpoint. Interactive Green writes production only and never
+  edits tests. Serial Green writes production and tests.
   Shares final interface details with the Diátaxis Writer. Never edits docs,
   README, or agent-policy paths.
 - **Judge** — validates the full cycle. It checks meaningful tests, clean
@@ -60,10 +61,10 @@ Red's evidence file has exact `argv`, `expected_failure`, and normalized changed
 positional test paths or node IDs. Architect checks the receipt, then selects
 the workflow mode.
 
-In interactive work, Main alone stages the approved test paths. It creates a
-local `--no-verify` Red commit. Main keeps its SHA and paths under a named local
-ref and returns them to Architect. It must not push or publish while that
-failing commit is the branch tip.
+In interactive work, Main stages the approved test paths and invokes
+`agent-work interactive-commit red --apply`. The trusted boundary creates and
+retains each test-only `--no-verify` Red commit under a named local ref. Main
+must not push or publish while a failing commit is the branch tip.
 
 Serial workers do not commit. The first workflow segment does Red only. Its
 live owner assembles the `red_checkpoint_ready` intent. It invokes
@@ -80,44 +81,39 @@ request. Only accepted retained evidence may start the resumed segment,
 policy preparation, then concurrent Green and documentation writing. Green inspects the ordinary
 Git diff from that checkpoint before implementation and review.
 
-During implementation, Green runs `uv run ruff check --fix`, `uv run ruff format`,
-and `uv run ty check`. It then runs focused behavior tests. The workflow owner
-waits until Green and the Diátaxis Writer stop editing. In interactive work, Main stages
+Interactive Green runs only `uv run ruff check --fix`, `uv run ruff format`,
+and `uv run ty check`. It checks readability when needed. It runs no tests,
+tox, or pre-commit. Serial Green may run focused tests. It uses its controller.
+The workflow owner waits until Green and the Diátaxis Writer stop editing. In interactive work, Main stages
 their combined exact candidate and records its tree OID. In serial work,
 Green requests staging through the controller-owned boundary while active;
 the controller observes and normalizes the exact worktree's changed paths,
 stages only allowed changes, and returns its tree OID. No model path list
 authorizes serial staging. Repeat the applicable boundary after each correction.
 
-These fast commands are repair tools. Validation verifies the candidate. It
-owns the one expensive tox/full-suite run. In serial work, Judge invokes the
+These fast commands are repair tools. In interactive work, Judge owns the sole
+normal Green commit and installed hook under its role contract. In
+serial work, Judge invokes the
 controller-owned durable validation and status boundary for that exact tree.
 The session runs the installed hook and persists evidence. The controller
 returns an unchanged-tree proof, opaque evidence identity, and trusted
 program-derived JUnit counts, digests, three slowest cases, complete
 `over_100ms_cases` lists, and `timing_complete` flags for each supported local
 Python environment without revealing controller-private snapshot paths.
-Interactive work keeps immutable JUnit
-snapshot paths, SHA-256 digests, and counts. Judge returns its Non-functional
-Reviewer child receipt. Every coding candidate runs the full hook. Only then
-may Green start concurrent specialist reviews. Test Judge verifies the
-Red-to-Green Git diff. During finalization,
-Finalizer checks that diff, checkpoint, and validation proof. In interactive
-work, it creates one final passing commit over the original base. It keeps the
-Red ref. Main publishes only that tip. Its history has one final commit over
-the base before push. Pipeline review
+Judge returns its Non-functional Reviewer child receipt. Only after the
+interactive Green commit or serial validation may concurrent specialist
+reviews start. Test Judge verifies the Red-to-Green Git diff. During
+finalization, Finalizer checks that diff, checkpoint, and validation proof.
+In interactive work, it invokes `agent-work interactive-commit verify` and
+remains read-only. Main publishes only the verified Green tip. Pipeline review
 independently observes the exact-source pipeline.
 
-Finalizer uses one bounded local compaction. Before it acts, it proves the
-passing head, base, Red commit and ref, Judge tree, clean state, ancestry, and
-no remote action. It creates the Judge tree commit with the base as sole parent.
-It atomically compare-and-swaps the branch from the passing head. It then proves
-the new head, parent, tree, unchanged Red ref, and clean state. Any failure stops
-publication.
-
-Recovery reuses the exact retained mode-specific checkpoint; it never rebuilds
+Recovery uses the exact retained checkpoint for the mode. It never rebuilds
 one from prose. No Red checkpoint ref is pushed. Correctness does not depend on
-server-side squash. Serial workers still cannot commit. The trusted controller
+stored Green, role receipts, or session state. Before Green, restart from
+current code, retained Red commits/ref, and the exact issue or MR. An
+actionable finding after interactive Green starts a fresh branch and TDD cycle.
+Never append a correction commit. Serial workers still cannot commit. The trusted controller
 retains its single validated final commit path.
 
 ## Reconciliation of completed coding work
@@ -136,8 +132,8 @@ source and target intent. Fresh validation and reviews cover the combined
 candidate. Judge and Finalizer keep historical Red-to-source proof apart from
 fresh three-way source-plus-target-to-candidate proof. Main supplies freshly
 fetched exact source and target ref proof before finalization. Finalizer checks
-it and local identities. It makes no remote or GitLab calls. It directly commits
-the exact Judge-approved staged tree from the still-pending merge state. This
+it and local identities. It makes no remote or GitLab calls. Main commits the
+exact Judge-approved staged tree from the still-pending merge state. This
 consumes `MERGE_HEAD`. Captured old source is first. Exact target/`MERGE_HEAD`
 is second. Do not create an intermediate passing commit or a sole-parent
 compaction. Postchecks require cleared merge state, a clean index and worktree,
@@ -150,8 +146,9 @@ Keep each proof. Check each result. Keep the tree. Keep the refs. Check the stat
 
 Documentation and README findings return through Architect to the Diátaxis
 Writer. Policy findings return through Architect to the Agent Policy Writer.
-Green consolidates findings but repairs only production and tests. Each
-correction gets a fresh Judge before dependent review.
+In serial work, Green consolidates findings and repairs production and tests. Each
+correction gets a fresh Judge before dependent review. In interactive work,
+post-Green findings use a fresh branch and TDD cycle.
 
 ## Never
 

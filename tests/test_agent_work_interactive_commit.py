@@ -7,624 +7,562 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
-"""Behavior contracts for one guarded interactive passing commit."""
+"""Real Git contracts for retained interactive Red and Green commits."""
 
 from __future__ import annotations
 
-import importlib
-import json
+import hashlib
+import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agent_work.cli import build_parser, main
 from agent_work.repository import CommandResult
 
-BASE_SHA = "a" * 40
-RED_SHA = "b" * 40
-PASSING_SHA = "c" * 40
-JUDGE_TREE = "d" * 40
-NEW_SHA = "e" * 40
-WRONG_SHA = "f" * 40
-BRANCH_REF = "refs/heads/clanker/issue-306"
-RED_REF = "refs/agent-work/red/issue-306"
-PASSING_IDENTITY = (
-    "Passing Author\0author@example.invalid\0"
-    "2026-09-27T08:00:00+00:00\0"
-    "Passing Committer\0committer@example.invalid\0"
-    "2026-09-27T08:01:00+00:00"
-)
+BRANCH = "clanker/issue323-boundary"
+BRANCH_REF = f"refs/heads/{BRANCH}"
+RED_REF = "refs/agent-work/red/issue323-boundary"
+OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
 
-def _cli_argv(tmp_path: Path) -> list[str]:
-    return [
-        "interactive-commit",
-        "compact",
-        "--worktree",
-        str(tmp_path),
-        "--branch-ref",
-        BRANCH_REF,
-        "--base-sha",
-        BASE_SHA,
-        "--red-ref",
-        RED_REF,
-        "--red-sha",
-        RED_SHA,
-        "--passing-sha",
-        PASSING_SHA,
-        "--judge-tree",
-        JUDGE_TREE,
-        "--message-file",
-        str(tmp_path / "message.txt"),
-        "--json",
-    ]
-
-
-def _module() -> Any:
-    return importlib.import_module("agent_work.interactive_commit")
-
-
-def _request(tmp_path: Path, **changes: object) -> Any:
-    (tmp_path / "message.txt").write_text("Compact reviewed change\n")
-    values: dict[str, object] = {
-        "worktree": tmp_path,
-        "branch_ref": BRANCH_REF,
-        "base_sha": BASE_SHA,
-        "red_ref": RED_REF,
-        "red_sha": RED_SHA,
-        "passing_sha": PASSING_SHA,
-        "judge_tree": JUDGE_TREE,
-        "message_file": tmp_path / "message.txt",
+def _environment() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test Author",
+        "GIT_AUTHOR_EMAIL": "author@example.invalid",
+        "GIT_COMMITTER_NAME": "Test Committer",
+        "GIT_COMMITTER_EMAIL": "committer@example.invalid",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.fsync",
+        "GIT_CONFIG_VALUE_0": "none",
     }
-    values.update(changes)
-    return _module().InteractiveCommitRequest(**values)
 
 
-class FakeGit:
-    """Model only the observable Git identities and mutations in the protocol."""
-
-    def __init__(
-        self,
-        *,
-        stale: str | None = None,
-        cas_fails: bool = False,
-        identity_text: str = PASSING_IDENTITY,
-    ) -> None:
-        self.stale = stale
-        self.cas_fails = cas_fails
-        self.commands: list[tuple[str, ...]] = []
-        self.head = PASSING_SHA
-        self.branch = PASSING_SHA
-        self.red = RED_SHA
-        self.clean = True
-        self.identity_text = identity_text
-
-    def __call__(self, _worktree: Path, argv: tuple[str, ...]) -> CommandResult:
-        self.commands.append(argv)
-        command = tuple(argv)
-        if "commit-tree" in command:
-            assert command == (
-                "commit-tree",
-                JUDGE_TREE,
-                "-p",
-                BASE_SHA,
-                "-F",
-                str(_worktree / "message.txt"),
-            )
-            return CommandResult(0, NEW_SHA + "\n", "")
-        if "update-ref" in command:
-            assert command == ("update-ref", BRANCH_REF, NEW_SHA, PASSING_SHA)
-            if self.cas_fails:
-                return CommandResult(1, "", "cannot lock ref")
-            self.branch = NEW_SHA
-            self.head = NEW_SHA
-            return CommandResult(0, "", "")
-        if "symbolic-ref" in command:
-            return CommandResult(0, BRANCH_REF + "\n", "")
-        if "status" in command or ("diff" in command and "--quiet" in command):
-            if (
-                self.stale == "dirty"
-                or not self.clean
-                or (self.stale == "after_dirty" and self.head == NEW_SHA)
-            ):
-                return CommandResult(0, " M src/agent_work/cli.py\n", "")
-            return CommandResult(0, "", "")
-        if "merge-base" in command:
-            return CommandResult(1 if self.stale == "ancestor" else 0, "", "")
-        if "show" in command and "--format=%P" in command:
-            if RED_SHA in command or RED_REF in command:
-                parent = WRONG_SHA if self.stale == "red_parent" else BASE_SHA
-                return CommandResult(0, parent + "\n", "")
-            if self.stale == "after_parent":
-                return CommandResult(0, WRONG_SHA + "\n", "")
-            return CommandResult(0, BASE_SHA + "\n", "")
-        if "show" in command and "--format=%T" in command:
-            tree = (
-                WRONG_SHA
-                if self.stale == "tree"
-                or (self.stale == "after_tree" and self.head == NEW_SHA)
-                else JUDGE_TREE
-            )
-            return CommandResult(0, tree + "\n", "")
-        if "show" in command and any("%an%x00%ae" in part for part in command):
-            if command[-1] != PASSING_SHA:
-                return CommandResult(1, "", "identity must come from passing commit")
-            return CommandResult(0, self.identity_text + "\n", "")
-        if "rev-list" in command or "show" in command:
-            if RED_SHA in command or RED_REF in command:
-                parent = WRONG_SHA if self.stale == "red_parent" else BASE_SHA
-                return CommandResult(0, f"{RED_SHA} {parent}\n", "")
-            if self.head == NEW_SHA:
-                return CommandResult(0, f"{NEW_SHA} {BASE_SHA}\n", "")
-            return CommandResult(0, f"{PASSING_SHA} {BASE_SHA}\n", "")
-        if "rev-parse" in command:
-            revision = command[-1]
-            if revision == "MERGE_HEAD":
-                return CommandResult(
-                    0, RED_SHA if self.stale == "merge_head" else "", ""
-                )
-            if revision in {"HEAD", "HEAD^{commit}"}:
-                head = (
-                    WRONG_SHA
-                    if self.stale == "head"
-                    or (self.stale == "after_head" and self.head == NEW_SHA)
-                    else self.head
-                )
-                return CommandResult(0, head + "\n", "")
-            if revision in {BRANCH_REF, f"{BRANCH_REF}^{{commit}}"}:
-                branch = (
-                    WRONG_SHA
-                    if self.stale == "branch"
-                    or (self.stale == "after_branch" and self.head == NEW_SHA)
-                    else self.branch
-                )
-                return CommandResult(0, branch + "\n", "")
-            if revision in {RED_REF, f"{RED_REF}^{{commit}}"}:
-                red = (
-                    WRONG_SHA
-                    if self.stale == "red_ref"
-                    or (self.stale == "after_red_ref" and self.head == NEW_SHA)
-                    else self.red
-                )
-                return CommandResult(0, red + "\n", "")
-            if revision.endswith("^{tree}"):
-                tree = WRONG_SHA if self.stale == "tree" else JUDGE_TREE
-                return CommandResult(0, tree + "\n", "")
-            if revision in {BASE_SHA, RED_SHA, PASSING_SHA, NEW_SHA}:
-                return CommandResult(0, revision + "\n", "")
-        return CommandResult(0, "", "")
-
-    @property
-    def mutations(self) -> list[tuple[str, ...]]:
-        """Return only Git commands that can change repository state."""
-        return [
-            command
-            for command in self.commands
-            if any(
-                part in {"commit-tree", "update-ref", "reset", "checkout", "push"}
-                for part in command
-            )
-        ]
-
-
-def _dependencies(git: FakeGit) -> Any:
-    module = _module()
-
-    def commit_tree(
-        worktree: Path, argv: tuple[str, ...], _identity: Any
-    ) -> CommandResult:
-        return git(worktree, argv)
-
-    return module.InteractiveCommitDependencies(run_git=git, commit_tree=commit_tree)
-
-
-def test_preview_proves_boundary_without_mutating(tmp_path: Path) -> None:
-    git = FakeGit()
-    module = _module()
-
-    report = module.compact_interactive_commit(
-        _request(tmp_path),
-        _dependencies(git),
-        apply=False,
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ("git", "-C", str(repo), *args),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=10,
     )
-
-    assert report.applied is False
-    assert report.new_commit is None
-    assert git.mutations == []
-    assert git.head == PASSING_SHA
-    assert git.red == RED_SHA
+    if check:
+        assert result.returncode == 0, (args, result.stderr)
+    return result.stdout.strip()
 
 
-def test_apply_creates_one_base_parent_commit_and_cas_updates_branch(
-    tmp_path: Path,
-) -> None:
-    git = FakeGit()
-    module = _module()
-
-    report = module.compact_interactive_commit(
-        _request(tmp_path),
-        _dependencies(git),
-        apply=True,
-    )
-
-    assert report.applied is True
-    assert report.new_commit == NEW_SHA
-    assert len(git.mutations) == 2
-    assert "commit-tree" in git.mutations[0]
-    assert JUDGE_TREE in git.mutations[0]
-    assert BASE_SHA in git.mutations[0]
-    assert str(tmp_path / "message.txt") in git.mutations[0]
-    assert git.mutations[1] == ("update-ref", BRANCH_REF, NEW_SHA, PASSING_SHA)
-    assert git.head == NEW_SHA
-    assert git.red == RED_SHA
+def _repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", BRANCH)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "src" / "widget.py").write_text("VALUE = 0\n")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", "README.md", "src/widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "base")
+    return repo, _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize(
-    "stale",
-    (
-        "head",
-        "branch",
-        "red_ref",
-        "red_parent",
-        "tree",
-        "dirty",
-        "ancestor",
-        "merge_head",
-    ),
-)
-def test_failed_precheck_rejects_without_any_mutation(
-    tmp_path: Path, stale: str
-) -> None:
-    git = FakeGit(stale=stale)
-    module = _module()
-
-    with pytest.raises(module.InteractiveCommitError):
-        module.compact_interactive_commit(
-            _request(tmp_path),
-            _dependencies(git),
-            apply=True,
-        )
-
-    assert git.mutations == []
-    assert git.branch == PASSING_SHA
-    assert git.red == RED_SHA
-
-
-def test_failed_compare_and_swap_stops_without_repair(tmp_path: Path) -> None:
-    git = FakeGit(cas_fails=True)
-    module = _module()
-
-    with pytest.raises(module.InteractiveCommitError):
-        module.compact_interactive_commit(
-            _request(tmp_path),
-            _dependencies(git),
-            apply=True,
-        )
-
-    assert len(git.mutations) == 2
-    assert git.mutations[-1] == ("update-ref", BRANCH_REF, NEW_SHA, PASSING_SHA)
-    assert git.branch == PASSING_SHA
-    assert git.red == RED_SHA
-
-
-@pytest.mark.parametrize(
-    "stale",
-    (
-        "after_head",
-        "after_branch",
-        "after_parent",
-        "after_tree",
-        "after_red_ref",
-        "after_dirty",
-    ),
-)
-def test_failed_postcheck_stops_without_repair(tmp_path: Path, stale: str) -> None:
-    git = FakeGit(stale=stale)
-    module = _module()
-
-    with pytest.raises(module.InteractiveCommitError):
-        module.compact_interactive_commit(
-            _request(tmp_path),
-            _dependencies(git),
-            apply=True,
-        )
-
-    assert git.mutations == [
-        (
-            "commit-tree",
-            JUDGE_TREE,
-            "-p",
-            BASE_SHA,
-            "-F",
-            str(tmp_path / "message.txt"),
-        ),
-        ("update-ref", BRANCH_REF, NEW_SHA, PASSING_SHA),
-    ]
-
-
-def test_apply_uses_passing_identity_in_commit_callback(tmp_path: Path) -> None:
-    git = FakeGit()
-    module = _module()
-    captured: list[Any] = []
-
-    def commit_tree(
-        worktree: Path, argv: tuple[str, ...], identity: Any
-    ) -> CommandResult:
-        captured.append(identity)
-        return git(worktree, argv)
-
-    report = module.compact_interactive_commit(
-        _request(tmp_path),
-        module.InteractiveCommitDependencies(run_git=git, commit_tree=commit_tree),
-        apply=True,
-    )
-
-    assert report.new_commit == NEW_SHA
-    assert len(captured) == 1
-    identity = captured[0]
-    assert identity.author_name == "Passing Author"
-    assert identity.author_email == "author@example.invalid"
-    assert identity.author_date == "2026-09-27T08:00:00+00:00"
-    assert identity.committer_name == "Passing Committer"
-    assert identity.committer_email == "committer@example.invalid"
-    assert identity.committer_date == "2026-09-27T08:01:00+00:00"
-    assert [
-        command
-        for command in git.commands
-        if "show" in command and any("%an%x00%ae" in part for part in command)
-    ] == [
-        (
-            "show",
-            "-s",
-            "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
-            PASSING_SHA,
-        )
-    ]
-
-
-@pytest.mark.parametrize("apply", (False, True))
-@pytest.mark.parametrize(
-    "identity_text",
-    (
-        "",
-        "only one field",
-        "A\0B\0C\0D\0E\0",
-        "A\0B\0C\0D\0E\0F\nG",
-        PASSING_IDENTITY.replace("Passing Author", "A" * 257),
-        PASSING_IDENTITY.replace(
-            "2026-09-27T08:00:00+00:00", "2026-02-30T08:00:00+00:00"
-        ),
-        PASSING_IDENTITY.replace(
-            "2026-09-27T08:01:00+00:00", "2026-02-30T08:01:00+00:00"
-        ),
-    ),
-)
-def test_malformed_passing_identity_rejects_before_mutation(
-    tmp_path: Path, identity_text: str, *, apply: bool
-) -> None:
-    git = FakeGit(identity_text=identity_text)
-    module = _module()
-
-    with pytest.raises(module.InteractiveCommitError):
-        module.compact_interactive_commit(
-            _request(tmp_path),
-            _dependencies(git),
-            apply=apply,
-        )
-
-    assert git.mutations == []
-    assert git.branch == PASSING_SHA
-    assert git.red == RED_SHA
-
-
-def test_missing_commit_callback_rejects_at_dependency_boundary() -> None:
-    git = FakeGit()
-    module = _module()
-
-    with pytest.raises(TypeError):
-        module.InteractiveCommitDependencies(run_git=git)
-
-    assert git.mutations == []
-
-
-@pytest.mark.parametrize("field", ("base_sha", "red_sha", "passing_sha", "judge_tree"))
-def test_request_rejects_invalid_object_id(tmp_path: Path, field: str) -> None:
-    with pytest.raises(ValueError):
-        _request(tmp_path, **{field: "not-an-object-id"})
-
-
-@pytest.mark.parametrize("apply", (False, True))
-def test_cli_parser_requires_explicit_inputs_and_selects_apply(
-    tmp_path: Path, *, apply: bool
-) -> None:
-    from agent_work.cli import build_parser
-
-    argv = [
-        "interactive-commit",
-        "compact",
-        "--worktree",
-        str(tmp_path),
-        "--branch-ref",
-        BRANCH_REF,
-        "--base-sha",
-        BASE_SHA,
-        "--red-ref",
-        RED_REF,
-        "--red-sha",
-        RED_SHA,
-        "--passing-sha",
-        PASSING_SHA,
-        "--judge-tree",
-        JUDGE_TREE,
-        "--message-file",
-        str(tmp_path / "message.txt"),
-        "--json",
-    ]
-    args = build_parser().parse_args([*argv, *(["--apply"] if apply else [])])
-
-    assert args.resource == "interactive-commit"
-    assert args.action == "compact"
-    assert args.json is True
-    assert args.apply is apply
-
-
-def test_cli_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    from agent_work.cli import build_parser
-
-    with pytest.raises(SystemExit) as error:
-        build_parser().parse_args(["interactive-commit", "compact", "--help"])
-
-    assert error.value.code == 0
-    assert "--apply" in capsys.readouterr().out
-
-
-def test_cli_missing_required_input_exits_two(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from agent_work.cli import build_parser
-
-    with pytest.raises(SystemExit) as error:
-        build_parser().parse_args(["interactive-commit", "compact"])
-
-    assert error.value.code == 2
-    assert "--worktree" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("apply", (False, True))
-def test_cli_dispatch_uses_injected_git_runner(tmp_path: Path, *, apply: bool) -> None:
-    from agent_work.cli import main
-
-    git = FakeGit()
-    _request(tmp_path)
-    output: list[str] = []
-
-    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
-        assert command[:3] == ("git", "-C", str(tmp_path))
-        assert command[3:5] == ("-c", "core.fsmonitor=false")
-        return git(tmp_path, command[5:])
-
-    code = main(
-        [*_cli_argv(tmp_path), *(["--apply"] if apply else [])],
-        run_command=run,
-        write_stdout=output.append,
-    )
-
-    assert code == 0
-    assert json.loads(output[0]) == {
-        "applied": apply,
-        "new_commit": NEW_SHA if apply else None,
-    }
-    assert len(git.mutations) == (2 if apply else 0)
-
-
-def test_cli_dispatch_reports_proof_and_input_errors(tmp_path: Path) -> None:
-    from agent_work.cli import main
-
-    _request(tmp_path)
-    errors: list[str] = []
-    git = FakeGit(stale="head")
-
-    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
-        return git(tmp_path, command[5:])
-
-    assert main(_cli_argv(tmp_path), run_command=run, write_stderr=errors.append) == 1
-    assert errors and git.mutations == []
-    errors.clear()
-    argv = _cli_argv(tmp_path)
-    argv[argv.index(BASE_SHA)] = "invalid"
-    assert main(argv, run_command=run, write_stderr=errors.append) == 2
-    assert errors and git.mutations == []
-
-
-def test_cli_debug_exposes_proof_error(tmp_path: Path) -> None:
-    from agent_work.cli import main
-
-    _request(tmp_path)
-    git = FakeGit(stale="head")
-
-    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
-        return git(tmp_path, command[5:])
-
-    with pytest.raises(_module().InteractiveCommitError):
-        main([*_cli_argv(tmp_path), "--debug"], run_command=run)
-
-
-def test_real_git_adapter_discards_ambient_config_controls(tmp_path: Path) -> None:
-    module = _module()
-    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+def _invoke(args: list[str]) -> tuple[int, list[str], list[str], list[tuple[str, ...]]]:
+    out: list[str] = []
+    err: list[str] = []
+    commands: list[tuple[str, ...]] = []
 
     def run(command: tuple[str, ...], **kwargs: Any) -> CommandResult:
-        calls.append((command, kwargs["environment"]))
-        return CommandResult(0, "", "")
+        commands.append(command)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=kwargs.get("environment", _environment()),
+            timeout=kwargs.get("timeout_seconds", 30),
+        )
+        return CommandResult(result.returncode, result.stdout, result.stderr)
 
-    poisoned = {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "core.fsmonitor",
-        "GIT_CONFIG_VALUE_0": "evil",
-        "GIT_CONFIG_PARAMETERS": "evil",
-        "GIT_CONFIG_GLOBAL": "/tmp/evil",
-        "GIT_CONFIG_SYSTEM": "/tmp/evil",
-        "GIT_DIR": "/tmp/other",
-        "GIT_INDEX_FILE": "/tmp/other/index",
-        "GIT_AUTHOR_NAME": "Approved Author",
-    }
-    module.run_git(
-        tmp_path, ("status", "--porcelain=v1"), run_command=run, environment=poisoned
-    )
-
-    command, environment = calls[0]
-    assert command[-2:] == ("status", "--porcelain=v1")
-    assert "core.fsmonitor=false" in command
-    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
-    assert environment["GIT_AUTHOR_NAME"] == "Approved Author"
-    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
-    assert not any(name.startswith("GIT_CONFIG_KEY_") for name in environment)
-    assert "GIT_CONFIG_COUNT" not in environment
-    assert "GIT_CONFIG_PARAMETERS" not in environment
-    assert "GIT_DIR" not in environment
-    assert "GIT_INDEX_FILE" not in environment
-
-
-def test_commit_adapter_overrides_ambient_identity(tmp_path: Path) -> None:
-    module = _module()
-    calls: list[dict[str, str]] = []
-
-    def run(_command: tuple[str, ...], **kwargs: Any) -> CommandResult:
-        calls.append(kwargs["environment"])
-        return CommandResult(0, NEW_SHA + "\n", "")
-
-    identity = module.CommitIdentity(
-        author_name="Passing Author",
-        author_email="author@example.invalid",
-        author_date="2026-09-27T08:00:00+00:00",
-        committer_name="Passing Committer",
-        committer_email="committer@example.invalid",
-        committer_date="2026-09-27T08:01:00+00:00",
-    )
-    result = module.run_commit_git(
-        tmp_path,
-        ("commit-tree", JUDGE_TREE, "-p", BASE_SHA),
-        identity,
+    code = main(
+        args,
         run_command=run,
-        environment={
-            "GIT_AUTHOR_NAME": "Wrong Author",
-            "GIT_COMMITTER_NAME": "Wrong Committer",
-            "GIT_CONFIG_GLOBAL": "/tmp/untrusted",
-        },
+        environment=_environment(),
+        write_stdout=out.append,
+        write_stderr=err.append,
+    )
+    return code, out, err, commands
+
+
+def _args(repo: Path, base: str, action: str) -> list[str]:
+    return [
+        "interactive-commit",
+        action,
+        "--worktree",
+        str(repo),
+        "--branch-ref",
+        BRANCH_REF,
+        "--base-sha",
+        base,
+        "--red-ref",
+        RED_REF,
+    ]
+
+
+def _message(tmp_path: Path) -> Path:
+    message = tmp_path / "message.txt"
+    message.write_text("reviewed change\n")
+    return message
+
+
+def _make_red(repo: Path, base: str) -> str:
+    (repo / "tests" / "test_widget.py").write_text(
+        "def test_widget():\n    assert 1 == 2\n"
+    )
+    _git(repo, "add", "tests/test_widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "Red")
+    red = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", red) == f"{red} {base}"
+    _git(repo, "update-ref", RED_REF, red, "")
+    return red
+
+
+def _make_green(repo: Path, red: str) -> tuple[str, str]:
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    tree = _git(repo, "write-tree")
+    _git(repo, "commit", "--no-verify", "-m", "Green")
+    green = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", green) == (f"{green} {red}")
+    return green, tree
+
+
+def _ref(repo: Path, name: str) -> str | None:
+    value = _git(repo, "rev-parse", "-q", "--verify", name, check=False)
+    return value or None
+
+
+def _object_store(repo: Path) -> tuple[tuple[str, str], ...]:
+    git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
+    objects = (
+        git_dir.parent / "objects"
+        if git_dir.name == "worktrees"
+        else git_dir / "objects"
+    )
+    if not objects.exists():
+        common_dir = Path(_git(repo, "rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = repo / common_dir
+        objects = common_dir / "objects"
+    return tuple(
+        (str(path.relative_to(objects)), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(objects.rglob("*"))
+        if path.is_file()
     )
 
-    assert result.stdout.strip() == NEW_SHA
-    assert calls == [
-        {
-            "GIT_AUTHOR_NAME": identity.author_name,
-            "GIT_AUTHOR_EMAIL": identity.author_email,
-            "GIT_AUTHOR_DATE": identity.author_date,
-            "GIT_COMMITTER_NAME": identity.committer_name,
-            "GIT_COMMITTER_EMAIL": identity.committer_email,
-            "GIT_COMMITTER_DATE": identity.committer_date,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_NO_REPLACE_OBJECTS": "1",
-        }
+
+def _state(repo: Path, hook_marker: Path) -> tuple[object, ...]:
+    index = Path(_git(repo, "rev-parse", "--git-path", "index"))
+    if not index.is_absolute():
+        index = repo / index
+    files = tuple(
+        (str(path.relative_to(repo)), path.read_bytes())
+        for path in sorted(repo.rglob("*"))
+        if path.is_file() and ".git" not in path.relative_to(repo).parts
+    )
+    return (
+        _git(repo, "symbolic-ref", "HEAD"),
+        _git(repo, "rev-parse", "HEAD"),
+        _ref(repo, RED_REF),
+        index.read_bytes(),
+        files,
+        hook_marker.read_bytes() if hook_marker.exists() else None,
+    )
+
+
+def _snapshot(repo: Path, hook_marker: Path) -> tuple[object, ...]:
+    return _state(repo, hook_marker), _object_store(repo)
+
+
+def _assert_observational(repo: Path, commands: list[tuple[str, ...]]) -> None:
+    for command in commands:
+        assert command[:5] == (
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "core.fsmonitor=false",
+        )
+        arguments = command[5:]
+        if arguments in {
+            ("symbolic-ref", "HEAD"),
+            ("rev-parse", "-q", "--verify", "MERGE_HEAD"),
+            ("status", "--porcelain=v1", "--untracked-files=all"),
+        }:
+            continue
+        if arguments[:2] == ("rev-parse", "--verify") and len(arguments) == 3:
+            revision = arguments[2]
+            assert revision in {"HEAD", BRANCH_REF, RED_REF} or (
+                revision.endswith("^{tree}")
+                and OBJECT_ID.fullmatch(revision.removesuffix("^{tree}"))
+            )
+            continue
+        if (
+            len(arguments) == 4
+            and arguments[:2] == ("show", "-s")
+            and arguments[2] in {"--format=%P", "--format=%T"}
+        ):
+            assert OBJECT_ID.fullmatch(arguments[3])
+            continue
+        if arguments[:6] == (
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+        ):
+            assert len(arguments) == 7
+            assert OBJECT_ID.fullmatch(arguments[6])
+            continue
+        if (
+            len(arguments) == 6
+            and arguments[:2] == ("diff", "--quiet")
+            and OBJECT_ID.fullmatch(arguments[2])
+            and arguments[3:] == ("--", "tests", "template/tests")
+        ):
+            continue
+        pytest.fail(f"non-observational Git argv: {arguments!r}")
+
+
+def _assert_rejected_without_changes(
+    repo: Path,
+    hook_marker: Path,
+    arguments: list[str],
+    *,
+    observational: bool = False,
+) -> None:
+    before = _snapshot(repo, hook_marker)
+    code, _, _, commands = _invoke(arguments)
+    assert code == 1
+    if observational:
+        _assert_observational(repo, commands)
+    assert _snapshot(repo, hook_marker) == before
+
+
+def _verify_args(repo: Path, base: str, red: str, green: str, tree: str) -> list[str]:
+    return _args(repo, base, "verify") + [
+        "--red-sha",
+        red,
+        "--green-sha",
+        green,
+        "--judge-tree",
+        tree,
     ]
+
+
+def test_interactive_cli_exposes_retained_stages_and_rejects_old_routes() -> None:
+    parser = build_parser()
+    for action in ("red", "green", "verify"):
+        with pytest.raises(SystemExit) as result:
+            parser.parse_args(["interactive-commit", action, "--help"])
+        assert result.value.code == 0
+    for obsolete in (("interactive-commit", "compact"), ("review-handoff",)):
+        with pytest.raises(SystemExit) as result:
+            parser.parse_args([*obsolete, "--help"])
+        assert result.value.code == 2
+
+
+def test_interactive_red_green_apply_and_verify_real_git_history(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    message = _message(tmp_path)
+    test_file = repo / "tests" / "test_widget.py"
+    test_file.write_text("def test_widget():\n    assert 1 == 2\n")
+    _git(repo, "add", "tests/test_widget.py")
+    red_arguments = _args(repo, base, "red") + [
+        "--red-sha",
+        base,
+        "--red-tree",
+        _git(repo, "write-tree"),
+        "--message-file",
+        str(message),
+        "--apply",
+    ]
+
+    code, _, _, commands = _invoke(red_arguments)
+
+    assert code == 0
+    red1 = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", red1) == (f"{red1} {base}")
+    assert _git(repo, "rev-parse", RED_REF) == red1
+    assert any("--no-verify" in command for command in commands)
+
+    test_file.write_text("def test_widget():\n    assert 1 == 3\n")
+    _git(repo, "add", "tests/test_widget.py")
+    red_arguments[red_arguments.index("--red-sha") + 1] = red1
+    red_arguments[red_arguments.index("--red-tree") + 1] = _git(repo, "write-tree")
+    assert _invoke(red_arguments)[0] == 0
+    red2 = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", red2) == (f"{red2} {red1}")
+    assert _git(repo, "rev-parse", RED_REF) == red2
+
+    hook_marker = tmp_path / "hook-runs"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf x >> '{hook_marker}'\n")
+    hook.chmod(0o755)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    tree = _git(repo, "write-tree")
+    green_arguments = _args(repo, base, "green") + [
+        "--red-sha",
+        red2,
+        "--judge-tree",
+        tree,
+        "--message-file",
+        str(message),
+        "--apply",
+    ]
+
+    code, _, _, commands = _invoke(green_arguments)
+
+    assert code == 0
+    green = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", green) == (f"{green} {red2}")
+    assert hook_marker.read_text() == "x"
+    assert not any("--no-verify" in command for command in commands)
+    code, _, _, commands = _invoke(_verify_args(repo, base, red2, green, tree))
+    assert code == 0
+    _assert_observational(repo, commands)
+
+
+@pytest.mark.parametrize("action", ["red", "green"])
+def test_interactive_commit_default_is_dry_run_without_side_effects(
+    tmp_path: Path, action: str
+) -> None:
+    repo, base = _repo(tmp_path)
+    message = _message(tmp_path)
+    hook_marker = tmp_path / "hook-runs"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf x >> '{hook_marker}'\n")
+    hook.chmod(0o755)
+    if action == "red":
+        (repo / "tests" / "test_widget.py").write_text(
+            "def test_widget():\n    assert 1 == 2\n"
+        )
+        _git(repo, "add", "tests/test_widget.py")
+        red = base
+        tree_option = "--red-tree"
+    else:
+        red = _make_red(repo, base)
+        (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+        _git(repo, "add", "src/widget.py")
+        tree_option = "--judge-tree"
+    arguments = _args(repo, base, action) + [
+        "--red-sha",
+        red,
+        tree_option,
+        _git(repo, "write-tree"),
+        "--message-file",
+        str(message),
+    ]
+    before = _state(repo, hook_marker)
+
+    code, _, _, _ = _invoke(arguments)
+
+    assert code == 0
+    assert _state(repo, hook_marker) == before
+
+
+def test_recovered_red_rejects_non_test_successor_before_ref_update(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 7\n")
+    _git(repo, "add", "src/widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "invalid Red successor")
+    invalid = _git(repo, "rev-parse", "HEAD")
+    arguments = _args(repo, base, "red") + [
+        "--red-sha",
+        red,
+        "--red-tree",
+        _git(repo, "rev-parse", "HEAD^{tree}"),
+        "--message-file",
+        str(_message(tmp_path)),
+        "--apply",
+    ]
+
+    _assert_rejected_without_changes(repo, tmp_path / "hook-runs", arguments)
+    assert _git(repo, "rev-parse", "HEAD") == invalid
+    assert _git(repo, "rev-parse", RED_REF) == red
+
+
+def test_green_rejects_preexisting_commit_without_hook_proof(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    green, tree = _make_green(repo, red)
+    hook_marker = tmp_path / "hook-runs"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf x >> '{hook_marker}'\n")
+    hook.chmod(0o755)
+    arguments = _args(repo, base, "green") + [
+        "--red-sha",
+        red,
+        "--judge-tree",
+        tree,
+        "--message-file",
+        str(_message(tmp_path)),
+        "--apply",
+    ]
+    _assert_rejected_without_changes(repo, hook_marker, arguments)
+    assert _git(repo, "rev-parse", "HEAD") == green
+
+
+@pytest.mark.parametrize("test_change", ["staged", "unstaged"])
+def test_green_rejects_test_changes_without_hook(
+    tmp_path: Path, test_change: str
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    test_file = repo / "tests" / "test_widget.py"
+    test_file.write_text("def test_widget():\n    assert 1 == 3\n")
+    if test_change == "staged":
+        _git(repo, "add", "tests/test_widget.py")
+    tree = _git(repo, "write-tree")
+    hook_marker = tmp_path / "hook-runs"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf x >> '{hook_marker}'\n")
+    hook.chmod(0o755)
+    arguments = _args(repo, base, "green") + [
+        "--red-sha",
+        red,
+        "--judge-tree",
+        tree,
+        "--message-file",
+        str(_message(tmp_path)),
+        "--apply",
+    ]
+
+    _assert_rejected_without_changes(repo, hook_marker, arguments)
+    assert not hook_marker.exists()
+
+
+def test_verify_rejects_wrong_green_sole_parent_in_isolation(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    tree = _git(repo, "rev-parse", f"{red}^{{tree}}")
+    wrong_green = _git(repo, "commit-tree", tree, "-p", base, "-m", "wrong parent")
+    _git(repo, "reset", "--hard", wrong_green)
+
+    _assert_rejected_without_changes(
+        repo,
+        tmp_path / "hook-runs",
+        _verify_args(repo, base, red, wrong_green, tree),
+        observational=True,
+    )
+
+
+def test_verify_rejects_checked_out_branch_mismatch_in_isolation(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    green, tree = _make_green(repo, red)
+    _git(repo, "branch", "clanker/other", green)
+    _git(repo, "switch", "clanker/other")
+
+    _assert_rejected_without_changes(
+        repo,
+        tmp_path / "hook-runs",
+        _verify_args(repo, base, red, green, tree),
+        observational=True,
+    )
+
+
+@pytest.mark.parametrize("stale_identity", ["red-ref", "green-sha", "judge-tree"])
+def test_verify_rejects_each_stale_identity_without_writes(
+    tmp_path: Path, stale_identity: str
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    green, tree = _make_green(repo, red)
+    arguments = _verify_args(repo, base, red, green, tree)
+    if stale_identity == "red-ref":
+        _git(repo, "update-ref", RED_REF, base, red)
+    elif stale_identity == "green-sha":
+        arguments[arguments.index("--green-sha") + 1] = base
+    else:
+        arguments[arguments.index("--judge-tree") + 1] = _git(
+            repo, "rev-parse", f"{base}^{{tree}}"
+        )
+
+    _assert_rejected_without_changes(
+        repo,
+        tmp_path / "hook-runs",
+        arguments,
+        observational=True,
+    )
+
+
+def test_verify_uses_only_observational_git_and_writes_nothing(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    green, tree = _make_green(repo, red)
+    hook_marker = tmp_path / "hook-runs"
+    before = _state(repo, hook_marker)
+    objects_before = _object_store(repo)
+
+    code, _, _, commands = _invoke(_verify_args(repo, base, red, green, tree))
+
+    assert code == 0
+    _assert_observational(repo, commands)
+    assert _state(repo, hook_marker) == before
+    assert _object_store(repo) == objects_before
+
+
+def test_verify_rejects_test_changes_in_green_and_each_red_commit(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    red1 = _make_red(repo, base)
+    test_file = repo / "tests" / "test_widget.py"
+    test_file.write_text("def test_widget():\n    assert 1 == 3\n")
+    _git(repo, "add", "tests/test_widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "Red correction")
+    red2 = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", RED_REF, red2, red1)
+    green, tree = _make_green(repo, red2)
+    assert _invoke(_verify_args(repo, base, red2, green, tree))[0] == 0
+
+    _git(repo, "reset", "--hard", red2)
+    test_file.write_text("def test_widget():\n    assert 1 == 4\n")
+    _git(repo, "add", "tests/test_widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "wrong Green")
+    wrong_green = _git(repo, "rev-parse", "HEAD")
+    wrong_tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    _assert_rejected_without_changes(
+        repo,
+        tmp_path / "hook-runs",
+        _verify_args(repo, base, red2, wrong_green, wrong_tree),
+        observational=True,
+    )
+
+    _git(repo, "reset", "--hard", red1)
+    (repo / "src" / "widget.py").write_text("VALUE = 8\n")
+    _git(repo, "add", "src/widget.py")
+    _git(repo, "commit", "--no-verify", "-m", "wrong Red")
+    wrong_red = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", RED_REF, wrong_red, red2)
+    wrong_green, wrong_tree = _make_green(repo, wrong_red)
+    _assert_rejected_without_changes(
+        repo,
+        tmp_path / "hook-runs",
+        _verify_args(repo, base, wrong_red, wrong_green, wrong_tree),
+        observational=True,
+    )

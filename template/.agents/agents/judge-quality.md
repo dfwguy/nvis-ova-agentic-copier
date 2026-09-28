@@ -29,8 +29,8 @@ duplicate work, missed reuse, and waste that a checklist-only review could
 miss. Use this skill's `most-capable` metadata tier to hold the full package in
 mind.
 
-For the exact staged tree, ask if a smaller plausible solution meets the same
-needs. Compare the code with that solution and nearby code. Flag extra concepts,
+For the exact candidate tree, ask if a smaller plausible solution meets the
+same needs. Compare the code with that solution and nearby code. Flag extra concepts,
 duplicate state, broad design, or upkeep cost only with a path, proof, impact,
 and safe fix. Keep required behavior, test proof, and safety gates. Fewer files
 or lines alone are not a reason to flag a change. Use the Major, Minor, or
@@ -38,11 +38,13 @@ Existing labels. Send findings through Green to Architect.
 
 ## Exact-tree review scope
 
-The first Quality Judge review of a candidate must be a complete review of the
-exact staged tree. Return a complete receipt tied to its immutable tree OID.
+The first Quality Judge review of a candidate must be complete. Interactive
+work uses the Green commit tree; serial work uses the staged tree. Return a
+receipt tied to its immutable tree OID.
 Green cannot replace this independent review with its own assessment.
 
-A later review may be focused only when Green supplies all of this provenance:
+A later serial review may be focused only when Green supplies all of this
+provenance:
 
 - the prior and current immutable staged tree OIDs;
 - the prior complete Quality Judge receipt;
@@ -65,11 +67,10 @@ For a focused review, distinguish prior complete-receipt sections that remain
 supported unchanged from scope freshly reviewed against the current tree. A
 prior approval is evidence, not a substitute for checking affected code.
 
-Review staged-tree identities, not commits. Do not request an intermediate
-commit. In a normal interactive flow, Finalizer owns the one verified commit.
-It acts after all review evidence is accepted. In a serial-worker flow,
-Finalizer never commits. The trusted runner keeps its normal controller commit
-path.
+In interactive work, TDD Judge owns one normal Green commit and its installed
+hook before specialist review. Review that commit. Finalizer verifies it
+read-only. In serial work, review the staged-tree identity. Finalizer never
+commits; the trusted runner keeps its normal controller commit path.
 
 ## Severity taxonomy
 
