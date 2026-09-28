@@ -31,7 +31,7 @@ from agent_work.ports import CommandResult as PortCommandResult
 from agent_work.repository import CommandResult
 from agent_work.test_timing import parse_full_junit_records
 from agent_work.timing_admission import TimingAdmissionLease
-from agent_work.timing_capture import FocusedTimingCaptureError
+from agent_work.timing_capture import FocusedTimingCaptureError, TimingCaptureError
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
@@ -1515,6 +1515,474 @@ def test_finding_budget_exhaustion_has_distinct_diagnostic_and_keeps_snapshots()
         ("py311", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
         ("py314", b"<testsuite tests='1' failures='0' errors='0'/>", 1),
     )
+
+
+class _BaselineHookCaptureError(TimingCaptureError):
+    code = "baseline_hook_failed"
+
+
+class _FocusedCommandCaptureError(TimingCaptureError):
+    code = "focused_timing_command_failed"
+
+
+def _failed_serial_timing_session(
+    capture_error: Exception | None = None,
+    snapshot_root: Path = Path("/snapshots"),
+) -> tuple[
+    ValidationStateFake,
+    JudgeValidationDependencies,
+    dict[Path, bytes],
+    list[tuple[str, ...]],
+]:
+    state = ValidationStateFake()
+    dependencies, commands = _dependencies(state)
+    snapshots: dict[Path, bytes] = {}
+    junit = b"<testsuite tests='1' failures='0' errors='0'/>"
+
+    def capture(
+        tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        paths = tuple(
+            snapshot_root / tree / f"test-results-{environment}.xml"
+            for environment, _contents, _count in artifacts
+        )
+        snapshots.update(
+            {
+                path: contents
+                for path, (_environment, contents, _count) in zip(paths, artifacts)
+            }
+        )
+        return paths
+
+    def read(path: Path) -> bytes | None:
+        return (
+            junit
+            if path.name in {"test-results-py311.xml", "test-results-py314.xml"}
+            and not path.is_absolute()
+            else snapshots.get(path)
+        )
+
+    dependencies = replace(
+        dependencies,
+        read_artifact=read,
+        capture_junit_artifacts=capture,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        expected_baseline_sha="c" * 40,
+        capture_timing_review=lambda _tree, _artifacts, _output: (_ for _ in ()).throw(
+            capture_error or OSError("PRIVATE_TOKEN=timing-secret /private/path")
+        ),
+    )
+    result = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert result.state == "terminal-artifact-failure"
+    return state, dependencies, snapshots, commands
+
+
+@pytest.mark.parametrize(
+    ("capture_error", "expected_code"),
+    [
+        (
+            _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook"),
+            "baseline_hook_failed",
+        ),
+        (
+            _FocusedCommandCaptureError("PRIVATE_TOKEN=secret /private/focused"),
+            "focused_timing_command_failed",
+        ),
+        (OSError("PRIVATE_TOKEN=secret /private/path"), "capture_failed"),
+    ],
+)
+def test_timing_capture_failure_has_safe_code_and_preserves_retry_evidence(
+    capture_error: Exception, expected_code: str
+) -> None:
+    state, dependencies, snapshots, commands = _failed_serial_timing_session(
+        capture_error
+    )
+    record = state.records[_CANDIDATE]
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert (
+        record["timing_failure_code"]
+        == getattr(status, "timing_failure_code", None)
+        == expected_code
+    )
+    assert record["candidate_tree"] == status.candidate_tree == _CANDIDATE
+    assert record["requested_baseline_tree"] == _OTHER_CANDIDATE
+    assert record["requested_baseline_sha"] == "c" * 40
+    assert record["returncode"] == status.returncode == 0
+    artifacts = cast(list[dict[str, object]], record["junit_artifacts"])
+    assert {item["environment"] for item in artifacts} == {"py311", "py314"}
+    assert all(Path(cast(str, item["path"])) in snapshots for item in artifacts)
+    assert "PRIVATE_TOKEN" not in str(record)
+    assert "/private/path" not in str(record)
+    assert "/snapshots" not in str(status)
+
+
+def test_status_rejects_forged_timing_failure_code() -> None:
+    state, dependencies, _snapshots, _commands = _failed_serial_timing_session(
+        _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook")
+    )
+    state.records[_CANDIDATE]["timing_failure_code"] = "PRIVATE_TOKEN=/private/path"
+
+    with pytest.raises(JudgeValidationError):
+        observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
+
+
+def test_timing_failure_retains_bounded_detail_and_both_snapshot_identities() -> None:
+    state, dependencies, snapshots, commands = _failed_serial_timing_session()
+    record = state.records[_CANDIDATE]
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert status.artifact_failure is not None
+    assert (status.artifact_failure.stage, status.artifact_failure.reason) == (
+        "timing_review",
+        "invalid_timing",
+    )
+    assert record["requested_baseline_sha"] == "c" * 40
+    assert record["requested_baseline_tree"] == _OTHER_CANDIDATE
+    artifacts = cast(list[dict[str, object]], record["junit_artifacts"])
+    assert {item["environment"] for item in artifacts} == {
+        "py311",
+        "py314",
+    }
+    for item in artifacts:
+        assert (
+            item["sha256"]
+            == hashlib.sha256(snapshots[Path(cast(str, item["path"]))]).hexdigest()
+        )
+        assert item["test_count"] == 1
+    assert "PRIVATE_TOKEN" not in str(record)
+    assert "/private/path" not in str(status)
+    assert "/snapshots" not in str(status)
+
+
+def test_timing_retry_uses_saved_junit_without_rerunning_hook_or_preflight() -> None:
+    state, dependencies, snapshots, commands = _failed_serial_timing_session()
+    original = json.loads(json.dumps(state.records[_CANDIDATE]))
+    retry_records: dict[str, dict[str, object]] = {}
+    captured: list[tuple[tuple[str, bytes, int], ...]] = []
+    transcript = _timing_transcript() | {"baseline_sha": "c" * 40}
+
+    def capture(
+        _tree: str, artifacts: tuple[tuple[str, bytes, int], ...], _output: str
+    ) -> dict[str, object]:
+        captured.append(artifacts)
+        return transcript
+
+    retry_dependencies = replace(
+        dependencies,
+        run_license_preflight=lambda _tree: (_ for _ in ()).throw(
+            AssertionError("preflight reran")
+        ),
+        run_command=lambda _command, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hook reran")
+        ),
+        capture_timing_review=capture,
+        read_timing_transcript=lambda _tree: transcript,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+    )
+    preview = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=False, dependencies=retry_dependencies
+    )
+    assert preview.action == "retry_preview"
+    assert captured == []
+    assert retry_records == {}
+    retried = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    repeated = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=retry_dependencies
+    )
+
+    assert preview.action == "retry_preview"
+    assert retried.action == "retried"
+    assert retried.state == repeated.state == status.state == "terminal-success"
+    assert repeated.action == "existing_retry"
+    assert len(captured) == 1
+    assert captured[0] == tuple(
+        (
+            environment,
+            snapshots[
+                Path("/snapshots") / _CANDIDATE / f"test-results-{environment}.xml"
+            ],
+            1,
+        )
+        for environment in ("py311", "py314")
+    )
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert state.records[_CANDIDATE] == original
+    assert (
+        retry_records[_CANDIDATE]["original_sha256"]
+        == hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def test_timing_retry_succeeds_without_prior_transcript() -> None:
+    state, dependencies, _snapshots, commands = _failed_serial_timing_session()
+    original = json.loads(json.dumps(state.records[_CANDIDATE]))
+    retry_records: dict[str, dict[str, object]] = {}
+    writes: list[str] = []
+    captures: list[tuple[tuple[str, bytes, int], ...]] = []
+    transcript = _timing_transcript() | {"baseline_sha": "c" * 40}
+
+    def write_retry(tree: str, record: dict[str, object]) -> None:
+        retry_records[tree] = record
+        writes.append(cast(str, record["state"]))
+
+    retry_dependencies = replace(
+        dependencies,
+        read_timing_transcript=lambda _tree: None,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=write_retry,
+        capture_timing_review=lambda _tree, artifacts, _output: (
+            captures.append(artifacts) or transcript
+        ),
+        run_command=lambda _command, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hook reran")
+        ),
+    )
+
+    retried = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+
+    assert retried.action == "retried"
+    assert retried.state == "terminal-success"
+    assert retry_records[_CANDIDATE]["state"] == "terminal-success"
+    assert writes == ["running", "terminal-success"]
+    assert len(captures) == 1
+    assert state.records[_CANDIDATE] == original
+    assert commands == [("git", "hook", "run", "pre-commit")]
+
+
+def test_timing_retry_persists_running_before_capture_and_never_recaptures_after_interrupt() -> (
+    None
+):
+    state, dependencies, _snapshots, commands = _failed_serial_timing_session()
+    original = json.loads(json.dumps(state.records[_CANDIDATE]))
+    original_digest = hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    retry_records: dict[str, dict[str, object]] = {}
+    writes: list[dict[str, object]] = []
+    captures: list[object] = []
+
+    def write_retry(tree: str, record: dict[str, object]) -> None:
+        assert tree == _CANDIDATE
+        retry_records[tree] = record
+        writes.append(json.loads(json.dumps(record)))
+
+    def interrupt_capture(
+        _tree: str, _artifacts: tuple[tuple[str, bytes, int], ...], _output: str
+    ) -> dict[str, object]:
+        captures.append(True)
+        assert len(writes) == 1
+        assert writes[0]["state"] == "running"
+        assert writes[0]["original_sha256"] == original_digest
+        raise KeyboardInterrupt
+
+    retry_dependencies = replace(
+        dependencies,
+        read_timing_transcript=lambda _tree: None,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=write_retry,
+        capture_timing_review=interrupt_capture,
+        run_command=lambda _command, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hook reran")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+        )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=retry_dependencies
+    )
+    repeated = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+
+    assert status.state == repeated.state == "running"
+    assert repeated.action == "existing_retry"
+    assert len(captures) == len(writes) == 1
+    assert state.records[_CANDIDATE] == original
+    assert commands == [("git", "hook", "run", "pre-commit")]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "missing",
+        "tampered",
+        "malformed",
+        "staged_tree",
+        "source_tree",
+        "baseline_sha",
+        "baseline_tree",
+        "collision",
+        "existing_transcript",
+        "forged_snapshot_root",
+    ),
+)
+def test_timing_retry_rejects_drift_or_tampered_evidence_without_hook(
+    damage: str,
+) -> None:
+    state, dependencies, snapshots, commands = _failed_serial_timing_session()
+    assert len(cast(list[object], state.records[_CANDIDATE]["junit_artifacts"])) == 2
+    retry_records: dict[str, dict[str, object]] = {}
+    captures: list[object] = []
+    changes: dict[str, object] = {}
+    if damage == "missing":
+        snapshots.pop(next(iter(snapshots)))
+    elif damage == "tampered":
+        snapshots[next(iter(snapshots))] = b"<testsuite tests='2'/>"
+    elif damage == "malformed":
+        snapshots[next(iter(snapshots))] = b"<testsuite"
+    elif damage == "staged_tree":
+        changes["current_staged_tree"] = lambda: _OTHER_CANDIDATE
+    elif damage == "source_tree":
+        changes["verify_candidate_source"] = lambda _tree: False
+    elif damage == "baseline_sha":
+        changes["expected_baseline_sha"] = "d" * 40
+    elif damage == "baseline_tree":
+        changes["expected_baseline_tree"] = "d" * 40
+    elif damage == "existing_transcript":
+        changes["read_timing_transcript"] = lambda _tree: {
+            **_timing_transcript(),
+            "outcome": "report_only",
+        }
+    elif damage == "forged_snapshot_root":
+        artifacts = cast(
+            list[dict[str, object]], state.records[_CANDIDATE]["junit_artifacts"]
+        )
+        artifacts[0]["path"] = str(
+            Path("/forged") / _CANDIDATE / "test-results-py311.xml"
+        )
+        changes["read_artifact"] = lambda _path: (_ for _ in ()).throw(
+            AssertionError("forged snapshot was read")
+        )
+    else:
+        retry_records[_CANDIDATE] = {
+            "candidate_tree": _CANDIDATE,
+            "state": "running",
+            "original_sha256": "0" * 64,
+        }
+    retry_dependencies = replace(
+        dependencies,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+        capture_timing_review=lambda _tree, _artifacts, _output: (
+            captures.append(True) or _timing_transcript()
+        ),
+        **changes,
+    )
+
+    with pytest.raises(JudgeValidationError):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+        )
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert captures == []
+
+
+def test_timing_retry_rejects_symlink_snapshot_before_read_or_capture(
+    tmp_path: Path,
+) -> None:
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    _state, dependencies, snapshots, commands = _failed_serial_timing_session(
+        snapshot_root=snapshot_root
+    )
+    outside = tmp_path / "outside.xml"
+    outside.write_bytes(next(iter(snapshots.values())))
+    snapshot = next(iter(snapshots))
+    snapshot.parent.mkdir()
+    snapshot.symlink_to(outside)
+    reads: list[Path] = []
+    captures: list[object] = []
+
+    def read_saved_snapshot(path: Path) -> bytes | None:
+        reads.append(path)
+        raise AssertionError("saved snapshot symlink was followed")
+
+    retry_dependencies = replace(
+        dependencies,
+        expected_snapshot_path=lambda tree, environment: (
+            snapshot_root / tree / f"test-results-{environment}.xml"
+        ),
+        read_saved_snapshot=read_saved_snapshot,
+        capture_timing_review=lambda _tree, _artifacts, _output: (
+            captures.append(True) or _timing_transcript()
+        ),
+    )
+
+    with pytest.raises(JudgeValidationError, match="snapshot"):
+        validation.retry_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+        )
+    assert reads == []
+    assert captures == []
+    assert commands == [("git", "hook", "run", "pre-commit")]
+
+
+def test_timing_retry_capture_failure_is_bounded_and_status_reports_retry() -> None:
+    _state, dependencies, _snapshots, commands = _failed_serial_timing_session()
+    retry_records: dict[str, dict[str, object]] = {}
+    writes: list[str] = []
+
+    def write_retry(tree: str, record: dict[str, object]) -> None:
+        retry_records[tree] = record
+        writes.append(cast(str, record["state"]))
+
+    retry_dependencies = replace(
+        dependencies,
+        capture_timing_review=lambda _tree, _artifacts, _output: (_ for _ in ()).throw(
+            FocusedTimingCaptureError("PRIVATE_TOKEN=retry-secret /private/path")
+        ),
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=write_retry,
+    )
+    retried = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=retry_dependencies
+    )
+    repeated = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=retry_dependencies
+    )
+
+    assert retried.action == "retried"
+    assert status.state == repeated.state == "terminal-artifact-failure"
+    assert repeated.action == "existing_retry"
+    assert writes == ["running", "terminal-artifact-failure"]
+    assert status.artifact_failure is not None
+    assert (status.artifact_failure.stage, status.artifact_failure.reason) == (
+        "timing_review",
+        "focused_budget_exhausted",
+    )
+    assert "PRIVATE_TOKEN" not in str(retry_records)
+    assert "/private/path" not in str(status)
+    assert commands == [("git", "hook", "run", "pre-commit")]
 
 
 def test_status_rejects_missing_required_timing_transcript_for_successful_tree() -> (

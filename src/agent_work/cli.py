@@ -671,6 +671,10 @@ class _AgentWorkParser(argparse.ArgumentParser):
         if getattr(parsed, "resource", None) == "validation" and getattr(
             parsed, "action", None
         ) in {"run", "retry", "status"}:
+            if parsed.serial_timing and parsed.baseline_sha is None:
+                self.error("--serial-timing requires --baseline-sha")
+            if parsed.baseline_sha is not None and not parsed.serial_timing:
+                self.error("--baseline-sha requires --serial-timing")
             if parsed.changed_path and parsed.baseline_sha is None:
                 self.error("--changed-path requires --baseline-sha")
             if (
@@ -1090,17 +1094,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validation_retry_parser = validation_actions.add_parser(
         "retry",
-        help="preview or apply one pre-hook cleanup retry",
+        help="preview or apply one cleanup or saved timing retry",
         description=(
             "Without --apply, preview without changing state. With --apply, run one "
-            "retry only when recorded cleanup failed before the hook started and "
-            "the candidate is the current staged tree."
+            "retry after pre-hook cleanup failure or a successful-hook serial timing "
+            "capture failure using saved JUnit snapshots and the current staged tree."
         ),
     )
     validation_retry_parser.add_argument(
         "--candidate-tree", type=_candidate_tree, required=True
     )
     for command in (validation_run, validation_status, validation_retry_parser):
+        command.add_argument(
+            "--serial-timing",
+            action="store_true",
+            help="identify a trusted serial timing validation request",
+        )
         command.add_argument(
             "--baseline-sha",
             type=_candidate_tree,
@@ -1112,7 +1121,9 @@ def build_parser() -> argparse.ArgumentParser:
             default=[],
             help="one canonical changed path for serial timing review; repeat as needed",
         )
-    _common(validation_retry_parser, apply_help="run the one permitted cleanup retry")
+    _common(
+        validation_retry_parser, apply_help="run the one permitted validation retry"
+    )
     repository = resources.add_parser("repository", help="inspect repository policy")
     repository_actions = repository.add_subparsers(dest="action", required=True)
     cleanup_policy = repository_actions.add_parser(
@@ -1137,6 +1148,43 @@ def _read_validation_artifact(path: Path) -> bytes:
     """Read at most one bounded fixed validation artifact."""
     with path.open("rb") as handle:
         return handle.read(1_048_577)
+
+
+def _read_saved_validation_snapshot(path: Path) -> bytes | None:
+    """Read one bounded JUnit snapshot through nofollow directory descriptors."""
+    try:
+        root = os.open(path.parent.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            candidate = os.open(
+                path.parent.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            try:
+                snapshot = os.open(
+                    path.name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=candidate,
+                )
+            except FileNotFoundError:
+                return None
+            try:
+                if not stat.S_ISREG(os.fstat(snapshot).st_mode):
+                    raise OSError("saved JUnit snapshot is not regular")
+                with os.fdopen(snapshot, "rb", closefd=False) as handle:
+                    return handle.read(1_048_577)
+            finally:
+                os.close(snapshot)
+        finally:
+            os.close(candidate)
+    finally:
+        os.close(root)
 
 
 def read_bounded_regular(path: Path, *, limit: int = 1_048_576) -> bytes | None:
@@ -2300,6 +2348,14 @@ def main(
                             else None
                         )
                     ),
+                    expected_snapshot_path=(
+                        lambda tree, environment: (
+                            snapshot_store.root
+                            / tree
+                            / f"test-results-{environment}.xml"
+                        )
+                    ),
+                    read_saved_snapshot=_read_saved_validation_snapshot,
                 )
                 if parsed.action == "run":
                     validation_run = partial(
@@ -2452,6 +2508,8 @@ def main(
                     "path": str(failure.path) if failure.path is not None else None,
                 },
             }
+        if (failure_code := getattr(report, "timing_failure_code", None)) is not None:
+            payload["timing_failure_code"] = failure_code
         write_stdout(
             json.dumps(payload, separators=(",", ":"))
             if parsed.json

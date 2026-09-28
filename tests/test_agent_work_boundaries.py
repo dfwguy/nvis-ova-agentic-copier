@@ -446,6 +446,159 @@ def test_judge_candidate_returns_bounded_deferred_admission(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    "failure_code",
+    (
+        "baseline_hook_failed",
+        "focused_timing_command_failed",
+        "capture_failed",
+        "PRIVATE_TOKEN=/private/path",
+    ),
+)
+def test_judge_candidate_binds_only_safe_timing_failure_code_to_evidence(
+    tmp_path: Path, failure_code: str
+) -> None:
+    tree = "b" * 40
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        return CommandResult(
+            1,
+            json.dumps(
+                {
+                    "candidate_tree": tree,
+                    "state": "terminal-artifact-failure",
+                    "terminal": True,
+                    "exit_code": 0,
+                    "diagnostic": None,
+                    "hook_failures": [],
+                    "junit_artifacts": [],
+                    "failed_tests": [],
+                    "failed_junit_digests": [],
+                    "junit_timings": [],
+                    "timing_failure_code": failure_code,
+                    "artifact_failure": {
+                        "stage": "timing_review",
+                        "reason": "invalid_timing",
+                        "environment": None,
+                        "path": None,
+                    },
+                }
+            ),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("src/example.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return tree
+
+    repository = ObservedRepository(_config(tmp_path), run)
+    if failure_code.startswith("PRIVATE_TOKEN"):
+        with pytest.raises(RepositoryError):
+            repository.judge_candidate(
+                tmp_path,
+                tree,
+                base_sha="a" * 40,
+                changed_paths=("src/example.py",),
+                action="status",
+                timeout_seconds=1,
+            )
+        return
+
+    observed = repository.judge_candidate(
+        tmp_path,
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("src/example.py",),
+        action="status",
+        timeout_seconds=1,
+    )
+    assert observed["timing_failure_code"] == failure_code
+    assert observed["evidence_id"]
+
+
+def test_judge_candidate_timing_failure_codes_change_evidence_identity(
+    tmp_path: Path,
+) -> None:
+    tree = "b" * 40
+    failure_code = "baseline_hook_failed"
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command[-1] == "write-tree":
+            return CommandResult(0, tree, "")
+        return CommandResult(
+            1,
+            json.dumps(
+                {
+                    "candidate_tree": tree,
+                    "state": "terminal-artifact-failure",
+                    "terminal": True,
+                    "exit_code": 0,
+                    "hook_failures": [],
+                    "junit_artifacts": [],
+                    "failed_tests": [],
+                    "failed_junit_digests": [],
+                    "junit_timings": [],
+                    "timing_failure_code": failure_code,
+                    "artifact_failure": {
+                        "stage": "timing_review",
+                        "reason": "invalid_timing",
+                        "environment": None,
+                        "path": None,
+                    },
+                }
+            ),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("src/example.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return tree
+
+    repository = ObservedRepository(_config(tmp_path), run)
+    first = repository.judge_candidate(
+        tmp_path,
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("src/example.py",),
+        action="status",
+        timeout_seconds=1,
+    )
+    failure_code = "focused_timing_command_failed"
+    second = repository.judge_candidate(
+        tmp_path,
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("src/example.py",),
+        action="status",
+        timeout_seconds=1,
+    )
+    assert first["evidence_id"] != second["evidence_id"]
+
+
+@pytest.mark.parametrize(
     "case",
     [
         {"name": "/private/test_secret", "seconds": 0.2},
@@ -5225,6 +5378,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
     validation_command = next(
         command for command in observed_commands if "validation" in command
     )
+    assert "--serial-timing" in validation_command
     assert validation_command[validation_command.index("--baseline-sha") + 1] == (
         baseline_sha
     )

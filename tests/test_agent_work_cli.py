@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,7 @@ from typing import Any, cast
 
 import pytest
 
+from agent_work import cli
 from agent_work.cli import _render, build_parser, main
 from agent_work.domain import CommandRequest, RunnerState, WorkflowPhase, WorkKind
 from agent_work.gitlab import (
@@ -701,6 +704,7 @@ def _serial_timing_status_json(
             "status",
             "--candidate-tree",
             candidate_tree,
+            "--serial-timing",
             "--baseline-sha",
             baseline_sha,
             "--json",
@@ -1181,12 +1185,80 @@ def test_serial_validation_status_allows_baseline_without_changed_paths() -> Non
             "status",
             "--candidate-tree",
             "b" * 40,
+            "--serial-timing",
             "--baseline-sha",
             "a" * 40,
         ]
     )
     assert parsed.baseline_sha == "a" * 40
     assert parsed.changed_path == []
+
+
+@pytest.mark.parametrize("action", ("run", "retry", "status"))
+def test_interactive_validation_rejects_serial_only_flags_before_git(
+    action: str,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    with pytest.raises(SystemExit) as usage:
+        main(
+            [
+                "validation",
+                action,
+                "--candidate-tree",
+                "b" * 40,
+                "--baseline-sha",
+                "a" * 40,
+                "--changed-path",
+                "tests/test_speed.py",
+                "--apply",
+            ],
+            run_command=lambda command, **_kwargs: (
+                commands.append(command) or CommandResult(0, "", "")
+            ),
+        )
+    assert usage.value.code == 2
+    assert commands == []
+
+
+@pytest.mark.parametrize("action", ("run", "retry", "status"))
+def test_serial_validation_marker_requires_baseline(action: str) -> None:
+    accepted = build_parser().parse_args(
+        [
+            "validation",
+            action,
+            "--candidate-tree",
+            "b" * 40,
+            "--serial-timing",
+            "--baseline-sha",
+            "a" * 40,
+        ]
+    )
+    assert accepted.serial_timing is True
+    with pytest.raises(SystemExit) as usage:
+        build_parser().parse_args(
+            ["validation", action, "--candidate-tree", "b" * 40, "--serial-timing"]
+        )
+    assert usage.value.code == 2
+
+
+def test_serial_validation_marker_accepts_complete_applied_run() -> None:
+    parsed = build_parser().parse_args(
+        [
+            "validation",
+            "run",
+            "--candidate-tree",
+            "b" * 40,
+            "--serial-timing",
+            "--baseline-sha",
+            "a" * 40,
+            "--changed-path",
+            "tests/test_speed.py",
+            "--apply",
+        ]
+    )
+    assert parsed.serial_timing is True
+    assert parsed.baseline_sha == "a" * 40
+    assert parsed.changed_path == ["tests/test_speed.py"]
 
 
 def test_validation_run_cli_forwards_apply_and_requires_terminal_success() -> None:
@@ -1552,6 +1624,44 @@ def test_validation_cli_json_projects_bounded_artifact_failure(action: str) -> N
     }
 
 
+@pytest.mark.parametrize("action", ("run", "retry", "status"))
+def test_validation_cli_reports_safe_timing_failure_code(action: str) -> None:
+    report = SimpleNamespace(
+        candidate_tree="a" * 40,
+        applied=action != "status",
+        action="retried" if action == "retry" else action,
+        state="terminal-artifact-failure",
+        terminal=True,
+        exit_code=0,
+        diagnostic=None,
+        timing_failure_code="baseline_hook_failed",
+        artifact_failure=SimpleNamespace(
+            stage="timing_review", reason="invalid_timing", environment=None, path=None
+        ),
+        hook_failures=(),
+        junit_artifacts=(),
+        failed_tests=(),
+        failed_junit_digests=(),
+        elapsed_seconds=0.1,
+        junit_timings=(),
+    )
+    output: list[str] = []
+    arguments = ["validation", action, "--candidate-tree", "a" * 40, "--json"]
+    if action != "status":
+        arguments.append("--apply")
+
+    exit_code = main(
+        arguments,
+        validation_run=lambda **_kwargs: report,
+        validation_retry=lambda **_kwargs: report,
+        validation_status=lambda **_kwargs: report,
+        write_stdout=output.append,
+    )
+
+    assert exit_code == 1
+    assert json.loads(output[0])["timing_failure_code"] == "baseline_hook_failed"
+
+
 def test_validation_retry_cli_supports_help_json_dry_run_and_apply(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1582,8 +1692,16 @@ def test_validation_retry_cli_supports_help_json_dry_run_and_apply(
         main(["validation", "retry", "--help"], validation_retry=retry)
     assert help_exit.value.code == 0
     help_text = capsys.readouterr().out
-    assert "Without --apply, preview" in help_text
-    assert "current staged tree" in help_text
+    help_words = " ".join(help_text.split())
+    assert "Without --apply, preview" in help_words
+    assert "current staged tree" in help_words
+    assert "pre-hook cleanup failure" in help_words
+    assert "successful-hook serial timing capture failure" in help_words
+    assert "saved JUnit snapshots" in help_words
+    apply_help = next(
+        line for line in help_text.splitlines() if line.strip().startswith("--apply ")
+    )
+    assert "validation retry" in apply_help
     with pytest.raises(SystemExit) as malformed_exit:
         main(
             ["validation", "retry", "--candidate-tree", "bad"],
@@ -1610,6 +1728,48 @@ def test_validation_retry_cli_supports_help_json_dry_run_and_apply(
     )
     assert json.loads(output[-1])["action"] == "retried"
     assert calls == [(candidate, False), (candidate, True)]
+
+
+@pytest.mark.parametrize("kind", ("regular", "symlink", "fifo", "oversized"))
+def test_saved_validation_snapshot_reader_is_nofollow_nonblocking_and_bounded(
+    tmp_path: Path, kind: str
+) -> None:
+    state_root = tmp_path / "state"
+    candidate = state_root / ("a" * 40)
+    candidate.mkdir(parents=True)
+    path = candidate / "test-results-py311.xml"
+    if kind == "regular":
+        path.write_bytes(b"<testsuite tests='1'/>")
+    elif kind == "symlink":
+        outside = tmp_path / "outside.xml"
+        outside.write_bytes(b"private")
+        path.symlink_to(outside)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(b"x" * 1_048_578)
+
+    outcomes: list[bytes | None | BaseException] = []
+    reader_name = "_read_saved_validation_snapshot"
+
+    def read() -> None:
+        try:
+            outcomes.append(getattr(cli, reader_name)(path))
+        except (OSError, AttributeError) as error:
+            outcomes.append(error)
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1
+    if kind == "regular":
+        assert outcomes == [b"<testsuite tests='1'/>"]
+    elif kind == "oversized":
+        assert isinstance(outcomes[0], bytes)
+        assert len(outcomes[0]) == 1_048_577
+    else:
+        assert isinstance(outcomes[0], OSError)
 
 
 def test_merge_request_publish_cli_passes_structured_fields_to_the_injected_boundary() -> (

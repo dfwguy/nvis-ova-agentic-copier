@@ -74,6 +74,27 @@ def _write_text(path: Path, value: str) -> None:
 class TimingCaptureError(RuntimeError):
     """A source, environment, inventory, or cleanup proof is incomplete."""
 
+    code = "capture_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Literal[
+            "baseline_hook_failed", "focused_timing_command_failed", "capture_failed"
+        ]
+        | None = None,
+    ) -> None:
+        super().__init__(message)
+        selected = code if code is not None else self.__class__.code
+        if selected not in {
+            "baseline_hook_failed",
+            "focused_timing_command_failed",
+            "capture_failed",
+        }:
+            raise ValueError("invalid timing failure code")
+        self.code = selected
+
 
 class FocusedTimingCaptureError(TimingCaptureError):
     """Exact-source focused comparisons exhausted their bounded budget."""
@@ -174,6 +195,9 @@ def _run(
     cwd: Path,
     environment: Mapping[str, str] | None = None,
     timeout: float = 120,
+    failure_code: Literal[
+        "baseline_hook_failed", "focused_timing_command_failed", "capture_failed"
+    ] = "capture_failed",
 ) -> str:
     result = dependencies.run_command(
         argv,
@@ -182,7 +206,7 @@ def _run(
         timeout_seconds=timeout,
     )
     if result.returncode != 0:
-        raise TimingCaptureError("timing command failed")
+        raise TimingCaptureError("timing command failed", code=failure_code)
     if len(result.stdout.encode("utf-8")) > _MAX_BYTES:
         raise TimingCaptureError("timing command output exceeds bound")
     return result.stdout.strip()
@@ -497,6 +521,7 @@ def _focused_runner(
                 cwd=source,
                 environment=plugin_env,
                 timeout=min(120, remaining),
+                failure_code="focused_timing_command_failed",
             )
         except TimingCaptureError as error:
             if dependencies.monotonic_clock() >= deadline:
@@ -610,6 +635,7 @@ def capture_serial_timing_review(
             cwd=base,
             environment=seeded,
             timeout=1_800,
+            failure_code="baseline_hook_failed",
         )
         candidate_by_env = {
             env: (contents, count) for env, contents, count in candidate_artifacts

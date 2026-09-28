@@ -75,6 +75,105 @@ def test_capture_rejects_omitted_canonical_changed_test_path(tmp_path: Path) -> 
         )
 
 
+@pytest.mark.parametrize(
+    ("failed_command", "expected_code"),
+    (
+        ("baseline_hook", "baseline_hook_failed"),
+        ("focused_pytest", "focused_timing_command_failed"),
+        ("generic_command", "capture_failed"),
+    ),
+)
+def test_capture_classifies_command_failure_by_trusted_stage(
+    tmp_path: Path, failed_command: str, expected_code: str
+) -> None:
+    baseline_artifact = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_existing' time='0.01'/>"
+        b"</testsuite>"
+    )
+    candidate_artifact = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_new' time='0.2'/>"
+        b"</testsuite>"
+    )
+    observed: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        observed.append(command)
+        cwd = cast(Path, kwargs["current_directory"])
+        if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+            return CommandResult(0, BASE_TREE, "")
+        if command[:3] == ("git", "diff", "--name-only"):
+            return CommandResult(0, "tests/test_speed.py\n", "")
+        if command[:4] == ("git", "worktree", "add", "--detach"):
+            Path(command[4]).mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(
+                0, BASE_TREE if cwd.name == "baseline" else CANDIDATE_TREE, ""
+            )
+        if command == ("git", "rev-parse", "HEAD"):
+            return CommandResult(0, BASE_SHA, "")
+        if command == ("git", "rev-parse", "HEAD^{tree}"):
+            return CommandResult(0, BASE_TREE, "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            if failed_command == "baseline_hook":
+                return CommandResult(1, "", "PRIVATE_TOKEN=secret /private/hook")
+            for environment in ("py311", "py314"):
+                (cwd / f"test-results-{environment}.xml").write_bytes(baseline_artifact)
+            return CommandResult(0, "", "")
+        if command[0].endswith("/pytest"):
+            return CommandResult(1, "", "PRIVATE_TOKEN=secret /private/pytest")
+        if command[1:2] == ("-c",):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "interpreter": ["3.11", "cpython-311", "linux-x86_64"],
+                        "distributions": [["pytest", "9.0"]],
+                    }
+                ),
+                "",
+            )
+        if command == ("git", "status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+        } or command[:3] == ("git", "worktree", "remove"):
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    if failed_command == "generic_command":
+        original_run = run
+
+        def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+                return CommandResult(1, "", "PRIVATE_TOKEN=secret /private/git")
+            return original_run(command, **kwargs)
+
+    dependencies = _dependencies(tmp_path, run)
+    with pytest.raises(TimingCaptureError) as failure:
+        capture_serial_timing_review(
+            baseline_sha=BASE_SHA,
+            candidate_tree=CANDIDATE_TREE,
+            candidate_artifacts=(
+                ("py311", candidate_artifact, 1),
+                ("py314", candidate_artifact, 1),
+            ),
+            changed_paths=("tests/test_speed.py",),
+            dependencies=dependencies,
+        )
+
+    if failed_command == "focused_pytest":
+        assert any(command[0].endswith("/pytest") for command in observed)
+    if failed_command == "baseline_hook":
+        assert ("git", "hook", "run", "pre-commit") in observed
+    assert getattr(failure.value, "code", None) == expected_code
+    assert "PRIVATE_TOKEN" not in str(failure.value)
+    assert "/private/" not in str(failure.value)
+
+
 def test_prepared_fingerprint_compares_installed_versions_without_source_path(
     tmp_path: Path,
 ) -> None:

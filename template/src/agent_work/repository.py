@@ -1408,6 +1408,7 @@ class GitRepository:
                 "run" if action == "validate" else "status",
                 "--candidate-tree",
                 candidate_tree,
+                *(("--serial-timing",) if timing_review_required else ()),
                 *(("--baseline-sha", base_sha) if timing_review_required else ()),
                 *(
                     part
@@ -1535,6 +1536,19 @@ class GitRepository:
             }
         elif raw_failure is not None:
             raise RepositoryError("candidate artifact failure is invalid")
+        timing_failure_code = report.get("timing_failure_code")
+        if timing_failure_code is not None and (
+            not isinstance(timing_failure_code, str)
+            or timing_failure_code
+            not in {
+                "baseline_hook_failed",
+                "focused_timing_command_failed",
+                "capture_failed",
+            }
+            or safe_failure is None
+            or safe_failure["stage"] != "timing_review"
+        ):
+            raise RepositoryError("candidate timing failure code is invalid")
         if (
             timing_review_required
             and state == "terminal-success"
@@ -1815,6 +1829,8 @@ class GitRepository:
             )
         }
         durable_evidence["artifact_failure"] = safe_failure
+        if timing_failure_code is not None:
+            durable_evidence["timing_failure_code"] = timing_failure_code
         return {
             "candidate_tree": candidate_tree,
             "state": state,
@@ -1832,6 +1848,11 @@ class GitRepository:
             "junit_timings": safe_timings,
             "timing_review": safe_timing_review,
             "artifact_failure": safe_failure,
+            **(
+                {"timing_failure_code": timing_failure_code}
+                if timing_failure_code is not None
+                else {}
+            ),
             "evidence_id": sha256(
                 json.dumps(
                     durable_evidence, sort_keys=True, separators=(",", ":")
