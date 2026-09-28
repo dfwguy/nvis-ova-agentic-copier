@@ -679,11 +679,6 @@ def capture_serial_timing_review(
                     "test_count": len(cases),
                     "timing_complete": True,
                     "cases": cases,
-                    "selectors": (
-                        baseline_selectors
-                        if tree == baseline_tree
-                        else candidate_selectors
-                    ),
                 }
         changed_fixtures = _changed_fixture_names(
             base, candidate, changed_paths, dependencies
@@ -698,7 +693,7 @@ def capture_serial_timing_review(
                         candidate,
                         private,
                         changed_fixtures,
-                        cast(dict[str, str], candidate_runs[env]["selectors"]),
+                        selector_map[candidate_tree][env],
                         seeded,
                         environment_name=env,
                     )
