@@ -2137,6 +2137,7 @@ def test_merge_request_publish_cli_forwards_the_injected_one_second_sleeper() ->
         evidence,
         evidence,
         [],
+        evidence,
         [{"project_id": 310967, "iid": 123}],
     ]
     delays: list[float] = []
