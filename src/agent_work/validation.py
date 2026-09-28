@@ -30,7 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .ports import CommandResult, CommandRunner
 from .test_timing import is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
-from .timing_capture import FindingBudgetCaptureError, FocusedTimingCaptureError
+from .timing_capture import (
+    FindingBudgetCaptureError,
+    FocusedTimingCaptureError,
+    TimingCaptureError,
+)
 
 _TREE = re.compile(r"^[0-9a-f]{40}$")
 _NONNEGATIVE_INTEGER = re.compile(r"^[0-9]+$")
@@ -361,6 +365,12 @@ class _Record(BaseModel):
     timing_transcript_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    timing_failure_code: (
+        Literal[
+            "baseline_hook_failed", "focused_timing_command_failed", "capture_failed"
+        ]
+        | None
+    ) = None
 
     def model_post_init(self, _context: object) -> None:
         terminal = self.state in {
@@ -389,6 +399,14 @@ class _Record(BaseModel):
             raise ValueError("post-hook artifact failure requires a hook exit")
         if self.state == "terminal-success" and self.returncode != 0:
             raise ValueError("success requires zero exit")
+        if self.timing_failure_code is not None and not (
+            self.state == "terminal-artifact-failure"
+            and self.returncode == 0
+            and self.artifact_failure is not None
+            and self.artifact_failure.stage == "timing_review"
+            and _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
+        ):
+            raise ValueError("invalid timing failure code")
         if (self.timing_baseline_tree is None) != (
             self.timing_transcript_sha256 is None
         ) or (
@@ -442,7 +460,17 @@ class _Record(BaseModel):
             and not _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
         ):
             raise ValueError("invalid JUnit artifact evidence")
-        if self.state != "terminal-success" and self.junit_artifacts:
+        if (
+            self.state != "terminal-success"
+            and self.junit_artifacts
+            and not (
+                self.state == "terminal-artifact-failure"
+                and self.returncode == 0
+                and self.artifact_failure is not None
+                and self.artifact_failure.stage == "timing_review"
+                and _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
+            )
+        ):
             raise ValueError("invalid JUnit artifact evidence")
         if self.state == "running" and self.elapsed_seconds is not None:
             raise ValueError("running validation has no terminal timing")
@@ -500,6 +528,7 @@ class JudgeValidationReport:
     elapsed_seconds: float | None = None
     junit_timings: tuple[JUnitTiming, ...] = ()
     artifact_failure: ArtifactFailure | None = None
+    timing_failure_code: str | None = None
 
     @property
     def exit_code(self) -> int | None:
@@ -543,6 +572,11 @@ class JudgeValidationDependencies:
     )
     hook_environment: Mapping[str, str] | None = None
     verify_candidate_source: Callable[[str], bool] = lambda _tree: True
+    expected_snapshot_path: Callable[[str, str], Path] = lambda tree, environment: (
+        Path("/snapshots") / tree / f"test-results-{environment}.xml"
+    )
+    read_saved_snapshot: Callable[[Path], bytes | None] | None = None
+    is_snapshot_symlink: Callable[[Path], bool] = Path.is_symlink
 
 
 def _valid_tree(value: str) -> bool:
@@ -1139,6 +1173,7 @@ def _report(
         )
         if record.artifact_failure is not None
         else None,
+        record.timing_failure_code,
     )
 
 
@@ -1152,6 +1187,11 @@ def _artifact_failure_record(
     environment: str | None = None,
     path: Path | None = None,
     diagnostic: str | None = None,
+    junit_artifacts: tuple[_PersistedJUnitArtifact, ...] = (),
+    timing_failure_code: Literal[
+        "baseline_hook_failed", "focused_timing_command_failed", "capture_failed"
+    ]
+    | None = None,
 ) -> _Record:
     """Create a redacted terminal state for unusable or unpublishable evidence."""
     return _Record(
@@ -1161,6 +1201,8 @@ def _artifact_failure_record(
         returncode=returncode,
         elapsed_seconds=elapsed_seconds,
         diagnostic=diagnostic,
+        junit_artifacts=junit_artifacts,
+        timing_failure_code=timing_failure_code,
         artifact_failure=_PersistedArtifactFailure.model_validate(
             {
                 "stage": stage,
@@ -1258,6 +1300,18 @@ def _timing_artifacts_match(
         ):
             return False
     return True
+
+
+def _timing_failure_code(
+    error: Exception,
+) -> Literal["baseline_hook_failed", "focused_timing_command_failed", "capture_failed"]:
+    """Classify timing failure without retaining private exception text."""
+    if isinstance(error, TimingCaptureError):
+        if error.code == "baseline_hook_failed":
+            return "baseline_hook_failed"
+        if error.code == "focused_timing_command_failed":
+            return "focused_timing_command_failed"
+    return "capture_failed"
 
 
 def run_judge_validation(
@@ -1573,6 +1627,8 @@ def run_judge_validation(
                             if isinstance(error, FocusedTimingCaptureError)
                             else "invalid_timing"
                         ),
+                        junit_artifacts=persisted,
+                        timing_failure_code=_timing_failure_code(error),
                     ),
                     dependencies,
                 )
@@ -1624,10 +1680,152 @@ def _retry_record(
     )
 
 
+def _saved_junit_pair(
+    original: _Record, dependencies: JudgeValidationDependencies
+) -> tuple[tuple[str, bytes, int], ...]:
+    """Read and verify both immutable candidate JUnit snapshots."""
+    if any(
+        Path(artifact.path)
+        != dependencies.expected_snapshot_path(
+            original.candidate_tree, artifact.environment
+        )
+        for artifact in original.junit_artifacts
+    ):
+        raise JudgeValidationError("saved JUnit artifact path is outside state root")
+    for artifact in original.junit_artifacts:
+        path = Path(artifact.path)
+        if dependencies.is_snapshot_symlink(path) or dependencies.is_snapshot_symlink(
+            path.parent
+        ):
+            raise JudgeValidationError("saved JUnit snapshot is a symlink")
+    read_saved_snapshot = dependencies.read_saved_snapshot or dependencies.read_artifact
+    captured: list[tuple[str, bytes, int]] = []
+    for artifact in original.junit_artifacts:
+        try:
+            contents = read_saved_snapshot(Path(artifact.path))
+        except OSError as error:
+            raise JudgeValidationError("saved JUnit artifact is unavailable") from error
+        if (
+            contents is None
+            or hashlib.sha256(contents).hexdigest() != artifact.sha256
+            or _junit_test_count(contents) != artifact.test_count
+        ):
+            raise JudgeValidationError("saved JUnit artifact changed before retry")
+        captured.append((artifact.environment, contents, artifact.test_count))
+    return tuple(captured)
+
+
+def _retry_saved_timing(
+    candidate_tree: str,
+    original: _Record,
+    original_sha256: str,
+    dependencies: JudgeValidationDependencies,
+) -> JudgeValidationReport:
+    """Capture timing from the exact saved successful-hook JUnit pair."""
+    captured = _saved_junit_pair(original, dependencies)
+
+    baseline_tree = dependencies.expected_baseline_tree
+    if baseline_tree is None or not _valid_tree(baseline_tree):
+        raise JudgeValidationError("timing baseline tree is invalid")
+    prior_transcript = dependencies.read_timing_transcript(candidate_tree)
+    prior_digest: str | None = None
+    if prior_transcript is not None:
+        prior_digest = _timing_transcript_digest(
+            prior_transcript,
+            baseline_tree=baseline_tree,
+            candidate_tree=candidate_tree,
+            baseline_sha=dependencies.expected_baseline_sha,
+        )
+        if not _timing_artifacts_match(prior_transcript, original.junit_artifacts):
+            raise JudgeValidationError("prior timing transcript JUnit pair differs")
+    running = _Record(
+        candidate_tree=candidate_tree,
+        schema_version=2,
+        state="running",
+        requested_baseline_tree=original.requested_baseline_tree,
+        requested_baseline_sha=original.requested_baseline_sha,
+    )
+    dependencies.atomic_write_retry_record(
+        candidate_tree,
+        running.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        | {"original_sha256": original_sha256},
+    )
+    try:
+        transcript = dependencies.capture_timing_review(candidate_tree, captured, "")
+        digest = _timing_transcript_digest(
+            transcript,
+            baseline_tree=baseline_tree,
+            candidate_tree=candidate_tree,
+            baseline_sha=dependencies.expected_baseline_sha,
+        )
+        if not _timing_artifacts_match(transcript, original.junit_artifacts):
+            raise JudgeValidationError("timing transcript JUnit pair differs")
+        if prior_digest is not None and prior_digest != digest:
+            raise JudgeValidationError("prior timing transcript changed on retry")
+    except (
+        JudgeValidationError,
+        OSError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+    ) as error:
+        record = _artifact_failure_record(
+            candidate_tree,
+            0,
+            original.elapsed_seconds,
+            stage="timing_review",
+            reason=(
+                "finding_budget_exhausted"
+                if isinstance(error, FindingBudgetCaptureError)
+                else "focused_budget_exhausted"
+                if isinstance(error, FocusedTimingCaptureError)
+                else "invalid_timing"
+            ),
+            junit_artifacts=original.junit_artifacts,
+            timing_failure_code=_timing_failure_code(error),
+        )
+    else:
+        record = _Record(
+            candidate_tree=candidate_tree,
+            schema_version=2,
+            state="terminal-success",
+            returncode=0,
+            junit_artifacts=original.junit_artifacts,
+            elapsed_seconds=original.elapsed_seconds,
+            timing_baseline_tree=baseline_tree,
+            timing_transcript_sha256=digest,
+            junit_timings=tuple(
+                summary
+                for environment, contents, _count in captured
+                if (
+                    summary := _junit_timing_summary(
+                        cast(Literal["py311", "py314"], environment),
+                        contents,
+                        serial=True,
+                    )
+                )
+                is not None
+            ),
+        )
+    record = _Record.model_validate(
+        record.model_dump(exclude_none=True)
+        | {
+            "requested_baseline_tree": original.requested_baseline_tree,
+            "requested_baseline_sha": original.requested_baseline_sha,
+        }
+    )
+    dependencies.atomic_write_retry_record(
+        candidate_tree,
+        record.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        | {"original_sha256": original_sha256},
+    )
+    return _report(candidate_tree, applied=True, action="retried", record=record)
+
+
 def retry_judge_validation(
     *, candidate_tree: str, apply: bool, dependencies: JudgeValidationDependencies
 ) -> JudgeValidationReport:
-    """Preview or run one append-only retry after pre-hook cleanup failed."""
+    """Retry pre-hook cleanup or saved serial timing evidence once."""
     if not _valid_tree(candidate_tree):
         raise JudgeValidationError("candidate tree is malformed")
     original_raw = dependencies.read_record(candidate_tree)
@@ -1643,17 +1841,29 @@ def retry_judge_validation(
         )
     ):
         raise JudgeValidationError("timing baseline changed before retry")
-    if (
-        original is None
-        or original.state != "terminal-artifact-failure"
-        or original.returncode is not None
-        or original.artifact_failure is None
-        or original.artifact_failure.stage != "pre_hook_cleanup"
-        or original.artifact_failure.reason != "os_error"
-    ):
+    cleanup_retry = (
+        original is not None
+        and original.state == "terminal-artifact-failure"
+        and original.returncode is None
+        and original.artifact_failure is not None
+        and original.artifact_failure.stage == "pre_hook_cleanup"
+        and original.artifact_failure.reason == "os_error"
+    )
+    timing_retry = (
+        original is not None
+        and dependencies.timing_review_required
+        and original.state == "terminal-artifact-failure"
+        and original.returncode == 0
+        and original.artifact_failure is not None
+        and original.artifact_failure.stage == "timing_review"
+        and _valid_junit_artifacts(candidate_tree, original.junit_artifacts)
+    )
+    if not (cleanup_retry or timing_retry):
         raise JudgeValidationError("validation retry is not permitted")
     if dependencies.current_staged_tree() != candidate_tree:
         raise JudgeValidationError("candidate tree is not the current staged tree")
+    if timing_retry and not dependencies.verify_candidate_source(candidate_tree):
+        raise JudgeValidationError("candidate source changed before timing retry")
     assert isinstance(original_raw, Mapping)
     original_sha256 = hashlib.sha256(
         json.dumps(original_raw, sort_keys=True, separators=(",", ":")).encode()
@@ -1671,14 +1881,27 @@ def retry_judge_validation(
             raise JudgeValidationError(
                 "original validation record changed before retry"
             )
+        if dependencies.current_staged_tree() != candidate_tree:
+            raise JudgeValidationError("candidate tree changed before retry")
+        if timing_retry and not dependencies.verify_candidate_source(candidate_tree):
+            raise JudgeValidationError("candidate source changed before timing retry")
         existing = _retry_record(
             candidate_tree,
             original_sha256,
             dependencies.read_retry_record(candidate_tree),
         )
         if existing is not None:
+            if timing_retry:
+                assert original is not None
+                _saved_junit_pair(original, dependencies)
+                _verify_required_timing(candidate_tree, existing, dependencies)
             return _report(
                 candidate_tree, applied=True, action="existing_retry", record=existing
+            )
+        if timing_retry:
+            assert original is not None
+            return _retry_saved_timing(
+                candidate_tree, original, original_sha256, dependencies
             )
 
         def read_retry(tree: str) -> object | None:
@@ -1728,7 +1951,7 @@ def observe_judge_validation(
     if (
         record.state == "terminal-artifact-failure"
         and record.artifact_failure is not None
-        and record.artifact_failure.stage == "pre_hook_cleanup"
+        and record.artifact_failure.stage in {"pre_hook_cleanup", "timing_review"}
     ):
         original_raw = dependencies.read_record(candidate_tree)
         assert isinstance(original_raw, Mapping)

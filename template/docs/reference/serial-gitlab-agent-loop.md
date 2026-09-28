@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -84,13 +84,14 @@ agent-work issue publish --title TEXT --problem TEXT --outcome TEXT
                          [--priority TEXT] [--severity TEXT]
                          [--label TEXT] [--issue-iid IID] [--feedback-audit]
                          [--apply] [--json] [--debug]
-agent-work validation run --candidate-tree TREE [--baseline-sha SHA]
+agent-work validation run --candidate-tree TREE [--serial-timing --baseline-sha SHA]
                           [--changed-path PATH]... [--apply] [--json]
-agent-work validation retry --candidate-tree TREE [--baseline-sha SHA]
+agent-work validation retry --candidate-tree TREE [--serial-timing --baseline-sha SHA]
                             [--changed-path PATH]... [--apply] [--json]
 agent-work validation window [--apply] [--json] -- COMMAND [ARG ...]
 agent-work validation status --candidate-tree TREE
-                             [--baseline-sha SHA] [--changed-path PATH]...
+                             [--serial-timing --baseline-sha SHA]
+                             [--changed-path PATH]...
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
                            [--broker-nonce NONCE] [--apply] [--json]
@@ -126,10 +127,10 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
-| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. The serial controller supplies `--baseline-sha SHA` and repeatable `--changed-path PATH` for paired timing proof. |
-| `validation retry` | `--candidate-tree TREE` with a recorded pre-hook cleanup failure | Bare invocation previews; `--apply` starts one explicit retry for the same staged tree. Serial work repeats the baseline SHA and changed paths. |
+| `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. Serial work adds `--serial-timing`, `--baseline-sha SHA`, and repeatable `--changed-path PATH` for paired timing proof. |
+| `validation retry` | `--candidate-tree TREE` with an eligible saved failure | Bare invocation previews. `--apply` retries pre-hook cleanup, or performs one timing-only retry after a successful hook. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths. |
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
-| `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. The serial controller repeats the baseline SHA and changed paths; status checks the saved timing proof. |
+| `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths; status checks the saved timing proof or retry result. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
 | `candidate read` | Same identity and returned tree; optional manifest, chunk, or completion selector | Reads bounded, controller-derived base-to-tree file evidence for Consistency Judge. |
 | `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
@@ -409,6 +410,10 @@ inventories and omission count.
 The outcome is `clear` when there are no findings, `report_only` for findings
 that need review but no correction, or `correction_required` when a new slow,
 touched slow, or corroborated regressed case needs correction.
+While the original terminal timing failure is current, `candidate validate`
+and `candidate status` report its safe `timing_failure_code` and bind it to the
+evidence ID. Once a retry starts, status reports the retry state. It includes
+a code only if that retry ends in a timing failure.
 
 The reviewer routes a touched case above 0.100 s to the test owner for
 correction. For every candidate case at or above 1.000 s, the reviewer checks
@@ -526,9 +531,12 @@ It saves them under the candidate tree in the state root. Each result gives its
 environment, absolute path, SHA-256 digest, and `test_count`. Status reads this
 saved evidence. It never reads checkout XML or runs the hook again.
 
-For serial work, the controller supplies the checked baseline commit and
-canonical changed paths with `--baseline-sha` and `--changed-path`. Applied
-serial validation rejects an empty changed-path list before the hook starts.
+For serial work, the controller explicitly selects `--serial-timing` and
+supplies the checked baseline commit and canonical changed paths with
+`--baseline-sha` and `--changed-path` on run, retry, and status. The marker
+requires a baseline SHA, and a baseline SHA without the marker is rejected
+before Git or state access. Applied serial validation rejects an empty
+changed-path list before the hook starts.
 The candidate hook uses an explicit seed. After it succeeds, the controller
 runs the full baseline suite from a private detached checkout of that commit
 with the same seed and prepared environments. It
@@ -544,19 +552,27 @@ and proof identities, with no private paths.
 
 Capture clears source artifacts before and after the hook. It fails closed if
 cleanup fails or the full set is missing, bad, or cannot be saved. The session
-then has `terminal-artifact-failure` with CLI status `1`. Its
-`artifact_failure` has an allowlisted `stage` and `reason`. When one file
-causes the failure, `environment` is `py311` or `py314`, and `path` is its
-fixed relative name, `test-results-py311.xml` or `test-results-py314.xml`.
+then has `terminal-artifact-failure` with CLI status `1`. A serial timing-review
+failure after a successful hook retains the immutable `py311` and `py314`
+snapshot identities in the original record, including their paths, SHA-256
+digests, and test counts, along with the requested baseline identity. The
+record and status report a safe `timing_failure_code`: `baseline_hook_failed`
+for a failed baseline hook, `focused_timing_command_failed` for a failed
+focused timing command, or `capture_failed` for other errors. They omit
+private error text.
+The record's `artifact_failure` has an allowlisted `stage` and `reason`. When
+one file causes the failure, `environment` is `py311` or `py314`. Its `path`
+is `test-results-py311.xml` or `test-results-py314.xml`.
 For a candidate-level `immutable_snapshot` or `timing_review` failure, both
-JSON fields are `null`. These fields identify the failing operation without exposing its
-exception or XML content.
+JSON fields are `null`. These fields identify the failing operation without
+exposing its exception or XML content.
 
 `exit_code` holds the actual hook exit code: `null` if cleanup failed before
 the hook, `0` if the hook succeeded, or the hook's nonzero exit code. It is
-not the CLI status. Artifact failures show no captured JUnit files. Preview,
-running, terminal-failure, and legacy sessions also show no files. Existing
-sessions are not backfilled.
+not the CLI status. Artifact-failure reports and status omit captured JUnit
+files, including the snapshots retained in a failed serial timing record.
+Preview, running, terminal-failure, and legacy sessions also show no files.
+Existing sessions are not backfilled.
 
 The `stage` distinguishes `pre_hook_cleanup`,
 `post_hook_failed_evidence_read`, `post_hook_failed_cleanup`,
@@ -566,19 +582,32 @@ The `stage` distinguishes `pre_hook_cleanup`,
 `invalid_timing`, `finding_budget_exhausted`, or `focused_budget_exhausted`.
 `invalid_snapshot` applies only when snapshot validation rejects the saved
 candidate evidence. The three timing reasons apply only to `timing_review`.
-The record never stores raw operating-system errors,
-paths outside the fixed artifact names, or XML data.
+The failure fields contain no raw operating-system errors, arbitrary paths,
+or XML data.
 
 `validation retry --candidate-tree TREE` previews a retry without changing
-the session. It accepts only a recorded `pre_hook_cleanup` failure with
-`reason: os_error` and no hook exit code, and only while `TREE` is still the
-current staged tree. With `--apply`, it saves a separate attempt tied to the
-original record, then runs the hook once. The original failure record stays
-intact. An interrupted or repeated retry reads the saved attempt and does not
-start another hook. An ordinary `validation run` still returns the original
-result.
-Failures after the hook require a fresh candidate tree; they cannot use this
-retry route.
+the session. Its help covers cleanup and saved timing retries. A recorded
+`pre_hook_cleanup` failure with `reason: os_error` and no hook exit code remains
+eligible while `TREE` is the current staged tree.
+With `--apply`, it saves a separate attempt tied to the original record and
+runs the hook once. An interrupted or repeated retry reads that attempt.
+
+Serial work has one additional retry: when the hook exited `0` and only the
+timing review failed, `validation retry --serial-timing` can use the two saved
+full-suite JUnit snapshots to rerun timing review. It rechecks the unchanged
+staged and source trees, requested baseline SHA and tree, original record,
+and both snapshots, including their trusted state-root paths, digests, and
+counts. Missing, changed, or conflicting evidence fails closed before timing
+capture. The saved reader uses `O_NOFOLLOW` and `O_NONBLOCK`, accepts regular
+files only, and reads at most 1 MiB plus one byte. An existing transcript must
+match the exact baseline commit and tree, candidate tree, and JUnit pair. The
+retry adds one attempt bound to the original record's SHA-256 digest. It saves
+`running` before capture, then saves the terminal result in that retry record.
+If interrupted, status reports `running`; another apply returns that record
+without capture. The timing retry never reruns the license preflight,
+candidate hook, or candidate full suite. A normal `validation run`
+still returns the original result. Other post-hook failures require a fresh
+candidate tree.
 
 When fixed supported-version JUnit artifacts are usable, the diagnostic has
 only their total numeric failure and error counts. Else, it uses a fixed generic
@@ -630,8 +659,8 @@ malformed session, or operational failure also exits `1`. Invalid usage exits
 `2`. JSON reports the candidate tree, applied state, action, state, terminal
 state, final exit code, and optional diagnostic. Repeated apply or status
 requests for the same candidate tree never rerun the combined hook or an
-individual hook. They never rewrite the record. The one explicit pre-hook
-cleanup retry writes a separate append-only attempt.
+individual hook. They never rewrite the original record. An eligible pre-hook
+cleanup or serial timing retry writes a separate append-only attempt.
 
 An interrupted interactive window can leave a saved `terminal-success` result
 for the exact staged tree while its focused timing is incomplete. Status still
