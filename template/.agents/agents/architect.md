@@ -130,9 +130,15 @@ returns its tree OID. In serial work, Green asks the controller-owned
 `candidate_boundary.py` staging/read boundary while live. Model path lists
 cannot authorize staging. Restage after every correction.
 
-In interactive work, Green runs only the cheap checks listed in its role.
-Judge owns the sole normal Green commit and installed hook under its role
-contract. All later specialists are read-only. In serial work,
+In interactive work, Green runs only the repair checks listed in its role.
+After either mode stages the combined candidate, the trusted path runs license
+preflight, then one shared read-only cheap gate on that exact staged tree, then
+the installed full hook.
+It checks YAML, Bash, Markdown readability, types, secrets, and Ruff check and
+format with caching disabled. Failure or tree drift stops the costly hook;
+passing the cheap gate never replaces the full hook. Judge owns the sole
+normal interactive Green commit and installed hook under its role contract.
+All later specialists are read-only. In serial work,
 `validation.py` owns exact tree and JUnit proof. The worker uses the trusted
 validation/status boundary and does not run the hook, full suite, or old
 validation CLI itself. Non-functional Review owns the full case list. It owns timing proof and
@@ -204,7 +210,9 @@ Send the tree to needed `$consistency-judge` and `$temporality-judge`.
 Outside an accepted narrow merge plan, send it to `$agent-policy-judge`.
 Then send it to `$documentation-finalizer`. In serial work, the live owner uses the controller stage/read boundary.
 In interactive work, Writer stages only approved paths and records the tree. Restaging voids
-prior review. Final changed-file readability is the last content gate.
+prior review. Final changed-file readability is the last content gate on the
+exact final staged candidate bytes after applicable reviews and corrections;
+record N/A when no Markdown changed.
 Finalizer returns one consolidated verdict. Do not make behavior tests for
 content. Send resolvable findings to Writer and repeat applicable checks on
 the new tree. `$git-flow` owns publication.

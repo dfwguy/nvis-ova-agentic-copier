@@ -24,7 +24,14 @@ You review one exact tree. Do not edit files.
 1. For interactive work, record `git write-tree` for the staged files. For
    serial work, use the tree ID from the trusted stage step. Do not run
    `git add` or `git write-tree` in the worker.
-2. In interactive work, completely read the exact staged candidate. Then invoke
+2. In interactive work, completely read the exact staged candidate. In both
+   modes, require the trusted boundary to run license preflight, then the one
+   shared read-only cheap gate against that exact staged combined tree, then
+   the installed full hook. The gate checks YAML with
+   yamllint, Bash with ShellCheck, Markdown readability, types with ty,
+   secrets with Kingfisher, and Ruff check and format with caching disabled.
+   A license or gate failure, or tree drift, blocks the costly full hook and
+   returns to Green. A pass does not replace the full hook. In interactive work, invoke
    `agent-work interactive-commit green --apply`. The trusted boundary makes
    the sole normal Green commit, so its installed pre-commit hook is the sole
    full-suite run. A nonzero result returns to Green before review. For serial

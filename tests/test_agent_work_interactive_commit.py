@@ -12,15 +12,26 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from agent_work.cli import build_parser, main
+from agent_work.interactive_commit import (
+    InteractiveCommitDependencies,
+    InteractiveCommitError,
+    InteractiveCommitRequest,
+    commit_interactive_green,
+    run_git,
+)
 from agent_work.repository import CommandResult
 
 BRANCH = "clanker/issue323-boundary"
@@ -69,29 +80,68 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _invoke(args: list[str]) -> tuple[int, list[str], list[str], list[tuple[str, ...]]]:
+def _invoke(
+    args: list[str],
+    *,
+    candidate_gate: Callable[[str], CommandResult] | None = (
+        lambda _tree: CommandResult(0, "", "")
+    ),
+    reject_gate_tool: bool = False,
+    license_violation: bool = False,
+) -> tuple[int, list[str], list[str], list[tuple[str, ...]]]:
     out: list[str] = []
     err: list[str] = []
     commands: list[tuple[str, ...]] = []
 
     def run(command: tuple[str, ...], **kwargs: Any) -> CommandResult:
         commands.append(command)
+        if command[:2] == (
+            sys.executable,
+            "scripts/check_licenses.py",
+        ):
+            return CommandResult(
+                1 if license_violation else 0,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "outcome": "violations" if license_violation else "compliant",
+                        "violations": (
+                            [
+                                {
+                                    "path": "src/widget.py",
+                                    "message": "missing NVIDIA license header",
+                                }
+                            ]
+                            if license_violation
+                            else []
+                        ),
+                    }
+                ),
+                "",
+            )
+        if reject_gate_tool and command[:2] == ("uv", "run"):
+            return CommandResult(1, "", "rejected gate tool")
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
             check=False,
             env=kwargs.get("environment", _environment()),
+            cwd=kwargs.get("current_directory"),
             timeout=kwargs.get("timeout_seconds", 30),
         )
         return CommandResult(result.returncode, result.stdout, result.stderr)
 
-    code = main(
+    injected_gate = (
+        {"candidate_gate": candidate_gate} if candidate_gate is not None else {}
+    )
+    code = cast(Callable[..., int], main)(
         args,
         run_command=run,
         environment=_environment(),
         write_stdout=out.append,
         write_stderr=err.append,
+        **injected_gate,
     )
     return code, out, err, commands
 
@@ -137,6 +187,243 @@ def _make_green(repo: Path, red: str) -> tuple[str, str]:
     green = _git(repo, "rev-parse", "HEAD")
     assert _git(repo, "rev-list", "--parents", "-n", "1", green) == (f"{green} {red}")
     return green, tree
+
+
+def _staged_green_request(tmp_path: Path) -> tuple[Path, InteractiveCommitRequest]:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    return repo, InteractiveCommitRequest(
+        worktree=repo,
+        branch_ref=BRANCH_REF,
+        base_sha=base,
+        red_ref=RED_REF,
+        red_sha=red,
+        passing_sha=red,
+        judge_tree=_git(repo, "write-tree"),
+        message_file=_message(tmp_path),
+    )
+
+
+@pytest.mark.parametrize("gate_returncode", (0, 1))
+def test_interactive_green_checks_exact_tree_before_installed_commit(
+    tmp_path: Path, gate_returncode: int
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    tree = _git(repo, "write-tree")
+    request = InteractiveCommitRequest(
+        worktree=repo,
+        branch_ref=BRANCH_REF,
+        base_sha=base,
+        red_ref=RED_REF,
+        red_sha=red,
+        passing_sha=red,
+        judge_tree=tree,
+        message_file=_message(tmp_path),
+    )
+    events: list[str] = []
+
+    def commit(worktree: Path, argv: tuple[str, ...]) -> CommandResult:
+        events.append("commit")
+        return CommandResult(0, _git(worktree, *argv), "")
+
+    dependencies = InteractiveCommitDependencies(
+        run_git=run_git, commit_worktree=commit
+    )
+    dependencies = replace(
+        dependencies,
+        run_license_preflight=lambda _tree: CommandResult(
+            0,
+            '{"schema_version":1,"outcome":"compliant","violations":[]}',
+            "",
+        ),
+        check_candidate_gate=lambda candidate: (
+            events.append(f"gate:{candidate}") or CommandResult(gate_returncode, "", "")
+        ),
+    )
+
+    if gate_returncode:
+        with pytest.raises(InteractiveCommitError):
+            commit_interactive_green(request, dependencies, apply=True)
+    else:
+        report = commit_interactive_green(request, dependencies, apply=True)
+        assert report.applied
+
+    assert events[0] == f"gate:{tree}"
+    assert ("commit" in events) is (gate_returncode == 0)
+
+
+def test_interactive_green_requires_license_preflight_before_gate(
+    tmp_path: Path,
+) -> None:
+    _repo, request = _staged_green_request(tmp_path)
+    events: list[str] = []
+    dependencies = replace(
+        InteractiveCommitDependencies(
+            run_git=run_git,
+            commit_worktree=lambda _path, _argv: (
+                events.append("commit") or CommandResult(0, "", "")
+            ),
+        ),
+        check_candidate_gate=lambda _tree: (
+            events.append("gate") or CommandResult(0, "", "")
+        ),
+    )
+
+    with pytest.raises(InteractiveCommitError):
+        commit_interactive_green(request, dependencies, apply=True)
+
+    assert events == []
+
+
+def test_interactive_cli_injects_gate_for_exact_green_tree_before_commit(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    tree = _git(repo, "write-tree")
+    gated: list[str] = []
+    arguments = _args(repo, base, "green") + [
+        "--red-sha",
+        red,
+        "--judge-tree",
+        tree,
+        "--message-file",
+        str(_message(tmp_path)),
+        "--apply",
+    ]
+
+    code, _out, _err, commands = _invoke(
+        arguments,
+        candidate_gate=lambda candidate: (
+            gated.append(candidate) or CommandResult(0, "", "")
+        ),
+    )
+
+    assert code == 0
+    assert gated == [tree]
+    assert any(command[-3:-1] == ("commit", "-F") for command in commands)
+
+
+def test_interactive_cli_default_runs_real_gate_before_commit(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    (repo / "src" / "widget.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "src/widget.py")
+    tree = _git(repo, "write-tree")
+    arguments = _args(repo, base, "green") + [
+        "--red-sha",
+        red,
+        "--judge-tree",
+        tree,
+        "--message-file",
+        str(_message(tmp_path)),
+        "--apply",
+    ]
+
+    code, _out, _err, commands = _invoke(
+        arguments, candidate_gate=None, reject_gate_tool=True
+    )
+
+    assert code == 1
+    assert any(command[:2] == ("uv", "run") for command in commands)
+    assert not any(command[-3:-1] == ("commit", "-F") for command in commands)
+
+
+def test_interactive_cli_license_violation_stops_gate_and_commit(
+    tmp_path: Path,
+) -> None:
+    repo, request = _staged_green_request(tmp_path)
+    gated: list[str] = []
+    arguments = _args(repo, request.base_sha, "green") + [
+        "--red-sha",
+        request.red_sha,
+        "--judge-tree",
+        request.judge_tree,
+        "--message-file",
+        str(request.message_file),
+        "--apply",
+    ]
+
+    code, _out, _err, commands = _invoke(
+        arguments,
+        candidate_gate=lambda tree: gated.append(tree) or CommandResult(0, "", ""),
+        license_violation=True,
+    )
+
+    checker = [
+        command
+        for command in commands
+        if command[:2] == (sys.executable, "scripts/check_licenses.py")
+    ]
+    assert code == 1
+    assert len(checker) == 1
+    assert checker[0][-3:] == (
+        "--candidate-tree",
+        request.judge_tree,
+        "--json",
+    )
+    assert gated == []
+    assert not any(command[-3:-1] == ("commit", "-F") for command in commands)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("invalid-license", "violated-license", "gate-id", "setup-error", "timeout"),
+)
+def test_interactive_green_failure_stops_before_commit_without_private_output(
+    tmp_path: Path, failure: str
+) -> None:
+    repo, request = _staged_green_request(tmp_path)
+    events: list[str] = []
+
+    def license_preflight(tree: str) -> CommandResult:
+        events.append(f"license:{tree}")
+        if failure == "invalid-license":
+            return CommandResult(0, "not-json", "")
+        if failure == "violated-license":
+            return CommandResult(1, "private stdout", "private stderr")
+        return CommandResult(
+            0, '{"schema_version":1,"outcome":"compliant","violations":[]}', ""
+        )
+
+    def gate(tree: str) -> CommandResult:
+        events.append(f"gate:{tree}")
+        if failure == "setup-error":
+            raise RuntimeError("private setup path")
+        if failure == "timeout":
+            raise TimeoutError("private token")
+        return CommandResult(1, "private stdout", "ruff-check failed: private stderr")
+
+    dependencies = replace(
+        InteractiveCommitDependencies(
+            run_git=run_git,
+            commit_worktree=lambda _path, _argv: (
+                events.append("commit") or CommandResult(0, "", "")
+            ),
+        ),
+        run_license_preflight=license_preflight,
+        check_candidate_gate=gate,
+    )
+
+    with pytest.raises(InteractiveCommitError) as error:
+        commit_interactive_green(request, dependencies, apply=True)
+
+    assert events == (
+        [f"license:{request.judge_tree}"]
+        if failure.endswith("license")
+        else [f"license:{request.judge_tree}", f"gate:{request.judge_tree}"]
+    )
+    assert "private" not in str(error.value)
+    if failure == "gate-id":
+        assert "ruff-check" in str(error.value)
+    assert _git(repo, "rev-parse", "HEAD") == request.red_sha
 
 
 def _ref(repo: Path, name: str) -> str | None:

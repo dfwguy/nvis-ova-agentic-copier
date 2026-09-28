@@ -95,6 +95,15 @@ class ValidationStateFake:
         yield
 
 
+def _passing_gate(
+    dependencies: JudgeValidationDependencies,
+) -> JudgeValidationDependencies:
+    return replace(
+        dependencies,
+        check_candidate_gate=lambda _tree: CommandResult(0, "", ""),
+    )
+
+
 def _dependencies(
     state: ValidationStateFake,
     *,
@@ -117,23 +126,22 @@ def _dependencies(
             for environment, _contents, _count in artifacts
         )
 
-    return (
-        JudgeValidationDependencies(
-            run_license_preflight=lambda _tree: CommandResult(
-                0, _preflight_payload("compliant"), ""
-            ),
-            current_staged_tree=lambda: current_tree,
-            read_record=state.read,
-            atomic_write_record=state.atomic_write,
-            candidate_lock=state.candidate_lock,
-            run_command=run,
-            monotonic_clock=monotonic_clock,
-            sleeper=sleeper,
-            read_artifact=lambda _path: (
-                b"<testsuite tests='1' failures='0' errors='0'/>"
-            ),
-            capture_junit_artifacts=capture,
+    dependencies = JudgeValidationDependencies(
+        run_license_preflight=lambda _tree: CommandResult(
+            0, _preflight_payload("compliant"), ""
         ),
+        current_staged_tree=lambda: current_tree,
+        read_record=state.read,
+        atomic_write_record=state.atomic_write,
+        candidate_lock=state.candidate_lock,
+        run_command=run,
+        monotonic_clock=monotonic_clock,
+        sleeper=sleeper,
+        read_artifact=lambda _path: b"<testsuite tests='1' failures='0' errors='0'/>",
+        capture_junit_artifacts=capture,
+    )
+    return (
+        _passing_gate(dependencies),
         calls,
     )
 
@@ -182,7 +190,11 @@ def _diagnostic_dependencies(
         read_artifact=read_artifact,
         capture_junit_artifacts=capture,
     )
-    return dependencies, calls, artifact_reads
+    return (
+        _passing_gate(dependencies),
+        calls,
+        artifact_reads,
+    )
 
 
 def _preflight_payload(
@@ -191,6 +203,148 @@ def _preflight_payload(
     return json.dumps(
         {"schema_version": 1, "outcome": outcome, "violations": violations or []}
     )
+
+
+@pytest.mark.parametrize("gate_returncode", (0, 1))
+def test_judge_runs_cheap_gate_on_exact_candidate_before_full_hook(
+    gate_returncode: int,
+) -> None:
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    events: list[str] = []
+    dependencies = replace(
+        dependencies,
+        check_candidate_gate=lambda tree: (
+            events.append(f"gate:{tree}") or CommandResult(gate_returncode, "", "")
+        ),
+        run_hook=lambda _command, _lease: (
+            events.append("hook") or CommandResult(0, "", "")
+        ),
+        remove_junit_artifact=lambda _path: events.append("junit cleanup"),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert events[0] == f"gate:{_CANDIDATE}"
+    assert ("hook" in events) is (gate_returncode == 0)
+    assert (report.state == "terminal-success") is (gate_returncode == 0)
+    if gate_returncode:
+        assert "junit cleanup" not in events
+        assert state.writes == []
+
+
+def test_judge_changed_candidate_requires_fresh_cheap_gate() -> None:
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    current = [_CANDIDATE]
+    gated: list[str] = []
+    dependencies = replace(
+        dependencies,
+        current_staged_tree=lambda: current[0],
+        check_candidate_gate=lambda tree: (
+            gated.append(tree) or CommandResult(1, "", "")
+        ),
+    )
+
+    first = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    current[0] = _OTHER_CANDIDATE
+    second = run_judge_validation(
+        candidate_tree=_OTHER_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert first.state != "terminal-success"
+    assert second.state != "terminal-success"
+    assert gated == [_CANDIDATE, _OTHER_CANDIDATE]
+
+
+def test_judge_rejects_candidate_changed_during_cheap_gate_before_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    current = [_CANDIDATE]
+
+    def gate(_tree: str) -> CommandResult:
+        current[0] = _OTHER_CANDIDATE
+        return CommandResult(0, "", "")
+
+    dependencies = replace(
+        dependencies,
+        current_staged_tree=lambda: current[0],
+        check_candidate_gate=gate,
+    )
+
+    with pytest.raises(JudgeValidationError, match="staged tree"):
+        run_judge_validation(
+            candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+        )
+
+    assert hooks == []
+    assert state.writes == []
+
+
+def test_judge_reports_safe_failing_check_without_tool_output() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    dependencies = replace(
+        dependencies,
+        check_candidate_gate=lambda _tree: CommandResult(
+            1, "private stdout", "ruff-check failed: private stderr"
+        ),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert report.hook_failures[0].hook_id == "ruff-check"
+    assert "private" not in str(report)
+    assert hooks == []
+    assert state.writes == []
+
+
+@pytest.mark.parametrize("error", (RuntimeError("setup path"), TimeoutError("token")))
+def test_judge_gate_exception_fails_closed_before_hook(error: Exception) -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+
+    def failed_gate(_tree: str) -> CommandResult:
+        raise error
+
+    dependencies = replace(dependencies, check_candidate_gate=failed_gate)
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert hooks == []
+    assert state.writes == []
+    assert "token" not in str(report)
+    assert "setup path" not in str(report)
+
+
+def test_judge_missing_gate_fails_closed_before_record_junit_or_hook() -> None:
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    removed: list[Path] = []
+    dependencies = replace(
+        dependencies,
+        check_candidate_gate=None,
+        remove_junit_artifact=removed.append,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert state.writes == []
+    assert removed == []
+    assert hooks == []
 
 
 def test_license_violation_preflight_keeps_candidate_without_session_or_hook() -> None:
@@ -2988,6 +3142,7 @@ def test_successful_apply_captures_exact_supported_junit_bytes_and_status_reuses
         read_artifact=read_artifact,
         capture_junit_artifacts=capture_junit_artifacts,
     )
+    dependencies = _passing_gate(dependencies)
 
     applied = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3194,6 +3349,7 @@ def test_hook_failure_keeps_existing_diagnostics_without_junit_capture() -> None
         read_artifact=lambda _path: b"<testsuite tests='1' failures='1' errors='0'/>",
         capture_junit_artifacts=lambda *_args: captures.append(_args),
     )
+    dependencies = _passing_gate(dependencies)
 
     report = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3231,6 +3387,7 @@ def test_artifact_capture_failure_is_terminal_without_rerunning_the_hook() -> No
         read_artifact=lambda _path: b"<testsuite tests='1' failures='0' errors='0'/>",
         capture_junit_artifacts=lambda *_args: (_ for _ in ()).throw(OSError("secret")),
     )
+    dependencies = _passing_gate(dependencies)
 
     first = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3298,6 +3455,7 @@ def test_apply_removes_stale_junit_sources_before_hook_and_in_finally_cleanup(
         remove_junit_artifact=remove_junit_artifact,
         capture_junit_artifacts=capture_junit_artifacts,
     )
+    dependencies = _passing_gate(dependencies)
 
     report = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3348,6 +3506,7 @@ def test_post_hook_junit_cleanup_failure_is_terminal_and_never_retries_hook(
         remove_junit_artifact=remove_junit_artifact,
         capture_junit_artifacts=lambda *_args: captures.append(_args),
     )
+    dependencies = _passing_gate(dependencies)
 
     first = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3392,6 +3551,7 @@ def test_pre_hook_junit_cleanup_failure_is_terminal_without_a_hook_return_code()
         ),
         capture_junit_artifacts=lambda *_args: captures.append(_args),
     )
+    dependencies = _passing_gate(dependencies)
 
     first = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3455,6 +3615,7 @@ def test_unusable_success_junit_xml_is_terminal_without_capture_or_hook_retry(
         remove_junit_artifact=removals.append,
         capture_junit_artifacts=lambda *_args: captures.append(_args),
     )
+    dependencies = _passing_gate(dependencies)
 
     first = run_judge_validation(
         candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
@@ -3606,6 +3767,7 @@ def test_interrupted_hook_preserves_running_record_for_nonduplicating_recovery()
         monotonic_clock=lambda: 0.0,
         sleeper=lambda _seconds: None,
     )
+    dependencies = _passing_gate(dependencies)
 
     with pytest.raises(RuntimeError, match="frontend handle lost"):
         run_judge_validation(

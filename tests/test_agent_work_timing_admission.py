@@ -16,7 +16,7 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import cast
@@ -457,10 +457,11 @@ def test_window_keeps_project_admission_through_nested_validation_and_later_work
                 observed.append("nested-hook")
             return CommandResult(0, "", "")
 
-        nested_exit = main(
+        nested_exit = cast(Callable[..., int], main)(
             ["validation", "run", "--candidate-tree", "a" * 40, "--apply"],
             environment=child_environment,
             run_command=run,
+            candidate_gate=lambda _tree: CommandResult(0, "", ""),
             run_validation_hook=lambda command, lease: (
                 hook_leases.append(lease) or run(command)
             ),

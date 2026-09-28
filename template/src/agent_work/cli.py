@@ -36,6 +36,7 @@ from . import (
     template_update_publication,
 )
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
+from .cheap_gate import check_candidate_gate
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -1644,6 +1645,7 @@ def main(
     apply_upstream: _ApplyUpstream | None = None,
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
+    candidate_gate: Callable[[str], CommandResult] | None = None,
     systemd_smoke_action: Callable[..., SystemdSmokeReport] = run_systemd_smoke,
     discover_agent_work_config: Callable[..., AgentWorkConfig] = discover_config,
     sleeper: Callable[[float], None] = time.sleep,
@@ -1718,6 +1720,25 @@ def main(
         except ValueError as error:
             write_stderr(str(error))
             return 2
+
+        def interactive_license_preflight(tree: str) -> CommandResult:
+            result = run_command(
+                (
+                    sys.executable,
+                    "scripts/check_licenses.py",
+                    "--root",
+                    ".",
+                    "--policy",
+                    ".license-policy.toml",
+                    "--candidate-tree",
+                    tree,
+                    "--json",
+                ),
+                current_directory=Path(parsed.worktree),
+                environment=environment,
+            )
+            return CommandResult(result.returncode, result.stdout, result.stderr)
+
         try:
             dependencies = InteractiveCommitDependencies(
                 run_git=partial(
@@ -1729,6 +1750,22 @@ def main(
                     run_worktree_commit,
                     run_command=run_command,
                     environment=environment,
+                ),
+                run_license_preflight=interactive_license_preflight,
+                check_candidate_gate=candidate_gate
+                or (
+                    lambda tree: check_candidate_gate(
+                        tree,
+                        source=Path(parsed.worktree),
+                        current_staged_tree=lambda: run_interactive_git(
+                            Path(parsed.worktree),
+                            ("write-tree",),
+                            run_command=run_command,
+                            environment=environment,
+                        ).stdout.strip(),
+                        run_command=run_command,
+                        environment=environment,
+                    )
                 ),
             )
             if parsed.action == "red":
@@ -2282,6 +2319,16 @@ def main(
                     candidate_lock=candidate_lock,
                     project_admission=project_admission,
                     run_command=run_command,
+                    check_candidate_gate=candidate_gate
+                    or (
+                        lambda tree: check_candidate_gate(
+                            tree,
+                            source=current_checkout(),
+                            current_staged_tree=lambda: git_read(("git", "write-tree")),
+                            run_command=run_command,
+                            environment=environment,
+                        )
+                    ),
                     run_license_preflight=lambda tree: run_command(
                         (
                             sys.executable,

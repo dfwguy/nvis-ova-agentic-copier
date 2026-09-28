@@ -590,6 +590,7 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
     worktree = tmp_path / _UPDATE_ID
     worktree.mkdir()
     calls: list[tuple[str, ...]] = []
+    gated: list[tuple[Path, str, dict[str, str]]] = []
 
     def process(
         command: tuple[str, ...], **_kwargs: object
@@ -646,14 +647,27 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
     dependencies = _DefaultDependencies(
         config,
         cast(Any, object()),
-        {},
+        {
+            "PATH": "/usr/bin",
+            "GITLAB_TOKEN": "service-token",
+            "GIT_ASKPASS": "hostile",
+            "SSH_ASKPASS": "hostile",
+            "AGENT_WORK_GIT_CREDENTIAL_HELPER": "hostile",
+        },
         lambda *_args, **_kwargs: CommandResult(0, "", ""),
         process,
         run_supervised_hook=supervised_hook,
     )
+    dependencies = replace(
+        dependencies,
+        candidate_gate=lambda path, tree, environment: (
+            gated.append((path, tree, dict(environment))) or CommandResult(0, "", "")
+        ),
+    )
 
     evidence = dependencies.validate_tree(worktree, _TREE)
     assert evidence.success
+    assert gated == [(worktree, _TREE, {"PATH": "/usr/bin"})]
     assert evidence.junit_artifacts == ("py311", "py314")
     assert next(i for i, call in enumerate(calls) if "--candidate-tree" in call) < next(
         i for i, call in enumerate(calls) if call[-3:] == ("hook", "run", "pre-commit")
