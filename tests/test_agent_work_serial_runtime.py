@@ -11701,9 +11701,17 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    clean = _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
     record = ledger.persist(
-        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+        clean.model_copy(
+            update={"workflow_lane": WorkflowLane.UNKNOWN, "main_sha": clean.source_sha}
+        )
     )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    assert record.workflow_lane is WorkflowLane.UNKNOWN
+    assert record.source_sha == record.main_sha
+    assert repository.paths == () and not repository.dirty
     payload = {
         "protocol_version": 2,
         "project_id": 310967,
@@ -11728,15 +11736,20 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
     outcome = run_segment(
         ledger=ledger,
         gitlab=FakeGitLab(),
-        repository=FakeRepository(config),
+        repository=repository,
         invoke=FakeInvoker(json.dumps(payload)),
         timeout_seconds=10,
         now=NOW,
         clock=lambda: next(moments),
     )
 
-    assert outcome is not None and outcome.state is RunnerState.BLOCKED
-    assert str(outcome.error_code) == "agent_capacity_unavailable"
+    assert outcome is not None and outcome.state is RunnerState.RETRY_WAIT
+    assert outcome.error_code is ErrorCode.AGENT_CAPACITY_UNAVAILABLE
+    assert outcome.prior_state is RunnerState.EXECUTING
+    assert outcome.prior_phase is WorkflowPhase.WORKFLOW
+    assert outcome.retry_count == 0
+    assert outcome.retry_at is not None
+    assert outcome.retry_at == NOW + timedelta(minutes=20)
     assert outcome.phase_timings[-1].model_dump() == {
         "phase_or_role": "capacity-wait",
         "attempt": 1,
@@ -11746,6 +11759,104 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
         "outcome": "agent_capacity_unavailable",
         "classification": "wait",
     }
+
+    before_due_invoker = FakeInvoker(json.dumps(payload))
+    before_due = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=before_due_invoker,
+        timeout_seconds=10,
+        now=outcome.retry_at - timedelta(microseconds=1),
+    )
+    assert before_due is None
+    assert before_due_invoker.prompts == []
+
+    repeated_invoker = FakeInvoker(json.dumps(payload))
+    repeated = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=repeated_invoker,
+        timeout_seconds=10,
+        now=outcome.retry_at,
+    )
+    assert repeated is not None and repeated.state is RunnerState.RETRY_WAIT
+    assert repeated.issue_iid == outcome.issue_iid
+    assert repeated.error_code is ErrorCode.AGENT_CAPACITY_UNAVAILABLE
+    assert repeated.retry_count == 0
+    assert repeated.retry_at is not None
+    assert repeated.retry_at == outcome.retry_at + timedelta(minutes=20)
+    assert len(repeated_invoker.prompts) == 1
+    assert repeated_invoker.prompts[0].count("$architect-proposal-balanced") == 1
+    assert repeated_invoker.prompts[0].count("$architect-proposal-fast") == 2
+
+    available_capacity = SingleSessionInvoker()
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=available_capacity,
+        timeout_seconds=10,
+        now=repeated.retry_at,
+    )
+    assert resumed is not None and resumed.issue_iid == outcome.issue_iid
+    assert available_capacity.phases == ["workflow"]
+    assert available_capacity.prompts[0].count("$architect-proposal-balanced") == 1
+    assert available_capacity.prompts[0].count("$architect-proposal-fast") == 2
+
+
+@pytest.mark.parametrize("retained_evidence", ["dirty", "red"])
+def test_capacity_refusal_with_retained_work_requires_safe_recovery(
+    tmp_path: Path, retained_evidence: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    clean = _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    record = ledger.persist(
+        clean.model_copy(
+            update={"workflow_lane": WorkflowLane.UNKNOWN, "main_sha": clean.source_sha}
+        )
+    )
+    repository = FakeRepository(config)
+    repository.paths = ()
+    assert record.workflow_lane is WorkflowLane.UNKNOWN
+    assert record.source_sha == record.main_sha
+    assert repository.paths == () and not repository.dirty
+    if retained_evidence == "dirty":
+        repository.dirty = True
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+    invoker = FakeInvoker(
+        json.dumps(
+            {
+                "workflow_lane": "coding",
+                "result_kind": "needs_human",
+                "phase_status": "rejected",
+                "completed_phase": "workflow",
+                "rejection_route": "workflow",
+                "change_summary": "Capacity admission did not pass.",
+                "error_code": "agent_capacity_unavailable",
+                "redacted_summary": "Fresh live-agent capacity was unavailable.",
+                "next_action": "Start a new workflow session with sufficient live slots.",
+            }
+        )
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=(
+            (lambda *_args: checkpoint) if retained_evidence == "red" else None
+        ),
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.error_code is ErrorCode.AGENT_CAPACITY_UNAVAILABLE
+    assert outcome.issue_iid == record.issue_iid
 
 
 @pytest.mark.parametrize(

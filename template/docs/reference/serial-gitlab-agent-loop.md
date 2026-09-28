@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -1186,7 +1186,7 @@ project or item is safe to run.
 | --- | --- | --- |
 | `PREPARING` | The selected record matches. The retained worktree is clean. | Resume this item when it owns the one-item advancement capacity. Repair it when safe. |
 | `EXECUTING` | The issue's owner marker and retained-worktree evidence are recoverable. | Resume this item when it owns the one-item advancement capacity. Repair it when safe. |
-| `RETRY_WAIT` | `retry_at` is due. No owner is immediate. | Resume the earliest due retry. A future retry is deferred. Scan on. |
+| `RETRY_WAIT` | `retry_at` is due. No owner is immediate. | Resume the earliest due retry, including a clean pre-selection capacity wait. A future retry is deferred. Scan on. |
 | `PUBLISHING` | The retained branch is exact. Publication identity is pending. | Resume publication for this item. Repair it when safe. |
 | `OBSERVING` | The current source SHA, owner, worktree, project, and target are exact. Pipeline evidence exists. | Direct or recovery handling observes immediately. Ordinary admission parks only this exact nonterminal item after its current activation, then scans for other eligible work. A retained stale or inexact claimant remains visible for item-local `_observe` reconciliation before fresh work. It blocks or repairs when identity cannot be established. Later terminal or conflict evidence takes priority: a conflict or exact failure enters repair, success with required jobs reaches human review, and exact canceled, skipped, or manual evidence enters item-local `NEEDS_REPAIR`. |
 | `REPAIR` | One failed current-source pipeline has a unique owner. | Run at most one repair workflow. Or resume one. Do this in the activation. |
@@ -1352,7 +1352,7 @@ global capacity is unreported.
 | Invalid source | Repository data, issue and task text, user or provider setup, service environment values, and retained ledger or audit values do not prove live capacity. |
 | Requirement | `12` total live slots for coding; `5` for content. The selected lane sets the requirement. |
 | Missing report | Continue. Missing global capacity is not a shortage. |
-| Reported shortage | Return `needs_human` before delegation, fanout, or a worktree change. State the lane, fixed requirement, reported total, shortfall, and an actionable frontend remedy. |
+| Reported shortage | Return `needs_human` before delegation, fanout, or a worktree change. State the lane, fixed requirement, reported total, shortfall, and an actionable frontend remedy. An eligible ordinary serial issue then enters the capacity wait below. |
 | Prohibited inference | Do not request or calculate topology, widest-row, retained-object, current-use, fresh-handle, per-owner, direct-child, descendant, or owner-headroom counts. None creates another capacity gate. |
 | New launch | A prior report does not authorize a new launch. Use a newer current report when one is available. |
 
@@ -1363,6 +1363,23 @@ controller-derived values, role receipts, or audit authorization. Legacy ledger
 records remain readable through their recorded route.
 See [Configure agent
 capacity](../how-to/configure-agent-capacity.md) for the operator procedure.
+
+For a broker-bound `agent_capacity_unavailable` refusal, the controller defers
+an ordinary issue only during a pre-selection `WORKFLOW` attempt whose durable
+lane is `UNKNOWN`. The ordinary record must have untouched retained evidence,
+an exact branch, HEAD, and source identity, no candidate paths, a clean
+worktree, and no Red checkpoint. The controller records the same issue in
+`RETRY_WAIT` with `retry_at` set 20 minutes after the recorded activation
+time. It keeps `retry_count` unchanged, so repeated shortages do not exhaust
+the three ordinary retries.
+It records the elapsed refusal as `capacity-wait` timing. The controller binds
+the worker's capacity result through the broker; it does not measure the
+frontend's live slots itself.
+
+When the wait is due, the same issue starts a fresh session. It checks current
+capacity and reruns the three Architect proposals. Dirty work, a saved Red
+checkpoint, a changed identity, or another `needs_human` cause follows the
+existing safe recovery route.
 
 ### Architect proposal gate
 
@@ -1622,13 +1639,17 @@ still check this exact completion path.
 
 ## Retry, repair deferment, exits, and JSON
 
-The first workflow attempt and at most three retries are bounded.
+The first workflow attempt and at most three ordinary retries are bounded.
 `retry-wait` records its deadline. Exhaustion becomes `agent::blocked`, never
 `agent::failed`. Labels never make a blocked item eligible. A valid exact retry
 plan lets `loop retry --issue-iid IID --apply --plan-file PATH` resume that IID
 from its retained worktree and durable record without a new human unblocking
 approval. It does not select a replacement issue or discard retained recovery
 evidence.
+
+A clean pre-selection capacity refusal has its own `RETRY_WAIT` deadline. It
+does not increase `retry_count`. A due wait starts a fresh session for the
+same issue.
 
 An applied activation may resume one clean, untouched ordinary blocked record
 after proof checks under the project and issue locks. The same failure sets a
@@ -1652,6 +1673,7 @@ it.
 | Outcome or condition | Durable handling |
 | --- | --- |
 | First workflow attempt plus at most three retries | Bounded; `retry-wait` records its deadline. Exhaustion becomes `agent::blocked`, never `agent::failed`. |
+| Clean, broker-bound pre-selection `agent_capacity_unavailable` | Keep the same issue in `RETRY_WAIT` until its deadline, without spending an ordinary retry. Recheck current capacity and the three proposal gates when due. |
 | Worker exit, timeout, malformed worker protocol, legacy invalid-receipt condition, or explicit `retryable` result | Immediately due and continued in the same activation. |
 | Transient GitLab or transport failure | Keeps retry timing. |
 | Repeated `worker_protocol_invalid`, or legacy `worker_receipt_invalid`, with the same error code and diagnostic in one coarse phase | Blocks immediately without another retry; retain the worktree, phase, and safe cause. |

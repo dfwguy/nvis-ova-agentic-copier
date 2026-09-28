@@ -2248,6 +2248,32 @@ def _record_timing_deferred(
     )
 
 
+def _record_capacity_deferred(
+    record: LedgerRecord, *, ledger: LedgerPort, now: datetime
+) -> LedgerRecord:
+    """Requeue a clean capacity refusal without charging the failure budget."""
+    detail = "Live-agent capacity was unavailable before ordinary work began."
+    condition = ConditionEvidence(
+        occurred_at=now,
+        retry_count=record.retry_count,
+        code=ErrorCode.AGENT_CAPACITY_UNAVAILABLE.value,
+        detail=detail,
+    )
+    return ledger.persist(
+        transition_record(
+            record,
+            RunnerState.RETRY_WAIT,
+            prior_state=record.state,
+            prior_phase=record.phase,
+            retry_at=now + timedelta(minutes=20),
+            error_code=ErrorCode.AGENT_CAPACITY_UNAVAILABLE,
+            summary=detail,
+            next_action="Retry the workflow when live-agent capacity is available.",
+            condition_history=(*record.condition_history, condition)[-64:],
+        )
+    )
+
+
 def _record_retry(
     record: LedgerRecord,
     *,
@@ -3951,6 +3977,29 @@ def _execute(
                         gitlab=gitlab,
                         now=now,
                     )
+                if (
+                    record.state is RunnerState.EXECUTING
+                    and record.phase is WorkflowPhase.WORKFLOW
+                    and record.workflow_lane is WorkflowLane.UNKNOWN
+                    and retained_checkpoint is None
+                    and retained_ordinary_is_untouched(record)
+                    and result.result_kind == "needs_human"
+                    and result.error_code is ErrorCode.AGENT_CAPACITY_UNAVAILABLE
+                    and not final_changed_paths
+                    and record.source_sha is not None
+                ):
+                    try:
+                        repository.verify_worktree(
+                            record.worktree, record.source_branch, record.source_sha
+                        )
+                        status = repository.observe_worktree_status(record.worktree)
+                    except RepositoryError:
+                        pass
+                    else:
+                        if not status.dirty and not status.changed_paths:
+                            return _record_capacity_deferred(
+                                record, ledger=ledger, now=now
+                            )
                 outcome = apply_worker_result(record, result, now=now).record
             except RepositoryTransientError:
                 if (
@@ -5269,6 +5318,7 @@ def run_segment(
         ErrorCode.WORKER_PROTOCOL_INVALID,
         ErrorCode.WORKER_RECEIPT_INVALID,
         ErrorCode.TIMING_ADMISSION_BUSY,
+        ErrorCode.AGENT_CAPACITY_UNAVAILABLE,
     }
     reexecute_due_worker_retry = record.state is RunnerState.RETRY_WAIT and (
         record.error_code in retryable_worker_errors
