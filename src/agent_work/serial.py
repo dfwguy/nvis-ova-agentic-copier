@@ -5686,12 +5686,12 @@ def run_segment(
                 update={
                     "phase_timings": append_phase_timing(
                         outcome.phase_timings,
-                        phase_or_role="pipeline-wait",
+                        phase_or_role="pipeline-poll",
                         attempt=record.retry_count + 1,
                         started_at=started_at,
                         finished_at=finished_at,
                         outcome=timing_outcome,
-                        classification="wait",
+                        classification="execution",
                     )
                 }
             )

@@ -55,18 +55,34 @@ def is_bounded_timing_append(
 
 def summarize_phase_timings(timings: tuple[PhaseTiming, ...]) -> str:
     """Return one compact human-safe aggregate token value."""
-    execution = sum(
-        timing.elapsed_seconds
-        for timing in timings
-        if timing.classification == "execution"
-    )
-    wait = sum(
-        timing.elapsed_seconds for timing in timings if timing.classification == "wait"
-    )
+    execution = []
+    wait = []
+    legacy_poll = []
+    for timing in timings:
+        if timing.phase_or_role == "pipeline-wait" and timing.classification == "wait":
+            legacy_poll.append(timing.elapsed_seconds)
+        elif timing.classification == "execution":
+            execution.append(timing.elapsed_seconds)
+        else:
+            wait.append(timing.elapsed_seconds)
     latest = timings[-1]
     latest_phase = re.sub(r"[^A-Za-z0-9._:-]+", "_", latest.phase_or_role)
     latest_outcome = re.sub(r"[^A-Za-z0-9._:-]+", "_", latest.outcome)
-    return (
-        f"count={len(timings)},execution={execution:.3f}s,wait={wait:.3f}s,"
+    parts = [
+        f"count={len(timings)}",
+        "scope=retained",
+        "coverage=unknown",
+        "internal_roles=unavailable",
+        f"observed_execution={sum(execution):.3f}s"
+        if execution
+        else "observed_execution=unavailable",
+        f"observed_wait={sum(wait):.3f}s" if wait else "observed_wait=unavailable",
+    ]
+    if legacy_poll:
+        parts.append(f"legacy_poll={sum(legacy_poll):.3f}s")
+    if len(timings) == MAX_PHASE_TIMINGS:
+        parts.append("history=possibly-truncated")
+    parts.append(
         f"latest={latest_phase}/{latest_outcome}/{latest.elapsed_seconds:.3f}s"
     )
+    return ",".join(parts)

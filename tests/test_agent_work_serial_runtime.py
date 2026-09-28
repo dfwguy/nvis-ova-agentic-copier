@@ -11686,13 +11686,13 @@ def test_controller_clock_records_publication_and_pipeline_observation_boundarie
 
     assert observed is not None and observed.phase is WorkflowPhase.PIPELINE_WAIT
     assert observed.phase_timings[-1].model_dump() == {
-        "phase_or_role": "pipeline-wait",
+        "phase_or_role": "pipeline-poll",
         "attempt": 1,
         "started_at": publication_finished,
         "finished_at": pipeline_finished,
         "elapsed_seconds": 5.0,
         "outcome": "awaiting-human",
-        "classification": "wait",
+        "classification": "execution",
     }
 
 
@@ -13526,7 +13526,8 @@ def test_nonterminal_pipeline_status_waits_without_repair(
         outcome.model_copy(update={"revision": record.revision, "phase_timings": ()})
         == record
     )
-    assert outcome.phase_timings[-1].phase_or_role == "pipeline-wait"
+    assert outcome.phase_timings[-1].phase_or_role == "pipeline-poll"
+    assert outcome.phase_timings[-1].classification == "execution"
     assert outcome.phase_timings[-1].outcome == "pending"
 
 
