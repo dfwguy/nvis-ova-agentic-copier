@@ -5,7 +5,7 @@ summary: Set live-agent capacity for a workflow lane.
 audience: practitioner
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-28
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why capacity is a workflow precondition.
@@ -109,3 +109,14 @@ metadata for the new session.
 
 Use the same fixed global rule for every Architect launch. Missing global
 capacity evidence is not a `needs_human` handoff.
+
+For an ordinary serial issue stopped by a reported shortage while its durable
+lane is still unknown, the controller checks its retained worktree. If the
+worktree is clean and there is no Red checkpoint, it keeps the issue in
+`RETRY_WAIT` until a 20-minute deadline measured from the current activation.
+You can raise the frontend limit. The next due activation checks current
+capacity and runs the Architect proposal gate again.
+A dirty worktree or saved Red checkpoint needs its existing recovery route.
+See the [serial loop
+reference](../reference/serial-gitlab-agent-loop.md#live-agent-capacity-launch-contract)
+for the exact eligibility rules.
