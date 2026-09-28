@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -15,6 +15,8 @@ related:
     why: Configures, recovers, and migrates the loop.
   - path: ../how-to/resolve-factory-issues.md
     why: Applies one reviewed decision to exceptional retained issue evidence.
+  - path: ../how-to/update-a-generated-project.md
+    why: Explains the project-owned dependency step before opting into the preview.
   - path: ../explanation/serial-gitlab-agent-loop.md
     why: Explains the architecture behind this contract.
   - path: ../explanation/serial-agent-loop-recovery-design.md
@@ -321,6 +323,36 @@ before supplying `--label`. It never assigns, approves, or merges an issue.
 `--json` returns the bounded publication result.
 
 ### Candidate stage, read, validate, and status
+
+#### Candidate-preview MCP host primitive
+
+Hosts can construct `RoleExecutionProfile.candidate_preview` for role
+`candidate-preview` and pass it to `AgentInvoker.invoke` as `role_profile`.
+The API has no installed command or factory caller. The ordinary factory
+loop does not launch it or consume its result. The primitive supports
+a separate read-only Codex profile with shell and unified execution disabled.
+Its stdio server is `agent_work.mcp_server`.
+
+| Tool | Model arguments | Result |
+| --- | --- | --- |
+| `candidate_status` | None | Saved status for the bound tree. |
+| `candidate_read_manifest` | None | Manifest of staged changed content. |
+| `candidate_read_chunk` | Changed `path`, `side` (`old` or `new`), nonnegative `offset`, and positive `length` up to 128 KiB | One content chunk from that manifest. |
+| `candidate_read_complete` | None | Completion result after all required chunks are read. |
+| `candidate_submit_review` | `verdict` (`approve` or `reject`), bounded `summary`, and up to 32 findings with `severity`, `path`, and `summary` | Recorded advisory review for the bound tree. |
+
+The controller binds the socket, nonce, issue number, and tree outside model
+tool arguments. The broker exposes the exact staged candidate's changed
+content, including old and new sides, within its read limits. It does not
+provide the full repository for a broad quality review. A submitted review
+returns the candidate tree, `review-recorded` state, verdict, summary, and
+findings. An approval with a major or critical finding is rejected.
+
+The result is advisory. The existing trusted broad Quality Judge remains the
+workflow's authority. The same-UID host cannot prove reviewer authority:
+another process under that user may see process-environment values, including
+credentials. Isolated-role wiring is outside this primitive's scope. Track the
+wider MCP migration in issue #341.
 
 For coding and content results, the serial worker uses private `candidate`
 commands in addition to its applicable checkpoint and worker-result

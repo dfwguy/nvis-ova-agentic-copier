@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import UnionType
 from typing import Literal, Protocol, Union, cast, get_args, get_origin
@@ -187,12 +187,34 @@ class WorkerResultBrokerClientRequest:
     issue_iid: int
 
 
+CandidateOperation = Literal["stage", "read", "validate", "status", "review"]
+
+
 class WorkerResultBrokerFactory(Protocol):
     """Create the private producer-to-controller result channel."""
 
     def __call__(
         self, request: WorkerResultBrokerRequest, **kwargs: object
     ) -> WorkerResultBrokerSession: ...
+
+
+class CandidateReviewBroker(Protocol):
+    """Controller channel capable of one exact-tree preview handoff."""
+
+    socket_path: Path
+
+    @property
+    def validated_candidate(self) -> str | None: ...
+
+    @property
+    def reviewed_candidate(self) -> str | None: ...
+
+    @property
+    def review_result(self) -> dict[str, object] | None: ...
+
+    def begin_review(self, expected_tree: str) -> None: ...
+
+    def close_and_capture(self) -> str | None: ...
 
 
 class CandidateBrokerFactory(Protocol):
@@ -202,7 +224,7 @@ class CandidateBrokerFactory(Protocol):
         self,
         candidate_action: Callable[[str, str | None], dict[str, object]],
         **kwargs: object,
-    ) -> CandidateBrokerSession: ...
+    ) -> CandidateReviewBroker: ...
 
 
 _BROKER_MAX_BYTES = 1_048_576
@@ -329,6 +351,55 @@ def _write_frame(connection: socket.socket, payload: bytes) -> None:
     connection.sendall(len(payload).to_bytes(4, byteorder="big") + payload)
 
 
+def _valid_candidate_review_selector(selector: object) -> bool:
+    if not isinstance(selector, dict) or set(selector) != {
+        "verdict",
+        "summary",
+        "findings",
+    }:
+        return False
+    selection = cast(dict[str, object], selector)
+    if selection.get("verdict") not in {"approve", "reject"}:
+        return False
+    summary = selection.get("summary")
+    findings = selection.get("findings")
+    if (
+        not isinstance(summary, str)
+        or not 0 < len(summary) <= 2048
+        or not isinstance(findings, list)
+        or len(findings) > 32
+    ):
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != {
+            "severity",
+            "path",
+            "summary",
+        }:
+            return False
+        item = cast(dict[str, object], finding)
+        path = item.get("path")
+        text = item.get("summary")
+        if (
+            item.get("severity") not in {"critical", "major", "minor"}
+            or (
+                selection["verdict"] == "approve"
+                and item.get("severity") in {"critical", "major"}
+            )
+            or not isinstance(path, str)
+            or not 0 < len(path) <= 512
+            or PurePosixPath(path).is_absolute()
+            or "\\" in path
+            or any(character in path for character in ("\n", "\r", "\x00"))
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or str(PurePosixPath(path)) != path
+            or not isinstance(text, str)
+            or not 0 < len(text) <= 2048
+        ):
+            return False
+    return True
+
+
 class CandidateBrokerSession:
     """Serve bounded validation requests while the producer remains active."""
 
@@ -350,7 +421,10 @@ class CandidateBrokerSession:
         self._stop = threading.Event()
         self._failure: WorkerProtocolError | None = None
         self._candidate: str | None = None
+        self._validated_tree: str | None = None
         self._reviewed: str | None = None
+        self._review_tree: str | None = None
+        self._review_result: dict[str, object] | None = None
         self._review_lock = threading.Lock()
         self._prepared: str | None = None
         self._read_base_sha: str | None = None
@@ -438,8 +512,8 @@ class CandidateBrokerSession:
                             "candidate_broker", "request identity mismatch"
                         )
                     if (
-                        action not in {"stage", "read", "validate", "status"}
-                        or (action != "read" and selector is not None)
+                        action not in {"stage", "read", "validate", "status", "review"}
+                        or (action not in {"read", "review"} and selector is not None)
                         or (action == "stage" and supplied_tree is not None)
                         or (
                             action != "stage"
@@ -460,8 +534,11 @@ class CandidateBrokerSession:
                         )
                     if action == "stage":
                         self._candidate = None
+                        self._validated_tree = None
                         with self._review_lock:
                             self._reviewed = None
+                            self._review_tree = None
+                            self._review_result = None
                         self._prepared = None
                         self._read_base_sha = None
                         self._manifest = None
@@ -469,7 +546,16 @@ class CandidateBrokerSession:
                         self._page_bytes = {}
                     mode: str | None = None
                     chunk_key: tuple[str, str] | None = None
-                    if selector is not None:
+                    if action == "review":
+                        if (
+                            not _valid_candidate_review_selector(selector)
+                            or self._review_tree != supplied_tree
+                            or self._reviewed != supplied_tree
+                        ):
+                            raise WorkerProtocolError(
+                                "candidate_broker", "candidate review is invalid"
+                            )
+                    elif selector is not None:
                         if not isinstance(selector, dict):
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate request is invalid"
@@ -579,6 +665,10 @@ class CandidateBrokerSession:
                         raise WorkerProtocolError(
                             "candidate_broker", "candidate identity changed"
                         )
+                    if action == "review" and outcome.get("state") != "review-recorded":
+                        raise WorkerProtocolError(
+                            "candidate_broker", "candidate review is invalid"
+                        )
                     if action == "read":
                         read_base_sha = outcome.get("base_sha")
                         if (
@@ -662,6 +752,8 @@ class CandidateBrokerSession:
                             if outcome.get("state") == "terminal-success"
                             else None
                         )
+                        if action == "validate":
+                            self._validated_tree = self._candidate
                     response_identity: dict[str, object] = {
                         "accepted": True,
                         "nonce": self._request.nonce,
@@ -774,6 +866,8 @@ class CandidateBrokerSession:
                                 )
                             elif mode == "complete" or selector is None:
                                 self._reviewed = cast(str, candidate)
+                        elif response.get("accepted") is True and action == "review":
+                            self._review_result = response
                     except (OSError, WorkerProtocolError):
                         self._failure = WorkerProtocolError(
                             "candidate_broker", "response could not be delivered"
@@ -836,6 +930,33 @@ class CandidateBrokerSession:
         with self._review_lock:
             return self._reviewed if self._failure is None else None
 
+    def begin_review(self, expected_tree: str) -> None:
+        """Enable one fresh review only after terminal validation of this tree."""
+        with self._review_lock:
+            if self._validated_tree != expected_tree or self._failure is not None:
+                raise WorkerProtocolError(
+                    "candidate_review", "validated tree is required"
+                )
+            self._review_tree = expected_tree
+            self._reviewed = None
+            self._review_result = None
+            self._manifest = None
+            self._read_base_sha = None
+            self._next_offset = {}
+            self._page_bytes = {}
+
+    @property
+    def review_result(self) -> dict[str, object] | None:
+        """Return the controller-bound review after successful delivery."""
+        with self._review_lock:
+            return self._review_result if self._failure is None else None
+
+    @property
+    def validated_candidate(self) -> str | None:
+        """Return the latest terminal validated tree."""
+        with self._review_lock:
+            return self._validated_tree if self._failure is None else None
+
 
 def create_candidate_broker(
     candidate_action: Callable[[str, str | None], dict[str, object]],
@@ -861,7 +982,7 @@ def request_candidate_validation(
     socket_path: Path,
     request: WorkerResultBrokerClientRequest,
     *,
-    action: Literal["stage", "read", "validate", "status"] = "validate",
+    action: CandidateOperation = "validate",
     candidate_tree: str | None = None,
     selector: dict[str, object] | None = None,
     timeout_seconds: int = 10_800,
@@ -2576,6 +2697,121 @@ def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+@dataclass(frozen=True)
+class RoleExecutionProfile:
+    """Explicit host controls for one separate candidate preview invocation."""
+
+    role: Literal["candidate-preview"]
+    candidate_socket: Path
+    nonce: str
+    issue_iid: int
+    candidate_tree: str
+
+    def __post_init__(self) -> None:
+        if self.role != "candidate-preview":
+            raise ValueError("candidate preview role must be candidate-preview")
+
+    @classmethod
+    def candidate_preview(
+        cls,
+        *,
+        role: str,
+        candidate_socket: Path,
+        nonce: str,
+        issue_iid: int,
+        candidate_tree: str,
+    ) -> RoleExecutionProfile:
+        """Create the pilot's read-only candidate preview profile."""
+        if role != "candidate-preview":
+            raise ValueError("candidate preview role must be candidate-preview")
+        return cls(
+            role="candidate-preview",
+            candidate_socket=candidate_socket,
+            nonce=nonce,
+            issue_iid=issue_iid,
+            candidate_tree=candidate_tree,
+        )
+
+
+_CANDIDATE_MCP_TOOLS = (
+    "candidate_status",
+    "candidate_read_manifest",
+    "candidate_read_chunk",
+    "candidate_read_complete",
+    "candidate_submit_review",
+)
+
+
+def _candidate_preview_command(
+    executable: str,
+    checkout: Path,
+    trusted_checkout: Path,
+    controller_environment: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Build a standalone Codex command with read-only host controls."""
+    configured_uv = controller_environment.get("AGENT_WORK_UV")
+    uv_executable = configured_uv if configured_uv is not None else shutil.which("uv")
+    if uv_executable is None or not Path(uv_executable).is_absolute():
+        raise RuntimeError("candidate MCP requires uv")
+    uv_path = Path(uv_executable).resolve()
+    if not uv_path.is_file() or not os.access(uv_path, os.X_OK):
+        raise RuntimeError("candidate MCP requires executable uv")
+    return (
+        executable,
+        "exec",
+        "-C",
+        str(checkout),
+        "--sandbox",
+        "read-only",
+        "--ignore-user-config",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "mcp_servers.candidate.command=" + json.dumps(str(uv_path)),
+        "-c",
+        "mcp_servers.candidate.args="
+        + json.dumps(
+            (
+                "run",
+                "--project",
+                str(trusted_checkout),
+                "--frozen",
+                "python",
+                "-I",
+                "-m",
+                "agent_work.mcp_server",
+            )
+        ),
+        "-c",
+        "mcp_servers.candidate.required=true",
+        "-c",
+        "mcp_servers.candidate.env_vars="
+        + json.dumps(
+            (
+                "AGENT_WORK_CANDIDATE_SOCKET",
+                "AGENT_WORK_CANDIDATE_NONCE",
+                "AGENT_WORK_CANDIDATE_ISSUE_IID",
+                "AGENT_WORK_CANDIDATE_TREE",
+            )
+        ),
+        "-c",
+        "mcp_servers.candidate.enabled_tools=" + json.dumps(_CANDIDATE_MCP_TOOLS),
+        *(
+            token
+            for tool in _CANDIDATE_MCP_TOOLS
+            for token in (
+                "-c",
+                f'mcp_servers.candidate.tools.{tool}.approval_mode="approve"',
+            )
+        ),
+        "--color",
+        "never",
+        "-",
+    )
+
+
 class AgentInvoker:
     """Invoke one supported coding agent through an injected command boundary."""
 
@@ -2588,6 +2824,7 @@ class AgentInvoker:
         candidate_broker_factory: CandidateBrokerFactory | None = None,
         clock: Callable[[], float] = monotonic,
         temporary_directory: Path | None = None,
+        trusted_controller_checkout: Path | None = None,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
@@ -2597,6 +2834,9 @@ class AgentInvoker:
         )
         self._clock = clock
         self._temporary_directory = temporary_directory
+        self._trusted_controller_checkout = (
+            trusted_controller_checkout or Path(__file__).resolve().parents[2]
+        ).resolve()
 
     supports_worker_result_broker = True
 
@@ -2624,6 +2864,7 @@ class AgentInvoker:
         stdin: str | None,
         timeout_seconds: int,
         environment: dict[str, str],
+        include_config: bool = True,
     ) -> CommandResult:
         """Give a Codex worker an owned session home for exactly one invocation."""
         if agent != "codex":
@@ -2644,7 +2885,9 @@ class AgentInvoker:
             home = root / "codex"
             home.mkdir(mode=0o700)
             source = Path(self._environment.get("CODEX_HOME", Path.home() / ".codex"))
-            for name in ("auth.json", "config.toml"):
+            for name in (
+                ("auth.json", "config.toml") if include_config else ("auth.json",)
+            ):
                 if credential := self._owned_codex_credential(source, name):
                     os.symlink(credential, home / name)
             scoped_environment = {
@@ -2735,9 +2978,66 @@ class AgentInvoker:
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
         candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        role_profile: RoleExecutionProfile | None = None,
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
         agent, executable = _agent_profile(self._environment)
+        if role_profile is not None:
+            if (
+                agent != "codex"
+                or broker_request is not None
+                or build_artifact is not None
+                or candidate_action is not None
+            ):
+                raise ValueError(
+                    "candidate preview requires a separate Codex invocation"
+                )
+            worker_environment = _worker_environment(self._environment)
+            worker_environment.pop("GITLAB_TOKEN", None)
+            for name in tuple(worker_environment):
+                if name.startswith(("PYTHON", "UV_")) or name == "VIRTUAL_ENV":
+                    worker_environment.pop(name)
+            worker_environment.update(
+                {
+                    "AGENT_WORK_CANDIDATE_SOCKET": str(role_profile.candidate_socket),
+                    "AGENT_WORK_CANDIDATE_NONCE": role_profile.nonce,
+                    "AGENT_WORK_CANDIDATE_ISSUE_IID": str(role_profile.issue_iid),
+                    "AGENT_WORK_CANDIDATE_TREE": role_profile.candidate_tree,
+                }
+            )
+            try:
+                result = self._run_worker_command(
+                    agent,
+                    _candidate_preview_command(
+                        executable,
+                        checkout,
+                        self._trusted_controller_checkout,
+                        self._environment,
+                    ),
+                    stdin=prompt,
+                    timeout_seconds=timeout,
+                    environment=worker_environment,
+                    include_config=False,
+                )
+            except RuntimeError:
+                return WorkerInvocation(None, stderr="candidate preview setup failed")
+            private_values = (
+                str(role_profile.candidate_socket),
+                role_profile.nonce,
+                role_profile.candidate_tree,
+            )
+
+            def safe_output(value: str) -> str:
+                rendered = _redact(value, worker_environment)
+                for private in private_values:
+                    rendered = rendered.replace(private, "[REDACTED]")
+                return rendered
+
+            return WorkerInvocation(
+                result.returncode,
+                safe_output(result.stdout),
+                safe_output(result.stderr),
+            )
         if broker_request is not None:
             if build_artifact is None:
                 raise ValueError("broker result builder is required")

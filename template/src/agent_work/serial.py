@@ -3485,6 +3485,31 @@ def _execute(
                 ):
                     raise WorkerProtocolError("candidate_broker", "identity changed")
                 return evidence | {"base_sha": candidate_base_sha}
+            if action == "review":
+                if (
+                    successfully_validated_tree != tree
+                    or selector is None
+                    or set(selector) != {"verdict", "summary", "findings"}
+                ):
+                    raise WorkerProtocolError(
+                        "candidate_broker", "candidate review is invalid"
+                    )
+                refreshed = ledger.load(record.issue_iid)
+                if (
+                    refreshed is None
+                    or refreshed.revision != record.revision
+                    or refreshed.state is not record.state
+                    or refreshed.phase is not record.phase
+                    or refreshed.source_sha != record.source_sha
+                    or repository.head(record.worktree) != record.source_sha
+                    or validated_candidate_paths != observed_candidate_paths()
+                    or repository.red_candidate_tree(
+                        record.worktree, candidate_base_sha, validated_candidate_paths
+                    )
+                    != tree
+                ):
+                    raise WorkerProtocolError("candidate_broker", "identity changed")
+                return {"candidate_tree": tree, "state": "review-recorded", **selector}
             report = repository.judge_candidate(
                 record.worktree,
                 tree,

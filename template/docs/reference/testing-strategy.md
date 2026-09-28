@@ -5,7 +5,7 @@ summary: Look up test design, validation layers, and local case timing rules.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../how-to/validate-template-changes.md
     why: Shows how to run the local and CI validation checks.
@@ -125,3 +125,7 @@ has a human-approved integration exception on Python 3.11 and 3.14. It may
 exceed 1 second because it runs a real Copier update. The maintainer owns this
 exception and reviews it when the Copier or template update path changes, or
 when case timing regresses. Keep reporting the case in the timing inventory.
+
+| Integration case | Versions | Cost and owner | Review trigger |
+| --- | --- | --- | --- |
+| `tests/test_agent_work_mcp_server.py::test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs` | Python 3.11 and 3.14 | A trusted interpreter starts through `uv`, then an MCP stdio process connects to a live broker. Process startup and full-suite contention can push the case over 1 second. The maintainer owns cost reduction. | Review when this process path changes or a focused call reaches 1 second. Keep the case in the timing inventory. |
