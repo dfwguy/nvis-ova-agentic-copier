@@ -289,13 +289,15 @@ request for the source branch. With `--issue-iid`, the preview ends with
 `Closes #139`. After create or update and the exact authoritative merge-request
 read-back, GitLab must project exactly that configured-project issue as closing.
 Only an empty or missing projection means GitLab is still catching up. The
-publisher reads it at most four times: once, then up to three retries. Each
-retry waits exactly one second, for at most three seconds of intentional wait.
-It never repeats create or update. An exact
-configured-project issue succeeds. A conflicting or malformed projection fails
-closed at once. The same is true for identity drift, a wrong project or IID,
-or extra or multiple issues. An empty or missing projection after the fourth
-read also fails closed. Omit `--issue-iid` for an issue-less merge request.
+publisher reads it at most eight times: once, then up to seven retries. Each
+retry waits exactly one second, for at most seven seconds of intentional wait.
+It revalidates the same merge request identity and source commit on each retry
+and never repeats create or update. An exact configured-project issue succeeds.
+A conflicting or malformed projection fails closed at once. The same is true
+for identity drift, a wrong project or IID, or extra or multiple issues. An
+empty or missing projection after the eighth read also fails closed and names
+the existing merge request IID and source commit. Omit `--issue-iid` for an
+issue-less merge request.
 
 Add `--impact`, `--human-action`, or `--tracking` only when it helps the
 reviewer. `--tracking` may accompany `--issue-iid`, but cannot contain a

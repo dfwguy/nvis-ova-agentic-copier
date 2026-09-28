@@ -67,12 +67,15 @@ class PublicationPortFake:
 
     inventory: tuple[MergeRequestEvidence, ...] = ()
     read_back: MergeRequestEvidence | None = None
+    fetch_projections: tuple[MergeRequestEvidence, ...] | None = None
+    update_response: MergeRequestEvidence | None = None
     closing_issues: tuple[tuple[int, int], ...] = ((310967, 123),)
     closing_issue_projections: tuple[object, ...] | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.closing_issue_reads = 0
+        self.fetch_reads = 0
 
     def list_merge_requests(
         self, *, project_id: int, source_branch: str
@@ -110,10 +113,20 @@ class PublicationPortFake:
                 (project_id, iid, source_branch, target_branch, title, description),
             )
         )
-        return self.read_back or _evidence(iid=iid, description=description)
+        return (
+            self.update_response
+            or self.read_back
+            or _evidence(iid=iid, description=description)
+        )
 
     def fetch_merge_request(self, *, project_id: int, iid: int) -> MergeRequestEvidence:
         self.calls.append(("fetch", (project_id, iid)))
+        if self.fetch_projections is not None:
+            projection = self.fetch_projections[
+                min(self.fetch_reads, len(self.fetch_projections) - 1)
+            ]
+            self.fetch_reads += 1
+            return projection
         if self.read_back is not None:
             return self.read_back
         mutation = next(
@@ -401,19 +414,50 @@ def test_publisher_retries_missing_closing_projection_after_one_one_second_wait(
         "update" if existing else "create",
         "fetch",
         "closes",
+        "fetch",
         "closes",
     ]
     assert delays == [1.0]
 
 
 @pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
-def test_publisher_fails_closed_after_three_one_second_waits(
+def test_publisher_accepts_closing_projection_on_fifth_read(
+    existing: tuple[MergeRequestEvidence, ...],
+) -> None:
+    port = PublicationPortFake(
+        inventory=existing,
+        closing_issue_projections=((), (), (), (), ((310967, 123),)),
+    )
+    delays: list[float] = []
+
+    report = publish_merge_request(
+        project_id=310967,
+        source_branch="clanker/structured-mr-descriptions",
+        target_branch="main",
+        title="Render merge-request descriptions",
+        description="Body\n\nCloses #123",
+        issue_iid=123,
+        apply=True,
+        port=port,
+        sleeper=delays.append,
+    )
+
+    assert report.applied is True
+    assert [call[0] for call in port.calls].count("closes") == 5
+    assert [call[0] for call in port.calls].count(
+        "update" if existing else "create"
+    ) == 1
+    assert delays == [1.0] * 4
+
+
+@pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
+def test_publisher_fails_closed_after_seven_one_second_waits(
     existing: tuple[MergeRequestEvidence, ...],
 ) -> None:
     port = PublicationPortFake(inventory=existing, closing_issue_projections=((),))
     delays: list[float] = []
 
-    with pytest.raises(GitLabError, match="closing"):
+    with pytest.raises(GitLabError) as error:
         publish_merge_request(
             project_id=310967,
             source_branch="clanker/structured-mr-descriptions",
@@ -426,8 +470,80 @@ def test_publisher_fails_closed_after_three_one_second_waits(
             sleeper=delays.append,
         )
 
-    assert [call[0] for call in port.calls].count("closes") == 4
-    assert delays == [1.0, 1.0, 1.0]
+    assert "88" in str(error.value)
+    assert "a" * 40 in str(error.value)
+    assert [call[0] for call in port.calls].count("closes") == 8
+    assert [call[0] for call in port.calls].count(
+        "update" if existing else "create"
+    ) == 1
+    assert delays == [1.0] * 7
+
+
+@pytest.mark.parametrize("existing", ((), (_evidence(),)), ids=("create", "update"))
+@pytest.mark.parametrize(
+    "drift",
+    (
+        {"iid": 89},
+        {"sha": "b" * 40},
+        {"title": "Changed title"},
+        {"description": "Changed body"},
+        {"source_branch": "other-branch"},
+        {"web_url": "https://gitlab.example.com/group/project/-/merge_requests/89"},
+    ),
+    ids=("iid", "sha", "title", "body", "source-branch", "url"),
+)
+def test_publisher_rejects_retry_read_back_drift_before_accepting_projection(
+    existing: tuple[MergeRequestEvidence, ...], drift: dict[str, object]
+) -> None:
+    first = _evidence(description="Body\n\nCloses #123")
+    port = PublicationPortFake(
+        inventory=existing,
+        fetch_projections=(first, first.model_copy(update=drift)),
+        closing_issue_projections=((), ((310967, 123),)),
+    )
+    delays: list[float] = []
+
+    with pytest.raises(GitLabError, match="read-back"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch=first.source_branch,
+            target_branch=first.target_branch,
+            title=first.title,
+            description=first.description,
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=delays.append,
+        )
+
+    assert [call[0] for call in port.calls].count(
+        "update" if existing else "create"
+    ) == 1
+    assert [call[0] for call in port.calls].count("closes") == 1
+    assert delays == [1.0]
+
+
+def test_publisher_rejects_update_response_for_different_merge_request() -> None:
+    existing = _evidence()
+    port = PublicationPortFake(
+        inventory=(existing,),
+        update_response=existing.model_copy(update={"iid": 89}),
+    )
+
+    with pytest.raises(GitLabError, match="merge request"):
+        publish_merge_request(
+            project_id=310967,
+            source_branch=existing.source_branch,
+            target_branch=existing.target_branch,
+            title=existing.title,
+            description="Body\n\nCloses #123",
+            issue_iid=123,
+            apply=True,
+            port=port,
+            sleeper=_no_sleep,
+        )
+
+    assert [call[0] for call in port.calls] == ["list", "update"]
 
 
 @pytest.mark.parametrize(

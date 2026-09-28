@@ -117,7 +117,7 @@ _MAX_LABEL_PAGES = 100
 _MAX_PIPELINE_JOB_PAGES = 100
 _HIGH_PRIORITY_LABEL = "agent-priority::high"
 _LOW_PRIORITY_LABEL = "agent-priority::low"
-_MAX_CLOSING_PROJECTION_READS = 4
+_MAX_CLOSING_PROJECTION_READS = 8
 _CLOSING_PROJECTION_RETRY_DELAY_SECONDS = 1.0
 _OUTCOME_NOTE_MARKER = re.compile(r"<!-- agent-work-outcome:v2 key=[0-9a-f]{64} -->")
 _OUTCOME_NOTE_NAMESPACE = "<!-- agent-work-outcome:v2"
@@ -592,37 +592,48 @@ def publish_merge_request(
             description=description,
         )
     )
-    read_back = port.fetch_merge_request(project_id=project_id, iid=submitted.iid)
-    if (
-        read_back.iid != submitted.iid
-        or read_back.state != "opened"
-        or read_back.source_branch != source_branch
-        or read_back.target_branch != target_branch
-        or read_back.title != title
-        or read_back.description != description
-        or read_back.has_conflicts
-        or (
-            read_back.source_project_id is not None
-            and read_back.source_project_id != project_id
-        )
-        or (
-            read_back.target_project_id is not None
-            and read_back.target_project_id != project_id
-        )
-    ):
+    if candidates and submitted.iid != candidates[0].iid:
         raise GitLabError(
-            "merge request read-back does not match the requested publication"
+            "updated merge request does not match the listed merge request"
         )
-    if issue_iid is not None:
-        for read_number in range(_MAX_CLOSING_PROJECTION_READS):
-            projection = port.fetch_closing_issues(
-                project_id=project_id, iid=read_back.iid
+    read_back = port.fetch_merge_request(project_id=project_id, iid=submitted.iid)
+    for read_number in range(
+        _MAX_CLOSING_PROJECTION_READS if issue_iid is not None else 1
+    ):
+        if (
+            read_back.iid != submitted.iid
+            or read_back.web_url != submitted.web_url
+            or read_back.sha != submitted.sha
+            or read_back.state != "opened"
+            or read_back.source_branch != source_branch
+            or read_back.target_branch != target_branch
+            or read_back.title != title
+            or read_back.description != description
+            or read_back.has_conflicts
+            or (
+                read_back.source_project_id is not None
+                and read_back.source_project_id != project_id
             )
-            if projection == ((project_id, issue_iid),):
-                break
-            if projection or read_number == _MAX_CLOSING_PROJECTION_READS - 1:
-                raise GitLabError("merge request closing issue projection is not exact")
-            sleeper(_CLOSING_PROJECTION_RETRY_DELAY_SECONDS)
+            or (
+                read_back.target_project_id is not None
+                and read_back.target_project_id != project_id
+            )
+        ):
+            raise GitLabError(
+                "merge request read-back does not match the requested publication"
+            )
+        if issue_iid is None:
+            break
+        projection = port.fetch_closing_issues(project_id=project_id, iid=read_back.iid)
+        if projection == ((project_id, issue_iid),):
+            break
+        if projection or read_number == _MAX_CLOSING_PROJECTION_READS - 1:
+            raise GitLabError(
+                "merge request closing issue projection is not exact for "
+                f"MR !{submitted.iid} at {submitted.sha}"
+            )
+        sleeper(_CLOSING_PROJECTION_RETRY_DELAY_SECONDS)
+        read_back = port.fetch_merge_request(project_id=project_id, iid=submitted.iid)
     return MergeRequestPublicationReport(
         True, action.removeprefix("would-"), read_back, description
     )
