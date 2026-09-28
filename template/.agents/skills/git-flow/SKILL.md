@@ -24,18 +24,18 @@ from `main`, do the work, commit, push, then use `glab` to open or update an
 MR. Publication hands work to a human reviewer. Waiting for a merge is not
 part of the active run. It does not block unrelated work. **There is no
 direct-to-`main` path.** Setup protects `main`. GitLab rejects pushes to it and
-requires approval to merge. Even a one-line typo fix needs an MR. For coding
-work, Finalizer owns the verified local commit. This main-thread skill
+requires approval to merge. Even a one-line typo fix needs an MR. For
+interactive coding work, Judge requests the sole Green commit through the
+trusted boundary and Finalizer verifies it read-only. This main-thread skill
 owns only the push and MR update. Content or trivial work keeps its normal
 main-thread commit. **Do not spawn a subagent for the main-thread publication
 steps below.** They are short, local-only, or one remote command.
 
-For coding work, Finalizer may use `git commit --no-verify`. First, it
-must mechanically match the staged tree and supported-version JUnit
-digests/counts to the validation Judge receipt. This avoids rerunning the recorded
-hook. The serial runner still uses ordinary `git commit -m`. It has no Judge
-identity shortcut. Exact-source pipeline checks after push are another defense.
-It never replaces Judge.
+Judge owns the sole normal interactive Green commit and installed hook under
+the TDD Judge contract. Only retained test-only Red commits use `--no-verify`.
+Finalizer verifies the Green commit read-only. The serial runner keeps its
+ordinary controller commit. Exact-source pipeline checks after push are another
+defense. They never replace Judge.
 
 **A readiness or policy audit is not publication permission.** A Developer may
 not be able to read Maintainer-only policy settings. That Developer may still

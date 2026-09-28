@@ -115,8 +115,9 @@ The coding lane applies when a diff has code, tests, CI, packaging, config,
 schemas, command contracts, or executable automation. Its TDD
 route has architecture, Red, Green, timing review, and validation. It has
 applicable implementation, test, CI, CLI, and filesystem reviews. Red first
-proves the failing tests. After Red and any policy work, Green writes code and
-tests. At the same time, the Diátaxis Writer updates `docs/` and `README.md`.
+proves the failing tests. After Red and any policy work, serial Green writes
+code and tests. Interactive Green changes production files while tests stay
+frozen. At the same time, the Diátaxis Writer updates `docs/` and `README.md`.
 Agent-policy Writer handles portable policy when it applies. Green never edits
 docs, README, or agent-policy paths.
 
@@ -127,11 +128,11 @@ The controller then supplies bounded, read-only candidate evidence to
 Consistency Judge. The finalizer records the judge's verdict or exact
 not-applicable reason in its existing receipt. A skip needs a specific reason.
 
-Red keeps a verified failing-test boundary. In an interactive workflow, Main
-creates one approved checkpoint commit and local ref after Red proves the
-expected failures. The Finalizer later replaces the branch tip with one passing
-commit over the original base and keeps the local Red ref. The failing tip is
-never pushed. GitLab squash does not affect correctness.
+Red keeps a verified failing-test boundary. In an interactive workflow, Red
+makes test-only commits with `--no-verify`. After Judge reads the exact staged
+tree, Judge requests the sole normal Green commit. Its installed hook runs the
+full suite once. Finalizer checks the committed tree and Red ancestry
+read-only. The branch retains Red and Green for a human squash merge.
 
 In a serial workflow, the AI worker cannot commit. While the Red producer is
 still live, it calls the trusted broker boundary. The boundary sets the coding
@@ -152,17 +153,14 @@ review, and final audit use that identity. On resume, the controller reloads it
 freshly and stops on invalid, stale, missing, or changed evidence. The trusted
 controller later makes the one final commit for the whole change.
 
-Green runs the fast formatter, lint, type checks, and focused behavior tests.
+Serial Green runs the fast formatter, lint, type checks, and focused behavior
+tests. Interactive Green runs format, lint, type, and readability checks
+without running tests.
 Green and the Diátaxis Writer stop editing before their combined candidate is
-staged. In interactive work, Main stages it and records its tree ID. Judge uses
-`validation run` for that tree. Judge first scans its licenses. A failed scan
-stops before the durable full-hook session or JUnit cleanup. A passing scan
-allows the session to run one `git hook run pre-commit`, then save fixed JUnit
-snapshots, digests, and test counts. Judge checks the unchanged tree after
-success. Judge and Non-functional
-Reviewer can read persisted evidence after a lost command handle without
-rerunning the hook. See the [validation command
-reference](../reference/serial-gitlab-agent-loop.md#validation-window-validation-run-and-validation-status).
+staged. In interactive work, Main stages it and records its tree ID. Judge
+reads that tree, then invokes the trusted Green commit command. Finalizer uses
+the read-only verification command. See the [interactive commit
+reference](../reference/serial-gitlab-agent-loop.md#interactive-red-and-green-commits).
 
 In serial work, Green asks a private controller socket to stage the changed
 paths the controller observes. The content workflow uses that boundary too.
@@ -196,23 +194,13 @@ the controller checks the tree, changed paths, and identity again before
 publication. The normal ledger transition records that authorization. See
 the [candidate command reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-read-validate-and-status).
 
-Long review cycles use context. In interactive work, Green saves its full,
-bounded correction ledger through the trusted controller checkout while Green
-is still active. Its parent carries a short reference and digest. Finalizer
-reads the saved ledger directly and checks the candidate tree and Judge
-evidence. Specialist reviews still pass directly between agents. The saved
-ledger is workflow context. It does not replace Judge or grant approval or
-merge power. The [review-handoff reference](../reference/serial-gitlab-agent-loop.md#interactive-correction-ledger-handoff)
-lists the commands and recovery checks.
+An interactive restart reconstructs the workflow from source code, Git
+commits, and exact issue and merge-request state. It reruns any needed checks
+instead of restoring an agent session or stored role and session receipts.
 
-During finalization, Finalizer may use `--no-verify`. It may do so only after matching
-that evidence. The serial runner uses its normal commit path. Pipeline review
-checks the exact source commit after publication. It never replaces Judge.
-Interactive Finalizer makes the verified local passing commit. It then uses the
-[interactive commit command](../reference/serial-gitlab-agent-loop.md#interactive-commit-compaction)
-to replace the branch tip with one commit over the original base while keeping
-the Red checkpoint local. Main publishes the returned final tip. In serial
-work, Finalizer does not commit. The trusted controller commits with its hook.
+The serial runner uses its normal commit path. Pipeline review checks the exact
+source commit after publication. It never replaces Judge. In serial work,
+Finalizer does not commit. The trusted controller commits with its hook.
 
 The documentation lane needs a complete diff limited to docs and agent-work
 instructions. It never invents passing prose tests. Its writer records sources.
@@ -447,7 +435,8 @@ Architect owns each coding workflow session. It does not launch unrelated
 top-level processes. It sends the approved design to Red first. Red changes
 only `tests/` and stops at the accepted checkpoint. Architect finishes policy
 work, if needed. It then starts Green and the Diátaxis Writer together. Green
-changes code and tests. The writer
+changes code and tests in serial work. In interactive work, Green changes
+production files while tests stay frozen. The writer
 owns `docs/`, its indexes and reciprocal links, and `README.md`, including
 declared portable mirrors. When portable policy applies, Agent-policy Writer
 changes only `AGENTS.md`, `.agents/**`, and their declared portable mirrors.
@@ -560,9 +549,10 @@ or authority boundary, cross-module rule, or scope not proved safe.
 
 The receipt marks prior sections that still have support. It also marks the
 scope checked again against the current tree. The reviewer uses staged tree
-identities, not intermediate commits. In normal interactive work, Finalizer
-owns one verified commit. In serial-worker work, Finalizer never commits. The
-trusted runner keeps its normal controller commit path.
+identities, not intermediate commits. In normal interactive work, Judge
+requests the sole normal Green commit and Finalizer verifies it read-only. In
+serial-worker work, Finalizer never commits. The trusted runner keeps its
+normal controller commit path.
 
 The controller, not the reviewer, measures review time. The receipt starts with
 compact, token-neutral scope metadata. A later cost study can compare complete

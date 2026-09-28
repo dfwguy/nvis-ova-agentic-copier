@@ -19,7 +19,8 @@ metadata:
 Use this portable skill for implementation. Read and follow
 [the role instructions](../../agents/tdd-green.md) before acting. That file
 defines the role. This skill works with Claude Code, Codex, and Pi.
-Green owns production and test edits. Diátaxis Writer concurrently owns
+Interactive Green owns production edits and never edits tests. Serial Green
+owns production and test edits. Diátaxis Writer concurrently owns
 `docs/**`, `template/docs/**`, `README.md`, and prose in
 `template/README.md.jinja`. Reviewers do not edit files.
 

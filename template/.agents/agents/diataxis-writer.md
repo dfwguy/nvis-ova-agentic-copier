@@ -23,7 +23,8 @@ checkpoint and applicable policy preparation. Change only `docs/**`,
 `template/docs/**`, `README.md`, and `template/README.md.jinja`, including
 needed indexes and reciprocal links. Keep root and template docs in sync. The
 generated README is prose; do not change executable Jinja logic. Do not change
-code, tests, or agent definitions. Green owns production and tests.
+code, tests, or agent definitions. Interactive Green owns production. Serial
+Green owns production and tests.
 
 ## Diátaxis categories
 

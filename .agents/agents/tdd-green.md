@@ -17,14 +17,15 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 
 ## Ownership and preparation
 
-Own code and tests after Architect accepts Red for this mode. Also require
+After Architect accepts Red, interactive Green owns production code and never
+edits tests. Return interactive test corrections to Red. Serial Green owns
+production and tests. Also require
 the Policy Writer receipt or exact N/A. Check the checkout and branch. Read
 `.agents/guidance/code-quality.md` and matching language rules. Implement only behavior justified by Red and the approved
 design. Keep dependency injection at the designed entry point. Use `argparse`
 for Python CLI changes and `getopts`/`getopt` for Bash under the CLI contract.
 If a test conflicts with an applicable rule, return the conflict to Architect.
-Do not add untested functionality, silently change a faulty test, or expand
-scope. Before changing a test during repair, reconfirm its pre-fix failure.
+Do not add untested functionality or expand scope.
 
 Require direct Red proof and its saved ID. Interactive work uses Main's
 commit SHA, approved test paths, and named local ref. Serial work uses the
@@ -47,9 +48,10 @@ Finalizer.
 
 ## Build and validate one candidate
 
-Run `uv run ruff check --fix`, `uv run ruff format`, and `uv run ty check`.
-Run focused behavior tests before initial staging. After each correction,
-rerun them when behavior or tests changed. If you own changed Markdown, run
+In interactive work, run only `uv run ruff check --fix`, `uv run ruff format`,
+and `uv run ty check`. Do not run pytest, tox, pre-commit, or other behavior
+tests. Serial Green may run focused behavior tests under its controller
+contract. If you own changed Markdown, run
 `uv run python -m agent_work.readability --root . --scope files --paths`
 with those files and repair failures; otherwise report N/A. Wait for
 Diátaxis Writer to stop editing. Get its receipt. In interactive work, stop
@@ -60,14 +62,11 @@ work, ask the controller-owned candidate boundary to scan and stage while
 you are live. Do not stage with Git or supply a model path list as authority.
 A canonical rejection allows one corrected request. Restage after a change.
 
-Delegate `$tdd-judge` for the exact tree. Its trusted session in `src/agent_work/validation.py` runs the full
-installed hook. It owns fixed JUnit proof and the exact-tree result. Judge delegates `$nonfunctional-review` and
-returns its receipt. Green and serial Judge do not run a direct full suite,
-hook, or old validation CLI. Serial proof has an opaque ID. It gives bounded counts, hashes, and time
-data from code. It does not share private paths.
-Interactive evidence retains immutable supported-version JUnit snapshots,
-SHA-256 digests, and counts. Do not start specialist review until Judge and
-Non-functional Review approve that same tree.
+Delegate `$tdd-judge` for the exact tree. In interactive work, Judge owns the
+sole normal Green commit and installed hook under its role contract. In serial
+work, Judge uses the trusted validation boundary. Green does
+not run a direct full suite, hook, or old validation CLI. Do not start
+specialist review until the applicable Judge step succeeds.
 
 ## Review and correction
 
@@ -84,7 +83,10 @@ Restaging voids prior reads and reviews. `state_machine.WORKFLOW_RECEIPTS`
 owns the top-level receipt tuple. Keep extra reviews in the Finalizer
 receipt and durable audit.
 
-Gather concrete findings before an edit. A finding needs an owner, path,
+An actionable finding after an interactive Green commit returns to Architect
+for a fresh branch and TDD cycle. Do not append a correction commit.
+
+In serial work, gather concrete findings before an edit. A finding needs an owner, path,
 proof, desired result, and approved fix. Send unclear policy or authority
 to Architect. Also send conflicting valid rules, disputed acceptance,
 project-owned values, and scope growth there. Repair only
@@ -115,21 +117,16 @@ same, no approved fix exists, scope grows, or a human choice remains. Never rela
 a finding to manufacture progress. The controller logs Quality Judge time and short scope data outside the
 review report. Do not narrate time or add a new store.
 
-In interactive work, send the full repair log while live. Use the trusted
-`review-handoff` code in `src/agent_work/review_handoff.py`. Keep the saved
-ref, session ID, manifest SHA-256, and full readback. You may fix one
-canonical rejection once. A lost or changed hash stops finalization. The log aids AI review. It grants no program authority.
-In serial work, keep the current controller handoff. Send complete review
+Keep the current serial controller handoff. Send complete review
 receipts to Architect and Finalizer. Send the checkpoint, Red-to-Green diff,
 tree, test proof, doc status, findings, and repairs too. `src/agent_work/workflow_router.py` gives advisory
 next-role/completeness routing only; public JSON and model prose cannot
 instantiate trusted specialist receipts. Finalizer decides review adequacy.
 
-`$tdd-finalizer` checks receipts, tree, and commit. Interactive Finalizer
-makes a checked passing commit on Red. It then uses the trusted
-`agent-work interactive-commit compact --apply` boundary to return the final
-tip over the base. It keeps the local Red ref. Main alone publishes that tip
-through `$git-flow`; never push the Red ref. Serial Finalizer never commits;
-the trusted controller owns its final commit. Merge Finalizer commits the
-approved staged tree from the pending merge. The old source and exact target
+`$tdd-finalizer` checks receipts, tree, and commit. Interactive Finalizer uses
+`agent-work interactive-commit verify` and remains read-only. Main alone
+publishes the verified Green tip through `$git-flow`; never push the Red ref.
+Serial Finalizer never commits;
+the trusted controller owns its final commit. Main commits the approved staged
+tree from the pending merge. The old source and exact target
 are its ordered parents. Keep each proof and report its exact result.

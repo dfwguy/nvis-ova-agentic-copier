@@ -62,19 +62,15 @@ agent-work worker-result build --issue-iid IID --input-file PATH
                                [--broker-socket PATH]
                                [--broker-nonce NONCE]
                                [--json] [--apply] [--debug]
-agent-work interactive-commit compact --worktree PATH --branch-ref REF
-    --base-sha SHA --red-ref REF --red-sha SHA --passing-sha SHA
-    --judge-tree TREE --message-file PATH [--json] [--apply] [--debug]
-bin/agent-work-from-checkout review-handoff begin --worktree PATH
-    [--issue-iid IID] [--apply] [--json]
-bin/agent-work-from-checkout review-handoff submit --worktree PATH
-    --session-id ID --role '$tdd-green' --review-version N
-    --kind correction-ledger --input-file PATH [--apply] [--json]
-bin/agent-work-from-checkout review-handoff manifest --worktree PATH
-    --session-id ID [--expected-manifest-sha256 SHA256] [--json]
-bin/agent-work-from-checkout review-handoff read --worktree PATH
-    --session-id ID --receipt-id ID
-    [--expected-manifest-sha256 SHA256] [--json]
+agent-work interactive-commit red --worktree PATH --branch-ref REF
+    --base-sha SHA --red-ref REF [--red-sha PRIOR_RED_SHA] --red-tree TREE
+    --message-file PATH [--apply] [--json] [--debug]
+agent-work interactive-commit green --worktree PATH --branch-ref REF
+    --base-sha SHA --red-ref REF --red-sha SHA --judge-tree TREE
+    --message-file PATH [--apply] [--json] [--debug]
+agent-work interactive-commit verify --worktree PATH --branch-ref REF
+    --base-sha SHA --red-ref REF --red-sha SHA --green-sha SHA
+    --judge-tree TREE [--json] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -125,11 +121,9 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
-| `interactive-commit compact` | Worktree, branch ref, original base, Red ref and commit, passing commit, Judge tree, and approved message file | Previews by default; `--apply` replaces the passing branch tip with the verified base-parent commit. |
-| `review-handoff begin` | Candidate worktree; optional issue number matching its branch | `--apply` saves one candidate-bound session after successful Judge validation. |
-| `review-handoff submit` | Worktree, session ID, Green role, review version, correction-ledger kind, and private input file | Green calls `--apply` while active to save its full bounded ledger. |
-| `review-handoff manifest` | Worktree and session ID | Reads the current receipt set and its digest. Optional expected digest rejects drift. |
-| `review-handoff read` | Worktree, session ID, and receipt ID | Reads one accepted ledger. Optional expected digest rejects a changed receipt set. |
+| `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` makes a test-only Red commit with `--no-verify`. |
+| `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the tree, `--apply` makes the sole normal Green commit; its hook runs the full suite. |
+| `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight first, then starts the one full hook run only if it passes. The serial controller supplies `--baseline-sha SHA` and repeatable `--changed-path PATH` for paired timing proof. |
@@ -186,52 +180,23 @@ change smoke output.
 
 The tables list the commands and their use.
 
-### Interactive commit compaction
+### Interactive Red and Green commits
 
-After the Finalizer creates the reviewed passing commit, it gives
-`interactive-commit compact` the exact identities in the command list. The
-command checks the current branch, clean worktree, Red checkpoint, passing
-commit, and Judge tree. Without `--apply`, it checks those inputs and leaves
-the branch alone. With `--apply`, it replaces the branch tip with one commit
-over the original base, keeping the approved tree and local Red ref. Publish
-only the returned `new_commit`; never push the Red ref. A pending merge uses
-the reconciliation path instead.
+Red uses `interactive-commit red --apply` to make each test-only commit with
+`--no-verify`. A later Red commit names its predecessor with `--red-sha`.
+Green keeps tests frozen. After Judge reads the exact staged tree, Judge uses
+`interactive-commit green --apply` to make the sole normal Green commit. The
+installed hook runs the full suite once.
 
-`--json` returns `applied` and `new_commit`. A preview returns `null` for
-`new_commit`. Invalid input exits `2`; a failed proof or Git action exits `1`.
+Without `--apply`, `red` and `green` preview the operation and leave the
+branch, refs, index, and worktree unchanged. Finalizer uses
+`interactive-commit verify` to check the committed tree and Red ancestry
+without changing the repository. The review branch retains its Red and Green
+commits for a human squash merge.
 
-### Interactive correction-ledger handoff
-
-The active controller checkout owns the `review-handoff` commands. Point them
-at the candidate worktree. They need a numeric configured project ID and a bare
-`GITLAB_HOST`. The controller and candidate must have matching, credential-free
-HTTPS `origin` URLs on that host. An archived controller checkout also needs
-its matching `origin` metadata. After Judge succeeds, `begin --apply` opens a
-session bound to the branch, staged tree, and Judge JUnit digests. An optional
-issue number must match the branch name; this does not prove GitLab ownership.
-`submit --apply` stores
-Green's complete bounded correction ledger while Green is still active. Bare
-`begin` and `submit` preview the operation. The `manifest` and `read` commands
-are read-only.
-
-The JSON result from `begin` has `session_id` and `applied`; `submit` returns
-`receipt_id`, `sha256`, and `applied`. Green sends its parent those IDs and
-the manifest digest. The manifest names the project, issue association,
-branch, candidate tree, JUnit digests, and each receipt's role, review
-version, kind, ID, and SHA-256. Finalizer reads the manifest and ledger
-directly. `--expected-manifest-sha256` rejects a changed receipt set.
-Finalizer also checks the candidate tree, Judge evidence, and applicable Red
-identity before using the ledger. A plain `read` prints safe UTF-8 text;
-`read --json` returns exact bytes as `content_base64`.
-Specialist review results remain direct agent-to-agent handoffs. The saved
-ledger is context for the review, not authorization for a program transition.
-
-For recovery, read the manifest and Green's ledger from the named session.
-Use the saved manifest digest with `manifest` and `read` to catch drift.
-If the ledger is missing or stale, Green must submit a fresh ledger while
-active. A changed candidate needs a new Judge result and session. Keep older
-sessions for diagnosis; do not copy their prose into a new submission.
-Finalization needs the current ledger and applicable specialist reviews.
+After a restart, reconstruct the workflow from source code, Git commits, and
+the exact issue and merge request. Rerun any needed checks. Do not restore an
+agent session or stored role and session receipts.
 
 ### Coding workflow Red boundary
 

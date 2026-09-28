@@ -24,46 +24,23 @@ You review one exact tree. Do not edit files.
 1. For interactive work, record `git write-tree` for the staged files. For
    serial work, use the tree ID from the trusted stage step. Do not run
    `git add` or `git write-tree` in the worker.
-2. In interactive work, enter one project-scoped `agent-work validation window
-   --apply -- bash` before the full hook. From that child shell, run one
-   mutation-gated `agent-work validation run --candidate-tree TREE --apply`.
-   Keep the window open through any required paired baseline and candidate
-   focused timing measurements, then exit the shell to close it. If its
-   validation handle is lost, use read-only `agent-work validation status
-   --candidate-tree TREE --wait-seconds 30` while the window remains open.
-   On admission contention, defer validation and record the contention. Never
-   treat overlapping timing measurements as clean evidence. For serial work,
-   call the trusted validation and status boundary while you are still active.
+2. In interactive work, completely read the exact staged candidate. Then invoke
+   `agent-work interactive-commit green --apply`. The trusted boundary makes
+   the sole normal Green commit, so its installed pre-commit hook is the sole
+   full-suite run. A nonzero result returns to Green before review. For serial
+   work, call the trusted validation and status boundary while still active.
    The trusted controller holds the same project admission for the hook and
    report within that validation call, including any paired timing measurements
    made inside the call. It does not hold a window over later independent
    measurements. Bind each call to the exact tree and checked worker identity.
    Do not call the old validation CLI. In both
-   modes, one saved session runs the fixed hook. Its tree lock stops a second
-   run. Do not run the hook yourself.
+   modes, one trusted boundary runs the fixed hook. Do not run the hook yourself.
    A pending, missing, or lost result is no pass. Use the right status step
    for the same tree. If that fails, return to Green. A nonzero exit goes to
    Green. Only exit zero lets you go on.
-   If the window closes after the hook succeeds but before focused timing is
-   complete, recover the saved result with read-only status for that same tree.
-   Keep its terminal-success state, hook exit code `0`, and immutable full
-   `py311` and `py314` JUnit paths, digests, and counts. Do not start another
-   validation run, retry, or hook for that tree. Discard timing runs from the
-   interrupted window, including a partially completed pair. Before opening
-   a fresh timing-only window, positively establish that the earlier factory
-   worker and all its descendants have ended and are quiet. Acquiring the
-   project lock alone does not establish this. Inside the new window, recheck
-   the saved status, staged tree, worktree, and JUnit artifacts. Collect a
-   complete new set of equal baseline and candidate focused repetitions and
-   compare it against those exact trees. The comparator checks trees, command,
-   interpreter path, seed, and JUnit and phase-log paths, digests, and counts.
-   Independently verify and audit Python and package version parity. Check for
-   competing work during and after the runs; invalidate the timing proof if
-   any overlaps. Record the interruption, old-worker check, new window,
-   identities, artifacts, and contention check in the durable audit. Keep
-   Non-functional Review and Finalizer blocked until the proof is sound.
-3. For interactive work, run `git write-tree` again. Reject tree or worktree
-   drift. For serial work, require the trusted unchanged-tree proof. Reject
+3. For interactive work, verify the Green commit has the staged tree as its
+   tree and final Red as its sole parent, and require a clean index and
+   worktree. For serial work, require the trusted unchanged-tree proof. Reject
    new paths or missing proof.
 4. For interactive work, record immutable absolute candidate JUnit paths,
    SHA-256 hashes, and test counts for Python 3.11 and 3.14. For serial work,
@@ -106,6 +83,7 @@ or missing proof to Architect. Keep and check both proofs.
 
 ## Constraints
 
-- Do not edit, stage, commit, push, or call GitLab.
+- Do not edit, stage, push, or call GitLab. Only the trusted interactive Green
+  boundary may create the commit requested above.
 - The trusted validation step may save proof. Do not change the worktree.
 - Return every blocking failure to Green.

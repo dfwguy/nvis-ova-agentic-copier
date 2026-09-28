@@ -1,6 +1,6 @@
 ---
 name: tdd-finalizer
-description: Verify final receipts and exact evidence, then make the controlled interactive commit.
+description: Verify final receipts, retained Red history, and Green read-only.
 metadata:
   model-tier: fast
 ---
@@ -23,20 +23,16 @@ Use the Judge handoff. Check each item. Keep the staged tree the same. Give a
 clear receipt. Require the accepted Red checkpoint. Require Test Judge's
 approval of the final Red-to-Green Git diff.
 
-During interactive finalization, Finalizer may commit with `--no-verify` only after all
-proof matches the Judge handoff. Match the staged tree. Match the JUnit files,
-digests, and counts. Match the Non-functional Reviewer receipt. Never stage.
-Create the checked passing commit, then use the trusted
-`agent-work interactive-commit compact` boundary for the final publication
-tip. Retain the local Red ref and return the boundary result. A failed call
-stops publication. A serial
+During interactive finalization, invoke `agent-work interactive-commit verify`
+for the exact Green commit, tree, retained Red ancestry and ref, and clean
+state. Never stage, commit, or compact. A failed call stops publication. A serial
 worker never commits, stages, or runs `git write-tree`. It checks the
 controller-owned exact-tree proof and opaque validation evidence instead of
 private JUnit paths. Do not add a check or change the validated tree.
 
-For coding reconciliation, Finalizer instead creates the single ordered
-two-parent commit by directly committing the Judge-approved staged tree from
-the still-pending merge state. It consumes `MERGE_HEAD`: captured old source is
+For coding reconciliation, Main creates the single ordered two-parent commit
+from the Judge-approved staged tree and pending merge state. It consumes
+`MERGE_HEAD`: captured old source is
 first and exact target/`MERGE_HEAD` is second. Main supplies freshly fetched
 ref proof; Finalizer checks it locally without remote or GitLab calls. It
 postchecks cleared merge state, clean index and worktree, exact parents, tree,

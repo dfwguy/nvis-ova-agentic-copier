@@ -399,7 +399,11 @@ def test_workflow_prompt_keeps_quality_rerun_accounting_with_controller() -> Non
     assert "do not add timing storage" in prompt
     assert "serial finalizer never commits" in prompt
     assert "trusted runner retains its normal controller commit path" in prompt
-    assert "normal interactive work, finalizer owns one verified commit" in prompt
+    assert (
+        "judge requests one normal green commit through the trusted boundary" in prompt
+    )
+    assert "finalizer verifies it read-only" in prompt
+    assert "finalizer owns one verified commit" not in prompt
     assert "finalizer alone may commit" not in prompt
     assert "no intermediate commits" in prompt
 

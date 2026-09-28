@@ -2365,7 +2365,7 @@ def build_worker_prompt(
             "Green runs evidence-based correction cycles while material progress exists; repeated or reopened fingerprint, unchanged relevant evidence, scope, authority, or controversy stops correction. "
             "Green returns all receipts and "
             "unresolved findings to the still-live Architect. Architect decides finalization, revision, or needs_human. "
-            "Use staged-tree identities and no intermediate commits. The serial Finalizer never commits; the trusted runner retains its normal controller commit path. In normal interactive work, Finalizer owns one verified commit. "
+            "Use staged-tree identities and no intermediate commits. The serial Finalizer never commits; the trusted runner retains its normal controller commit path. In normal interactive work, Judge requests one normal Green commit through the trusted boundary and Finalizer verifies it read-only. "
             "Content-only work uses a sole Documentation Writer, controller stage/read, applicable reviews, "
             "and Documentation Finalizer without Red or code judges. "
         )

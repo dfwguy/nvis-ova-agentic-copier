@@ -7,7 +7,7 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
-"""Guard one interactive passing commit over its original base."""
+"""Guard interactive Red and Green commits and verify their retained history."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 
+from .domain import sanitize_diagnostic
 from .ports import CommandRunner
 from .repository import CommandResult, RepositoryError, run_subprocess
 
@@ -38,7 +38,7 @@ class InteractiveCommitRequest(BaseModel):
     red_sha: str
     passing_sha: str
     judge_tree: str
-    message_file: Path
+    message_file: Path | None = None
 
     @field_validator("base_sha", "red_sha", "passing_sha", "judge_tree")
     @classmethod
@@ -70,27 +70,24 @@ class InteractiveCommitDependencies:
     """Injected Git command boundary."""
 
     run_git: Callable[[Path, tuple[str, ...]], CommandResult]
-    commit_tree: Callable[[Path, tuple[str, ...], CommitIdentity], CommandResult]
-
-
-@dataclass(frozen=True)
-class CommitIdentity:
-    """Author and committer identity copied from the verified passing commit."""
-
-    author_name: str
-    author_email: str
-    author_date: str
-    committer_name: str
-    committer_email: str
-    committer_date: str
+    commit_worktree: Callable[[Path, tuple[str, ...]], CommandResult] | None = None
 
 
 @dataclass(frozen=True)
 class InteractiveCommitReport:
-    """Outcome of one preview or guarded compaction."""
+    """Outcome of one preview or retained Red/Green commit."""
 
     applied: bool
     new_commit: str | None
+
+
+@dataclass(frozen=True)
+class InteractiveFinalReport:
+    """Read-only proof of the retained interactive commit chain."""
+
+    red_commit: str
+    green_commit: str
+    judge_tree: str
 
 
 def run_git(
@@ -99,6 +96,7 @@ def run_git(
     *,
     run_command: CommandRunner = run_subprocess,
     environment: Mapping[str, str] = os.environ,
+    timeout_seconds: int = 30,
 ) -> CommandResult:
     """Run Git in the explicit worktree with isolated configuration."""
     git_environment = {
@@ -120,37 +118,29 @@ def run_git(
     git_environment["GIT_CONFIG_NOSYSTEM"] = "1"
     git_environment["GIT_CONFIG_GLOBAL"] = os.devnull
     git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    git_environment["GIT_OPTIONAL_LOCKS"] = "0"
     result = run_command(
         ("git", "-C", str(worktree), "-c", "core.fsmonitor=false", *argv),
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
         environment=git_environment,
     )
     return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
-def run_commit_git(
+def run_worktree_commit(
     worktree: Path,
     argv: tuple[str, ...],
-    identity: CommitIdentity,
     *,
     run_command: CommandRunner = run_subprocess,
     environment: Mapping[str, str] = os.environ,
 ) -> CommandResult:
-    """Create one commit using the verified passing commit's exact identity."""
-    commit_environment = {
-        **environment,
-        "GIT_AUTHOR_NAME": identity.author_name,
-        "GIT_AUTHOR_EMAIL": identity.author_email,
-        "GIT_AUTHOR_DATE": identity.author_date,
-        "GIT_COMMITTER_NAME": identity.committer_name,
-        "GIT_COMMITTER_EMAIL": identity.committer_email,
-        "GIT_COMMITTER_DATE": identity.committer_date,
-    }
+    """Run the installed commit hook with the same isolated Git configuration."""
     return run_git(
         worktree,
         argv,
         run_command=run_command,
-        environment=commit_environment,
+        environment=environment,
+        timeout_seconds=10_800,
     )
 
 
@@ -182,54 +172,123 @@ def _clean(dependencies: InteractiveCommitDependencies, worktree: Path) -> None:
         raise InteractiveCommitError("index or worktree is not clean")
 
 
-def _passing_identity(
-    request: InteractiveCommitRequest,
+def _staged_only(
+    dependencies: InteractiveCommitDependencies, worktree: Path, label: str
+) -> None:
+    try:
+        result = dependencies.run_git(
+            worktree, ("status", "--porcelain=v1", "--untracked-files=all")
+        )
+    except RepositoryError as error:
+        raise InteractiveCommitError("candidate status failed") from error
+    if result.returncode != 0:
+        raise InteractiveCommitError("candidate status failed")
+    status = result.stdout
+    if not status or any(
+        line.startswith("??") or len(line) < 2 or line[1] != " "
+        for line in status.splitlines()
+    ):
+        raise InteractiveCommitError(f"{label} has unstaged or untracked changes")
+
+
+def _staged_tests_only(
+    dependencies: InteractiveCommitDependencies, worktree: Path
+) -> None:
+    """Require at least one staged test path and no staged production path."""
+    paths = _git(
+        dependencies, worktree, ("diff", "--cached", "--name-only", "-z")
+    ).split("\0")
+    changed = [path for path in paths if path]
+    if not changed or any(
+        not path.startswith(("tests/", "template/tests/")) for path in changed
+    ):
+        raise InteractiveCommitError("Red may stage only test paths")
+
+
+def _tests_frozen(
+    dependencies: InteractiveCommitDependencies, worktree: Path, red_sha: str
+) -> None:
+    """Reject staged or worktree test changes since the retained Red commit."""
+    try:
+        result = dependencies.run_git(
+            worktree, ("diff", "--quiet", red_sha, "--", "tests", "template/tests")
+        )
+    except RepositoryError as error:
+        raise InteractiveCommitError("test freeze could not be checked") from error
+    if result.returncode != 0:
+        raise InteractiveCommitError("tests changed after Red")
+
+
+def _no_pending_merge(
+    dependencies: InteractiveCommitDependencies, worktree: Path
+) -> None:
+    try:
+        merge_head = dependencies.run_git(
+            worktree, ("rev-parse", "-q", "--verify", "MERGE_HEAD")
+        )
+    except RepositoryError as error:
+        raise InteractiveCommitError("merge state could not be checked") from error
+    if merge_head.returncode not in {0, 1} or merge_head.stdout.strip():
+        raise InteractiveCommitError("checkout has a pending merge")
+
+
+def _require_test_only_commit(
     dependencies: InteractiveCommitDependencies,
-) -> CommitIdentity:
-    """Parse bounded, unambiguous author and committer data from passing SHA."""
-    output = _git(
+    worktree: Path,
+    commit: str,
+) -> str:
+    """Return the sole parent after proving a commit changes only tests."""
+    parent = _git(
         dependencies,
-        request.worktree,
+        worktree,
+        ("show", "-s", "--format=%P", commit),
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", parent) is None:
+        raise InteractiveCommitError("Red commit must have one parent")
+    changed = _git(
+        dependencies,
+        worktree,
         (
-            "show",
-            "-s",
-            "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
-            request.passing_sha,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            commit,
         ),
     )
-    fields = output.split("\0")
-    if len(fields) != 6 or any(
-        not field
-        or len(field.encode("utf-8")) > 256
-        or any(ord(character) < 32 or ord(character) == 127 for character in field)
-        for field in fields
+    paths = tuple(path for path in changed.split("\0") if path)
+    if not paths or any(
+        not path.startswith(("tests/", "template/tests/")) for path in paths
     ):
-        raise InteractiveCommitError("passing commit identity is invalid")
-    for date in (fields[2], fields[5]):
-        if (
-            re.fullmatch(
-                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}",
-                date,
-            )
-            is None
-        ):
-            raise InteractiveCommitError("passing commit identity is invalid")
-        try:
-            datetime.fromisoformat(date)
-        except ValueError as error:
-            raise InteractiveCommitError(
-                "passing commit identity is invalid"
-            ) from error
-    return CommitIdentity(*fields)
+        raise InteractiveCommitError("Red history contains a non-test change")
+    return parent
 
 
-def compact_interactive_commit(
+def _verify_red_chain(
     request: InteractiveCommitRequest,
     dependencies: InteractiveCommitDependencies,
-    *,
-    apply: bool,
-) -> InteractiveCommitReport:
-    """Prove the candidate and optionally replace its branch tip atomically."""
+) -> None:
+    """Require a finite single-parent Red chain from the final ref to base."""
+    current = request.red_sha
+    seen: set[str] = set()
+    for _ in range(128):
+        if current in seen or current == request.base_sha:
+            raise InteractiveCommitError("Red history is cyclic or empty")
+        seen.add(current)
+        parent = _require_test_only_commit(dependencies, request.worktree, current)
+        if parent == request.base_sha:
+            return
+        current = parent
+    raise InteractiveCommitError("Red history exceeds the supported bound")
+
+
+def verify_interactive_final(
+    request: InteractiveCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+) -> InteractiveFinalReport:
+    """Verify the exact Green tree and complete Red ancestry without mutation."""
     worktree = request.worktree
     _require_equal(
         _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
@@ -240,9 +299,6 @@ def compact_interactive_commit(
         ("HEAD", request.passing_sha, "HEAD"),
         (request.branch_ref, request.passing_sha, "branch"),
         (request.red_ref, request.red_sha, "Red ref"),
-        (request.base_sha, request.base_sha, "base commit"),
-        (request.red_sha, request.red_sha, "Red commit"),
-        (request.passing_sha, request.passing_sha, "passing commit"),
         (f"{request.judge_tree}^{{tree}}", request.judge_tree, "Judge tree"),
     ):
         _require_equal(
@@ -250,80 +306,225 @@ def compact_interactive_commit(
             expected,
             label,
         )
+    _verify_red_chain(request, dependencies)
     _require_equal(
-        _git(dependencies, worktree, ("show", "-s", "--format=%P", request.red_sha)),
-        request.base_sha,
-        "Red sole parent",
-    )
-    _git(
-        dependencies,
-        worktree,
-        ("merge-base", "--is-ancestor", request.red_sha, request.passing_sha),
+        _git(
+            dependencies,
+            worktree,
+            ("show", "-s", "--format=%P", request.passing_sha),
+        ),
+        request.red_sha,
+        "Green sole parent",
     )
     _require_equal(
         _git(
-            dependencies, worktree, ("show", "-s", "--format=%T", request.passing_sha)
+            dependencies,
+            worktree,
+            ("show", "-s", "--format=%T", request.passing_sha),
         ),
         request.judge_tree,
-        "passing tree",
+        "Green tree",
     )
-    try:
-        merge_head = dependencies.run_git(
-            worktree, ("rev-parse", "-q", "--verify", "MERGE_HEAD")
-        )
-    except RepositoryError as error:
-        raise InteractiveCommitError("merge state could not be checked") from error
-    if merge_head.returncode not in {0, 1} or merge_head.stdout.strip():
-        raise InteractiveCommitError("checkout has a pending merge")
+    _no_pending_merge(dependencies, worktree)
     _clean(dependencies, worktree)
-    identity = _passing_identity(request, dependencies)
-    if not apply:
-        return InteractiveCommitReport(applied=False, new_commit=None)
+    _tests_frozen(dependencies, worktree, request.red_sha)
+    return InteractiveFinalReport(
+        red_commit=request.red_sha,
+        green_commit=request.passing_sha,
+        judge_tree=request.judge_tree,
+    )
 
-    commit_argv = (
-        "commit-tree",
-        request.judge_tree,
-        "-p",
-        request.base_sha,
-        "-F",
-        str(request.message_file),
-    )
-    try:
-        commit_result = dependencies.commit_tree(worktree, commit_argv, identity)
-    except RepositoryError as error:
-        raise InteractiveCommitError("Git commit-tree failed") from error
-    if commit_result.returncode != 0:
-        raise InteractiveCommitError("Git commit-tree failed")
-    new_commit = commit_result.stdout.strip()
-    if re.fullmatch(r"[0-9a-f]{40}", new_commit) is None:
-        raise InteractiveCommitError("commit-tree did not return an object ID")
-    _git(
-        dependencies,
-        worktree,
-        ("update-ref", request.branch_ref, new_commit, request.passing_sha),
-    )
+
+def commit_interactive_green(
+    request: InteractiveCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+    *,
+    apply: bool,
+) -> InteractiveCommitReport:
+    """Commit the exact staged Judge tree on Red with installed hooks."""
+    worktree = request.worktree
     _require_equal(
-        _git(dependencies, worktree, ("rev-parse", "HEAD")), new_commit, "new HEAD"
+        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
+        request.branch_ref,
+        "checked-out branch",
     )
-    _require_equal(
-        _git(dependencies, worktree, ("rev-parse", request.branch_ref)),
-        new_commit,
-        "new branch",
-    )
-    _require_equal(
-        _git(dependencies, worktree, ("show", "-s", "--format=%P", new_commit)),
-        request.base_sha,
-        "new sole parent",
-    )
-    _require_equal(
-        _git(dependencies, worktree, ("show", "-s", "--format=%T", new_commit)),
-        request.judge_tree,
-        "new tree",
-    )
+    _no_pending_merge(dependencies, worktree)
     _require_equal(
         _git(dependencies, worktree, ("rev-parse", request.red_ref)),
         request.red_sha,
         "Red ref",
     )
+    _verify_red_chain(request, dependencies)
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        request.judge_tree,
+        "staged Judge tree",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("rev-parse", "HEAD")),
+        request.red_sha,
+        "HEAD",
+    )
+    _staged_only(dependencies, worktree, "Green candidate")
+    _tests_frozen(dependencies, worktree, request.red_sha)
+    if not apply:
+        return InteractiveCommitReport(applied=False, new_commit=None)
+    if dependencies.commit_worktree is None:
+        raise InteractiveCommitError("worktree commit boundary is unavailable")
+    if request.message_file is None:
+        raise InteractiveCommitError("Green commit message file is required")
+    result = dependencies.commit_worktree(
+        worktree, ("commit", "-F", str(request.message_file))
+    )
+    if result.returncode != 0:
+        diagnostic = sanitize_diagnostic(
+            f"installed pre-commit rejected Green: {result.stdout} {result.stderr}",
+            limit=2048,
+        )
+        raise InteractiveCommitError(diagnostic)
+    green_sha = _git(dependencies, worktree, ("rev-parse", "HEAD"))
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%P", green_sha)),
+        request.red_sha,
+        "Green sole parent",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%T", green_sha)),
+        request.judge_tree,
+        "Green tree",
+    )
     _clean(dependencies, worktree)
-    return InteractiveCommitReport(applied=True, new_commit=new_commit)
+    _tests_frozen(dependencies, worktree, request.red_sha)
+    return InteractiveCommitReport(applied=True, new_commit=green_sha)
+
+
+def commit_interactive_red(
+    request: InteractiveCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+    *,
+    apply: bool,
+) -> InteractiveCommitReport:
+    """Retain the exact staged failing-test tree on its original base."""
+    worktree = request.worktree
+    _require_equal(
+        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
+        request.branch_ref,
+        "checked-out branch",
+    )
+    _no_pending_merge(dependencies, worktree)
+    prior_red = request.red_sha
+    if prior_red != request.base_sha:
+        _verify_red_chain(request, dependencies)
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        request.judge_tree,
+        "staged Red tree",
+    )
+    head = _git(dependencies, worktree, ("rev-parse", "HEAD"))
+    if head != prior_red:
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", request.branch_ref)),
+            head,
+            "Red branch",
+        )
+        _require_equal(
+            _require_test_only_commit(dependencies, worktree, head),
+            prior_red,
+            "Red sole parent",
+        )
+        _require_equal(
+            _git(dependencies, worktree, ("show", "-s", "--format=%T", head)),
+            request.judge_tree,
+            "Red tree",
+        )
+        try:
+            red_ref = dependencies.run_git(
+                worktree, ("rev-parse", "-q", "--verify", request.red_ref)
+            )
+        except RepositoryError as error:
+            raise InteractiveCommitError("Red ref could not be checked") from error
+        ref_sha = red_ref.stdout.strip()
+        if red_ref.returncode == 0 and ref_sha == head:
+            _clean(dependencies, worktree)
+            return InteractiveCommitReport(applied=apply, new_commit=head)
+        if red_ref.returncode == 1 and not ref_sha:
+            expected_ref = ""
+        elif (
+            red_ref.returncode == 0
+            and prior_red != request.base_sha
+            and ref_sha == prior_red
+        ):
+            expected_ref = prior_red
+        else:
+            raise InteractiveCommitError("Red ref changed")
+        _clean(dependencies, worktree)
+        if not apply:
+            return InteractiveCommitReport(applied=False, new_commit=None)
+        _git(
+            dependencies,
+            worktree,
+            ("update-ref", request.red_ref, head, expected_ref),
+        )
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", request.red_ref)),
+            head,
+            "Red ref",
+        )
+        _clean(dependencies, worktree)
+        return InteractiveCommitReport(applied=True, new_commit=head)
+    if prior_red != request.base_sha:
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", request.red_ref)),
+            prior_red,
+            "prior Red ref",
+        )
+    else:
+        try:
+            red_ref = dependencies.run_git(
+                worktree, ("rev-parse", "-q", "--verify", request.red_ref)
+            )
+        except RepositoryError as error:
+            raise InteractiveCommitError("Red ref could not be checked") from error
+        if red_ref.returncode not in {0, 1} or red_ref.stdout.strip():
+            raise InteractiveCommitError("Red ref already exists")
+    _staged_only(dependencies, worktree, "Red candidate")
+    _staged_tests_only(dependencies, worktree)
+    if not apply:
+        return InteractiveCommitReport(applied=False, new_commit=None)
+    if request.message_file is None:
+        raise InteractiveCommitError("Red commit message file is required")
+    if dependencies.commit_worktree is None:
+        raise InteractiveCommitError("worktree commit boundary is unavailable")
+    result = dependencies.commit_worktree(
+        worktree, ("commit", "--no-verify", "-F", str(request.message_file))
+    )
+    if result.returncode != 0:
+        raise InteractiveCommitError("Red commit could not be created")
+    red_sha = _git(dependencies, worktree, ("rev-parse", "HEAD"))
+    _require_equal(
+        _git(dependencies, worktree, ("rev-parse", request.branch_ref)),
+        red_sha,
+        "Red branch",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%P", red_sha)),
+        prior_red,
+        "Red sole parent",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%T", red_sha)),
+        request.judge_tree,
+        "Red tree",
+    )
+    _git(
+        dependencies,
+        worktree,
+        (
+            "update-ref",
+            request.red_ref,
+            red_sha,
+            "" if prior_red == request.base_sha else prior_red,
+        ),
+    )
+    _clean(dependencies, worktree)
+    return InteractiveCommitReport(applied=True, new_commit=red_sha)
