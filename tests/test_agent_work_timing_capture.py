@@ -398,6 +398,120 @@ def test_changed_file_with_many_existing_slow_cases_retains_complete_junit_proof
             assert inventories[source][environment]["timing_complete"] is True
 
 
+def test_capture_replays_complete_large_inventories_with_bounded_transcript(
+    tmp_path: Path,
+) -> None:
+    case_count = 1_600
+    names = tuple(
+        f"tests/test_speed.py::test_case_{index:04d}_{'x' * 200}"
+        for index in range(case_count)
+    )
+    artifact = (
+        f"<testsuite tests='{case_count}' failures='0' errors='0'>".encode()
+        + b"".join(
+            f"<testcase classname='tests.test_speed' name='{name.split('::')[1]}' time='0.01'/>".encode()
+            for name in names
+        )
+        + b"</testsuite>"
+    )
+    assert len(artifact) <= 1_048_576
+    assert case_count <= 8_192
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        cwd = cast(Path, kwargs.get("current_directory"))
+        if command[:4] == ("git", "worktree", "add", "--detach"):
+            Path(command[4]).mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            for environment in ("py311", "py314"):
+                (cwd / f"test-results-{environment}.xml").write_bytes(artifact)
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(
+                0, BASE_TREE if cwd.name == "baseline" else CANDIDATE_TREE, ""
+            )
+        if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+            return CommandResult(0, BASE_TREE, "")
+        if command in {
+            ("git", "rev-parse", "HEAD"),
+            ("git", "rev-parse", "HEAD^{tree}"),
+        }:
+            return CommandResult(
+                0, BASE_SHA if command[-1] == "HEAD" else BASE_TREE, ""
+            )
+        if command[:3] == ("git", "diff", "--name-only"):
+            return CommandResult(0, "src/agent_work/timing_capture.py\n", "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+            ("git", "status", "--porcelain"),
+        } or command[:3] == ("git", "worktree", "remove"):
+            return CommandResult(0, "", "")
+        if len(command) >= 3 and command[1] == "-c":
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "interpreter": ["3.11", "cpython-311", "linux-x86_64"],
+                        "distributions": [["pytest", "9.0"]],
+                    },
+                    sort_keys=True,
+                ),
+                "",
+            )
+        raise AssertionError(f"unexpected timing capture command: {command}")
+
+    dependencies = _dependencies(tmp_path, run)
+    captured = capture_serial_timing_review(
+        baseline_sha=BASE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        candidate_artifacts=(
+            ("py311", artifact, case_count),
+            ("py314", artifact, case_count),
+        ),
+        changed_paths=("src/agent_work/timing_capture.py",),
+        dependencies=dependencies,
+    )
+    replayed = read_serial_timing_transcript(
+        candidate_tree=CANDIDATE_TREE, dependencies=dependencies
+    )
+
+    assert replayed is not None
+    for field in ("outcome", "findings", "omitted_findings"):
+        assert replayed[field] == captured[field]
+    assert replayed["baseline_sha"] == BASE_SHA
+    assert replayed["baseline_tree"] == BASE_TREE
+    assert replayed["candidate_tree"] == CANDIDATE_TREE
+    assert replayed["seed"] == str(int(CANDIDATE_TREE[:8], 16))
+    runs = cast(dict[str, dict[str, dict[str, object]]], replayed["runs"])
+    inventories = cast(
+        dict[str, dict[str, dict[str, object]]], replayed["full_inventories"]
+    )
+    expected_cases = dict.fromkeys(names, 0.01)
+    for environment in ("py311", "py314"):
+        for source, tree in (("baseline", BASE_TREE), ("candidate", CANDIDATE_TREE)):
+            full = inventories[source][environment]
+            assert "selectors" not in full
+            assert full["cases"] == expected_cases
+            assert full["source_tree"] == tree
+            assert full["environment"] == environment
+            assert full["seed"] == replayed["seed"]
+            assert full["junit_sha256"] == hashlib.sha256(artifact).hexdigest()
+            assert full["test_count"] == case_count
+            assert full["timing_complete"] is True
+            assert runs[environment][source] == {
+                "sha256": hashlib.sha256(artifact).hexdigest(),
+                "test_count": case_count,
+                "timing_complete": True,
+            }
+    payload = (dependencies.state_root / f"{CANDIDATE_TREE}.timing.json").read_bytes()
+    assert len(payload) <= 4_194_304
+    selector_bytes = len(
+        json.dumps(dict(zip(names, names, strict=True)), separators=(",", ":")).encode()
+    )
+    assert len(payload) + 4 * (len(',"selectors":') + selector_bytes) > 4_194_304
+
+
 def test_focused_runner_binds_multiple_selectors_to_one_exact_source(
     tmp_path: Path,
 ) -> None:
