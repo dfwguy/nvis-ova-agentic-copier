@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -213,13 +213,14 @@ def test_append_phase_timing_property_retains_exact_newest_bounded_window(
     assert is_bounded_timing_append(previous, current)
 
 
+@settings(max_examples=40)
 @given(
     phase=st.text(min_size=1, max_size=32),
     outcome=st.text(min_size=1, max_size=32),
     elapsed=st.integers(min_value=0, max_value=86_400),
     classification=st.sampled_from(("execution", "wait")),
 )
-def test_timing_summary_property_is_single_token_with_exact_aggregate(
+def test_timing_summary_property_reports_observed_subtotal_and_missing_classification(
     phase: str,
     outcome: str,
     elapsed: int,
@@ -238,11 +239,77 @@ def test_timing_summary_property_is_single_token_with_exact_aggregate(
     summary = summarize_phase_timings((timing,))
 
     assert not any(character.isspace() for character in summary)
-    assert summary.startswith("count=1,")
-    expected_execution = float(elapsed) if classification == "execution" else 0.0
-    expected_wait = float(elapsed) if classification == "wait" else 0.0
-    assert f"execution={expected_execution:.3f}s" in summary
-    assert f"wait={expected_wait:.3f}s" in summary
+    assert "count=1" in summary
+    assert "scope=retained" in summary
+    assert "coverage=unknown" in summary
+    assert "internal_roles=unavailable" in summary
+    assert "history=" not in summary
+    if phase == "pipeline-wait" and classification == "wait":
+        assert f"legacy_poll={elapsed:.3f}s" in summary
+        assert "observed_execution=unavailable" in summary
+        assert "observed_wait=unavailable" in summary
+        return
+    other = "wait" if classification == "execution" else "execution"
+    assert f"observed_{classification}={elapsed:.3f}s" in summary
+    assert f"observed_{other}=unavailable" in summary
+
+
+def test_timing_summary_at_retention_limit_reports_possible_truncation() -> None:
+    timings = tuple(
+        PhaseTiming.model_validate(
+            _timing(phase_or_role=f"role-{index}", attempt=index + 1)
+        )
+        for index in range(64)
+    )
+
+    summary = summarize_phase_timings(timings)
+
+    assert "count=64" in summary
+    assert "observed_execution=160.000s" in summary
+    assert "scope=retained" in summary
+    assert "history=possibly-truncated" in summary
+    assert "coverage=unknown" in summary
+    assert "history=truncated" not in summary
+
+
+def test_timing_summary_separates_legacy_poll_duration_from_wait() -> None:
+    summary = summarize_phase_timings(
+        (
+            PhaseTiming.model_validate(_timing(elapsed_seconds=2.5)),
+            PhaseTiming.model_validate(
+                _timing(
+                    phase_or_role="pipeline-wait",
+                    elapsed_seconds=4.0,
+                    classification="wait",
+                )
+            ),
+        )
+    )
+
+    assert "observed_execution=2.500s" in summary
+    assert "observed_wait=unavailable" in summary
+    assert "legacy_poll=4.000s" in summary
+    assert "latest=pipeline-wait/complete/4.000s" in summary
+    assert "coverage=unknown" in summary
+
+
+def test_timing_summary_counts_new_pipeline_poll_as_observed_execution() -> None:
+    summary = summarize_phase_timings(
+        (
+            PhaseTiming.model_validate(
+                _timing(
+                    phase_or_role="pipeline-poll",
+                    elapsed_seconds=5.0,
+                    classification="execution",
+                )
+            ),
+        )
+    )
+
+    assert "observed_execution=5.000s" in summary
+    assert "observed_wait=unavailable" in summary
+    assert "latest=pipeline-poll/complete/5.000s" in summary
+    assert "legacy_poll=" not in summary
 
 
 def test_bounded_timing_append_rejects_non_appends_and_wrong_full_window_shift() -> (
@@ -349,8 +416,11 @@ def test_human_status_adds_one_sanitized_latest_and_aggregate_timing_token() -> 
 
     assert rendered.count("timing=") == 1
     assert "count=2" in rendered
-    assert "execution=2.500s" in rendered
-    assert "wait=4.000s" in rendered
+    assert "observed_execution=2.500s" in rendered
+    assert "observed_wait=4.000s" in rendered
+    assert "scope=retained" in rendered
+    assert "coverage=unknown" in rendered
+    assert "internal_roles=unavailable" in rendered
     assert "latest=pipeline_wait_prompt/success_transcript_data/4.000s" in rendered
     assert "\n" not in rendered and "\t" not in rendered
     assert "pipeline wait\nprompt" not in rendered
