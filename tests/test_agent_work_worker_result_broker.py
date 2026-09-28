@@ -2189,6 +2189,7 @@ def test_agent_invoker_validates_candidate_while_producer_is_active(
     candidate_socket = tmp_path / "private-candidate" / "candidate.sock"
     active = False
     validated = False
+    commands: list[tuple[str, ...]] = []
 
     class ResultSession:
         socket_path = result_socket
@@ -2205,6 +2206,7 @@ def test_agent_invoker_validates_candidate_while_producer_is_active(
         ) -> None:
             self.action = action
             self.receipt: str | None = None
+            self.close_count = 0
 
         def accept(self) -> None:
             staged = self.action("stage", None)
@@ -2215,6 +2217,7 @@ def test_agent_invoker_validates_candidate_while_producer_is_active(
             self.receipt = tree
 
         def close_and_capture(self) -> str | None:
+            self.close_count += 1
             return self.receipt
 
     candidate_session: CandidateSession | None = None
@@ -2238,9 +2241,11 @@ def test_agent_invoker_validates_candidate_while_producer_is_active(
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
         nonlocal active
+        commands.append(command)
+        assert len(commands) == 1
+        assert candidate_session is not None
         assert str(candidate_socket.parent) in command
         assert "--candidate-socket" in cast(str, kwargs["stdin"])
-        assert candidate_session is not None
         active = True
         try:
             candidate_session.accept()
@@ -2271,6 +2276,10 @@ def test_agent_invoker_validates_candidate_while_producer_is_active(
     )
 
     assert validated
+    assert len(commands) == 1
+    assert candidate_session is not None
+    assert candidate_session.close_count == 1
+    assert invocation.protocol_error is None
     assert invocation.validated_candidate == "b" * 40
 
 

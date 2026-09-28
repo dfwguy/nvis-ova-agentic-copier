@@ -5,7 +5,7 @@ summary: Apply a reviewed template revision and inspect its human-review merge r
 audience: practitioner
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-24
+last_reviewed: 2026-09-28
 related:
   - path: preview-template-revision.md
     why: Compares the recorded template revision with the revision to apply.
@@ -13,6 +13,8 @@ related:
     why: Defines the update command, durable states, and result data.
   - path: setup-serial-gitlab-agent-loop.md
     why: Shows the user-bus check used to supervise an optional template-update timer.
+  - path: ../reference/serial-gitlab-agent-loop.md
+    why: Defines the candidate MCP host primitive and its limits.
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -61,6 +63,16 @@ project and publish a change for human review.
    whether an uncertain remote write succeeded or create another merge
    request. Check the retained branch and request named by the result. Do not
    discard, reset, or stash the work.
+
+## Add MCP to an updated project
+
+Copier keeps an existing project's `pyproject.toml`. If that preserved file
+lacks `mcp>=2,<3`, add the dependency before wiring a host adapter. Have the
+project owner review and approve the dependency, update `pyproject.toml` and
+`uv.lock`, and review both file changes. The ordinary factory loop remains
+usable without an adapter. The
+[serial-loop reference](../reference/serial-gitlab-agent-loop.md#candidate-preview-mcp-host-primitive)
+defines the host primitive and its limits.
 
 ## Set up an optional scheduled preview
 
