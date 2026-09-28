@@ -80,6 +80,23 @@ existing case first reaches or gets slower above 1 second, the controller
 checks two focused repeats from each exact tree and reports setup, call,
 and teardown changes. Missing repeat proof blocks a decision that needs it.
 
+For an existing touched case that stays above 100 ms and below 1 second, the
+controller uses the complete baseline and candidate JUnit inventories to mark
+it `touched_slow`. A changed test file can mark many cases this way without
+using focused runs. New cases above 100 ms get one candidate focused check.
+Existing cases that first reach 1 second or worsen above it get two baseline
+and two candidate repeats. The controller groups up to 32 cases per focused
+invocation within each Python version. It allows at most 32 focused
+invocations and 900 seconds for the review. The worker receives up to 128
+timing findings and an `omitted_findings` count. Every candidate finding at
+or above 1 second is retained before subsecond findings. More than 128 such
+findings fail validation closed. The stable artifact reason is
+`finding_budget_exhausted`. Validation retains the full-suite JUnit snapshots.
+The private proof keeps the full case inventories. The worker reviews omitted
+subsecond cases in the complete candidate list. An exhausted invocation or
+time budget stops timing review with the stable reason
+`focused_budget_exhausted`.
+
 For interactive work, [investigate local test timing](../how-to/validate-template-changes.md#investigate-local-test-timing)
 with paired focused runs on the exact trees. An added ordinary test that
 stays above 100 ms in repeats, a changed test that adds cost above 100 ms,

@@ -25,7 +25,12 @@ from typing import Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandRunner
-from .test_timing import parse_full_junit_records, review_test_timings
+from .test_timing import (
+    FindingBudgetExhausted,
+    FocusedTimingBudgetExhausted,
+    parse_full_junit_records,
+    review_test_timings,
+)
 
 _ENVIRONMENTS = ("py311", "py314")
 _MAX_BYTES = 1_048_576
@@ -70,6 +75,14 @@ class TimingCaptureError(RuntimeError):
     """A source, environment, inventory, or cleanup proof is incomplete."""
 
 
+class FocusedTimingCaptureError(TimingCaptureError):
+    """Exact-source focused comparisons exhausted their bounded budget."""
+
+
+class FindingBudgetCaptureError(TimingCaptureError):
+    """The timing review cannot retain every critical finding."""
+
+
 class _PrivateTranscript(BaseModel):
     """Validate private replay data before status trusts its source claims."""
 
@@ -81,6 +94,7 @@ class _PrivateTranscript(BaseModel):
     outcome: Literal["clear", "report_only", "correction_required"]
     runs: dict[str, object]
     findings: list[dict[str, object]] = Field(max_length=128)
+    omitted_findings: int = Field(default=0, ge=0, le=32_768)
     full_inventories: dict[str, object]
 
     def model_post_init(self, _context: object) -> None:
@@ -438,47 +452,63 @@ def _focused_runner(
             raise TimingCaptureError("focused source tree is unknown")
         remaining = deadline - dependencies.monotonic_clock()
         if remaining <= 0:
-            raise TimingCaptureError("focused timing budget exhausted")
+            raise FocusedTimingCaptureError("focused timing budget exhausted")
         case_names = request["case_names"]
-        if not isinstance(case_names, tuple) or len(case_names) != 1:
+        if (
+            not isinstance(case_names, tuple)
+            or not 1 <= len(case_names) <= 32
+            or any(not isinstance(name, str) for name in case_names)
+            or len(set(case_names)) != len(case_names)
+        ):
             raise TimingCaptureError("focused selector is invalid")
-        case_name = cast(str, case_names[0])
         try:
-            raw_selector = selectors[cast(str, source_tree)][
+            source_selectors = selectors[cast(str, source_tree)][
                 cast(str, request["environment"])
-            ][case_name]
+            ]
+            raw_selectors = tuple(
+                source_selectors[name] for name in cast(tuple[str, ...], case_names)
+            )
         except KeyError as error:
             raise TimingCaptureError("focused selector is unavailable") from error
+        if len(set(raw_selectors)) != len(raw_selectors):
+            raise TimingCaptureError("focused selector is ambiguous")
         counter += 1
         output = private / f"focused-{counter}.json"
         plugin_env = dict(environment) | {
             "PYTHONPATH": str(private),
             "AGENT_TIMING_OUTPUT": str(output),
         }
-        _run(
-            dependencies,
-            (
-                str(
-                    source
-                    / ".tox"
-                    / cast(str, request["environment"])
-                    / "bin"
-                    / "pytest"
+        try:
+            _run(
+                dependencies,
+                (
+                    str(
+                        source
+                        / ".tox"
+                        / cast(str, request["environment"])
+                        / "bin"
+                        / "pytest"
+                    ),
+                    "-q",
+                    "-p",
+                    "agent_work_timing_phases",
+                    *raw_selectors,
                 ),
-                "-q",
-                "-p",
-                "agent_work_timing_phases",
-                raw_selector,
-            ),
-            cwd=source,
-            environment=plugin_env,
-            timeout=min(120, remaining),
-        )
+                cwd=source,
+                environment=plugin_env,
+                timeout=min(120, remaining),
+            )
+        except TimingCaptureError as error:
+            if dependencies.monotonic_clock() >= deadline:
+                raise FocusedTimingCaptureError(
+                    "focused timing budget exhausted"
+                ) from error
+            raise
         try:
             raw_cases = json.loads(_artifact(output, dependencies))
         except json.JSONDecodeError as error:
             raise TimingCaptureError("focused phase evidence is malformed") from error
-        if not isinstance(raw_cases, dict) or set(raw_cases) != {raw_selector}:
+        if not isinstance(raw_cases, dict) or set(raw_cases) != set(raw_selectors):
             raise TimingCaptureError("focused phase evidence is incomplete")
         if _source_tree(dependencies, source, clean=source == base) != source_tree:
             raise TimingCaptureError("focused source changed")
@@ -491,7 +521,12 @@ def _focused_runner(
                 "argv",
                 "seed",
             )
-        } | {"cases": {case_name: raw_cases[raw_selector]}}
+        } | {
+            "cases": {
+                name: raw_cases[selector]
+                for name, selector in zip(case_names, raw_selectors, strict=True)
+            }
+        }
 
     return focused
 
@@ -644,27 +679,34 @@ def capture_serial_timing_review(
                 }
             )
         )
-        review = review_test_timings(
-            baseline_tree=baseline_tree,
-            candidate_tree=candidate_tree,
-            baseline_runs=baseline_runs,
-            candidate_runs=candidate_runs,
-            changed_tests=tuple(
-                path
-                for path in changed_paths
-                if path.startswith("tests/") and not path.endswith("/conftest.py")
-            ),
-            affected_by_helper=affected,
-            run_focused=_focused_runner(
-                dependencies,
-                base=base,
-                private=private,
+        try:
+            review = review_test_timings(
                 baseline_tree=baseline_tree,
                 candidate_tree=candidate_tree,
-                environment=seeded,
-                selectors=selector_map,
-            ),
-        )
+                baseline_runs=baseline_runs,
+                candidate_runs=candidate_runs,
+                changed_tests=tuple(
+                    path
+                    for path in changed_paths
+                    if path.startswith("tests/") and not path.endswith("/conftest.py")
+                ),
+                affected_by_helper=affected,
+                run_focused=_focused_runner(
+                    dependencies,
+                    base=base,
+                    private=private,
+                    baseline_tree=baseline_tree,
+                    candidate_tree=candidate_tree,
+                    environment=seeded,
+                    selectors=selector_map,
+                ),
+            )
+        except FindingBudgetExhausted as error:
+            raise FindingBudgetCaptureError("finding budget exhausted") from error
+        except FocusedTimingBudgetExhausted as error:
+            raise FocusedTimingCaptureError(
+                "focused timing budget exhausted"
+            ) from error
         if (
             _run(dependencies, ("git", "rev-parse", "HEAD"), cwd=base) != baseline_sha
             or _source_tree(dependencies, base, clean=True) != baseline_tree
@@ -702,6 +744,7 @@ def capture_serial_timing_review(
             "outcome": review.outcome,
             "runs": runs,
             "findings": findings,
+            "omitted_findings": review.omitted_findings,
             "full_inventories": {
                 "baseline": baseline_runs,
                 "candidate": candidate_runs,
@@ -752,4 +795,4 @@ def read_serial_timing_transcript(
         value = _PrivateTranscript.model_validate_json(payload)
     except (OSError, ValidationError) as error:
         raise TimingCaptureError("timing transcript is unavailable") from error
-    return value.model_dump(mode="json")
+    return value.model_dump(mode="json", exclude_unset=True)

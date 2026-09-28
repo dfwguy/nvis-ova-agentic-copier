@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .ports import CommandResult, CommandRunner
 from .test_timing import is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
+from .timing_capture import FindingBudgetCaptureError, FocusedTimingCaptureError
 
 _TREE = re.compile(r"^[0-9a-f]{40}$")
 _NONNEGATIVE_INTEGER = re.compile(r"^[0-9]+$")
@@ -279,6 +280,8 @@ class ArtifactFailure:
         "invalid_count",
         "invalid_snapshot",
         "invalid_timing",
+        "finding_budget_exhausted",
+        "focused_budget_exhausted",
     ]
     environment: Literal["py311", "py314"] | None
     path: Path | None
@@ -303,6 +306,8 @@ class _PersistedArtifactFailure(BaseModel):
         "invalid_count",
         "invalid_snapshot",
         "invalid_timing",
+        "finding_budget_exhausted",
+        "focused_budget_exhausted",
     ]
     environment: Literal["py311", "py314"] | None = None
     path: str | None = None
@@ -324,9 +329,11 @@ class _PersistedArtifactFailure(BaseModel):
             self.stage != "immutable_snapshot" or self.environment is not None
         ):
             raise ValueError("invalid snapshot reason")
-        if self.reason == "invalid_timing" and (
-            self.stage != "timing_review" or self.environment is not None
-        ):
+        if self.reason in {
+            "invalid_timing",
+            "finding_budget_exhausted",
+            "focused_budget_exhausted",
+        } and (self.stage != "timing_review" or self.environment is not None):
             raise ValueError("invalid timing review reason")
 
 
@@ -1545,7 +1552,13 @@ def run_judge_validation(
                 )
                 if not _timing_artifacts_match(transcript, persisted):
                     raise JudgeValidationError("timing transcript JUnit pair differs")
-            except (JudgeValidationError, OSError, ValueError, TypeError, RuntimeError):
+            except (
+                JudgeValidationError,
+                OSError,
+                ValueError,
+                TypeError,
+                RuntimeError,
+            ) as error:
                 return _write_terminal(
                     candidate_tree,
                     _artifact_failure_record(
@@ -1553,7 +1566,13 @@ def run_judge_validation(
                         result.returncode,
                         elapsed,
                         stage="timing_review",
-                        reason="invalid_timing",
+                        reason=(
+                            "finding_budget_exhausted"
+                            if isinstance(error, FindingBudgetCaptureError)
+                            else "focused_budget_exhausted"
+                            if isinstance(error, FocusedTimingCaptureError)
+                            else "invalid_timing"
+                        ),
                     ),
                     dependencies,
                 )

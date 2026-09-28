@@ -421,7 +421,26 @@ proof for both `py311` and `py314`, bound to their exact source trees. The
 trusted controller privately checks complete case inventories and matching
 prepared environments, commands, and seeds. It rejects missing, partial, or
 mismatched proof. The worker receives bounded proof identities, an outcome,
-findings, and the candidate's complete list of cases above 0.100 s.
+up to 128 deterministic findings, an `omitted_findings` count, and the
+candidate's complete list of cases above 0.100 s. Every candidate finding at
+or above 1.000 s is retained before any subsecond finding. If more than 128
+such findings exist, validation fails closed with the stable artifact reason
+`finding_budget_exhausted` and retains the full-suite JUnit snapshots. The
+private transcript keeps the full JUnit inventories and the same omission
+count. A changed test
+file may mark many existing cases above 0.100 s and below 1.000 s as
+`touched_slow` from those inventories without focused repeats. Cases that
+need focused checks are grouped by Python version, with at most 32 case
+selectors per invocation. New cases above 0.100 s need one candidate check.
+An existing case that reaches 1.000 s or worsens above it needs two baseline
+and two candidate checks. Focused checks share a limit of 32 invocations and
+900 seconds across the review. If either limit is exhausted, validation
+reports the stable artifact reason
+`focused_budget_exhausted` and keeps the saved full-suite JUnit snapshots.
+When `omitted_findings` is positive, the worker reviews the omitted subsecond
+cases in the complete candidate list above 0.100 s with the outcome. The
+private transcript remains the controller's source-bound proof for the full
+inventories and omission count.
 The outcome is `clear` when there are no findings, `report_only` for findings
 that need review but no correction, or `correction_required` when a new slow,
 touched slow, or corroborated regressed case needs correction.
@@ -431,9 +450,9 @@ correction. For every candidate case at or above 1.000 s, the reviewer checks
 the controller's finding and records its classification, owner, and reduction
 or exception plan in the durable audit or linked issue record, even if another
 finding already needs correction. When an existing case first reaches or gets
-slower above 1.000 s,
-the controller checks two focused repeats per tree and Python version under
-matching conditions. Its finding reports setup, call, and teardown deltas.
+slower above 1.000 s, the controller checks two focused repeats per tree and
+Python version under matching conditions. It batches up to 32 cases per
+repeat. Each case's finding reports setup, call, and teardown deltas.
 Missing or mismatched repeat proof blocks a decision that depends on it. One
 slow observation alone does not establish a regression.
 
@@ -564,8 +583,8 @@ then has `terminal-artifact-failure` with CLI status `1`. Its
 `artifact_failure` has an allowlisted `stage` and `reason`. When one file
 causes the failure, `environment` is `py311` or `py314`, and `path` is its
 fixed relative name, `test-results-py311.xml` or `test-results-py314.xml`.
-For a candidate-level `immutable_snapshot` failure, both JSON fields are
-`null`. These fields identify the failing operation without exposing its
+For a candidate-level `immutable_snapshot` or `timing_review` failure, both
+JSON fields are `null`. These fields identify the failing operation without exposing its
 exception or XML content.
 
 `exit_code` holds the actual hook exit code: `null` if cleanup failed before
@@ -577,10 +596,12 @@ sessions are not backfilled.
 The `stage` distinguishes `pre_hook_cleanup`,
 `post_hook_failed_evidence_read`, `post_hook_failed_cleanup`,
 `post_hook_success_evidence_read`, `post_hook_success_cleanup`, and
-`immutable_snapshot`. The `reason` is one of `os_error`, `missing`,
-`invalid_xml`, `oversized`, `invalid_count`, or `invalid_snapshot`.
+`immutable_snapshot`, and `timing_review`. The `reason` is one of `os_error`,
+`missing`, `invalid_xml`, `oversized`, `invalid_count`, `invalid_snapshot`,
+`invalid_timing`, `finding_budget_exhausted`, or `focused_budget_exhausted`.
 `invalid_snapshot` applies only when snapshot validation rejects the saved
-candidate evidence. The record never stores raw operating-system errors,
+candidate evidence. The three timing reasons apply only to `timing_review`.
+The record never stores raw operating-system errors,
 paths outside the fixed artifact names, or XML data.
 
 `validation retry --candidate-tree TREE` previews a retry without changing

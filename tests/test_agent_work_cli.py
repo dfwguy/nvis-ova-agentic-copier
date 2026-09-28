@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping
@@ -595,6 +596,139 @@ def test_validation_cli_renders_complete_over_100ms_case_evidence() -> None:
         "test_three",
         "test_four",
     ]
+
+
+def _serial_timing_status_json(
+    tmp_path: Path, *, omitted_findings: int | None
+) -> dict[str, Any]:
+    baseline_sha = "a" * 40
+    baseline_tree = "c" * 40
+    candidate_tree = "b" * 40
+    artifact_digest = "d" * 64
+    environment = {
+        "XDG_STATE_HOME": str(tmp_path),
+        "GITLAB_HOST": "gitlab.example.test",
+        "GITLAB_PROJECT_ID": "276",
+    }
+    git_directory = tmp_path / ".git"
+    state_root = (
+        tmp_path
+        / "agent-work-validation"
+        / hashlib.sha256(str(git_directory.resolve()).encode()).hexdigest()
+    )
+
+    def full_inventory(tree: str, name: str) -> dict[str, object]:
+        return {
+            "source_tree": tree,
+            "environment": name,
+            "prepared_environment": "prepared",
+            "argv": ["git", "hook", "run", "pre-commit"],
+            "seed": "1",
+            "junit_sha256": artifact_digest,
+            "test_count": 1,
+            "timing_complete": True,
+            "cases": {"tests/test_speed.py::test_case": 0.101},
+        }
+
+    transcript: dict[str, object] = {
+        "baseline_sha": baseline_sha,
+        "baseline_tree": baseline_tree,
+        "candidate_tree": candidate_tree,
+        "seed": "1",
+        "outcome": "correction_required",
+        "runs": {
+            name: {
+                source: {
+                    "sha256": artifact_digest,
+                    "test_count": 1,
+                    "timing_complete": True,
+                }
+                for source in ("baseline", "candidate")
+            }
+            for name in ("py311", "py314")
+        },
+        "findings": [],
+        "full_inventories": {
+            source: {name: full_inventory(tree, name) for name in ("py311", "py314")}
+            for source, tree in (
+                ("baseline", baseline_tree),
+                ("candidate", candidate_tree),
+            )
+        },
+    }
+    if omitted_findings is not None:
+        transcript["omitted_findings"] = omitted_findings
+    artifact_root = (tmp_path / "snapshots" / candidate_tree).resolve()
+    record = {
+        "candidate_tree": candidate_tree,
+        "schema_version": 2,
+        "state": "terminal-success",
+        "returncode": 0,
+        "junit_artifacts": [
+            {
+                "environment": name,
+                "path": str(artifact_root / f"test-results-{name}.xml"),
+                "sha256": artifact_digest,
+                "test_count": 1,
+            }
+            for name in ("py311", "py314")
+        ],
+        "requested_baseline_tree": baseline_tree,
+        "requested_baseline_sha": baseline_sha,
+        "timing_baseline_tree": baseline_tree,
+        "timing_transcript_sha256": hashlib.sha256(
+            json.dumps(transcript, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    state_root.mkdir(parents=True)
+    (state_root / f"{candidate_tree}.timing.json").write_text(
+        json.dumps(transcript, separators=(",", ":"))
+    )
+    (state_root / f"{candidate_tree}.json").write_text(
+        json.dumps(record, separators=(",", ":"))
+    )
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        if command == ("git", "rev-parse", "--git-dir"):
+            return CommandResult(0, str(git_directory), "")
+        assert command == ("git", "rev-parse", f"{baseline_sha}^{{tree}}")
+        return CommandResult(0, baseline_tree, "")
+
+    output: list[str] = []
+    exit_code = main(
+        [
+            "validation",
+            "status",
+            "--candidate-tree",
+            candidate_tree,
+            "--baseline-sha",
+            baseline_sha,
+            "--json",
+        ],
+        environment=environment,
+        current_checkout=lambda: tmp_path,
+        run_command=run,
+        write_stdout=output.append,
+    )
+    return {"exit_code": exit_code, "output": json.loads(output[0]) if output else {}}
+
+
+def test_serial_validation_status_json_preserves_omitted_timing_findings(
+    tmp_path: Path,
+) -> None:
+    result = _serial_timing_status_json(tmp_path, omitted_findings=7)
+
+    assert result["exit_code"] == 0
+    assert result["output"]["timing_review"]["omitted_findings"] == 7
+
+
+def test_serial_validation_status_json_defaults_missing_omitted_timing_findings(
+    tmp_path: Path,
+) -> None:
+    result = _serial_timing_status_json(tmp_path, omitted_findings=None)
+
+    assert result["exit_code"] == 0
+    assert result["output"]["timing_review"]["omitted_findings"] == 0
 
 
 def test_candidate_cli_previews_and_forwards_live_identity(
