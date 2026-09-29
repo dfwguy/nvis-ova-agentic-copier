@@ -368,9 +368,13 @@ def test_changed_file_with_many_existing_slow_cases_retains_complete_junit_proof
         candidate_tree=CANDIDATE_TREE, dependencies=dependencies
     )
 
-    assert captured["outcome"] == "correction_required"
+    assert captured["outcome"] == "report_only"
     assert len(cast(list[object], captured["findings"])) == 128
     assert captured["omitted_findings"] == 44
+    assert all(
+        finding["reason"] == "touched_slow"
+        for finding in cast(list[dict[str, object]], captured["findings"])
+    )
     assert replayed is not None
     for field in (
         "baseline_sha",

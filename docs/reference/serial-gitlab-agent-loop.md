@@ -450,15 +450,17 @@ cases in the complete candidate list above 0.100 s with the outcome. The
 private transcript remains the controller's source-bound proof for the full
 inventories and omission count.
 The outcome is `clear` when there are no findings, `report_only` for findings
-that need review but no correction, or `correction_required` when a new slow,
-touched slow, or corroborated regressed case needs correction.
+that need review but no correction, or `correction_required` when a new slow
+or corroborated regressed case needs correction. A `touched_slow` finding
+alone is report-only.
 While the original terminal timing failure is current, `candidate validate`
 and `candidate status` report its safe `timing_failure_code` and bind it to the
 evidence ID. Once a retry starts, status reports the retry state. It includes
 a code only if that retry ends in a timing failure.
 
-The reviewer routes a touched case above 0.100 s to the test owner for
-correction. For every candidate case at or above 1.000 s, the reviewer checks
+The reviewer records a touched case above 0.100 s for its test owner. It
+needs correction only if repeats corroborate a regression. For every
+candidate case at or above 1.000 s, the reviewer checks
 the controller's finding and records its classification, owner, and reduction
 or exception plan in the durable audit or linked issue record, even if another
 finding already needs correction. When an existing case first reaches or gets

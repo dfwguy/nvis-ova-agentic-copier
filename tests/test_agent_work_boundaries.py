@@ -5325,8 +5325,18 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
         assert any(_git_arguments(call)[:2] == ("fetch", "origin") for call in calls)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "reason", "omitted_findings"),
+    (
+        ("correction_required", "corroborated_regression", 0),
+        ("report_only", "touched_slow", 2),
+    ),
+)
 def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
     tmp_path: Path,
+    outcome: str,
+    reason: str,
+    omitted_findings: int,
 ) -> None:
     baseline_sha = "a" * 40
     candidate_tree = "b" * 40
@@ -5389,7 +5399,8 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
         "baseline_sha": baseline_sha,
         "baseline_tree": "c" * 40,
         "candidate_tree": candidate_tree,
-        "outcome": "correction_required",
+        "outcome": outcome,
+        "omitted_findings": omitted_findings,
         "transcript_sha256": "d" * 64,
         "runs": {
             environment: {
@@ -5406,8 +5417,12 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
             {
                 "environment": "py311",
                 "name": "tests/test_speed.py::test_existing",
-                "reason": "corroborated_regression",
-                "phase_deltas": {"setup": 0.0, "call": 0.8, "teardown": 0.0},
+                "reason": reason,
+                "phase_deltas": (
+                    {"setup": 0.0, "call": 0.8, "teardown": 0.0}
+                    if reason == "corroborated_regression"
+                    else None
+                ),
             },
             {
                 "environment": "py314",
