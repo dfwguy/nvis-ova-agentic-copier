@@ -243,7 +243,7 @@ def test_focused_candidate_case_missing_from_full_junit_is_inconclusive() -> Non
     assert result.reasons and "full JUnit" in result.reasons[0]
 
 
-def test_new_case_above_100ms_requires_review_even_without_baseline_case() -> None:
+def test_new_case_above_100ms_is_advisory_without_baseline_case() -> None:
     baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
     candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.140, 0.010)},) * 2
     manifest, files = _bundle(
@@ -255,15 +255,124 @@ def test_new_case_above_100ms_requires_review_even_without_baseline_case() -> No
 
     result = _compare(manifest, files)
 
-    assert result.status == "review"
+    assert result.status == "clear"
     assert _case(result, NEW).classification == "introduced"
     assert _case(result, NEW).baseline_seconds == ()
     assert _case(result, NEW).candidate_seconds == pytest.approx((0.160, 0.160))
 
 
-def test_unchanged_case_with_consistent_candidate_slowdown_requires_attribution() -> (
+def test_new_case_at_exactly_one_second_is_allowed() -> None:
+    baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
+    candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.140, 0.010)},) * 2
+    manifest, files = _bundle(
+        baseline=baseline,
+        candidate=candidate,
+        full_times={SLOW: 0.190, NEW: 1.000},
+        changed=(NEW,),
+    )
+
+    result = _compare(manifest, files)
+
+    assert result.status == "clear"
+    assert _case(result, NEW).classification == "introduced"
+    assert result.at_least_1s_cases["py311"] == ((NEW, 1.000),)
+
+
+def test_new_case_above_one_second_requires_review_from_full_junit() -> None:
+    baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
+    candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.050, 0.010)},) * 2
+    manifest, files = _bundle(
+        baseline=baseline,
+        candidate=candidate,
+        full_times={SLOW: 0.190, NEW: 1.001},
+        changed=(NEW,),
+    )
+
+    result = _compare(manifest, files)
+
+    assert result.status == "review"
+    assert _case(result, NEW).classification == "introduced"
+    assert _case(result, NEW).candidate_seconds == pytest.approx((0.070, 0.070))
+
+
+def test_modified_case_above_one_second_requires_review_even_if_focused_run_improves() -> (
     None
 ):
+    manifest, files = _bundle(full_times={SLOW: 1.001, OTHER: 0.100}, changed=(SLOW,))
+
+    result = _compare(manifest, files)
+
+    assert result.status == "review"
+    assert _case(result, SLOW).changed is True
+    assert _case(result, SLOW).classification == "inherited"
+
+
+def test_unmodified_case_above_one_second_does_not_gate_new_advisory_case() -> None:
+    baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
+    candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.140, 0.010)},) * 2
+    manifest, files = _bundle(
+        baseline=baseline,
+        candidate=candidate,
+        full_times={SLOW: 1.001, NEW: 0.160},
+        changed=(NEW,),
+    )
+
+    result = _compare(manifest, files)
+
+    assert result.status == "clear"
+    assert result.at_least_1s_cases["py311"] == ((SLOW, 1.001),)
+
+
+@pytest.mark.parametrize("missing_side", ["baseline_runs", "candidate_runs"])
+def test_absent_paired_proof_is_unknown_with_valid_candidate_inventory(
+    missing_side: str,
+) -> None:
+    manifest, files = _bundle(full_times={SLOW: 0.190, NEW: 1.250}, changed=(SLOW,))
+    for evidence in manifest["environments"].values():
+        del evidence[missing_side]
+
+    result = _compare(manifest, files)
+
+    assert result.status == "unknown"
+    assert result.over_100ms_cases == {
+        "py311": ((SLOW, 0.190), (NEW, 1.250)),
+        "py314": ((SLOW, 0.190), (NEW, 1.250)),
+    }
+    assert result.at_least_1s_cases == {
+        "py311": ((NEW, 1.250),),
+        "py314": ((NEW, 1.250),),
+    }
+
+
+@pytest.mark.parametrize("missing_side", ["baseline_runs", "candidate_runs"])
+def test_changed_case_above_one_second_requires_review_when_paired_proof_absent(
+    missing_side: str,
+) -> None:
+    baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
+    candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.050, 0.010)},) * 2
+    manifest, files = _bundle(
+        baseline=baseline,
+        candidate=candidate,
+        full_times={SLOW: 0.190, NEW: 1.001},
+        changed=(NEW,),
+    )
+    for evidence in manifest["environments"].values():
+        del evidence[missing_side]
+
+    result = _compare(manifest, files)
+
+    assert result.status == "review"
+    assert result.over_100ms_cases == {
+        "py311": ((SLOW, 0.190), (NEW, 1.001)),
+        "py314": ((SLOW, 0.190), (NEW, 1.001)),
+    }
+    assert result.at_least_1s_cases == {
+        "py311": ((NEW, 1.001),),
+        "py314": ((NEW, 1.001),),
+    }
+
+
+def test_unchanged_case_with_consistent_candidate_slowdown_is_advisory() -> None:
     baseline = ({SLOW: (0.010, 0.090, 0.010)}, {SLOW: (0.010, 0.100, 0.010)})
     candidate = ({SLOW: (0.010, 0.190, 0.010)}, {SLOW: (0.010, 0.200, 0.010)})
     manifest, files = _bundle(baseline=baseline, candidate=candidate)
@@ -271,7 +380,7 @@ def test_unchanged_case_with_consistent_candidate_slowdown_requires_attribution(
     result = _compare(manifest, files)
 
     case = _case(result, SLOW)
-    assert result.status == "review"
+    assert result.status == "clear"
     assert case.classification == "consistent_slowdown"
     assert case.changed is False
     assert case.signed_delta_seconds == pytest.approx((0.100, 0.100))
@@ -431,7 +540,7 @@ def test_changed_slow_case_missing_from_focused_runs_is_inconclusive() -> None:
     assert result.reasons
 
 
-def test_introduced_slow_case_requires_review_even_if_change_list_omits_it() -> None:
+def test_introduced_case_under_one_second_is_advisory_if_change_list_omits_it() -> None:
     baseline = ({SLOW: (0.010, 0.240, 0.010)},) * 2
     candidate = ({SLOW: (0.010, 0.170, 0.010), NEW: (0.010, 0.140, 0.010)},) * 2
     manifest, files = _bundle(
@@ -440,7 +549,7 @@ def test_introduced_slow_case_requires_review_even_if_change_list_omits_it() -> 
 
     result = _compare(manifest, files)
 
-    assert result.status == "review"
+    assert result.status == "clear"
     assert _case(result, NEW).classification == "introduced"
 
 
@@ -490,7 +599,7 @@ def test_candidate_only_test_id_has_realistic_side_specific_selection() -> None:
 
     result = _compare(manifest, files)
 
-    assert result.status == "review"
+    assert result.status == "clear"
     assert _case(result, NEW).classification == "introduced"
 
 

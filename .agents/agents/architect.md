@@ -148,8 +148,12 @@ normal interactive Green commit and installed hook under its role contract.
 All later specialists are read-only. In serial work,
 `validation.py` owns exact tree and JUnit proof. The worker uses the trusted
 validation/status boundary and does not run the hook, full suite, or old
-validation CLI itself. Non-functional Review owns the full case list. It owns timing proof and
-the 0.100-second test rule. It judges exceptions and causes. Its receipt retains complete evidence;
+validation CLI itself. Non-functional Review owns the full case list and
+timing proof. In interactive work, a new or modified test strictly above
+1.000 seconds is the ordinary hard block; exactly 1.000 is allowed. For that
+route, the 0.100-second target is an advisory follow-up. Missing paired proof leaves
+baseline regression `UNKNOWN` and does not waive the full-JUnit gate. It
+judges exceptions and causes. Its receipt retains complete evidence;
 Architect routes its findings without inventing a timing pass.
 
 For serial work, the controller supplies `timing_review` bound to the baseline

@@ -115,13 +115,24 @@ subsecond cases in the complete candidate list. An exhausted invocation or
 time budget stops timing review with the stable reason
 `focused_budget_exhausted`.
 
-For interactive work, [investigate local test timing](../how-to/validate-template-changes.md#investigate-local-test-timing)
-with paired focused runs on the exact trees. An added ordinary test that
-stays above 100 ms in repeats, a changed test that adds cost above 100 ms,
-or a proven slowdown caused by a test, fixture, or code goes back to its
-owner. Map cases using changed shared fixtures or helpers before approval.
-Apply any tighter task limit. One run or a comparator `review` flag does not
-prove a regression; mixed case trends need diagnosis.
+For interactive work, read the fixed full candidate JUnit files for both
+supported Python versions after a successful hook. If a fixed file is missing
+or `OSError`-unreadable, timing is `UNKNOWN`; continue without a timing pass,
+times, or counts. A malformed or mismatched file that is present needs repair.
+With valid files, a new or modified case strictly above 1.000 seconds is a
+hard stop. Exactly 1.000 seconds is allowed by this rule. Unchanged inherited
+cases do not trigger it. Cases above 100 ms remain advisory: record them for a
+separate owner and follow-up. Apply any tighter controlled task limit.
+
+[Paired local timing investigation](../how-to/validate-template-changes.md#investigate-local-test-timing)
+can help assign cause. If paired proof is absent but candidate JUnit is valid,
+the comparison is `unknown` and does not block by itself. Present malformed or
+mismatched paired proof is `inconclusive` and blocks approval until repaired.
+An `unknown` comparison never waives the candidate JUnit hard gate.
+The comparison still lists candidate cases above 100 ms and at or above 1
+second. A `review` status applies only to new or modified cases strictly above
+1.000 seconds; it does not, by itself, prove a regression. Mixed case trends
+need diagnosis.
 
 Job duration helps diagnosis; it is not a publication gate. Image pulls,
 setup, and scheduling may lengthen jobs without increasing JUnit case time.
