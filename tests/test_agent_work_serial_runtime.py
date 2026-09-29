@@ -12,14 +12,20 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import hashlib
 import importlib
 import json
 import logging
+import os
 import re
+import socketserver
 import sys
+import threading
+import time
 from base64 import b64encode
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -59,7 +65,9 @@ from agent_work.ledger import (
     LedgerCorrupt,
     LedgerError,
     XdgIssueLock,
+    XdgProjectLock,
     observe_issue_lock,
+    project_state_path,
 )
 from agent_work.models import (
     AgentWorkConfig,
@@ -2522,6 +2530,929 @@ def test_red_checkpoint_is_persisted_while_the_producing_worker_is_active(
     assert retained is not None
     assert len(invoker.prompts) == 2
     assert result is not None and result.state is RunnerState.PUBLISHING
+
+
+def test_live_validation_request_yields_after_durable_red_then_timer_resumes(
+    tmp_path: Path,
+) -> None:
+    """A trusted request stops the controller at a checkpoint, never a live worker."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+    observations: list[int] = []
+    waiting = True
+
+    def apply_red_checkpoint(
+        issue_iid: int, request: RedCheckpointRequest, _expected_tree_oid: str
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        assert issue_iid == record.issue_iid
+        assert request == _red_checkpoint_request_for_segment()
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    def observe_interactive_validation() -> bool:
+        current = ledger.load_read_only(record.issue_iid)
+        assert current is not None
+        assert retained is not None
+        observations.append(current.revision)
+        return waiting
+
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        invoke=invoker,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+        observe_interactive_validation=observe_interactive_validation,
+    )
+    first = dispatch(
+        CommandRequest(command="loop.run", max_segments=16),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    persisted = ledger.load_read_only(record.issue_iid)
+    assert first.stop_reason == "interactive_validation_yield"
+    assert persisted is not None and persisted.state is RunnerState.EXECUTING
+    assert persisted.revision > record.revision
+    assert retained is not None
+    assert len(invoker.prompts) == 1
+    assert len(observations) == 1
+    assert 0 < observations[0] < persisted.revision
+
+    waiting = False
+    second = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+    assert second.stop_reason != "interactive_validation_yield"
+    assert len(invoker.prompts) == 2
+    assert retained.tree_oid in invoker.prompts[1]
+
+
+def _completed_admission_for_test(
+    tmp_path: Path,
+) -> tuple[AgentWorkConfig, dict[str, str], Path]:
+    """Persist one completed, issue-bound admission for lifecycle tests."""
+    initial = _config(tmp_path)
+    environment = {"XDG_STATE_HOME": str(tmp_path / "timing-state")}
+    state_root = project_state_path(
+        host=initial.host, project_id=initial.project_id, environment=environment
+    )
+    state_root.mkdir(parents=True)
+    config = initial.model_copy(update={"state_root": state_root})
+    path = state_root / "interactive-validation-request.json"
+    path.write_text(
+        json.dumps(
+            {
+                "host": config.host,
+                "project_id": config.project_id,
+                "status": "complete",
+                "request_id": "a" * 32,
+                "issue_iid": 12,
+                "request_at": NOW.isoformat(),
+                "yield_at": NOW.isoformat(),
+                "validation_started_at": NOW.isoformat(),
+                "validation_finished_at": NOW.isoformat(),
+                "wait_elapsed_seconds": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config, environment, path
+
+
+def test_idle_activation_does_not_report_or_consume_yielded_resume(
+    tmp_path: Path,
+) -> None:
+    """Only a returned segment for the yielded issue can mark resumption."""
+    from agent_work import timing_admission
+
+    config, timing_environment, state_path = _completed_admission_for_test(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        run_segment_boundary=lambda **_kwargs: None,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.validation_admission is None
+    assert "resume_at" not in json.loads(state_path.read_text())
+    assert (
+        timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "resolution"),
+    [
+        (RunnerState.COMPLETE, "closed_without_resume"),
+        (RunnerState.BLOCKED, "ineligible_without_resume"),
+    ],
+)
+def test_terminal_yielded_issue_reports_without_claiming_worker_resume(
+    tmp_path: Path,
+    terminal_state: RunnerState,
+    resolution: str,
+) -> None:
+    """An ineligible issue releases its completed validation request truthfully."""
+    from agent_work import timing_admission
+
+    config, timing_environment, state_path = _completed_admission_for_test(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(tmp_path, state=terminal_state, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        run_segment_boundary=lambda **_kwargs: None,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.validation_admission is not None
+    assert report.validation_admission.resolution == resolution
+    assert report.validation_admission.resume_at is None
+    assert report.validation_admission.validation_finished_at == NOW
+    retained = json.loads(state_path.read_text())
+    assert retained["resolution"] == resolution
+    assert "resume_at" not in retained
+    assert (
+        timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        )
+        is None
+    )
+    assert (
+        timing_admission.run_project_timing_window(
+            command=("validation",),
+            run_child=lambda _command, _environment: 0,
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+            wait_seconds=0.0,
+            monotonic_clock=lambda: 0.0,
+            sleeper=lambda _seconds: None,
+        )
+        == 0
+    )
+
+
+def test_resumed_admission_is_consumed_while_project_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    """A terminal worker return cannot be reclassified before its resume is saved."""
+    from agent_work import timing_admission
+
+    config, timing_environment, state_path = _completed_admission_for_test(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    worker_returned = False
+    verified_while_locked = False
+
+    @contextmanager
+    def project_lock() -> Any:
+        nonlocal verified_while_locked
+        try:
+            yield
+        finally:
+            if worker_returned:
+                assert "resume_at" in json.loads(state_path.read_text()), (
+                    "worker resumption was marked after releasing lock"
+                )
+                verified_while_locked = True
+
+    def terminal_worker(**kwargs: Any) -> LedgerRecord:
+        nonlocal worker_returned
+        kwargs["on_worker_invoke"](record.issue_iid)
+        worker_returned = True
+        return record.model_copy(
+            update={
+                "state": RunnerState.AWAITING_HUMAN,
+                "revision": record.revision + 1,
+            }
+        )
+
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), FakeRepository(config)),
+        lock=project_lock,
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        run_segment_boundary=terminal_worker,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert verified_while_locked
+    assert report.validation_admission is not None
+    assert report.validation_admission.resolution == "resumed"
+    assert "resume_at" in json.loads(state_path.read_text())
+
+
+def test_unrelated_issue_does_not_consume_yielded_resume(tmp_path: Path) -> None:
+    """A new issue cannot inherit another issue's validation admission."""
+    from agent_work import timing_admission
+
+    config, timing_environment, state_path = _completed_admission_for_test(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = FakeRepository(config)
+    unrelated = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    ).model_copy(update={"issue_iid": 13, "source_branch": "agent/issue-13"})
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        run_segment_boundary=lambda **_kwargs: unrelated,
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.items[0].issue_iid == 13
+    assert report.validation_admission is None
+    assert "resume_at" not in json.loads(state_path.read_text())
+    assert (
+        timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        )
+        is not None
+    )
+
+
+def test_same_issue_early_return_without_worker_keeps_resume_pending(
+    tmp_path: Path,
+) -> None:
+    """A reconciliation return cannot impersonate actual worker resumption."""
+    from agent_work import timing_admission
+
+    config, timing_environment, state_path = _completed_admission_for_test(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        run_segment_boundary=lambda **_kwargs: record.model_copy(
+            update={"revision": record.revision + 1}
+        ),
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert report.items[0].issue_iid == record.issue_iid
+    assert report.validation_admission is None
+    assert "resume_at" not in json.loads(state_path.read_text())
+    assert (
+        timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        )
+        is not None
+    )
+
+
+def test_repeated_activation_preserves_first_live_yield_binding(tmp_path: Path) -> None:
+    """A rapid second timer pass yields again without rewriting the first handoff."""
+    from agent_work import timing_admission
+
+    initial = _config(tmp_path)
+    timing_environment = {"XDG_STATE_HOME": str(tmp_path / "timing-state")}
+    root = project_state_path(
+        host=initial.host,
+        project_id=initial.project_id,
+        environment=timing_environment,
+    )
+    root.mkdir(parents=True)
+    config = initial.model_copy(update={"state_root": root})
+    ledger = JsonLedger(root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+    request_path = root / "interactive-validation-request.json"
+    lock_path = root / "interactive-validation-request.lock"
+    requested_at = datetime.now(UTC)
+    request_path.write_text(
+        json.dumps(
+            {
+                "host": config.host,
+                "project_id": config.project_id,
+                "status": "waiting",
+                "request_id": "b" * 32,
+                "request_at": requested_at.isoformat(),
+                "expires_at": (requested_at + timedelta(minutes=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+    def apply_red_checkpoint(
+        issue_iid: int, _request: RedCheckpointRequest, _tree: str
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    def observe() -> object:
+        return timing_admission.observe_waiting_interactive_validation(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        )
+
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        invoke=invoker,
+        clock=lambda: datetime.now(UTC),
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+        observe_interactive_validation=observe,
+        observe_yielded_interactive_validation=lambda: cast(
+            timing_admission.InteractiveValidationRequest | None, observe()
+        ),
+    )
+    try:
+        first = dispatch(
+            CommandRequest(command="loop.run", max_segments=16),
+            apply=True,
+            dependencies=dependencies,
+        )
+        first_binding = json.loads(request_path.read_text())
+        observed = observe()
+        assert isinstance(observed, timing_admission.InteractiveValidationRequest)
+        assert timing_admission.mark_interactive_validation_yield(
+            observed, at=datetime.now(UTC), issue_iid=record.issue_iid
+        )
+        assert not timing_admission.mark_interactive_validation_yield(
+            observed, at=datetime.now(UTC), issue_iid=13
+        )
+        second = dispatch(
+            CommandRequest(command="loop.run", max_segments=16),
+            apply=True,
+            dependencies=dependencies,
+        )
+        second_binding = json.loads(request_path.read_text())
+    finally:
+        os.close(descriptor)
+
+    assert first.stop_reason == second.stop_reason == "interactive_validation_yield"
+    assert len(invoker.prompts) == 1
+    assert first_binding["issue_iid"] == second_binding["issue_iid"] == record.issue_iid
+    assert first_binding["yield_at"] == second_binding["yield_at"]
+
+
+def test_service_activation_yields_for_live_validation_then_timer_resumes_controller(
+    tmp_path: Path,
+) -> None:
+    """The real service command consumes a real controller yield across activations."""
+    from agent_work import timing_admission
+    from tests.test_template import _run_wrapper, _wrapper_checkout_environment
+
+    observe = getattr(timing_admission, "observe_waiting_interactive_validation", None)
+    assert callable(observe), "live interactive validation observer is required"
+
+    root = Path(__file__).resolve().parents[1]
+    service_root = tmp_path / "service"
+    service_root.mkdir()
+    _, environment, _, _ = _wrapper_checkout_environment(service_root)
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    invoker = RedThenGreenInvoker(repository)
+    retained: RedCheckpointEvidence | None = None
+    controller_reports: list[CommandReport] = []
+    timing_environment = {"XDG_STATE_HOME": str(tmp_path / "timing-state")}
+    admission = {
+        "host": config.host,
+        "project_id": config.project_id,
+        "environment": timing_environment,
+    }
+    request_seen = threading.Event()
+    validation_started = threading.Event()
+    validation_finished = threading.Event()
+    validation_errors: list[BaseException] = []
+    validation_times: dict[str, datetime] = {}
+    request_ids: list[str] = []
+    held = timing_admission.project_timing_admission(
+        **admission,
+        wait_seconds=0.0,
+        monotonic_clock=time.monotonic,
+        sleeper=time.sleep,
+    )
+    held.__enter__()
+    lease_released = False
+
+    def validation_child(_command: tuple[str, ...], _environment: object) -> int:
+        active = observe(
+            **admission,
+            utc_clock=lambda: datetime.now(UTC),
+        )
+        assert active is not None
+        assert active.request_id == request_ids[0]
+        validation_times["validation_started_at"] = datetime.now(UTC)
+        validation_started.set()
+        assert len(invoker.prompts) == 1
+        validation_times["validation_finished_at"] = datetime.now(UTC)
+        validation_finished.set()
+        return 0
+
+    def validation_waiter() -> None:
+        def signal_and_sleep(seconds: float) -> None:
+            request_seen.set()
+            time.sleep(seconds)
+
+        try:
+            assert (
+                timing_admission.run_project_timing_window(
+                    command=("validation",),
+                    run_child=validation_child,
+                    host=config.host,
+                    project_id=config.project_id,
+                    environment=timing_environment,
+                    wait_seconds=10.0,
+                    monotonic_clock=time.monotonic,
+                    sleeper=signal_and_sleep,
+                )
+                == 0
+            )
+        except (AssertionError, OSError, RuntimeError, ValueError) as error:
+            validation_errors.append(error)
+            request_seen.set()
+            validation_finished.set()
+
+    def apply_red_checkpoint(
+        issue_iid: int, _request: RedCheckpointRequest, _expected_tree_oid: str
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        current = ledger.load_read_only(issue_iid)
+        assert current is not None
+        retained = _red_checkpoint_evidence_for_segment(current)
+        return retained
+
+    def observe_interactive_validation() -> object:
+        return observe(
+            **admission,
+            utc_clock=lambda: datetime.now(UTC),
+        )
+
+    dependencies = replace(
+        _dependencies(config, ledger, FakeGitLab(), repository),
+        invoke=invoker,
+        load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+        apply_red_checkpoint=apply_red_checkpoint,
+        observe_interactive_validation=observe_interactive_validation,
+        read_validation_admission=lambda: timing_admission.read_validation_admission(
+            host=config.host,
+            project_id=config.project_id,
+            environment=timing_environment,
+        ),
+        clock=lambda: datetime.now(UTC),
+    )
+
+    class DispatchHandler(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            command = self.rfile.readline().decode().strip()
+            assert command == "run agent-work loop run --apply --json"
+            report = dispatch(
+                CommandRequest(command="loop.run", max_segments=1),
+                apply=True,
+                dependencies=dependencies,
+            )
+            controller_reports.append(report)
+            self.wfile.write((report.model_dump_json() + "\n").encode())
+
+    socket_path = tmp_path / "controller.sock"
+
+    class DispatchServer(socketserver.UnixStreamServer):
+        allow_reuse_address = True
+
+    with DispatchServer(str(socket_path), DispatchHandler) as server:
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.001}, daemon=True
+        )
+        thread.start()
+        waiter = threading.Thread(target=validation_waiter, daemon=True)
+        actual_wait_started = time.monotonic()
+        waiter.start()
+        shim = service_root / "uv-dispatch"
+        shim.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, socket, sys\n"
+            "with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:\n"
+            "    client.connect(os.environ['CONTROLLER_SOCKET'])\n"
+            "    client.sendall((' '.join(sys.argv[1:]) + '\\n').encode())\n"
+            "    chunks = []\n"
+            "    while True:\n"
+            "        chunk = client.recv(65536)\n"
+            "        if not chunk:\n"
+            "            break\n"
+            "        chunks.append(chunk)\n"
+            "    sys.stdout.buffer.write(b''.join(chunks))\n"
+        )
+        shim.chmod(0o755)
+        environment |= {
+            "AGENT_WORK_UV": str(shim),
+            "CONTROLLER_SOCKET": str(socket_path),
+        }
+        try:
+            assert request_seen.wait(1.0)
+            pending = observe(
+                **admission,
+                utc_clock=lambda: datetime.now(UTC),
+            )
+            assert pending is not None
+            request_ids.append(pending.request_id)
+            validation_times["request_at"] = pending.requested_at
+            first = _run_wrapper(root, environment, "--apply")
+            assert first.returncode == 0, first.stderr
+            assert controller_reports[0].stop_reason == "interactive_validation_yield"
+            validation_times["yield_at"] = datetime.now(UTC)
+            assert len(invoker.prompts) == 1
+            persisted = ledger.load_read_only(record.issue_iid)
+            assert persisted is not None and persisted.state is RunnerState.EXECUTING
+
+            held.__exit__(None, None, None)
+            lease_released = True
+            actual_wait_elapsed = time.monotonic() - actual_wait_started
+            assert actual_wait_elapsed > 0
+            assert validation_started.wait(1.0)
+            assert len(invoker.prompts) == 1
+            assert validation_finished.wait(1.0)
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive()
+            assert not validation_errors
+            assert len(invoker.prompts) == 1
+
+            second = _run_wrapper(root, environment, "--apply")
+            assert second.returncode == 0, second.stderr
+            validation_times["resume_at"] = datetime.now(UTC)
+            assert len(controller_reports) == 2
+            assert len(invoker.prompts) == 2
+            assert retained is not None and retained.tree_oid in invoker.prompts[1]
+            assert (
+                validation_times["request_at"]
+                <= validation_times["yield_at"]
+                <= validation_times["validation_started_at"]
+                < validation_times["validation_finished_at"]
+                <= validation_times["resume_at"]
+            )
+            admission_evidence = controller_reports[1].model_dump()[
+                "validation_admission"
+            ]
+            assert admission_evidence["request_id"] == pending.request_id
+            assert admission_evidence["wait_elapsed_seconds"] > 0
+            assert admission_evidence["request_at"] < admission_evidence["yield_at"]
+            assert (
+                admission_evidence["yield_at"]
+                <= admission_evidence["validation_started_at"]
+            )
+            assert (
+                admission_evidence["validation_started_at"]
+                < admission_evidence["validation_finished_at"]
+            )
+            assert (
+                admission_evidence["validation_finished_at"]
+                <= admission_evidence["resume_at"]
+            )
+        finally:
+            if not lease_released:
+                held.__exit__(None, None, None)
+            waiter.join(timeout=1.0)
+            server.shutdown()
+            thread.join()
+
+
+@pytest.mark.timeout(30)
+def test_service_yield_validates_before_resumed_green_and_preserves_worker(
+    tmp_path: Path,
+) -> None:
+    """Check worker order across real services and record both observed waits."""
+    from agent_work import timing_admission
+    from tests.test_template import _run_wrapper, _wrapper_checkout_environment
+
+    root = Path(__file__).resolve().parents[1]
+
+    def measure(
+        *,
+        cooperative: bool,
+        green_entered: threading.Event | None = None,
+        release_green: threading.Event | None = None,
+    ) -> float:
+        scenario = tmp_path / ("yield" if cooperative else "baseline")
+        scenario.mkdir()
+        service_root = scenario / "service"
+        service_root.mkdir()
+        _, environment, _, _ = _wrapper_checkout_environment(service_root)
+        initial_config = _config(scenario)
+        timing_environment = {"XDG_STATE_HOME": str(scenario / "timing-state")}
+        state_root = project_state_path(
+            host=initial_config.host,
+            project_id=initial_config.project_id,
+            environment=timing_environment,
+        )
+        config = initial_config.model_copy(update={"state_root": state_root})
+        ledger = JsonLedger(state_root, clock=lambda: datetime.now(UTC))
+        record = ledger.persist(
+            _record(
+                scenario, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+            ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+        )
+        repository = FakeRepository(config)
+        repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+        red_entered = threading.Event()
+        release_red = threading.Event()
+        request_seen = threading.Event()
+        validation_started = threading.Event()
+        prompts_at_validation: list[int] = []
+        retained: RedCheckpointEvidence | None = None
+        reports: list[CommandReport] = []
+        errors: list[BaseException] = []
+        times: dict[str, float] = {}
+        green_started_at: list[datetime] = []
+        green_finished_at: list[datetime] = []
+        green_finished = threading.Event()
+
+        class DelayedInvoker(RedThenGreenInvoker):
+            def invoke(self, *args: Any, **kwargs: Any) -> WorkerInvocation:
+                if not self.prompts:
+                    red_entered.set()
+                    assert release_red.wait()
+                else:
+                    green_started_at.append(datetime.now(UTC))
+                    if green_entered is not None and release_green is not None:
+                        green_entered.set()
+                        assert release_green.wait()
+                outcome = super().invoke(*args, **kwargs)
+                if green_started_at:
+                    green_finished_at.append(datetime.now(UTC))
+                    green_finished.set()
+                return outcome
+
+        invoker = DelayedInvoker(repository)
+
+        def apply_red_checkpoint(
+            issue_iid: int, _request: RedCheckpointRequest, _tree: str
+        ) -> RedCheckpointEvidence:
+            nonlocal retained
+            current = ledger.load_read_only(issue_iid)
+            assert current is not None
+            retained = _red_checkpoint_evidence_for_segment(current)
+            return retained
+
+        def observe_request() -> object:
+            if not cooperative:
+                return None
+            return timing_admission.observe_waiting_interactive_validation(
+                host=config.host,
+                project_id=config.project_id,
+                environment=timing_environment,
+            )
+
+        dependencies = replace(
+            _dependencies(config, ledger, FakeGitLab(), repository),
+            invoke=invoker,
+            lock=lambda: XdgProjectLock(state_root / "project.lock"),
+            clock=lambda: datetime.now(UTC),
+            monotonic=time.monotonic,
+            load_red_checkpoint=lambda _project_id, _issue_iid, _base_sha: retained,
+            apply_red_checkpoint=apply_red_checkpoint,
+            observe_interactive_validation=observe_request,
+            read_validation_admission=lambda: (
+                timing_admission.read_validation_admission(
+                    host=config.host,
+                    project_id=config.project_id,
+                    environment=timing_environment,
+                )
+            ),
+        )
+
+        class DispatchHandler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                assert self.rfile.readline().decode().strip() == (
+                    "run agent-work loop run --apply --json"
+                )
+                report = dispatch(
+                    CommandRequest(command="loop.run", max_segments=1),
+                    apply=True,
+                    dependencies=dependencies,
+                )
+                reports.append(report)
+                self.wfile.write((report.model_dump_json() + "\n").encode())
+
+        socket_path = scenario / "controller.sock"
+        shim = service_root / "uv-dispatch"
+        shim.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, socket, sys\n"
+            "with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:\n"
+            "    client.connect(os.environ['CONTROLLER_SOCKET'])\n"
+            "    client.sendall((' '.join(sys.argv[1:]) + '\\n').encode())\n"
+            "    chunks = []\n"
+            "    while chunk := client.recv(65536):\n"
+            "        chunks.append(chunk)\n"
+            "    sys.stdout.buffer.write(b''.join(chunks))\n"
+        )
+        shim.chmod(0o755)
+        environment |= {
+            "AGENT_WORK_UV": str(shim),
+            "CONTROLLER_SOCKET": str(socket_path),
+        }
+
+        def run_wrapper() -> None:
+            try:
+                result = _run_wrapper(root, environment, "--apply")
+                assert result.returncode == 0, result.stderr
+            except (AssertionError, OSError, RuntimeError) as error:
+                errors.append(error)
+
+        def validation_child(_command: tuple[str, ...], _environment: object) -> int:
+            times["validation_start"] = time.monotonic()
+            prompts_at_validation.append(len(invoker.prompts))
+            assert green_finished.is_set() == (not cooperative)
+            validation_started.set()
+            return 0
+
+        def wait_for_validation() -> None:
+            def signal_and_sleep(seconds: float) -> None:
+                request_seen.set()
+                time.sleep(seconds)
+
+            try:
+                timing_admission.run_project_timing_window(
+                    command=("validation",),
+                    run_child=validation_child,
+                    host=config.host,
+                    project_id=config.project_id,
+                    environment=timing_environment,
+                    wait_seconds=3.0 if cooperative else 60.0,
+                    monotonic_clock=time.monotonic,
+                    sleeper=signal_and_sleep,
+                )
+            except (AssertionError, OSError, RuntimeError, ValueError) as error:
+                errors.append(error)
+                validation_started.set()
+
+        class DispatchServer(socketserver.UnixStreamServer):
+            allow_reuse_address = True
+
+        with DispatchServer(str(socket_path), DispatchHandler) as server:
+            server_thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.001},
+                daemon=True,
+            )
+            server_thread.start()
+            wrapper_thread = threading.Thread(target=run_wrapper, daemon=True)
+            wrapper_thread.start()
+            try:
+                assert red_entered.wait()
+                waiter = threading.Thread(target=wait_for_validation, daemon=True)
+                waiter.start()
+                assert request_seen.wait()
+                pending = timing_admission.observe_waiting_interactive_validation(
+                    host=config.host,
+                    project_id=config.project_id,
+                    environment=timing_environment,
+                )
+                assert pending is not None
+                times["request"] = time.monotonic()
+                assert not validation_started.is_set()
+                release_red.set()
+                assert validation_started.wait()
+                wrapper_thread.join()
+                waiter.join()
+                assert not wrapper_thread.is_alive() and not waiter.is_alive()
+                assert not errors
+                assert len(reports) == 1
+                if cooperative:
+                    assert reports[0].stop_reason == "interactive_validation_yield"
+                    assert prompts_at_validation == [1]
+                    resumed = _run_wrapper(root, environment, "--apply")
+                    assert resumed.returncode == 0, resumed.stderr
+                    assert len(invoker.prompts) == 2
+                    assert retained is not None
+                    assert retained.tree_oid in invoker.prompts[1]
+                    admission_report = reports[1].validation_admission
+                    assert admission_report is not None
+                    assert (
+                        admission_report.resume_at
+                        <= green_started_at[0]
+                        < green_finished_at[0]
+                    )
+                else:
+                    assert reports[0].stop_reason != "interactive_validation_yield"
+                    assert prompts_at_validation == [2]
+                assert record.issue_iid == reports[0].items[0].issue_iid
+                return times["validation_start"] - times["request"]
+            finally:
+                release_red.set()
+                server.shutdown()
+                server_thread.join()
+
+    green_entered = threading.Event()
+    release_green = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        baseline = pool.submit(
+            measure,
+            cooperative=False,
+            green_entered=green_entered,
+            release_green=release_green,
+        )
+        try:
+            assert green_entered.wait()
+            after = measure(cooperative=True)
+        finally:
+            release_green.set()
+        before = baseline.result()
+    logging.getLogger(__name__).info(
+        "validation wait before=%.6fs after=%.6fs", before, after
+    )
 
 
 def test_coding_publication_requires_controller_validated_candidate(

@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-29
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -608,6 +608,29 @@ exact observer from ownership. Parking does not create `pipeline_wait`: it can
 start another item or be idle and yield to the timer. A retained inexact or stale
 claimant stays visible for `_observe` before fresh work. It blocks or repairs if
 identity is unclear. Preview is read-only and fast. It does not poll.
+
+An interactive Judge waiting for this project's validation window can request
+the controller to yield. After the controller saves a coding Red checkpoint, an
+applied run can return `stop_reason=interactive_validation_yield` while the
+issue stays in `EXECUTING`. The service exits and its wrapper stops this pass;
+the timer's next activation resumes the saved worker if the issue remains
+active. If that exact issue is `COMPLETE`, the next applied run reports
+`validation_admission.resolution=closed_without_resume`. For another non-active
+state, such as `BLOCKED`, it reports `ineligible_without_resume`. Both return
+`stop_reason=validation_admission_resolved` without invoking the worker. Check
+`resolved_at` and `issue_iid`; `resume_at` is null. Either report consumes the
+request and permits a new window. The waiting validation
+window takes the project lock and timing admission within one bounded wait. It
+holds both during validation. If it reports
+`reason=project_timing_admission_busy`, validation did not start. The request
+is no longer live, so later controller runs are not held by it. Check the
+next applied run's `validation_admission` for its outcome. A resumed report
+has yield, validation, and resume times. A resolved report has yield and
+validation times plus `resolved_at`. An unavailable report has
+`unavailable=true`. [Phase timing](../reference/serial-gitlab-agent-loop.md#ledger-worktrees-and-audit)
+tracks workflow phases and roles separately.
+Wait for that admission report before starting another validation window for
+this project; a new window is deferred while the earlier request is outstanding.
 
 If the full budget is used, inspect the saved retry or worktree restore result
 as you would any other timeout.

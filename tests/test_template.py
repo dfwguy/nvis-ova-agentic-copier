@@ -2988,6 +2988,31 @@ def _applied_report(stop_reason: str) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    "stop_reason", ("interactive_validation_yield", "validation_admission_resolved")
+)
+def test_agent_loop_wrapper_stops_after_validation_handoff(
+    project_root: Path, tmp_path: Path, stop_reason: str
+) -> None:
+    """The timer's next activation handles a yielded or resolved request."""
+    _, environment, _, _ = _wrapper_checkout_environment(tmp_path)
+    calls = _scripted_wrapper_worker(
+        tmp_path,
+        environment,
+        (
+            _applied_report(stop_reason),
+            _preview_report("resume_available"),
+        ),
+    )
+
+    result = _run_wrapper(project_root, environment, "--apply")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [
+        "one|run agent-work loop run --apply --json"
+    ]
+
+
 def _preview_report(outcome: str) -> str:
     """Return one minimal valid read-only loop report for a wrapper worker fake."""
     return json.dumps(

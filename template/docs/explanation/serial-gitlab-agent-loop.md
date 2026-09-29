@@ -81,6 +81,19 @@ For each activation, the controller performs these stages in order:
 
 The controller keeps selection and recovery safe and visible.
 
+An interactive validation window may already be waiting for the same project
+when a coding worker reaches its durable Red checkpoint. The controller yields
+at that boundary so the waiting Judge can measure validation without competing
+with the factory run. It preserves the worker's issue and checkpoint for the
+timer's next activation. If that issue is no longer active, the next run
+records why it cannot resume without invoking the worker. The Judge holds the
+same project lock through
+validation, so the controller cannot resume at the same time. The request
+belongs to a live, bounded wait for the exact project; an old request cannot
+pause later work. The handoff has its own request, yield, and validation times,
+plus a resume or resolution time. Workflow phase timings describe different
+boundaries.
+
 | Design choice | Reason and boundary |
 | --- | --- |
 | Refresh | Before publication, update current `main` through normal Git reconciliation in the retained worktree; never discard work to refresh the base. Keep watching a nonterminal default-branch pipeline in place. Ordinary scheduling parks only an MR observer with exact SHA, owner, worktree, project, and target. A retained stale or inexact claimant stays visible for `_observe` before fresh work. |

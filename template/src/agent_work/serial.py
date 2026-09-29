@@ -3176,6 +3176,8 @@ def _execute(
     apply_red_checkpoint: (
         Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None,
+    observe_interactive_validation: Callable[[], object] = lambda: None,
+    on_worker_invoke: Callable[[int], None] = lambda _issue_iid: None,
 ) -> LedgerRecord | None:
     if not invoke.supports_worker_result_broker:
         raise SegmentError("worker invoker does not support the live result broker")
@@ -3656,6 +3658,7 @@ def _execute(
         and retained_checkpoint is None
     ):
         with lock_factory(record.issue_iid):
+            on_worker_invoke(record.issue_iid)
             red_invocation = invoke.invoke(
                 record.worktree,
                 prompt,
@@ -3764,6 +3767,8 @@ def _execute(
                             error_code=None,
                         )
                     )
+                    if observe_interactive_validation():
+                        return record
                 except (RedCheckpointError, RepositoryError, ValueError):
                     return _record_retry(
                         record,
@@ -3838,6 +3843,7 @@ def _execute(
             )
     if invocation is None:
         with lock_factory(record.issue_iid):
+            on_worker_invoke(record.issue_iid)
             invocation = invoke.invoke(
                 record.worktree,
                 prompt,
@@ -5364,6 +5370,8 @@ def run_segment(
         Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None,
     deferred_observer_iids: frozenset[int] = frozenset(),
+    observe_interactive_validation: Callable[[], object] = lambda: None,
+    on_worker_invoke: Callable[[int], None] = lambda _issue_iid: None,
 ) -> LedgerRecord | None:
     """Run at most one recoverable segment and return its durable state."""
     record, issue = select_record(
@@ -5671,6 +5679,8 @@ def run_segment(
             issue_lock=issue_lock,
             load_red_checkpoint=load_red_checkpoint,
             apply_red_checkpoint=apply_red_checkpoint,
+            observe_interactive_validation=observe_interactive_validation,
+            on_worker_invoke=on_worker_invoke,
         )
         finished_at = boundary_clock()
         if outcome is None:

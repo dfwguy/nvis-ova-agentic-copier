@@ -50,6 +50,13 @@ class XdgProjectLock:
     def _owner_marker(self) -> Path:
         return self._path.with_name(f"{self._path.name}.owner")
 
+    @property
+    def fd(self) -> int:
+        """Return the live lock descriptor for a supervised child boundary."""
+        if self._handle is None:
+            raise RuntimeError("project lock is not acquired")
+        return self._handle.fileno()
+
     def __enter__(self) -> None:
         """Acquire the project lock without waiting."""
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

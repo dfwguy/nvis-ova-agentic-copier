@@ -89,6 +89,7 @@ from .models import (
     RecoveryChildState,
     RecoverySummary,
     TransitionIntentRecord,
+    ValidationAdmissionReport,
 )
 from .ports import (
     CommandResult,
@@ -134,6 +135,14 @@ from .serial import (
 from .state_machine import retained_ordinary_is_untouched, transition_record
 from .status import project_status
 from .timing import is_bounded_timing_append
+from .timing_admission import (
+    InteractiveValidationRequest,
+    mark_interactive_validation_yield,
+    mark_validation_admission_resolved,
+    mark_validation_admission_resumed,
+    observe_waiting_interactive_validation,
+    read_validation_admission,
+)
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
 
 
@@ -282,6 +291,7 @@ def _report(
     next_action: str | None = None,
     operational_plan: OperationalPlan | None = None,
     prerequisite_projections: tuple[PrerequisiteLabelProjectionReport, ...] = (),
+    validation_admission: ValidationAdmissionReport | None = None,
 ) -> CommandReport:
     return CommandReport(
         command=request.command,
@@ -296,6 +306,7 @@ def _report(
         next_action=next_action,
         operational_plan=operational_plan,
         prerequisite_projections=prerequisite_projections,
+        validation_admission=validation_admission,
     )
 
 
@@ -2558,6 +2569,11 @@ class RuntimeDependencies:
         Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None
     run_segment_boundary: Callable[..., LedgerRecord | None] = run_segment
+    observe_interactive_validation: Callable[[], object] = lambda: None
+    observe_yielded_interactive_validation: Callable[
+        [], InteractiveValidationRequest | None
+    ] = lambda: None
+    read_validation_admission: Callable[[], dict[str, object] | None] = lambda: None
 
 
 class RuntimeCheckpointRepository(RepositoryPort, Protocol):
@@ -3118,6 +3134,25 @@ def build_runtime_dependencies(
         ensure_lifecycle_labels=gitlab.ensure_lifecycle_labels,
         load_red_checkpoint=load_red_checkpoint,
         apply_red_checkpoint=apply_red_checkpoint,
+        observe_interactive_validation=lambda: observe_waiting_interactive_validation(
+            host=config.host, project_id=config.project_id, environment=os.environ
+        ),
+        observe_yielded_interactive_validation=lambda: (
+            observed
+            if (
+                observed := observe_waiting_interactive_validation(
+                    host=config.host,
+                    project_id=config.project_id,
+                    environment=os.environ,
+                )
+            )
+            is not None
+            and observed.yielded_issue_iid is not None
+            else None
+        ),
+        read_validation_admission=lambda: read_validation_admission(
+            host=config.host, project_id=config.project_id, environment=os.environ
+        ),
     )
 
 
@@ -5131,6 +5166,10 @@ def dispatch(
     wired.invoke.preflight()
     records: list[LedgerRecord] = []
     stop_reason = "idle"
+    completed_admission = wired.read_validation_admission()
+    resumed_at: datetime | None = None
+    resumed_disposition_saved = False
+    idle_recovery: tuple[str, LedgerRecord] | None = None
 
     with wired.lock():
         reconcile_closed_issues(
@@ -5140,6 +5179,67 @@ def dispatch(
             repository=repository,
             now=wired.clock(),
         )
+        yielded_issue_iid = (
+            completed_admission.get("issue_iid")
+            if completed_admission is not None
+            else None
+        )
+        if (
+            completed_admission is not None
+            and completed_admission.get("status") == "complete"
+            and completed_admission.get("yield_at") is not None
+            and isinstance(yielded_issue_iid, int)
+        ):
+            yielded_record = next(
+                (
+                    record
+                    for record in ledger.list_records()
+                    if record.issue_iid == yielded_issue_iid
+                ),
+                None,
+            )
+            if yielded_record is not None and yielded_record.state not in ACTIVE_STATES:
+                resolution = (
+                    "closed_without_resume"
+                    if yielded_record.state is RunnerState.COMPLETE
+                    else "ineligible_without_resume"
+                )
+                resolved_at = wired.clock()
+                if mark_validation_admission_resolved(
+                    completed_admission,
+                    at=resolved_at,
+                    issue_iid=yielded_issue_iid,
+                    resolution=resolution,
+                ):
+                    return _report(
+                        request,
+                        applied=True,
+                        outcome="activation_complete",
+                        project=identity,
+                        stop_reason="validation_admission_resolved",
+                        validation_admission=ValidationAdmissionReport(
+                            request_id=str(completed_admission["request_id"]),
+                            request_at=datetime.fromisoformat(
+                                str(completed_admission["request_at"])
+                            ),
+                            yield_at=datetime.fromisoformat(
+                                str(completed_admission["yield_at"])
+                            ),
+                            validation_started_at=datetime.fromisoformat(
+                                str(completed_admission["validation_started_at"])
+                            ),
+                            validation_finished_at=datetime.fromisoformat(
+                                str(completed_admission["validation_finished_at"])
+                            ),
+                            resolved_at=resolved_at,
+                            issue_iid=yielded_issue_iid,
+                            resolution=resolution,
+                            wait_elapsed_seconds=float(
+                                str(completed_admission["wait_elapsed_seconds"])
+                            ),
+                            unavailable=False,
+                        ),
+                    )
         started = wired.monotonic()
 
         def activate_pipeline_repair(
@@ -5297,7 +5397,40 @@ def dispatch(
             if remaining_activation_seconds() <= 0:
                 stop_reason = "time_limit"
                 break
+            yielded_request = wired.observe_yielded_interactive_validation()
+            if (
+                yielded_request is not None
+                and yielded_request.status == "waiting"
+                and yielded_request.yielded_issue_iid is not None
+                and wired.clock() < yielded_request.expires_at
+            ):
+                stop_reason = "interactive_validation_yield"
+                break
             segment_start_state = prior_state
+            observed_in_segment = False
+            pending_validation: object = None
+
+            def on_worker_invoke(invoked_issue_iid: int) -> None:
+                nonlocal resumed_at
+                if (
+                    completed_admission is not None
+                    and completed_admission.get("status") == "complete"
+                    and completed_admission.get("issue_iid") == invoked_issue_iid
+                    and resumed_at is None
+                ):
+                    resumed_at = wired.clock()
+
+            def observe_for_segment() -> object:
+                nonlocal observed_in_segment, pending_validation
+                observed_in_segment = True
+                pending_validation = wired.observe_interactive_validation()
+                if (
+                    isinstance(pending_validation, InteractiveValidationRequest)
+                    and pending_validation.status != "waiting"
+                ):
+                    return None
+                return pending_validation
+
             record = wired.run_segment_boundary(
                 ledger=ledger,
                 gitlab=gitlab,
@@ -5312,6 +5445,8 @@ def dispatch(
                 apply_red_checkpoint=wired.apply_red_checkpoint,
                 remaining_seconds=remaining_activation_seconds,
                 deferred_observer_iids=gate.deferred_observer_iids,
+                observe_interactive_validation=observe_for_segment,
+                on_worker_invoke=on_worker_invoke,
             )
             if record is None:
                 if remaining_activation_seconds() <= 0:
@@ -5327,6 +5462,17 @@ def dispatch(
                         else "idle"
                     )
                 break
+            if (
+                resumed_at is not None
+                and completed_admission is not None
+                and record.issue_iid == completed_admission.get("issue_iid")
+                and not resumed_disposition_saved
+            ):
+                resumed_disposition_saved = mark_validation_admission_resumed(
+                    completed_admission,
+                    at=resumed_at,
+                    issue_iid=record.issue_iid,
+                )
             if issue_iid is None:
                 issue_iid = record.issue_iid
             elif record.issue_iid != issue_iid:
@@ -5355,6 +5501,25 @@ def dispatch(
                 segments_run += 1
             prior_revision = record.revision
             prior_record = record
+            if not observed_in_segment:
+                pending_validation = wired.observe_interactive_validation()
+            if (
+                pending_validation
+                and record.state in IMMEDIATE_OWNER_STATES
+                and (
+                    not isinstance(pending_validation, InteractiveValidationRequest)
+                    or (
+                        pending_validation.status == "waiting"
+                        and mark_interactive_validation_yield(
+                            pending_validation,
+                            at=wired.clock(),
+                            issue_iid=record.issue_iid,
+                        )
+                    )
+                )
+            ):
+                stop_reason = "interactive_validation_yield"
+                break
             if segment_start_state is RunnerState.REPAIR:
                 repair_workflow_ran = True
             if record.state is RunnerState.REPAIR and repair_workflow_ran:
@@ -5392,23 +5557,72 @@ def dispatch(
         else:
             stop_reason = "segment_limit"
         if not records and stop_reason == "idle" and issue_iid is None:
-            recovery = _idle_recovery_child(
+            idle_recovery = _idle_recovery_child(
                 wired=wired,
                 project=project,
                 now=wired.clock(),
                 remaining_seconds=remaining_activation_seconds,
             )
-            if recovery is not None:
-                outcome, original = recovery
-                return _report(
-                    request,
-                    applied=True,
-                    outcome=outcome,
-                    records=(original,),
-                    project=identity,
-                    segments_run=1,
-                    stop_reason=outcome,
+    admission_evidence: ValidationAdmissionReport | None = None
+    if completed_admission is not None and (
+        completed_admission.get("status") == "unavailable" or resumed_disposition_saved
+    ):
+        try:
+            request_at = datetime.fromisoformat(str(completed_admission["request_at"]))
+            resume_at = resumed_at or wired.clock()
+            unavailable = completed_admission.get("status") == "unavailable"
+            validation_started_at = (
+                None
+                if unavailable
+                else datetime.fromisoformat(
+                    str(completed_admission["validation_started_at"])
                 )
+            )
+            validation_finished_at = datetime.fromisoformat(
+                str(completed_admission["validation_finished_at"])
+            )
+            yield_at = (
+                None
+                if unavailable
+                else datetime.fromisoformat(str(completed_admission["yield_at"]))
+            )
+            admission_evidence = ValidationAdmissionReport(
+                request_id=str(completed_admission["request_id"]),
+                request_at=request_at,
+                yield_at=yield_at,
+                validation_started_at=validation_started_at,
+                validation_finished_at=validation_finished_at,
+                resume_at=resume_at,
+                issue_iid=(
+                    int(str(completed_admission["issue_iid"]))
+                    if not unavailable
+                    and completed_admission.get("issue_iid") is not None
+                    else None
+                ),
+                resolution="unavailable" if unavailable else "resumed",
+                wait_elapsed_seconds=float(
+                    str(completed_admission["wait_elapsed_seconds"])
+                ),
+                unavailable=unavailable,
+            )
+            if unavailable and not mark_validation_admission_resumed(
+                completed_admission, at=resume_at
+            ):
+                admission_evidence = None
+        except (KeyError, TypeError, ValueError):
+            admission_evidence = None
+    if idle_recovery is not None:
+        outcome, original = idle_recovery
+        return _report(
+            request,
+            applied=True,
+            outcome=outcome,
+            records=(original,),
+            project=identity,
+            segments_run=1,
+            stop_reason=outcome,
+            validation_admission=admission_evidence,
+        )
     return _report(
         request,
         applied=True,
@@ -5419,4 +5633,5 @@ def dispatch(
         project=identity,
         segments_run=segments_run,
         stop_reason=stop_reason,
+        validation_admission=admission_evidence,
     )
