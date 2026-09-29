@@ -43,6 +43,7 @@ from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
+from .red_commit import RedCommitDependencies
 from .test_timing import is_safe_timing_case_id
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
@@ -1019,6 +1020,160 @@ class GitRepository:
         ):
             raise RepositoryError("checkpoint ref could not be verified")
         return result.stdout.strip()
+
+    def create_isolated_red_commit(
+        self,
+        *,
+        worktree: Path,
+        isolated_worktree: Path,
+        base_sha: str,
+        candidate_tree: str,
+        test_paths: tuple[str, ...],
+    ) -> str:
+        """Create a real Red commit without changing the worker index or HEAD."""
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", base_sha)
+            or not re.fullmatch(r"[0-9a-f]{40}", candidate_tree)
+            or not test_paths
+        ):
+            raise RepositoryError("Red commit inputs are invalid")
+        no_hooks = {
+            **self._environment,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": "/dev/null",
+        }
+        added = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(worktree),
+                "worktree",
+                "add",
+                "--detach",
+                str(isolated_worktree),
+                base_sha,
+            ),
+            environment=no_hooks,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if added.returncode != 0:
+            raise RepositoryError("isolated Red worktree could not be created")
+        try:
+            self._git("read-tree", candidate_tree, cwd=isolated_worktree)
+            self._git("checkout-index", "-a", "-f", cwd=isolated_worktree)
+            identity = {
+                **no_hooks,
+                "GIT_AUTHOR_NAME": "agent-work",
+                "GIT_AUTHOR_EMAIL": "agent-work@localhost",
+                "GIT_COMMITTER_NAME": "agent-work",
+                "GIT_COMMITTER_EMAIL": "agent-work@localhost",
+            }
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(isolated_worktree),
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "Accepted failing tests",
+                ),
+                environment=identity,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                raise RepositoryError("isolated Red commit failed")
+            commit = self._git("rev-parse", "HEAD", cwd=isolated_worktree)
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise RepositoryError("isolated Red commit oid is invalid")
+            return commit
+        finally:
+            self._git(
+                "worktree", "remove", "--force", str(isolated_worktree), cwd=worktree
+            )
+
+    def red_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> RedCommitDependencies:
+        """Wire the Red proof transaction to this repository's Git boundary."""
+
+        def changed_paths(base: str, tree: str) -> tuple[str, ...]:
+            names = self._git(
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                base,
+                tree,
+                cwd=worktree,
+                preserve_output=True,
+            )
+            return tuple(sorted(name for name in names.split("\0") if name))
+
+        def read_ref(ref: str) -> str | None:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    ref,
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 1:
+                return None
+            oid = result.stdout.strip()
+            if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", oid):
+                raise RepositoryError("Red commit ref could not be read")
+            return oid
+
+        def commit_identity(oid: str) -> tuple[str, str]:
+            parents = self._git(
+                "rev-list", "--parents", "-n", "1", oid, cwd=worktree
+            ).split()
+            if len(parents) != 2 or parents[0] != oid:
+                raise RepositoryError("Red commit does not have one exact parent")
+            return parents[1], self._git("rev-parse", f"{oid}^{{tree}}", cwd=worktree)
+
+        def cas_ref(ref: str, oid: str, old: str | None) -> bool:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "update-ref",
+                    ref,
+                    oid,
+                    old or "",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            return result.returncode == 0
+
+        return RedCommitDependencies(
+            current_head=self.head,
+            current_index_tree=lambda path: self._git("write-tree", cwd=path),
+            changed_paths=changed_paths,
+            blob_oid=lambda tree, path: self._git(
+                "rev-parse", f"{tree}:{path}", cwd=worktree
+            ),
+            read_ref=read_ref,
+            isolated_commit=lambda base, tree, paths: self.create_isolated_red_commit(
+                worktree=worktree,
+                isolated_worktree=isolated_worktree,
+                base_sha=base,
+                candidate_tree=tree,
+                test_paths=paths,
+            ),
+            commit_identity=commit_identity,
+            cas_ref=cas_ref,
+        )
 
     def write_red_checkpoint_ref(
         self, worktree: Path, evidence: RedCheckpointEvidence
