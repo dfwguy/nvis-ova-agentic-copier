@@ -2389,6 +2389,67 @@ def _resume_due_retry(record: LedgerRecord, *, ledger: LedgerPort) -> LedgerReco
     )
 
 
+def _unsafe_due_protocol_retry_reason(
+    record: LedgerRecord,
+    *,
+    repository: RepositoryPort,
+    load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None] | None,
+) -> str | None:
+    """Require a dirty retry candidate to remain the retained Red snapshot."""
+    if record.source_sha is None:
+        return "the retained worktree baseline is unavailable"
+    try:
+        if repository.head(record.worktree) != record.source_sha:
+            return "the retained worktree head changed"
+        status = repository.observe_worktree_status(record.worktree)
+    except RepositoryError:
+        return "the retained worktree could not be verified"
+    if not status.dirty:
+        return None
+    checkpoint = _retained_red_checkpoint(record, load_red_checkpoint)
+    if checkpoint is None:
+        return "the retained Red checkpoint is unavailable"
+    paths = tuple(sorted(set(status.changed_paths)))
+    if paths != checkpoint.test_paths:
+        return "the retained dirty paths differ from the Red checkpoint"
+    try:
+        if (
+            repository.red_candidate_tree(record.worktree, checkpoint.base_sha, paths)
+            != checkpoint.tree_oid
+        ):
+            return "the retained dirty tree differs from the Red checkpoint"
+    except RepositoryError:
+        return "the retained dirty tree could not be verified"
+    return None
+
+
+def _block_unsafe_due_protocol_retry(
+    record: LedgerRecord,
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    detail: str,
+) -> LedgerRecord:
+    """Keep an unverified dirty candidate available for explicit recovery."""
+    blocked = ledger.persist(
+        transition_record(
+            record,
+            RunnerState.BLOCKED,
+            error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
+            summary=f"Automatic workflow retry stopped: {detail}.",
+            next_action="Review the retained candidate and Red checkpoint before explicit recovery.",
+        )
+    )
+    gitlab.transition_labels(record.issue_iid, label_for_state(blocked.state))
+    gitlab.comment_outcome(
+        record.issue_iid,
+        error_code=str(blocked.error_code),
+        summary=blocked.summary,
+        next_action=blocked.next_action,
+    )
+    return blocked
+
+
 def _mr_publication_identity_is_exact(
     record: LedgerRecord,
     mr: MergeRequestEvidence,
@@ -3623,7 +3684,7 @@ def _execute(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
                 detail=format_worker_result_diagnostic(red_invocation.protocol_error),
@@ -3641,7 +3702,7 @@ def _execute(
                 record.model_copy(update={"worker_exit": worker_exit}),
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 error_code=(
                     ErrorCode.WORKER_TIMEOUT
                     if red_invocation.returncode is None
@@ -3664,7 +3725,7 @@ def _execute(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
                 detail=format_worker_result_diagnostic(error),
@@ -3716,7 +3777,7 @@ def _execute(
                         record,
                         ledger=ledger,
                         gitlab=gitlab,
-                        now=now,
+                        now=completion_clock(),
                         error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                         retry_delay=timedelta(),
                         detail="worker_result_broker: red checkpoint was not retained",
@@ -3780,7 +3841,7 @@ def _execute(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 stage=RedCheckpointFailureStage.RESULT_REQUEST_PATH,
             )
     if invocation is None:
@@ -3827,7 +3888,7 @@ def _execute(
             record,
             ledger=ledger,
             gitlab=gitlab,
-            now=now,
+            now=completion_clock(),
             error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
             retry_delay=timedelta(),
             detail=format_worker_result_diagnostic(invocation.protocol_error),
@@ -3914,7 +3975,7 @@ def _execute(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
                 detail=format_worker_result_diagnostic(error),
@@ -4124,7 +4185,7 @@ def _execute(
                 record,
                 ledger=ledger,
                 gitlab=gitlab,
-                now=now,
+                now=completion_clock(),
                 error_code=ErrorCode.WORKER_PROTOCOL_INVALID,
                 retry_delay=timedelta(),
                 detail="candidate_broker: validated candidate changed or is missing",
@@ -5355,7 +5416,19 @@ def run_segment(
         )
     )
     resumed_from_retry = record.state is RunnerState.RETRY_WAIT and _due(record, now)
-    if resumed_from_retry:
+    unsafe_due_protocol_retry_reason = None
+    if (
+        resumed_from_retry
+        and record.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+        and record.prior_state is RunnerState.EXECUTING
+        and record.prior_phase is WorkflowPhase.WORKFLOW
+    ):
+        unsafe_due_protocol_retry_reason = _unsafe_due_protocol_retry_reason(
+            record,
+            repository=repository,
+            load_red_checkpoint=load_red_checkpoint,
+        )
+    if resumed_from_retry and unsafe_due_protocol_retry_reason is None:
         record = _resume_due_retry(record, ledger=ledger)
     if record.state is RunnerState.RETRY_WAIT and not _due(record, now):
         return None
@@ -5373,6 +5446,13 @@ def run_segment(
             now=now,
             error_code=ErrorCode.GITLAB_RETRYABLE,
             allow_remote_exhaustion_side_effects=False,
+        )
+    if unsafe_due_protocol_retry_reason is not None:
+        return _block_unsafe_due_protocol_retry(
+            record,
+            ledger=ledger,
+            gitlab=gitlab,
+            detail=unsafe_due_protocol_retry_reason,
         )
     if (
         record.pending_feedback is not None

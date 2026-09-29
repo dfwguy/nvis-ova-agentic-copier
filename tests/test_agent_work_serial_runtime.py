@@ -2457,6 +2457,257 @@ def test_coding_publication_requires_controller_validated_candidate(
 
 
 @pytest.mark.parametrize(
+    ("paths", "dirty", "checkpoint_tree", "retry_is_safe"),
+    (
+        (
+            ("src/example.py", "tests/test_agent_work_serial_runtime.py"),
+            True,
+            "b" * 40,
+            False,
+        ),
+        (
+            ("src/example.py", "tests/test_agent_work_serial_runtime.py"),
+            False,
+            "b" * 40,
+            True,
+        ),
+        (("tests/test_agent_work_serial_runtime.py",), True, "c" * 40, True),
+        (("tests/test_agent_work_serial_runtime.py",), True, "b" * 40, False),
+    ),
+)
+def test_late_candidate_protocol_failure_retries_only_a_safe_exact_checkpoint(
+    tmp_path: Path,
+    paths: tuple[str, ...],
+    dirty: bool,
+    checkpoint_tree: str,
+    retry_is_safe: bool,
+) -> None:
+    """A late candidate mismatch preserves dirty work before another workflow."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = FakeRepository(config)
+    repository.paths = paths
+    repository.dirty = dirty
+    checkpoint = _red_checkpoint_evidence_for_segment(record, tree_oid=checkpoint_tree)
+    completed_at = NOW + timedelta(seconds=31)
+
+    class LateCandidateDriftInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            invocation = super().invoke(
+                checkout,
+                prompt,
+                timeout,
+                broker_request=broker_request,
+                build_artifact=build_artifact,
+                candidate_action=candidate_action,
+            )
+            repository.candidate_tree = "c" * 40
+            return invocation
+
+    first_invoker = LateCandidateDriftInvoker()
+    first_invoker.changed_paths = paths
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=first_invoker,
+        timeout_seconds=10,
+        now=NOW,
+        clock=lambda: completed_at,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert first is not None and first.error_code is ErrorCode.WORKER_PROTOCOL_INVALID
+    assert first.condition_history[-1] == ConditionEvidence(
+        occurred_at=completed_at,
+        retry_count=1,
+        code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+        detail="candidate_broker: validated candidate changed or is missing",
+    )
+
+    class RetryInvoker:
+        supports_worker_result_broker = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def preflight(self) -> None:
+            pass
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            del (
+                checkout,
+                prompt,
+                timeout,
+                broker_request,
+                build_artifact,
+                candidate_action,
+            )
+            self.calls += 1
+            return WorkerInvocation(1, "", "worker stopped")
+
+    retry_invoker = RetryInvoker()
+    second = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=retry_invoker,
+        timeout_seconds=10,
+        now=completed_at,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert second is not None
+    if retry_is_safe:
+        assert retry_invoker.calls == 1
+    else:
+        assert second.state is RunnerState.BLOCKED
+        assert retry_invoker.calls == 0
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "missing-source",
+        "head-drift",
+        "head-error",
+        "status-error",
+        "missing-checkpoint",
+        "tree-error",
+    ),
+)
+def test_due_protocol_retry_blocks_unverifiable_dirty_candidate_before_worker(
+    tmp_path: Path, defect: str
+) -> None:
+    """A dirty retry requires every retained candidate identity observation."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    )
+    checkpoint = _red_checkpoint_evidence_for_segment(original)
+    updates: dict[str, object] = {
+        "state": RunnerState.RETRY_WAIT,
+        "prior_state": RunnerState.EXECUTING,
+        "prior_phase": WorkflowPhase.WORKFLOW,
+        "retry_at": NOW,
+        "error_code": ErrorCode.WORKER_PROTOCOL_INVALID,
+        "condition_history": (
+            ConditionEvidence(
+                occurred_at=NOW,
+                retry_count=1,
+                code=ErrorCode.WORKER_PROTOCOL_INVALID.value,
+                detail="candidate_broker: validated candidate changed or is missing",
+            ),
+        ),
+    }
+    if defect == "missing-source":
+        updates["source_sha"] = None
+    record = ledger.persist(original.model_copy(update=updates))
+
+    class UnverifiableRepository(FakeRepository):
+        def head(self, worktree: Path) -> str:
+            if defect == "head-error":
+                raise RepositoryError("head unavailable")
+            return super().head(worktree)
+
+        def observe_worktree_status(self, worktree: Path) -> WorktreeStatus:
+            if defect == "status-error":
+                raise RepositoryError("status unavailable")
+            return super().observe_worktree_status(worktree)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            if defect == "tree-error":
+                raise RepositoryError("tree unavailable")
+            return super().red_candidate_tree(worktree, base_sha, paths)
+
+    repository = UnverifiableRepository(config)
+    repository.dirty = True
+    repository.paths = ("tests/test_agent_work_serial_runtime.py",)
+    if defect == "head-drift":
+        repository.current_head = "c" * 40
+
+    class RetryInvoker:
+        supports_worker_result_broker = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def preflight(self) -> None:
+            pass
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[[str, str | None], dict[str, object]]
+            | None = None,
+        ) -> WorkerInvocation:
+            del (
+                checkout,
+                prompt,
+                timeout,
+                broker_request,
+                build_artifact,
+                candidate_action,
+            )
+            self.calls += 1
+            return WorkerInvocation(1, "", "worker stopped")
+
+    invoker = RetryInvoker()
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=(
+            (lambda *_args: None)
+            if defect == "missing-checkpoint"
+            else lambda *_args: checkpoint
+        ),
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.condition_history[-1].code == ErrorCode.WORKER_PROTOCOL_INVALID.value
+    assert invoker.calls == 0
+    assert repository.dirty and repository.paths == (
+        "tests/test_agent_work_serial_runtime.py",
+    )
+    assert ledger.load(record.issue_iid) == outcome
+
+
+@pytest.mark.parametrize(
     ("timing_outcome", "may_publish"),
     (("correction_required", False), ("report_only", True)),
 )
