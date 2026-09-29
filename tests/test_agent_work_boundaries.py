@@ -4365,6 +4365,8 @@ def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
         str(tmp_path / ".agents"),
         "--add-dir",
         str(tmp_path / "template" / ".agents"),
+        "--model",
+        "gpt-6-sol",
         "--color",
         "never",
         "-",
