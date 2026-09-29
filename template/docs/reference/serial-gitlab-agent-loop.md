@@ -356,6 +356,35 @@ before supplying `--label`. It never assigns, approves, or merges an issue.
 
 ### Candidate stage, read, validate, and status
 
+#### Opt-in worker read MCP primitive
+
+The repository provides an opt-in read broker and a separate MCP server for
+one worker issue. The controller can create a live session through
+`create_live_worker_read_session` only for an executing workflow record. The
+session gives its trusted caller a socket path and nonce to connect the
+separate MCP gateway. There is no installed CLI or host launch for this
+surface yet. The normal worker launch and its tool access are unchanged.
+
+The controller creates the private socket and nonce. Each read checks the
+project, issue, checkout, ledger revision, workflow state and phase, lane,
+branch, source commit, and repository HEAD against the bound record. A stale
+or mismatched identity stops the read.
+The model cannot choose a path, field, Git command, GitLab endpoint, or another
+issue through these tools.
+
+| Worker MCP tool | Model arguments | Read result |
+| --- | --- | --- |
+| `worker_context` | None | Bounded workflow context, including state, phase, and lane. |
+| `worker_issue` | None | Bounded issue title and description. |
+| `worker_ledger` | None | Bounded ledger revision, source branch and commit, state, and phase. |
+
+The worker read server lists only these three tools. It does not add tools to
+the candidate-preview MCP server. Private connection details, checkout paths,
+credentials, and controller state paths are not returned. Closing or expiring
+the session makes further reads fail. Provider errors return a bounded failure
+without private detail. This interface supplies context only;
+it grants no file, Git, GitLab, publication, approval, or merge operation.
+
 #### Candidate-preview MCP host primitive
 
 Hosts can construct `RoleExecutionProfile.candidate_preview` for role

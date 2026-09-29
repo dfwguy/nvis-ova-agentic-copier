@@ -247,6 +247,74 @@ def create_candidate_mcp_server(
     return server
 
 
+class _WorkerReadMCPServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__("worker-read")
+
+    async def list_tools(self) -> list[Tool]:
+        """Advertise only fixed reads with closed argument schemas."""
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {**tool.input_schema, "additionalProperties": False}
+                }
+            )
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult:
+        if (
+            name not in {"worker_context", "worker_issue", "worker_ledger"}
+            or arguments != {}
+        ):
+            return CallToolResult(
+                content=[TextContent(text="worker_read: invalid tool or arguments")],
+                is_error=True,
+            )
+        return cast(CallToolResult, await super().call_tool(name, arguments, context))
+
+
+def create_worker_read_mcp_server(
+    gateway: Callable[[str], dict[str, object]],
+) -> MCPServer:
+    """Expose three fixed worker reads on a separate MCP server."""
+    server = _WorkerReadMCPServer()
+
+    def read(action: str) -> CallToolResult:
+        try:
+            response = gateway(action)
+            encoded = json.dumps(response, ensure_ascii=True)
+            if len(encoded.encode()) > 131_072:
+                raise ValueError("worker read too large")
+        except (WorkerProtocolError, OSError, ValueError, TypeError, OverflowError):
+            return CallToolResult(
+                content=[TextContent(text="worker_read: read failed")],
+                is_error=True,
+            )
+        return CallToolResult(
+            content=[TextContent(text=encoded)], structured_content=response
+        )
+
+    @server.tool()
+    def worker_context() -> CallToolResult:
+        """Read bounded workflow state for this worker."""
+        return read("context")
+
+    @server.tool()
+    def worker_issue() -> CallToolResult:
+        """Read bounded issue title and description."""
+        return read("issue")
+
+    @server.tool()
+    def worker_ledger() -> CallToolResult:
+        """Read bounded ledger identity and workflow state."""
+        return read("ledger")
+
+    return server
+
+
 def main() -> None:
     """Serve stdio MCP using private identity supplied by the controller."""
     try:

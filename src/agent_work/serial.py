@@ -94,10 +94,87 @@ from .worker import (
     validate_worker_result,
     worker_exit_evidence,
 )
+from .worker_read import (
+    WorkerReadBrokerSession,
+    WorkerReadSessionIdentity,
+    create_worker_read_broker,
+)
 
 
 class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
+
+
+def create_live_worker_read_session(
+    record: LedgerRecord,
+    issue: GitLabIssue,
+    *,
+    ledger: LedgerPort,
+    repository: RepositoryPort,
+    timeout_seconds: float,
+    temporary_directory: Path | None = None,
+) -> WorkerReadBrokerSession:
+    """Create an opt-in read session bound to a live controller record."""
+    if (
+        record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.source_sha is None
+        or issue.iid != record.issue_iid
+    ):
+        raise SegmentError("worker read identity is incomplete")
+    identity = WorkerReadSessionIdentity(
+        nonce=secrets.token_hex(16),
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        checkout=record.worktree,
+        phase=record.phase.value,
+        ledger_revision=record.revision,
+        source_sha=record.source_sha,
+    )
+
+    def identity_check(candidate: WorkerReadSessionIdentity) -> bool:
+        current = ledger.load(record.issue_iid)
+        return (
+            candidate == identity
+            and current is not None
+            and current.project_id == record.project_id
+            and current.issue_iid == record.issue_iid
+            and current.worktree == record.worktree
+            and current.revision == record.revision
+            and current.state is record.state
+            and current.phase is record.phase
+            and current.workflow_lane is record.workflow_lane
+            and current.source_branch == record.source_branch
+            and current.source_sha == record.source_sha
+            and repository.head(record.worktree) == record.source_sha
+        )
+
+    def read_action(action: str) -> dict[str, object]:
+        if action == "context":
+            return {
+                "state": record.state.value,
+                "phase": record.phase.value,
+                "workflow_lane": record.workflow_lane.value,
+            }
+        if action == "issue":
+            return {"title": issue.title, "description": issue.description}
+        if action == "ledger":
+            return {
+                "revision": record.revision,
+                "source_branch": record.source_branch,
+                "source_sha": record.source_sha or "",
+                "state": record.state.value,
+                "phase": record.phase.value,
+            }
+        raise ValueError("worker_read: invalid action")
+
+    return create_worker_read_broker(
+        identity,
+        identity_check=identity_check,
+        read_action=read_action,
+        timeout_seconds=timeout_seconds,
+        temporary_directory=temporary_directory,
+    )
 
 
 def retained_precheckpoint_failure_is_untouched(record: LedgerRecord) -> bool:
