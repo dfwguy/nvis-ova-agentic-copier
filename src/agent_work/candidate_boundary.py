@@ -11,6 +11,7 @@
 """Bounded, identity-bound reads of a controller-owned candidate snapshot."""
 
 import os
+import resource
 import stat
 from base64 import b64encode
 from dataclasses import dataclass
@@ -234,33 +235,76 @@ def _root_files(root: Path) -> tuple[str, ...]:
     """Enumerate bounded regular files through no-follow directory descriptors."""
     try:
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        open_fds = {root_fd}
         try:
+            soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            max_open = (
+                _MAX_PATHS
+                if soft_limit == resource.RLIM_INFINITY
+                else max(2, min(_MAX_PATHS, soft_limit - 32))
+            )
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             files: list[str] = []
-            pending: list[tuple[str, ...]] = [()]
+            pending: list[tuple[str, ...]] = []
+            ancestors: list[tuple[tuple[str, ...], int, list[str]]] = []
             entry_count = 0
-            while pending:
-                parts = pending.pop()
-                directory_fd = _directory_fd(root_fd, parts)
-                try:
-                    with os.scandir(directory_fd) as entries:
-                        for entry in entries:
-                            entry_count += 1
-                            if entry_count > _MAX_PATHS:
-                                raise CandidateBoundaryError("path count exceeds limit")
-                            path_parts = (*parts, entry.name)
-                            if entry.is_dir(follow_symlinks=False):
-                                pending.append(path_parts)
-                            elif entry.is_file(follow_symlinks=False):
-                                files.append("/".join(path_parts))
-                            else:
-                                raise CandidateBoundaryError(
-                                    "candidate root contains unsafe entry"
-                                )
-                finally:
+            parts: tuple[str, ...] = ()
+            directory_fd = root_fd
+            while True:
+                children: list[str] = []
+                with os.scandir(directory_fd) as entries:
+                    for entry in entries:
+                        entry_count += 1
+                        if entry_count > _MAX_PATHS:
+                            raise CandidateBoundaryError("path count exceeds limit")
+                        path_parts = (*parts, entry.name)
+                        if entry.is_dir(follow_symlinks=False):
+                            children.append(entry.name)
+                        elif entry.is_file(follow_symlinks=False):
+                            files.append("/".join(path_parts))
+                        else:
+                            raise CandidateBoundaryError(
+                                "candidate root contains unsafe entry"
+                            )
+                if children:
+                    child = children.pop()
+                    retain_parent = bool(children) and len(open_fds) < max_open
+                    if retain_parent:
+                        ancestors.append((parts, directory_fd, children))
+                    else:
+                        pending.extend((*parts, name) for name in children)
+                    child_fd = os.open(child, directory_flags, dir_fd=directory_fd)
+                    open_fds.add(child_fd)
+                    if not retain_parent and directory_fd != root_fd:
+                        os.close(directory_fd)
+                        open_fds.remove(directory_fd)
+                    parts = (*parts, child)
+                    directory_fd = child_fd
+                    continue
+                if directory_fd != root_fd:
                     os.close(directory_fd)
-            return tuple(sorted(files))
+                    open_fds.remove(directory_fd)
+                if ancestors:
+                    parent_parts, parent_fd, siblings = ancestors[-1]
+                    child = siblings.pop()
+                    if not siblings:
+                        ancestors.pop()
+                    child_fd = os.open(child, directory_flags, dir_fd=parent_fd)
+                    open_fds.add(child_fd)
+                    if not siblings and parent_fd != root_fd:
+                        os.close(parent_fd)
+                        open_fds.remove(parent_fd)
+                    parts = (*parent_parts, child)
+                    directory_fd = child_fd
+                elif pending:
+                    parts = pending.pop()
+                    directory_fd = _directory_fd(root_fd, parts)
+                    open_fds.add(directory_fd)
+                else:
+                    return tuple(sorted(files))
         finally:
-            os.close(root_fd)
+            for descriptor in open_fds:
+                os.close(descriptor)
     except OSError as exc:
         raise CandidateBoundaryError("candidate root is missing or unsafe") from exc
 
