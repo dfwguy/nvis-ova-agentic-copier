@@ -28,6 +28,7 @@ from .domain import (
     ACTIVE_STATES,
     IMMEDIATE_OWNER_STATES,
     LIFECYCLE_LABELS,
+    MANUAL_TRACKER_LABEL,
     NONTERMINAL_PIPELINE_STATUSES,
     CommandRequest,
     ErrorCode,
@@ -85,6 +86,7 @@ from .models import (
     PrerequisiteLabelProjectionReport,
     PublicationCorrectionIdentity,
     RecoveryCandidateReport,
+    RecoveryChildState,
     RecoverySummary,
     TransitionIntentRecord,
 )
@@ -1492,6 +1494,397 @@ def _automatic_clean_blocked_retry(
                 record.issue_iid, label_for_state(resumed.state)
             )
             return resumed
+    return None
+
+
+def _recovery_child_marker(project_id: int, issue_iid: int) -> str:
+    """Return a stable marker that cannot be mistaken for a split child."""
+    digest = hashlib.sha256(f"{project_id}:{issue_iid}:recovery".encode()).hexdigest()
+    return f"<!-- agent-work-recovery-child:v1 project={project_id} original={issue_iid} fingerprint={digest} -->"
+
+
+def _cooldown_recovery_advice(
+    wired: RuntimeDependencies,
+    record: LedgerRecord,
+    condition_fingerprint: str,
+    attempts: int,
+    now: datetime,
+) -> None:
+    """Retain one adviser attempt and defer the same condition."""
+    cooldown = now + timedelta(minutes=20)
+    wired.ledger.persist(
+        record.model_copy(
+            update={
+                "retry_at": cooldown,
+                "recovery_child": RecoveryChildState(
+                    condition_fingerprint=condition_fingerprint,
+                    attempts=attempts + 1,
+                    cooldown_until=cooldown,
+                ),
+            }
+        )
+    )
+
+
+def _idle_recovery_child(
+    *,
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    now: datetime,
+    remaining_seconds: Callable[[], float],
+) -> tuple[str, LedgerRecord] | None:
+    """Create or adopt one clean child after ordinary loop selection is idle."""
+    for selected in sorted(
+        wired.ledger.list_records(), key=lambda item: item.issue_iid
+    ):
+        if remaining_seconds() <= 0:
+            return None
+        if (
+            selected.project_id != project.id
+            or selected.state is not RunnerState.BLOCKED
+            or selected.phase is not WorkflowPhase.WORKFLOW
+            or selected.work_kind is not WorkKind.ORDINARY
+            or selected.error_code is not ErrorCode.RED_CHECKPOINT_FAILED
+            or not selected.worktree_dirty
+            or selected.retry_at is not None
+            and selected.retry_at > now
+            or selected.source_sha is None
+            or selected.source_branch != f"agent/issue-{selected.issue_iid}"
+            or selected.worktree.resolve()
+            != (
+                wired.config.state_root / "worktrees" / str(selected.issue_iid)
+            ).resolve()
+        ):
+            continue
+        with wired.issue_lock(selected.issue_iid):
+            record = wired.ledger.load(selected.issue_iid)
+            if record != selected:
+                continue
+            assert record is not None
+            recovery_state = record.recovery_child
+            if (
+                record.intent is None
+                and recovery_state is not None
+                and recovery_state.child_iid is not None
+            ):
+                continue
+            marker = _recovery_child_marker(project.id, record.issue_iid)
+            title = f"Recover blocked issue #{record.issue_iid} in a clean checkout"
+            description = (
+                f"{marker}\n\nParent: #{record.issue_iid}\n"
+                "Recreate the intended change in a clean checkout. Inspect the blocked "
+                "original as evidence; do not mutate or close it. Complete the ordinary "
+                "workflow with human review."
+            )
+            if record.intent is not None:
+                if (
+                    record.intent.kind != "recovery_child_create"
+                    or record.intent.operation_id != marker
+                    or recovery_state is None
+                    or record.intent.expected_evidence
+                    != {
+                        "project_id": project.id,
+                        "issue_iid": record.issue_iid,
+                        "condition_fingerprint": recovery_state.condition_fingerprint,
+                    }
+                ):
+                    continue
+                try:
+                    child_inventory = wired.gitlab.recovery_child_inventory()
+                except (GitLabError, OSError, RuntimeError, ValueError):
+                    continue
+                children = tuple(
+                    child for child in child_inventory if marker in child.description
+                )
+                conflicting_children = tuple(
+                    child
+                    for child in child_inventory
+                    if f"original={record.issue_iid} " in child.description
+                    and marker not in child.description
+                )
+                if len(children) != 1 or conflicting_children:
+                    continue
+                child = children[0]
+                if (
+                    child.iid == record.issue_iid
+                    or child.title != title
+                    or child.description != description
+                    or child.confidential
+                    or "confidential" not in child.model_fields_set
+                ):
+                    continue
+                adopted = wired.ledger.persist(
+                    record.model_copy(
+                        update={
+                            "intent": None,
+                            "retry_at": None,
+                            "recovery_child": RecoveryChildState(
+                                condition_fingerprint=recovery_state.condition_fingerprint,
+                                attempts=recovery_state.attempts,
+                                child_iid=child.iid,
+                            ),
+                        }
+                    )
+                )
+                return "recovery_child_adopted", adopted
+            try:
+                issue = wired.gitlab.fetch_issue(record.issue_iid)
+                inventory = wired.gitlab.prerequisite_projection_inventory()
+                dependencies = _recovery_split_dependencies(
+                    record.issue_iid, project=project, issues=inventory
+                )
+                owner = _issue_owner_status(wired, record.issue_iid)
+                wired.repository.verify_worktree(
+                    record.worktree, record.source_branch, record.source_sha or ""
+                )
+                candidate = wired.repository.observe_legacy_publication_candidate(
+                    record.worktree
+                )
+                snapshot = wired.repository.retained_worktree_fingerprint(
+                    record.worktree
+                )
+                child_inventory = wired.gitlab.recovery_child_inventory()
+                children = tuple(
+                    child for child in child_inventory if marker in child.description
+                )
+                conflicting_children = tuple(
+                    child
+                    for child in child_inventory
+                    if f"original={record.issue_iid} " in child.description
+                    and marker not in child.description
+                )
+                merge_requests = wired.gitlab.open_merge_requests()
+                checkpoint = (
+                    None
+                    if wired.load_red_checkpoint is None
+                    else wired.load_red_checkpoint(
+                        record.project_id, record.issue_iid, record.source_sha or ""
+                    )
+                )
+                exact = (
+                    issue.state == "opened"
+                    and not issue.confidential
+                    and "confidential" in issue.model_fields_set
+                    and MANUAL_TRACKER_LABEL not in issue.labels
+                    and set(issue.labels).intersection(LIFECYCLE_LABELS)
+                    == {"agent::blocked"}
+                    and next(
+                        (item for item in inventory if item.iid == issue.iid), None
+                    )
+                    == issue
+                    and classify_work(issue, project_id=project.id).kind
+                    is WorkKind.ORDINARY
+                    and owner == "missing"
+                    and not any(state != "closed" for _, state in dependencies)
+                    and not any(
+                        mr.source_branch == record.source_branch
+                        or wired.gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+                        for mr in merge_requests
+                    )
+                    and wired.repository.worktree_exists(record.worktree)
+                    and wired.repository.has_changes(record.worktree)
+                    and candidate.branch == record.source_branch
+                    and candidate.head == record.source_sha
+                    and candidate.merge_head is None
+                    and not candidate.has_untracked
+                    and not candidate.has_unmerged
+                    and not candidate.has_renames
+                    and bool(candidate.staged_paths or candidate.unstaged_paths)
+                    and checkpoint is None
+                    and len(children) <= 1
+                    and not conflicting_children
+                    and wired.repository.head(record.worktree) == record.source_sha
+                )
+            except (
+                ClassificationError,
+                GitLabError,
+                RepositoryError,
+                OSError,
+                RuntimeError,
+                ValueError,
+            ):
+                continue
+            if children:
+                continue
+            if not exact:
+                continue
+            condition_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "project_id": project.id,
+                        "issue_iid": record.issue_iid,
+                        "source_sha": record.source_sha,
+                        "issue": issue.model_dump(mode="json"),
+                        "dependencies": dependencies,
+                        "merge_requests": [mr.iid for mr in merge_requests],
+                        "index": candidate.index_fingerprint,
+                        "worktree": snapshot,
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            attempts = (
+                recovery_state.attempts
+                if recovery_state is not None
+                and recovery_state.condition_fingerprint == condition_fingerprint
+                else 0
+            )
+            if _identical_blocked_failure_repeated(record):
+                cooldown = now + timedelta(minutes=20)
+                wired.ledger.persist(
+                    record.model_copy(
+                        update={
+                            "retry_at": cooldown,
+                            "recovery_child": RecoveryChildState(
+                                condition_fingerprint=condition_fingerprint,
+                                attempts=attempts + 1,
+                                cooldown_until=cooldown,
+                            ),
+                        }
+                    )
+                )
+                continue
+            adviser_timeout = min(120, int(remaining_seconds()))
+            if adviser_timeout <= 0:
+                return None
+            try:
+                advice = wired.invoke.invoke(
+                    wired.config.checkout,
+                    "RECOVERY_ADVISORY_V1\nAct as $idle-recovery-adviser. You have no tools. "
+                    "Return one JSON object with action create_child or defer and the supplied identity only. "
+                    f"project_id={project.id} issue_iid={record.issue_iid} "
+                    f"source_branch={record.source_branch} source_sha={record.source_sha} "
+                    f"ledger_revision={record.revision}",
+                    adviser_timeout,
+                )
+            except (OSError, RuntimeError, ValueError):
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            if len(advice.stdout) > 2_048:
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            try:
+                decision = json.loads(advice.stdout)
+            except (TypeError, ValueError):
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            identity = {
+                "project_id": project.id,
+                "issue_iid": record.issue_iid,
+                "source_branch": record.source_branch,
+                "source_sha": record.source_sha,
+                "ledger_revision": record.revision,
+            }
+            if (
+                advice.returncode != 0
+                or not isinstance(decision, dict)
+                or set(decision) != {"action", *identity}
+                or any(decision.get(key) != value for key, value in identity.items())
+            ):
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            if decision["action"] == "defer":
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            if decision["action"] != "create_child":
+                _cooldown_recovery_advice(
+                    wired, record, condition_fingerprint, attempts, now
+                )
+                return None
+            try:
+                refreshed = wired.repository.observe_legacy_publication_candidate(
+                    record.worktree
+                )
+                refreshed_merge_requests = wired.gitlab.open_merge_requests()
+                refreshed_issue = wired.gitlab.fetch_issue(record.issue_iid)
+                refreshed_has_closing_mr = any(
+                    mr.source_branch == record.source_branch
+                    or wired.gitlab.mr_closes_issue(mr.iid, record.issue_iid)
+                    for mr in refreshed_merge_requests
+                )
+                if (
+                    remaining_seconds() <= 0
+                    or wired.ledger.load(record.issue_iid) != record
+                    or refreshed_issue != issue
+                    or refreshed_issue.confidential
+                    or "confidential" not in refreshed_issue.model_fields_set
+                    or MANUAL_TRACKER_LABEL in refreshed_issue.labels
+                    or wired.gitlab.prerequisite_projection_inventory() != inventory
+                    or refreshed_merge_requests != merge_requests
+                    or refreshed_has_closing_mr
+                    or _issue_owner_status(wired, record.issue_iid) != owner
+                    or refreshed != candidate
+                    or wired.repository.head(record.worktree) != record.source_sha
+                    or wired.repository.retained_worktree_fingerprint(record.worktree)
+                    != snapshot
+                    or wired.gitlab.recovery_child_inventory() != child_inventory
+                ):
+                    return None
+            except (GitLabError, RepositoryError, OSError, RuntimeError, ValueError):
+                return None
+            if remaining_seconds() <= 0:
+                return None
+            pending = wired.ledger.persist(
+                record.model_copy(
+                    update={
+                        "intent": TransitionIntentRecord(
+                            operation_id=marker,
+                            kind="recovery_child_create",
+                            expected_evidence={
+                                "project_id": project.id,
+                                "issue_iid": record.issue_iid,
+                                "condition_fingerprint": condition_fingerprint,
+                            },
+                        ),
+                        "recovery_child": RecoveryChildState(
+                            condition_fingerprint=condition_fingerprint,
+                            attempts=attempts + 1,
+                        ),
+                    }
+                )
+            )
+            if remaining_seconds() <= 0:
+                return None
+            try:
+                child = wired.gitlab.create_recovery_child(
+                    title=title, description=description, marker=marker
+                )
+            except GitLabError:
+                return None
+            if (
+                child.iid == record.issue_iid
+                or child.title != title
+                or child.description != description
+                or child.state != "opened"
+                or child.labels
+                or child.confidential
+                or "confidential" not in child.model_fields_set
+            ):
+                return None
+            finished = wired.ledger.persist(
+                pending.model_copy(
+                    update={
+                        "intent": None,
+                        "retry_at": None,
+                        "recovery_child": RecoveryChildState(
+                            condition_fingerprint=condition_fingerprint,
+                            attempts=attempts + 1,
+                            child_iid=child.iid,
+                        ),
+                    }
+                )
+            )
+            return "recovery_child_created", finished
     return None
 
 
@@ -4998,6 +5391,24 @@ def dispatch(
                 continue
         else:
             stop_reason = "segment_limit"
+        if not records and stop_reason == "idle" and issue_iid is None:
+            recovery = _idle_recovery_child(
+                wired=wired,
+                project=project,
+                now=wired.clock(),
+                remaining_seconds=remaining_activation_seconds,
+            )
+            if recovery is not None:
+                outcome, original = recovery
+                return _report(
+                    request,
+                    applied=True,
+                    outcome=outcome,
+                    records=(original,),
+                    project=identity,
+                    segments_run=1,
+                    stop_reason=outcome,
+                )
     return _report(
         request,
         applied=True,

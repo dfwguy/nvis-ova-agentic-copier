@@ -171,6 +171,12 @@ class GitLabPort(Protocol):
 
     def split_child_inventory(self) -> tuple[GitLabIssue, ...]: ...
 
+    def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]: ...
+
+    def create_recovery_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue: ...
+
     def create_split_child(
         self, *, title: str, description: str, marker: str
     ) -> GitLabIssue: ...
@@ -341,8 +347,8 @@ class InvokerPort(Protocol):
         prompt: str,
         timeout: int,
         *,
-        broker_request: WorkerResultBrokerRequest,
-        build_artifact: Callable[[bytes], bytes],
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
         candidate_action: Callable[
             [str, str | None, dict[str, object] | None], dict[str, object]
         ]

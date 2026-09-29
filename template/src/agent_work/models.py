@@ -404,6 +404,15 @@ class TransitionIntentRecord(BoundaryModel):
     expected_evidence: dict[str, str | int | bool | None] = Field(default_factory=dict)
 
 
+class RecoveryChildState(BoundaryModel):
+    """Durable condition and outcome for one blocked original's child handoff."""
+
+    condition_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    attempts: int = Field(ge=0)
+    cooldown_until: datetime | None = None
+    child_iid: int | None = Field(default=None, gt=0)
+
+
 class WorkflowReceiptRecord(BoundaryModel):
     """One durable phase receipt."""
 
@@ -899,6 +908,7 @@ class LedgerRecord(BoundaryModel):
     suggest_close_evidence: SuggestCloseEvidence | None = None
     receipts: tuple[WorkflowReceiptRecord, ...] = ()
     intent: TransitionIntentRecord | None = None
+    recovery_child: RecoveryChildState | None = None
     outcome_projection: OutcomeProjectionRecord | None = None
     error_code: ErrorCode | None = None
     worker_exit: WorkerExitEvidence | None = None

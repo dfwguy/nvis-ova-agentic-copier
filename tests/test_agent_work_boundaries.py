@@ -1538,6 +1538,62 @@ def _issue_payload(
     }
 
 
+@pytest.mark.parametrize(
+    ("boundary", "change"),
+    [
+        ("readback", {"title": "Wrong title"}),
+        ("readback", {"description": "Wrong description"}),
+        ("readback", {"state": "closed"}),
+        ("readback", {"labels": ["agent::running"]}),
+        ("readback", {"iid": 102}),
+        ("readback", {"confidential": True}),
+        ("readback", {"confidential": "__omit__"}),
+        ("post", {"title": "Wrong title"}),
+        ("post", {"description": "Wrong description"}),
+        ("post", {"state": "closed"}),
+        ("post", {"labels": ["agent::running"]}),
+        ("post", {"confidential": "__omit__"}),
+    ],
+)
+def test_gitlab_recovery_child_rejects_mismatched_post_or_readback(
+    tmp_path: Path, boundary: str, change: dict[str, object]
+) -> None:
+    marker = "<!-- agent-work-recovery-child:v1 original=12 fingerprint=abc -->"
+    title = "Recover blocked issue #12 in a clean checkout"
+    description = f"{marker}\n\nParent: #12"
+    posted = _issue_payload(iid=101) | {"title": title, "description": description}
+    read_back = posted.copy()
+    selected = posted if boundary == "post" else read_back
+    selected.update(change)
+    if change.get("confidential") == "__omit__":
+        selected.pop("confidential")
+    requests: list[tuple[str, str]] = []
+
+    def api(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        method = command[command.index("-X") + 1]
+        endpoint = command[command.index("-X") + 2]
+        requests.append((method, endpoint))
+        if (method, endpoint) == ("POST", "projects/310967/issues"):
+            return CommandResult(0, json.dumps(posted), "")
+        if (method, endpoint) == ("GET", "projects/310967/issues/101"):
+            return CommandResult(0, json.dumps(read_back), "")
+        raise AssertionError((method, endpoint))
+
+    with pytest.raises(GitLabError, match="not exact"):
+        GitLabGateway(_config(tmp_path), api).create_recovery_child(
+            title=title, description=description, marker=marker
+        )
+
+    assert requests == (
+        [("POST", "projects/310967/issues")]
+        if boundary == "post"
+        else [
+            ("POST", "projects/310967/issues"),
+            ("GET", "projects/310967/issues/101"),
+        ]
+    )
+
+
 def _note_payload(
     note_id: int,
     *,
@@ -4370,6 +4426,140 @@ def test_codex_command_scopes_policy_writes_to_the_prepared_checkout(
         "-",
     )
     assert stdin == "prompt"
+
+
+def test_recovery_advisory_codex_process_has_no_original_write_or_broker_access(
+    tmp_path: Path,
+) -> None:
+    """The bounded advisory receives a read-only command and no GitLab authority."""
+    original = tmp_path / "original-worktree"
+    original.mkdir()
+    advisory_checkout = tmp_path / "advisory-checkout"
+    advisory_checkout.mkdir()
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    for name in ("auth.json", "config.toml"):
+        credential = source_home / name
+        credential.write_text("local Codex configuration")
+        credential.chmod(0o600)
+    prompt = "RECOVERY_ADVISORY_V1\nReturn deferred advice for issue 12."
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        environment = cast(Mapping[str, str], kwargs["environment"])
+        private_home = Path(environment["CODEX_HOME"])
+        assert (private_home / "auth.json").is_symlink()
+        assert not (private_home / "config.toml").exists()
+        calls.append((command, kwargs))
+        return CommandResult(0, '{"action":"defer"}', "")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": "codex",
+            "AGENT_WORK_AGENT_PATH": "/codex",
+            "CODEX_HOME": str(source_home),
+            "GITLAB_TOKEN": "gitlab-test-token",
+        },
+        temporary_directory=tmp_path,
+    )
+
+    result = invoker.invoke(advisory_checkout, prompt, 120)
+
+    assert result.returncode == 0 and result.stdout == '{"action":"defer"}'
+    assert len(calls) == 1
+    command, options = calls[0]
+    environment = cast(Mapping[str, str], options["environment"])
+    assert command[:4] == ("/codex", "exec", "-C", str(advisory_checkout))
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert "--ignore-user-config" in command
+    assert "features.shell_tool=false" in command
+    assert "features.unified_exec=false" in command
+    assert "--add-dir" not in command
+    assert not any("mcp_servers" in argument for argument in command)
+    assert str(original) not in " ".join(command)
+    assert str(original) not in " ".join(environment.values())
+    assert "GITLAB_TOKEN" not in environment
+    assert not any("BROKER" in name or "CANDIDATE" in name for name in environment)
+    assert options["stdin"] == prompt and options["timeout_seconds"] == 120
+    with pytest.raises(ValueError, match="bounded Codex invocation"):
+        invoker.invoke(advisory_checkout, prompt, 121)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("agent", "required_flags"),
+    [
+        (
+            "claude",
+            (
+                "--tools",
+                "",
+                "--permission-mode",
+                "plan",
+                "--no-session-persistence",
+                "--print",
+            ),
+        ),
+        (
+            "pi",
+            (
+                "--no-tools",
+                "--no-extensions",
+                "--no-skills",
+                "--no-session",
+                "--print",
+                "--mode",
+                "text",
+            ),
+        ),
+    ],
+)
+def test_recovery_advisory_portable_agents_have_no_tools_or_broker_access(
+    tmp_path: Path, agent: str, required_flags: tuple[str, ...]
+) -> None:
+    original = tmp_path / "original-worktree"
+    original.mkdir()
+    advisory_checkout = tmp_path / "advisory-checkout"
+    advisory_checkout.mkdir()
+    prompt = "RECOVERY_ADVISORY_V1\nReturn deferred advice for issue 12."
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        calls.append((command, kwargs))
+        return CommandResult(0, '{"action":"defer"}', "")
+
+    invoker = AgentInvoker(
+        run_command,
+        environment={
+            "AGENT_WORK_AGENT": agent,
+            "AGENT_WORK_AGENT_PATH": f"/{agent}",
+            "GITLAB_TOKEN": "gitlab-test-token",
+        },
+    )
+
+    result = invoker.invoke(advisory_checkout, prompt, 120)
+
+    assert result.returncode == 0 and result.stdout == '{"action":"defer"}'
+    assert len(calls) == 1
+    command, options = calls[0]
+    environment = cast(Mapping[str, str], options["environment"])
+    assert command[0] == f"/{agent}"
+    assert all(part in command for part in required_flags)
+    if agent == "claude":
+        assert command[command.index("--tools") + 1] == ""
+        assert command[command.index("--permission-mode") + 1] == "plan"
+    else:
+        assert command[command.index("--mode") + 1] == "text"
+    assert str(original) not in " ".join(command)
+    assert str(original) not in " ".join(environment.values())
+    assert "GITLAB_TOKEN" not in environment
+    assert not any("BROKER" in name or "CANDIDATE" in name for name in environment)
+    assert options["timeout_seconds"] == 120
+    assert options["stdin"] is None
+    with pytest.raises(ValueError, match="bounded"):
+        invoker.invoke(advisory_checkout, prompt, 121)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

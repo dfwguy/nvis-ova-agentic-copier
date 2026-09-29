@@ -2853,6 +2853,90 @@ class AgentInvoker:
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
         agent, executable = _agent_profile(self._environment)
+        if prompt.startswith("RECOVERY_ADVISORY_V1\n"):
+            if (
+                broker_request is not None
+                or build_artifact is not None
+                or candidate_action is not None
+                or role_profile is not None
+                or timeout <= 0
+                or timeout > 120
+            ):
+                raise ValueError(
+                    f"recovery advisory requires a separate bounded {agent.title()} invocation"
+                )
+            environment = _worker_environment(self._environment)
+            environment.pop("GITLAB_TOKEN", None)
+            for name in tuple(environment):
+                if (
+                    name.startswith(("PYTHON", "UV_"))
+                    or name == "VIRTUAL_ENV"
+                    or "BROKER" in name.upper()
+                    or "CANDIDATE" in name.upper()
+                ):
+                    environment.pop(name)
+            if agent == "codex":
+                command = (
+                    executable,
+                    "exec",
+                    "-C",
+                    str(checkout),
+                    "--sandbox",
+                    "read-only",
+                    "--ignore-user-config",
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.unified_exec=false",
+                    "--color",
+                    "never",
+                    "-",
+                )
+                stdin = prompt
+            elif agent == "claude":
+                command = (
+                    executable,
+                    "--print",
+                    "--output-format",
+                    "text",
+                    "--no-session-persistence",
+                    "--permission-mode",
+                    "plan",
+                    "--tools",
+                    "",
+                    "--",
+                    prompt,
+                )
+                stdin = None
+            else:
+                command = (
+                    executable,
+                    "--print",
+                    "--mode",
+                    "text",
+                    "--no-session",
+                    "--no-tools",
+                    "--no-extensions",
+                    "--no-skills",
+                    prompt,
+                )
+                stdin = None
+            try:
+                result = self._run_worker_command(
+                    agent,
+                    command,
+                    stdin=stdin,
+                    timeout_seconds=timeout,
+                    environment=environment,
+                    include_config=False,
+                )
+            except RuntimeError:
+                return WorkerInvocation(None, stderr="recovery advisory setup failed")
+            return WorkerInvocation(
+                result.returncode,
+                _redact(result.stdout, environment),
+                _redact(result.stderr, environment),
+            )
         if role_profile is not None:
             if (
                 agent != "codex"
