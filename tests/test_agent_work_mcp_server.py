@@ -393,6 +393,7 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
                 "AGENT_WORK_CANDIDATE_NONCE": request.nonce,
                 "AGENT_WORK_CANDIDATE_ISSUE_IID": str(request.issue_iid),
                 "AGENT_WORK_CANDIDATE_TREE": TREE,
+                "AGENT_WORK_CANDIDATE_ROLE": "candidate-preview",
             },
         )
 

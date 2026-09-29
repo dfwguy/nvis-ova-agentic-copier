@@ -385,8 +385,46 @@ is rejected.
 The result is advisory. The existing trusted broad Quality Judge remains the
 workflow's authority. The same-UID host cannot prove reviewer authority:
 another process under that user may see process-environment values, including
-credentials. Isolated-role wiring is outside this primitive's scope. Track the
-wider MCP migration in issue #341.
+credentials. The pilot stays separate from the opt-in read-only role profiles
+below. Track the wider MCP migration in issue #341.
+
+#### Opt-in read-only role profiles
+
+A host can request a separate read-only Codex launch with
+`RoleExecutionProfile.read_only` and pass that profile to
+`AgentInvoker.invoke`. It requires keyword arguments `role`,
+`candidate_socket`, `nonce`, `issue_iid`, and `candidate_tree`. The host binds
+the socket, nonce, issue, and tree outside model tool arguments. The role
+receives only its listed candidate
+MCP tools. The launch requests a read-only sandbox, disables shell, unified
+execution, and code-mode host tools, and ignores user configuration. It does
+not inherit the GitLab token.
+
+The host must set `AGENT_WORK_CANDIDATE_ROLE` for the MCP server to one exact
+allowlisted role. A missing or invalid value rejects server startup. It never
+falls back to `candidate-preview`; that pilot also needs an explicit role value.
+
+| Role | Allowed MCP tools |
+| --- | --- |
+| `router` | `candidate_status`, `candidate_changed_paths`, `candidate_read` |
+| `judge` | `candidate_status`, `candidate_changed_paths`, `candidate_read`, `candidate_submit_review` |
+| `finalizer` | `candidate_status`, `candidate_changed_paths`, `candidate_read` |
+| `supervisor-inspect` | `candidate_status` |
+
+Only Codex supports these profiles. Claude and Pi requests fail before launch.
+Before a role starts, the host audits its effective features in an isolated
+Codex home that carries authentication but no user configuration. It requires
+`shell_tool`, `unified_exec`, and `code_mode_host` all to report `false`.
+An unavailable feature, a `true` result, or an unreadable result rejects the
+role before launch. The role command also uses `--strict-config`.
+
+The feature audit is not a live tool probe. Before using this route, an
+operator must check the selected host's actual tool list and confirm that
+shell, write, and unlisted MCP calls fail. Command settings and fake command
+tests do not prove that those tools are absent. Keep the normal factory route
+until both the effective-feature audit and live tool probe pass and the
+controller is wired to the replacement. These profiles do not change human
+approval or merge authority. The candidate-preview pilot stays advisory.
 
 For coding and content results, the serial worker uses private `candidate`
 commands in addition to its applicable checkpoint and worker-result

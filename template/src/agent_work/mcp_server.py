@@ -33,6 +33,7 @@ from .worker import (
     CandidateOperation,
     WorkerProtocolError,
     WorkerResultBrokerClientRequest,
+    candidate_tools_for_role,
     request_candidate_validation,
 )
 
@@ -88,8 +89,12 @@ class _ReviewSubmission(BaseModel):
 
 
 class _CandidateMCPServer(MCPServer):
+    def __init__(self, role: str) -> None:
+        super().__init__("candidate")
+        self._allowed_tools = frozenset(candidate_tools_for_role(role))
+
     async def list_tools(self) -> list[Tool]:
-        """Advertise closed argument schemas for the four candidate tools."""
+        """Advertise only role-granted tools with closed argument schemas."""
         tools = await super().list_tools()
         return [
             tool.model_copy(
@@ -98,6 +103,7 @@ class _CandidateMCPServer(MCPServer):
                 }
             )
             for tool in tools
+            if tool.name in self._allowed_tools
         ]
 
     async def call_tool(
@@ -106,7 +112,7 @@ class _CandidateMCPServer(MCPServer):
         arguments: dict[str, Any],
         context: Any = None,
     ) -> CallToolResult:
-        if name not in _TOOL_NAMES:
+        if name not in self._allowed_tools:
             return CallToolResult(
                 content=[TextContent(text="candidate_broker: invalid tool")],
                 is_error=True,
@@ -162,10 +168,10 @@ def _public_value(value: object) -> object:
 
 
 def create_candidate_mcp_server(
-    gateway: CandidateGateway, candidate_tree: str
+    gateway: CandidateGateway, candidate_tree: str, *, role: str = "candidate-preview"
 ) -> MCPServer:
     """Expose bounded candidate reads and one advisory review submission."""
-    server = _CandidateMCPServer("candidate")
+    server = _CandidateMCPServer(role)
 
     def read(
         action: CandidateOperation, selector: dict[str, object] | None = None
@@ -250,6 +256,8 @@ def main() -> None:
             issue_iid=int(os.environ["AGENT_WORK_CANDIDATE_ISSUE_IID"]),
         )
         tree = os.environ["AGENT_WORK_CANDIDATE_TREE"]
+        role = os.environ["AGENT_WORK_CANDIDATE_ROLE"]
+        candidate_tools_for_role(role)
     except (KeyError, ValueError):
         raise RuntimeError("candidate MCP setup failed") from None
 
@@ -266,7 +274,7 @@ def main() -> None:
             selector=selector,
         )
 
-    create_candidate_mcp_server(gateway, tree).run(transport="stdio")
+    create_candidate_mcp_server(gateway, tree, role=role).run(transport="stdio")
 
 
 if __name__ == "__main__":

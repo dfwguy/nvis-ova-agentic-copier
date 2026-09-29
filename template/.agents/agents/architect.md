@@ -40,6 +40,13 @@ cannot stage, validate, publish, or waive a gate. Existing trusted code
 checks identities. Architect and Finalizer still judge review quality.
 Producer-owned specialist receipt proof remains a later issue #306 slice.
 
+An opt-in host-issued `router` MCP profile is a separate read-only candidate
+session. Use only its candidate tools and checked issue/tree identity. It does
+not change this Architect's authority, stage files, or replace the writable
+workflow. Judges and Finalizer use their own host-issued profiles when
+offered. If the host cannot enforce a profile, stop that opt-in session; do
+not continue it through Bash. Follow `.agents/guidance/read-only-mcp.md`.
+
 ## Admission and design proposals
 
 Use each exact skill's `metadata.model-tier`. Codex maps `most-capable` to
