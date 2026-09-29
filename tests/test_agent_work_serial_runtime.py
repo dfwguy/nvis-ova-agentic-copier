@@ -44,6 +44,7 @@ from agent_work.domain import (
     ErrorCode,
     JobTraceEvidence,
     PipelineJobEvidence,
+    RedCheckpointFailureStage,
     RepairAttemptEvidence,
     RunnerState,
     SuggestCloseEvidence,
@@ -154,6 +155,7 @@ def _issue(
         description=description,
         labels=(),
         state=state,
+        confidential=False,
     )
 
 
@@ -267,6 +269,9 @@ class FakeGitLab:
         self.split_children: dict[str, GitLabIssue] = {}
         self.split_child_matches: dict[str, tuple[GitLabIssue, ...]] = {}
         self.created_children: list[tuple[str, str]] = []
+        self.recovery_children: dict[str, GitLabIssue] = {}
+        self.created_recovery_children: list[str] = []
+        self.recovery_post_uncertain = False
         self.decomposition_notes: list[str] = []
         self.closed_issues: list[int] = []
         self.reopened_issues: list[int] = []
@@ -589,6 +594,22 @@ class FakeGitLab:
             *self.split_children.values(),
             *(item for items in self.split_child_matches.values() for item in items),
         )
+
+    def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+        return tuple(self.recovery_children.values())
+
+    def create_recovery_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue:
+        assert marker in description
+        self.created_recovery_children.append(marker)
+        child = _issue(
+            iid=101 + len(self.recovery_children), description=description
+        ).model_copy(update={"title": title})
+        self.recovery_children[marker] = child
+        if self.recovery_post_uncertain:
+            raise GitLabError("response lost after child creation")
+        return child
 
     def create_split_child(
         self, *, title: str, description: str, marker: str
@@ -23316,6 +23337,972 @@ def _clean_blocked_automatic_retry_record(tmp_path: Path) -> LedgerRecord:
             ),
         }
     )
+
+
+def _dirty_red_failure_record(
+    tmp_path: Path, ledger: JsonLedger, *, iid: int = 12
+) -> LedgerRecord:
+    """Retain one exactly identified dirty Red failure without a checkpoint."""
+    original = _precheckpoint_test_only_red_record(tmp_path)
+    return ledger.persist(
+        original.model_copy(
+            update={
+                "issue_iid": iid,
+                "source_branch": f"agent/issue-{iid}",
+                "worktree": tmp_path / "state" / "worktrees" / str(iid),
+                "worktree_dirty": True,
+                "condition_history": (
+                    ConditionEvidence(
+                        occurred_at=NOW,
+                        code=ErrorCode.RED_CHECKPOINT_FAILED.value,
+                        detail=RedCheckpointFailureStage.EXECUTION_PERSISTENCE.value,
+                    ),
+                ),
+            }
+        )
+    )
+
+
+def _create_child_advice(ledger: JsonLedger, issue_iid: int) -> WorkerInvocation:
+    """Return identity-bound advice from the current retained revision."""
+    record = ledger.load(issue_iid)
+    assert record is not None
+    return WorkerInvocation(
+        0,
+        stdout=json.dumps(
+            {
+                "action": "create_child",
+                "project_id": record.project_id,
+                "issue_iid": issue_iid,
+                "source_branch": record.source_branch,
+                "source_sha": record.source_sha,
+                "ledger_revision": record.revision,
+            }
+        ),
+    )
+
+
+class RecoveryAdvisoryInvoker(FakeInvoker):
+    """Record advisory calls separately from worker-result broker calls."""
+
+    def __init__(self, answer: Callable[[], WorkerInvocation]) -> None:
+        super().__init__()
+        self.answer = answer
+        self.advisory_calls: list[tuple[Path, int]] = []
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
+    ) -> WorkerInvocation:
+        if broker_request is None:
+            self.advisory_calls.append((checkout, timeout))
+            return self.answer()
+        return super().invoke(
+            checkout,
+            prompt,
+            timeout,
+            broker_request=broker_request,
+            build_artifact=build_artifact,
+            candidate_action=candidate_action,
+        )
+
+
+def _run_idle_recovery_pass(
+    config: AgentWorkConfig,
+    ledger: JsonLedger,
+    gitlab: FakeGitLab,
+    repository: FakeRepository,
+    invoker: RecoveryAdvisoryInvoker,
+    *,
+    owner_status: str = "missing",
+) -> CommandReport:
+    """Reach the loop's idle decision with the existing injected boundaries."""
+    return dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=invoker,
+                load_red_checkpoint=lambda *_args: None,
+                run_segment_boundary=lambda **_kwargs: None,
+            ),
+            lambda _iid: owner_status,
+        ),
+    )
+
+
+def test_finalized_recovery_child_skips_original_probes_on_later_idle_pass(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    wired = _with_issue_owner_probe(
+        replace(
+            _dependencies(config, ledger, gitlab, repository),
+            invoke=invoker,
+            load_red_checkpoint=lambda *_args: None,
+        ),
+        lambda _iid: "missing",
+    )
+    assert (
+        runtime._idle_recovery_child(
+            wired=wired, project=_project(), now=NOW, remaining_seconds=lambda: 120
+        )
+        is not None
+    )
+    finalized = ledger.load(original.issue_iid)
+    assert finalized is not None and finalized.recovery_child is not None
+    assert finalized.recovery_child.child_iid is not None
+    gitlab.fetch_issue_calls.clear()
+    gitlab.preselection_calls.clear()
+    repository.verified_heads.clear()
+    invoker.advisory_calls.clear()
+
+    assert (
+        runtime._idle_recovery_child(
+            wired=wired, project=_project(), now=NOW, remaining_seconds=lambda: 120
+        )
+        is None
+    )
+    assert gitlab.fetch_issue_calls == []
+    assert gitlab.preselection_calls == []
+    assert repository.verified_heads == []
+    assert invoker.advisory_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("project_id", 42),
+        ("issue_iid", 42),
+        ("source_branch", "agent/issue-42"),
+        ("source_sha", "b" * 40),
+        ("ledger_revision", -1),
+        ("extra", "unrequested"),
+    ],
+)
+def test_idle_recovery_rejects_advice_with_unexpected_identity(
+    tmp_path: Path, field: str, wrong: object
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+
+    def advise() -> WorkerInvocation:
+        decision = json.loads(_create_child_advice(ledger, original.issue_iid).stdout)
+        decision[field] = wrong
+        return WorkerInvocation(0, stdout=json.dumps(decision))
+
+    invoker = RecoveryAdvisoryInvoker(advise)
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome != "recovery_child_created"
+    assert len(invoker.advisory_calls) == 1
+    assert gitlab.created_recovery_children == []
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+
+
+def test_idle_recovery_rejects_original_without_confidential_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    issue = GitLabIssue.model_validate(
+        {"iid": original.issue_iid, "title": "Work", "labels": ["agent::blocked"]}
+    )
+    assert "confidential" not in issue.model_fields_set
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert invoker.advisory_calls == []
+    assert gitlab.created_recovery_children == []
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+
+
+def test_pending_recovery_child_without_confidential_evidence_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class DelayedInventoryGitLab(FakeGitLab):
+        hide_child = True
+
+        def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+            return () if self.hide_child else super().recovery_child_inventory()
+
+    gitlab = DelayedInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.recovery_post_uncertain = True
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    marker = gitlab.created_recovery_children[0]
+    child = gitlab.recovery_children[marker]
+    gitlab.recovery_children[marker] = GitLabIssue.model_validate(
+        {"iid": child.iid, "title": child.title, "description": child.description}
+    )
+    gitlab.hide_child = False
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome != "recovery_child_adopted"
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.intent is not None
+    assert gitlab.created_recovery_children == [marker]
+
+
+def test_idle_loop_creates_one_clean_recovery_child_without_touching_dirty_original(
+    tmp_path: Path,
+) -> None:
+    """A failed Red capture can move to a later clean child without losing work."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class RecoveryGitLab(FakeGitLab):
+        def __init__(self) -> None:
+            super().__init__(
+                _issue().model_copy(update={"labels": ("agent::blocked",)})
+            )
+            self.intent_at_post: TransitionIntentRecord | None = None
+
+        def create_recovery_child(
+            self, *, title: str, description: str, marker: str
+        ) -> GitLabIssue:
+            retained = ledger.load(original.issue_iid)
+            assert retained is not None
+            self.intent_at_post = retained.intent
+            assert marker in description
+            assert "agent-work-split" not in marker
+            return super().create_recovery_child(
+                title=title, description=description, marker=marker
+            )
+
+    gitlab = RecoveryGitLab()
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.paths = ("src/example.py",)
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    ordinary_segments: list[int | None] = []
+
+    def idle_segment(**kwargs: object) -> None:
+        ordinary_segments.append(cast(int | None, kwargs["issue_iid"]))
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=invoker,
+                load_red_checkpoint=lambda *_args: None,
+                run_segment_boundary=idle_segment,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    assert report.outcome == "recovery_child_created"
+    assert len(gitlab.recovery_children) == 1
+    child = next(iter(gitlab.recovery_children.values()))
+    assert child.state == "opened" and child.labels == ()
+    assert "Parent: #12" in child.description
+    assert gitlab.intent_at_post is not None
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.labels == []
+    assert repository.prepared is False and repository.prepares == 0
+    assert repository.current_head == original.source_sha
+    assert repository.legacy_index_fingerprint == "d" * 64
+    assert repository.retained_worktree_fingerprint_value == "f" * 64
+    assert len(invoker.advisory_calls) == 1
+    assert invoker.advisory_calls[0][0] != original.worktree
+    assert 0 < invoker.advisory_calls[0][1] <= 120
+    assert ordinary_segments == [None]
+
+
+@pytest.mark.parametrize(
+    ("selection_finished_at", "advice_action", "expected_advisory_timeouts"),
+    [
+        pytest.param(5.0, "create_child", (), id="exhausted"),
+        pytest.param(4.0, "defer", (1,), id="capped_adviser"),
+        pytest.param(4.0, "create_child", (1,), id="late_post"),
+    ],
+)
+def test_idle_recovery_respects_remaining_activation_time_after_ordinary_selection(
+    tmp_path: Path,
+    selection_finished_at: float,
+    advice_action: str,
+    expected_advisory_timeouts: tuple[int, ...],
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    clock = AdvancingMonotonicClock()
+    ordinary_segments: list[int | None] = []
+
+    def idle_segment(**kwargs: object) -> None:
+        ordinary_segments.append(cast(int | None, kwargs["issue_iid"]))
+        clock.value = selection_finished_at
+
+    def advise() -> WorkerInvocation:
+        clock.value = 6.0
+        return (
+            _create_child_advice(ledger, original.issue_iid)
+            if advice_action == "create_child"
+            else WorkerInvocation(0, stdout='{"action":"defer"}')
+        )
+
+    invoker = RecoveryAdvisoryInvoker(advise)
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1, max_activation_seconds=5),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=invoker,
+                monotonic=clock.monotonic,
+                run_segment_boundary=idle_segment,
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    assert ordinary_segments == [None]
+    assert gitlab.created_recovery_children == []
+    assert tuple(timeout for _, timeout in invoker.advisory_calls) == (
+        expected_advisory_timeouts
+    )
+
+
+def test_ordinary_eligible_issue_runs_before_dirty_recovery_child(
+    tmp_path: Path,
+) -> None:
+    """An ordinary open issue keeps its normal serial selection priority."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    ordinary = _issue(iid=13)
+
+    class OrdinaryFirstGitLab(FakeGitLab):
+        def list_eligible(self) -> tuple[GitLabIssue, ...]:
+            return (ordinary,)
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return self.issue, ordinary
+
+    gitlab = OrdinaryFirstGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.issues[13] = ordinary
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    report = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=invoker,
+                load_red_checkpoint=lambda *_args: None,
+            ),
+            lambda _iid: "missing",
+        ),
+    )
+
+    assert report.items and report.items[0].issue_iid == ordinary.iid
+    assert ledger.load(ordinary.iid) is not None
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.created_recovery_children == []
+    assert invoker.advisory_calls == []
+
+
+@pytest.mark.parametrize(
+    "hazard",
+    (
+        "head_drift",
+        "active_owner",
+        "branch_mr",
+        "closing_mr",
+        "open_prerequisite",
+    ),
+)
+def test_dirty_recovery_rechecks_live_guards_before_child_creation(
+    tmp_path: Path, hazard: str
+) -> None:
+    """A changed or owned original cannot authorize a child until proof clears."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class GuardedGitLab(FakeGitLab):
+        prerequisite: GitLabIssue | None = None
+
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return (
+                (self.issue,)
+                if self.prerequisite is None
+                else (
+                    self.issue,
+                    self.prerequisite,
+                )
+            )
+
+    gitlab = GuardedGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    repository.paths = ("src/example.py",)
+    owner_status = "missing"
+    if hazard == "head_drift":
+        repository.current_head = "b" * 40
+    elif hazard == "active_owner":
+        owner_status = "active"
+    elif hazard == "branch_mr":
+        gitlab.open_merge_request_inventory = (_mr(description="Closes #12"),)
+    elif hazard == "closing_mr":
+        gitlab.open_merge_request_inventory = (
+            _mr(source_branch="clanker/other", description="Closes #12"),
+        )
+    else:
+        gitlab.issue = gitlab.issue.model_copy(
+            update={
+                "description": render_split_marker(310967, 1, "target", (11,)),
+                "labels": ("agent::blocked", "agent-prereq_11"),
+            }
+        )
+        gitlab.prerequisite = _issue(iid=11)
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    _run_idle_recovery_pass(
+        config, ledger, gitlab, repository, invoker, owner_status=owner_status
+    )
+
+    assert gitlab.created_recovery_children == []
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.labels == []
+    assert repository.prepared is False and repository.prepares == 0
+    if hazard == "head_drift":
+        repository.current_head = original.source_sha or ""
+    elif hazard in {"branch_mr", "closing_mr"}:
+        gitlab.open_merge_request_inventory = ()
+    elif hazard == "open_prerequisite":
+        gitlab.prerequisite = None
+        gitlab.issue = gitlab.issue.model_copy(
+            update={"description": "ordinary", "labels": ("agent::blocked",)}
+        )
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome == "recovery_child_created"
+    assert len(gitlab.created_recovery_children) == 1
+
+
+@pytest.mark.parametrize("excluded", ("confidential", "manual"))
+def test_dirty_recovery_excludes_ineligible_original_before_advice(
+    tmp_path: Path, excluded: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    issue = _issue().model_copy(update={"labels": ("agent::blocked",)})
+    issue = issue.model_copy(
+        update=(
+            {"confidential": True}
+            if excluded == "confidential"
+            else {"labels": ("agent::blocked", "agent-work::manual")}
+        )
+    )
+    gitlab = FakeGitLab(issue)
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert invoker.advisory_calls == []
+    assert gitlab.created_recovery_children == []
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+
+
+@pytest.mark.parametrize("hazard", ("confidential", "manual", "owner", "index"))
+def test_dirty_recovery_stops_when_guard_changes_during_advice(
+    tmp_path: Path, hazard: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+    gitlab = FakeGitLab(_issue().model_copy(update={"labels": ("agent::blocked",)}))
+    repository = FakeRepository(config)
+    repository.dirty = True
+    owner_status = "missing"
+
+    def advise() -> WorkerInvocation:
+        nonlocal owner_status
+        if hazard == "confidential":
+            gitlab.issue = gitlab.issue.model_copy(update={"confidential": True})
+        elif hazard == "manual":
+            gitlab.issue = gitlab.issue.model_copy(
+                update={"labels": ("agent::blocked", "agent-work::manual")}
+            )
+        elif hazard == "owner":
+            owner_status = "active"
+        else:
+            repository.legacy_index_fingerprint = "e" * 64
+        gitlab.issues[original.issue_iid] = gitlab.issue
+        return _create_child_advice(ledger, original.issue_iid)
+
+    invoker = RecoveryAdvisoryInvoker(advise)
+    dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=_with_issue_owner_probe(
+            replace(
+                _dependencies(config, ledger, gitlab, repository),
+                invoke=invoker,
+                load_red_checkpoint=lambda *_args: None,
+                run_segment_boundary=lambda **_kwargs: None,
+            ),
+            lambda _iid: owner_status,
+        ),
+    )
+
+    assert len(invoker.advisory_calls) == 1
+    assert gitlab.created_recovery_children == []
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+
+
+def test_confidential_recovery_child_response_keeps_pending_intent(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class ConfidentialChildGitLab(FakeGitLab):
+        def create_recovery_child(
+            self, *, title: str, description: str, marker: str
+        ) -> GitLabIssue:
+            child = super().create_recovery_child(
+                title=title, description=description, marker=marker
+            )
+            confidential = child.model_copy(update={"confidential": True})
+            self.recovery_children[marker] = confidential
+            return confidential
+
+    gitlab = ConfidentialChildGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome != "recovery_child_created"
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.intent is not None
+    assert retained.recovery_child is not None
+    assert retained.recovery_child.child_iid is None
+    assert len(gitlab.created_recovery_children) == 1
+
+
+def test_confidential_pending_recovery_child_is_not_adopted(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class DelayedInventoryGitLab(FakeGitLab):
+        hide_child = True
+
+        def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+            return () if self.hide_child else super().recovery_child_inventory()
+
+    gitlab = DelayedInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.recovery_post_uncertain = True
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    marker = gitlab.created_recovery_children[0]
+    child = gitlab.recovery_children[marker]
+    gitlab.recovery_children[marker] = child.model_copy(update={"confidential": True})
+    gitlab.hide_child = False
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome != "recovery_child_adopted"
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.intent is not None
+    assert retained.recovery_child is not None
+    assert retained.recovery_child.child_iid is None
+    assert gitlab.created_recovery_children == [marker]
+
+
+def test_uncertain_recovery_child_post_adopts_marker_without_reposting(
+    tmp_path: Path,
+) -> None:
+    """A child created before a lost response is adopted after the next scan."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class DelayedInventoryGitLab(FakeGitLab):
+        hide_child = True
+
+        def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+            return () if self.hide_child else super().recovery_child_inventory()
+
+    gitlab = DelayedInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.recovery_post_uncertain = True
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    assert len(gitlab.created_recovery_children) == 1
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.intent is not None
+    gitlab.hide_child = False
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome in {"recovery_child_created", "recovery_child_adopted"}
+    assert len(gitlab.created_recovery_children) == 1
+    assert len(gitlab.recovery_children) == 1
+    retained = ledger.load(original.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.labels == []
+    assert repository.prepared is False
+
+
+def test_repeated_dirty_recovery_failure_cools_original_and_allows_next_issue(
+    tmp_path: Path,
+) -> None:
+    """One cooled original cannot starve another independent blocked issue."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = _dirty_red_failure_record(tmp_path, ledger)
+    second = _dirty_red_failure_record(tmp_path, ledger, iid=13)
+    ledger.persist(
+        first.model_copy(update={"condition_history": first.condition_history * 2})
+    )
+
+    class TwoBlockedGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return tuple(self.issues.values())
+
+    first_issue = _issue().model_copy(update={"labels": ("agent::blocked",)})
+    second_issue = _issue(iid=13).model_copy(update={"labels": ("agent::blocked",)})
+    gitlab = TwoBlockedGitLab(first_issue)
+    gitlab.issues = {12: first_issue, 13: second_issue}
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, second.issue_iid)
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    cooled = ledger.load(first.issue_iid)
+    assert cooled is not None and cooled.retry_at is not None
+    assert cooled.retry_at > NOW
+    assert cooled.state is RunnerState.BLOCKED
+
+    repository.legacy_branch = second.source_branch
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome == "recovery_child_created"
+    assert len(gitlab.created_recovery_children) == 1
+    child = next(iter(gitlab.recovery_children.values()))
+    assert "Parent: #13" in child.description
+    retained = ledger.load(first.issue_iid)
+    assert retained is not None and retained.state is RunnerState.BLOCKED
+    assert gitlab.labels == []
+
+
+@pytest.mark.parametrize("first_answer", ("defer", "error", "oversized", "invalid"))
+def test_idle_recovery_invokes_at_most_one_adviser_per_activation(
+    tmp_path: Path, first_answer: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    first = _dirty_red_failure_record(tmp_path, ledger)
+    second = _dirty_red_failure_record(tmp_path, ledger, iid=13)
+    first_issue = _issue().model_copy(update={"labels": ("agent::blocked",)})
+    second_issue = _issue(iid=13).model_copy(update={"labels": ("agent::blocked",)})
+
+    class TwoOriginalsGitLab(FakeGitLab):
+        def prerequisite_projection_inventory(self) -> tuple[GitLabIssue, ...]:
+            return first_issue, second_issue
+
+    class TwoWorktreesRepository(FakeRepository):
+        def observe_legacy_publication_candidate(
+            self, worktree: Path, *, status: WorktreeStatus | None = None
+        ) -> LegacyPublicationCandidate:
+            self.legacy_branch = f"agent/issue-{worktree.name}"
+            return super().observe_legacy_publication_candidate(worktree, status=status)
+
+    gitlab = TwoOriginalsGitLab(first_issue)
+    gitlab.issues = {12: first_issue, 13: second_issue}
+    repository = TwoWorktreesRepository(config)
+    repository.dirty = True
+    calls: list[int] = []
+
+    def advise() -> WorkerInvocation:
+        issue_iid = (first.issue_iid, second.issue_iid)[len(calls)]
+        calls.append(issue_iid)
+        if len(calls) == 1 and first_answer == "error":
+            raise RuntimeError("adviser failed")
+        if len(calls) == 1 and first_answer == "invalid":
+            return WorkerInvocation(0, stdout="not JSON")
+        if len(calls) == 1 and first_answer == "oversized":
+            return WorkerInvocation(0, stdout="x" * 2_049)
+        if len(calls) == 1:
+            decision = json.loads(_create_child_advice(ledger, issue_iid).stdout)
+            decision["action"] = "defer"
+            return WorkerInvocation(0, stdout=json.dumps(decision))
+        return _create_child_advice(ledger, issue_iid)
+
+    invoker = RecoveryAdvisoryInvoker(advise)
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert calls == [first.issue_iid]
+    assert gitlab.created_recovery_children == []
+
+    retained = ledger.load(first.issue_iid)
+    assert retained is not None and retained.recovery_child is not None
+    assert retained.recovery_child.attempts == 1
+    assert retained.recovery_child.condition_fingerprint
+    assert retained.retry_at is not None and retained.retry_at > NOW
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert report.outcome == "recovery_child_created"
+    assert calls == [first.issue_iid, second.issue_iid]
+    assert "Parent: #13" in next(iter(gitlab.recovery_children.values())).description
+    assert ledger.load(first.issue_iid) == retained
+
+
+def test_recovery_child_rejects_open_mr_with_gitlab_closing_projection(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class ClosingProjectionGitLab(FakeGitLab):
+        def mr_closes_issue(self, mr_iid: int, issue_iid: int) -> bool:
+            self.closing_checks += 1
+            return mr_iid == 88 and issue_iid == original.issue_iid
+
+    gitlab = ClosingProjectionGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.open_merge_request_inventory = (
+        _mr(source_branch="clanker/other", description="Fixes #12"),
+    )
+    gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
+        id=2,
+        status="success",
+        sha="a" * 40,
+        web_url="https://pipeline/closing",
+    )
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    assert gitlab.created_recovery_children == []
+    assert gitlab.closing_checks > 0
+    assert invoker.advisory_calls == []
+
+
+@pytest.mark.parametrize(
+    "changed_context",
+    ("unrelated_mr", "started_child", "head_drift", "worktree_unavailable"),
+)
+def test_pending_recovery_child_adopts_exact_marker_after_context_changes(
+    tmp_path: Path, changed_context: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class DelayedInventoryGitLab(FakeGitLab):
+        hide_child = True
+
+        def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+            return () if self.hide_child else super().recovery_child_inventory()
+
+    gitlab = DelayedInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.recovery_post_uncertain = True
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    pending = ledger.load(original.issue_iid)
+    assert pending is not None and pending.intent is not None
+    marker = gitlab.created_recovery_children[0]
+    child = gitlab.recovery_children[marker]
+    gitlab.hide_child = False
+    if changed_context == "unrelated_mr":
+        gitlab.open_merge_request_inventory = (
+            _mr(source_branch="clanker/unrelated", description="Unrelated"),
+        )
+        gitlab.pipeline_by_merge_request[(88, "a" * 40)] = PipelineEvidence(
+            id=2,
+            status="success",
+            sha="a" * 40,
+            web_url="https://pipeline/unrelated",
+        )
+    elif changed_context == "started_child":
+        gitlab.recovery_children[marker] = child.model_copy(
+            update={"labels": ("agent::running",)}
+        )
+    elif changed_context == "head_drift":
+        repository.current_head = "b" * 40
+        repository.worktree_valid = False
+    else:
+        repository.worktree_present = False
+        repository.worktree_valid = False
+
+    report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    adopted = ledger.load(original.issue_iid)
+    assert report.outcome == "recovery_child_adopted"
+    assert adopted is not None and adopted.intent is None
+    assert adopted.recovery_child is not None
+    assert adopted.recovery_child.child_iid == child.iid
+    assert gitlab.created_recovery_children == [marker]
+    assert len(invoker.advisory_calls) == 1
+
+    next_report = _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    after_repeat = ledger.load(original.issue_iid)
+    assert next_report.outcome != "recovery_child_adopted"
+    assert after_repeat is not None and after_repeat.intent is None
+    assert after_repeat.recovery_child == adopted.recovery_child
+    assert gitlab.created_recovery_children == [marker]
+
+
+@pytest.mark.parametrize("marker_conflict", ("duplicate", "mismatch"))
+def test_pending_recovery_child_rejects_ambiguous_marker_without_reposting(
+    tmp_path: Path, marker_conflict: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _dirty_red_failure_record(tmp_path, ledger)
+
+    class ConflictingInventoryGitLab(FakeGitLab):
+        hide_child = True
+        extra_child: GitLabIssue | None = None
+
+        def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+            if self.hide_child:
+                return ()
+            children = super().recovery_child_inventory()
+            return (
+                children if self.extra_child is None else (*children, self.extra_child)
+            )
+
+    gitlab = ConflictingInventoryGitLab(
+        _issue().model_copy(update={"labels": ("agent::blocked",)})
+    )
+    gitlab.recovery_post_uncertain = True
+    repository = FakeRepository(config)
+    repository.dirty = True
+    invoker = RecoveryAdvisoryInvoker(
+        lambda: _create_child_advice(ledger, original.issue_iid)
+    )
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+    marker = gitlab.created_recovery_children[0]
+    child = gitlab.recovery_children[marker]
+    gitlab.hide_child = False
+    description = (
+        child.description
+        if marker_conflict == "duplicate"
+        else child.description.replace("fingerprint=", "fingerprint=wrong")
+    )
+    gitlab.extra_child = child.model_copy(
+        update={"iid": child.iid + 1, "description": description}
+    )
+
+    _run_idle_recovery_pass(config, ledger, gitlab, repository, invoker)
+
+    pending = ledger.load(original.issue_iid)
+    assert pending is not None and pending.intent is not None
+    assert pending.recovery_child is not None
+    assert pending.recovery_child.child_iid is None
+    assert gitlab.created_recovery_children == [marker]
 
 
 def test_loop_run_automatically_resumes_one_clean_proven_blocked_issue(

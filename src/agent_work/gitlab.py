@@ -2005,6 +2005,56 @@ class GitLabGateway:
             if "<!-- agent-work-split:v1" in issue.description
         )
 
+    def recovery_child_inventory(self) -> tuple[GitLabIssue, ...]:
+        """Return all recovery children, including closed ones, for adoption."""
+        return tuple(
+            issue
+            for issue in self._issues(state="all")
+            if "<!-- agent-work-recovery-child:v1" in issue.description
+        )
+
+    def create_recovery_child(
+        self, *, title: str, description: str, marker: str
+    ) -> GitLabIssue:
+        """Create one marker-bound recovery issue and read it back exactly."""
+        reject_unsafe_issue_text(title)
+        reject_unsafe_issue_text(description)
+        reject_unsafe_issue_text(marker)
+        try:
+            payload = self._mapping(
+                self._call(
+                    f"projects/{self._config.project_id}/issues",
+                    method="POST",
+                    fields=(f"title={title}", f"description={description}"),
+                ),
+                "recovery child issue",
+            )
+            issue = GitLabIssue.model_validate(_selected(payload, ISSUE_FIELDS))
+        except ValidationError as error:
+            raise GitLabError("GitLab returned invalid recovery child issue") from error
+        if (
+            issue.title != title
+            or issue.description != description
+            or marker not in issue.description
+            or issue.state != "opened"
+            or issue.labels
+            or issue.confidential
+            or "confidential" not in issue.model_fields_set
+        ):
+            raise GitLabError("GitLab recovery child evidence is not exact")
+        read_back = self.fetch_issue(issue.iid)
+        if (
+            read_back.iid != issue.iid
+            or read_back.title != title
+            or read_back.description != description
+            or read_back.state != "opened"
+            or read_back.labels
+            or read_back.confidential
+            or "confidential" not in read_back.model_fields_set
+        ):
+            raise GitLabError("GitLab recovery child evidence is not exact")
+        return read_back
+
     def create_split_child(
         self, *, title: str, description: str, marker: str
     ) -> GitLabIssue:
