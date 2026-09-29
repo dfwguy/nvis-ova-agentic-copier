@@ -81,7 +81,8 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    from trusted code. Never ask for private paths. Compare the docs and README
    verdicts to the final diff. Do not rerun tests, lint, or pre-commit.
    Step 4 allows one final check of changed-file readability.
-4. For interactive work, invoke `agent-work interactive-commit verify` with
+4. For normal interactive Green work, invoke
+   `agent-work interactive-commit verify` with
    the accepted base, final Red ref, Judge tree, and Green commit. Require its
    exact Green tree, sole Red parent, unchanged Red ref, and clean state. For serial work, require the
    controller's tree and changed-path proof.
@@ -93,15 +94,22 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    SHA, mechanically re-proved retained Red-to-source provenance, and fresh
    three-way reconciliation evidence. Require Main's freshly fetched exact
    source and target ref proof; check that supplied proof and local identities
-   only. Do not fetch or call GitLab. Main commits the exact Judge-approved
-   staged tree from the still-pending merge state, which consumes `MERGE_HEAD`.
-   This creates exactly one ordered two-parent commit with old source first and exact
-   target/`MERGE_HEAD` second. Do no passing-head commit or ordinary compaction.
-   Prove cleared merge state, clean index and worktree, exact parent order,
-   tree, message, unchanged Red ref, and unchanged supplied local identities.
+   only. Do not fetch or call GitLab. Main invokes
+   `agent-work reconcile-commit commit --apply` for the exact Judge-approved
+   staged tree from the pending merge state. It consumes `MERGE_HEAD` and
+   creates one ordered two-parent
+   commit with old source first and exact target second. Invoke
+   `agent-work reconcile-commit verify` with the worktree, clanker branch ref,
+   captured source SHA, exact target SHA, retained Red ref and SHA, and Judge
+   tree.
+   Require its read-only proof of cleared merge state, clean index and worktree,
+   exact parent order, tree, unchanged Red ref, and unchanged supplied local
+   identities. Separately compare the commit message with the reviewed message
+   file. Do no passing-head commit or ordinary compaction.
    Any drift invalidates every receipt and returns to exact selection and
    preparation.
-6. Main may publish only the verified interactive Green tip through
+6. Main may publish the verified normal interactive Green tip or, for a pending
+   coding merge, the verified ordered two-parent reconciliation commit through
    `$git-flow`. Never push a Red ref. A serial-worker Finalizer never commits;
    its trusted runner owns the final commit and Git hooks.
 

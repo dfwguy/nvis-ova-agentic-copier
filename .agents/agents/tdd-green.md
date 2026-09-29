@@ -62,9 +62,11 @@ work, ask the controller-owned candidate boundary to scan and stage while
 you are live. Do not stage with Git or supply a model path list as authority.
 A canonical rejection allows one corrected request. Restage after a change.
 
-Delegate `$tdd-judge` for the exact tree. In interactive work, Judge owns the
-sole normal Green commit and installed hook under its role contract. In serial
-work, Judge uses the trusted validation boundary. Green does
+Delegate `$tdd-judge` for the exact tree. In normal interactive Green work,
+Judge owns the sole Green commit and installed hook under its role contract.
+For a pending coding merge, Judge validates the staged candidate before review;
+Main later creates the ordered two-parent commit through the trusted boundary.
+In serial work, Judge uses the trusted validation boundary. Green does
 not run a direct full suite, hook, or old validation CLI. Do not start
 specialist review until the applicable Judge step succeeds.
 
@@ -123,10 +125,11 @@ tree, test proof, doc status, findings, and repairs too. `src/agent_work/workflo
 next-role/completeness routing only; public JSON and model prose cannot
 instantiate trusted specialist receipts. Finalizer decides review adequacy.
 
-`$tdd-finalizer` checks receipts, tree, and commit. Interactive Finalizer uses
-`agent-work interactive-commit verify` and remains read-only. Main alone
-publishes the verified Green tip through `$git-flow`; never push the Red ref.
-Serial Finalizer never commits;
-the trusted controller owns its final commit. Main commits the approved staged
-tree from the pending merge. The old source and exact target
-are its ordered parents. Keep each proof and report its exact result.
+`$tdd-finalizer` checks receipts, tree, and commit. For normal interactive
+Green work, Finalizer uses `agent-work interactive-commit verify` read-only,
+and Main publishes the verified Green tip through `$git-flow`. For a pending
+coding merge, Main commits the approved staged tree with old source first and
+exact target second; Finalizer uses `agent-work reconcile-commit verify`
+read-only before publication. Never push the Red ref. Serial Finalizer never
+commits; the trusted controller owns its final commit. Keep each proof and
+report its exact result.

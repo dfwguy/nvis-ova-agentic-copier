@@ -23,21 +23,22 @@ Use the Judge handoff. Check each item. Keep the staged tree the same. Give a
 clear receipt. Require the accepted Red checkpoint. Require Test Judge's
 approval of the final Red-to-Green Git diff.
 
-During interactive finalization, invoke `agent-work interactive-commit verify`
+During normal interactive Green finalization, invoke
+`agent-work interactive-commit verify`
 for the exact Green commit, tree, retained Red ancestry and ref, and clean
 state. Never stage, commit, or compact. A failed call stops publication. A serial
 worker never commits, stages, or runs `git write-tree`. It checks the
 controller-owned exact-tree proof and opaque validation evidence instead of
 private JUnit paths. Do not add a check or change the validated tree.
 
-For coding reconciliation, Main creates the single ordered two-parent commit
-from the Judge-approved staged tree and pending merge state. It consumes
-`MERGE_HEAD`: captured old source is
-first and exact target/`MERGE_HEAD` is second. Main supplies freshly fetched
-ref proof; Finalizer checks it locally without remote or GitLab calls. It
-postchecks cleared merge state, clean index and worktree, exact parents, tree,
-message, and unchanged Red ref, without an intermediate passing commit or
-sole-parent compaction.
+For coding reconciliation, Main invokes
+`agent-work reconcile-commit commit --apply` on the Judge-approved staged tree
+and pending merge state. Captured old source is first and exact target is
+second. Main supplies freshly fetched
+ref proof. Finalizer checks it locally without remote or GitLab calls, then
+invokes `agent-work reconcile-commit verify` read-only for the resulting commit,
+clean state, exact parents and tree, and unchanged Red ref. It separately
+compares the commit message with the reviewed message file.
 
 ## Model selection
 

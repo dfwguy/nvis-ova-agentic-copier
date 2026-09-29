@@ -196,7 +196,8 @@ waive or relabel a finding to claim progress. Diagnose recoverable failures
 and try one bounded safeguard-preserving alternative.
 
 `$tdd-finalizer` owns exact checkpoint, tree, receipt, and commit checks.
-In interactive work it invokes `agent-work interactive-commit verify` and
+For normal interactive Green work it invokes
+`agent-work interactive-commit verify` and
 checks the retained Red history, Green commit, and clean state without
 mutation. Main publishes only that verified tip; the Red ref is never pushed.
 Serial Finalizer never commits;
@@ -238,11 +239,15 @@ Full coding merge work re-proves the saved Red-to-source proof against the
 captured source. It never makes Red proof after the fact. A pre-checkpoint MR routes to issue #158. A
 missing or mismatched post-policy checkpoint stops for recovery. Green
 preserves approved source and target intent and keeps historical Red proof
-apart from fresh three-way candidate proof. Fresh Judge and specialist
-reviews cover the joined candidate. Main commits the approved staged tree
-from the still-pending merge with old source first and exact target second.
-Finalizer checks cleared merge state, clean tree, parents, and unchanged
-Red ref. Content reconciliation uses Documentation Finalizer and Main's
+apart from fresh three-way candidate proof. Judge validates the exact staged
+tree through `agent-work validation run --candidate-tree <staged-tree> --apply`
+while the merge is pending. Specialist reviews then cover the joined candidate.
+Main commits the approved staged tree
+from the still-pending merge through `agent-work reconcile-commit commit --apply`,
+with old source first and exact target second. Finalizer invokes
+`agent-work reconcile-commit verify` read-only for the resulting commit,
+cleared merge state, clean tree, parents, and unchanged Red ref. Content
+reconciliation uses Documentation Finalizer and Main's
 matching pending-merge commit. Source or target drift voids receipts and
 restarts selection. Humans alone approve and merge.
 

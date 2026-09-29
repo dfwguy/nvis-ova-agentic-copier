@@ -73,6 +73,12 @@ agent-work interactive-commit green --worktree PATH --branch-ref REF
 agent-work interactive-commit verify --worktree PATH --branch-ref REF
     --base-sha SHA --red-ref REF --red-sha SHA --green-sha SHA
     --judge-tree TREE [--json] [--debug]
+agent-work reconcile-commit commit --worktree PATH --branch-ref REF
+    --source-sha SHA --target-sha SHA --red-ref REF --red-sha SHA
+    --judge-tree TREE --message-file PATH [--apply | --dry-run] [--json] [--debug]
+agent-work reconcile-commit verify --worktree PATH --branch-ref REF
+    --source-sha SHA --target-sha SHA --red-ref REF --red-sha SHA
+    --judge-tree TREE --reconcile-sha SHA [--apply] [--json] [--debug]
 agent-work merge-request publish --source-branch BRANCH --target-branch BRANCH
                                  --title TEXT --problem TEXT --outcome TEXT
                                  --validation TEXT [--validation TEXT ...]
@@ -129,6 +135,8 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` makes a test-only Red commit with `--no-verify`. |
 | `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the exact tree, `--apply` runs its license preflight and shared cheap gate, then makes the sole normal Green commit; its installed hook runs the full suite. |
 | `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
+| `reconcile-commit commit` | Worktree, branch, captured source and exact target commits, retained Red ref and commit, Judge tree, and message file | Omitting `--apply` or using `--dry-run` previews without changing Git state. `--apply` checks the pending merge and exact tree, runs the license preflight and shared cheap gate, then makes one normal commit with the source first and target second. The installed hook runs the full suite. |
+| `reconcile-commit verify` | Resulting reconciliation commit, worktree, branch, source and target commits, retained Red ref and commit, and Judge tree | Checks the ordered parents, tree, unchanged Red ref, cleared merge state, and clean worktree read-only. Optional `--apply` is accepted but changes nothing. |
 | `merge-request publish` | Source and target branches, title, problem, outcome, and one or more validations | `--apply` creates or updates one exact MR; `--json` returns its result. |
 | `issue publish` | Title, problem, outcome, repeated acceptance criteria, and a task-specific marker | `--apply` creates or updates one exact issue in the configured checkout project. `--feedback-audit` checks new automatic feedback issues; `--json` returns the result. |
 | `validation run` | `--candidate-tree TREE` | `--apply` runs the read-only license preflight and shared cheap gate on the exact staged tree before the one full hook run. Serial work adds `--serial-timing`, `--baseline-sha SHA`, and repeatable `--changed-path PATH` for paired timing proof. |
@@ -205,6 +213,24 @@ commits for a human squash merge.
 After a restart, reconstruct the workflow from source code, Git commits, and
 the exact issue and merge request. Rerun any needed checks. Do not restore an
 agent session or stored role and session receipts.
+
+### Coding reconciliation commit
+
+After review, the branch still points to the saved source commit. The merge
+remains pending. `reconcile-commit commit` checks the branch, source and target
+commits, Red ref, staged Judge tree, and worktree. It rejects changed values,
+unresolved merge entries, and unstaged or untracked files. Omitting `--apply`
+or using `--dry-run` previews the commit and leaves the pending merge untouched.
+
+With `--apply`, the command runs the license check and shared cheap gate for
+the Judge tree. It then makes one merge commit through the installed hook. Its
+parents are the saved source first and exact target second.
+`reconcile-commit verify` checks the new commit, parent order, tree, Red ref,
+cleared merge state, and clean index and worktree. It makes no changes, even
+when passed `--apply`.
+Compare the commit message with the reviewed message file separately. Ordinary
+`interactive-commit green` remains the single-parent Green commit for work
+without a pending merge.
 
 ### Coding workflow Red boundary
 

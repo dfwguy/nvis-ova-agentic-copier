@@ -31,10 +31,14 @@ You review one exact tree. Do not edit files.
    yamllint, Bash with ShellCheck, Markdown readability, types with ty,
    secrets with Kingfisher, and Ruff check and format with caching disabled.
    A license or gate failure, or tree drift, blocks the costly full hook and
-   returns to Green. A pass does not replace the full hook. In interactive work, invoke
-   `agent-work interactive-commit green --apply`. The trusted boundary makes
-   the sole normal Green commit, so its installed pre-commit hook is the sole
-   full-suite run. A nonzero result returns to Green before review. For serial
+   returns to Green. A pass does not replace the full hook. For normal
+   interactive Green work, invoke `agent-work interactive-commit green --apply`.
+   The trusted boundary makes the sole normal Green commit, so its installed
+   pre-commit hook is the sole full-suite run. For a pending coding merge, run
+   `agent-work validation run --candidate-tree <staged-tree> --apply` before
+   review. It checks the staged tree without a commit. Keep the merge and its
+   parent order intact. Main later commits that same tree with the hook.
+   A nonzero result returns to Green before review. For serial
    work, call the trusted validation and status boundary while still active.
    The trusted controller holds the same project admission for the hook and
    report within that validation call, including any paired timing measurements
@@ -45,10 +49,13 @@ You review one exact tree. Do not edit files.
    A pending, missing, or lost result is no pass. Use the right status step
    for the same tree. If that fails, return to Green. A nonzero exit goes to
    Green. Only exit zero lets you go on.
-3. For interactive work, verify the Green commit has the staged tree as its
-   tree and final Red as its sole parent, and require a clean index and
-   worktree. For serial work, require the trusted unchanged-tree proof. Reject
-   new paths or missing proof.
+3. For normal interactive Green work, verify the Green commit has the staged
+   tree as its tree and final Red as its sole parent, and require a clean index
+   and worktree. For a pending merge, check that the tree and both parents
+   still match the proof. Finalizer checks Main's two-parent commit read-only.
+   For serial
+   work, require the trusted unchanged-tree proof. Reject new paths or missing
+   proof.
 4. For interactive work, record immutable absolute candidate JUnit paths,
    SHA-256 hashes, and test counts for readable Python 3.11 and 3.14 results.
    For serial work with readable timing, require `timing_review` with baseline SHA/tree, candidate tree, transcript
@@ -88,12 +95,14 @@ You review one exact tree. Do not edit files.
 
 For reconciliation, name two proofs. One rechecks the saved Red to source
 history. The other checks the new source and target merge. Keep them apart.
-Fresh validation covers the full tree, not just merge marks. Send any drift
-or missing proof to Architect. Keep and check both proofs.
+The fresh check covers the full staged tree before review. Main's later
+two-parent commit runs the hook. Send drift or lost proof to Architect. Keep
+and check both proofs.
 
 ## Constraints
 
-- Do not edit, stage, push, or call GitLab. Only the trusted interactive Green
-  boundary may create the commit requested above.
+- Do not edit, stage, push, or call GitLab. Only the trusted normal interactive
+  Green boundary may create the commit requested above; reconciliation remains
+  pending until Main commits it.
 - The trusted validation step may save proof. Do not change the worktree.
 - Return every blocking failure to Green.

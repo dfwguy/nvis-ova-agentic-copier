@@ -128,11 +128,18 @@ The controller then supplies bounded, read-only candidate evidence to
 Consistency Judge. The finalizer records the judge's verdict or exact
 not-applicable reason in its existing receipt. A skip needs a specific reason.
 
-Red keeps a verified failing-test boundary. In an interactive workflow, Red
-makes test-only commits with `--no-verify`. After Judge reads the exact staged
-tree, Judge requests the sole normal Green commit. Its installed hook runs the
-full suite once. Finalizer checks the committed tree and Red ancestry
-read-only. The branch retains Red and Green for a human squash merge.
+Red keeps a verified failing-test boundary. In an ordinary interactive
+workflow, Red makes test-only commits with `--no-verify`. After Judge reads the
+exact staged tree, Judge requests the sole normal Green commit. Its installed
+hook runs the full suite once. Finalizer checks the committed tree and Red
+ancestry read-only. The branch retains Red and Green for a human squash merge.
+
+When a coding branch needs a merge with its target, the merge stays open while
+Judge checks the exact staged tree and reviewers inspect it.
+Main then uses the trusted [reconciliation commit command](../reference/serial-gitlab-agent-loop.md#coding-reconciliation-commit)
+to make one normal commit with the saved source and target as ordered parents.
+Its installed hook runs the full suite. Finalizer checks the commit and Red
+ancestry without edits before publication.
 
 In a serial workflow, the AI worker cannot commit. While the Red producer is
 still live, it calls the trusted broker boundary. The boundary sets the coding
@@ -554,10 +561,11 @@ or authority boundary, cross-module rule, or scope not proved safe.
 
 The receipt marks prior sections that still have support. It also marks the
 scope checked again against the current tree. The reviewer uses staged tree
-identities, not intermediate commits. In normal interactive work, Judge
-requests the sole normal Green commit and Finalizer verifies it read-only. In
-serial-worker work, Finalizer never commits. The trusted runner keeps its
-normal controller commit path.
+identities, not intermediate commits. In ordinary interactive work, Judge
+requests the sole normal Green commit. For a pending coding merge, Main makes
+the reviewed two-parent reconciliation commit after validation and review.
+Finalizer verifies either commit read-only. In serial-worker work, Finalizer
+never commits. The trusted runner keeps its normal controller commit path.
 
 The controller, not the reviewer, measures review time. The receipt starts with
 compact, token-neutral scope metadata. A later cost study can compare complete

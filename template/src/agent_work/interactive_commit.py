@@ -67,6 +67,49 @@ class InteractiveCommitRequest(BaseModel):
         return value
 
 
+class ReconcileCommitRequest(BaseModel):
+    """Explicit identities for one pending two-parent reconciliation."""
+
+    worktree: Path
+    branch_ref: str
+    source_sha: str
+    target_sha: str
+    red_ref: str
+    red_sha: str
+    judge_tree: str
+    message_file: Path | None = None
+    reconcile_sha: str | None = None
+
+    @field_validator(
+        "source_sha", "target_sha", "red_sha", "judge_tree", "reconcile_sha"
+    )
+    @classmethod
+    def _object_id(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise ValueError("object ID must be 40 lowercase hexadecimal characters")
+        return value
+
+    @field_validator("branch_ref")
+    @classmethod
+    def _branch_ref(cls, value: str) -> str:
+        return InteractiveCommitRequest._branch_ref(value)
+
+    @field_validator("red_ref")
+    @classmethod
+    def _red_ref(cls, value: str) -> str:
+        if value.startswith("refs/agent-work/red/"):
+            return InteractiveCommitRequest._red_ref(value)
+        if (
+            re.fullmatch(
+                r"refs/agent-work/red-checkpoints/[1-9][0-9]*/[a-zA-Z0-9][a-zA-Z0-9/-]*",
+                value,
+            )
+            is None
+        ):
+            raise ValueError("Red ref must be an agent-work Red checkpoint ref")
+        return value
+
+
 @dataclass(frozen=True)
 class InteractiveCommitDependencies:
     """Injected Git command boundary."""
@@ -91,6 +134,14 @@ class InteractiveFinalReport:
 
     red_commit: str
     green_commit: str
+    judge_tree: str
+
+
+@dataclass(frozen=True)
+class ReconcileFinalReport:
+    """Read-only proof of an exact two-parent reconciliation commit."""
+
+    reconcile_commit: str
     judge_tree: str
 
 
@@ -236,6 +287,141 @@ def _no_pending_merge(
         raise InteractiveCommitError("checkout has a pending merge")
 
 
+def _reconcile_identity(
+    request: ReconcileCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+) -> None:
+    """Prove the current checkout still has the exact reviewed pending merge."""
+    worktree = request.worktree
+    for revision, expected, label in (
+        ("HEAD", request.source_sha, "source HEAD"),
+        (request.branch_ref, request.source_sha, "source branch"),
+        ("MERGE_HEAD", request.target_sha, "merge target"),
+        ("refs/remotes/origin/main", request.target_sha, "origin/main"),
+        (request.red_ref, request.red_sha, "Red ref"),
+        (f"{request.judge_tree}^{{tree}}", request.judge_tree, "Judge tree"),
+    ):
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", "--verify", revision)),
+            expected,
+            label,
+        )
+    _require_equal(
+        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
+        request.branch_ref,
+        "checked-out branch",
+    )
+    if _git(dependencies, worktree, ("ls-files", "-u")):
+        raise InteractiveCommitError("merge has unresolved conflicts")
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        request.judge_tree,
+        "staged Judge tree",
+    )
+    _staged_only(dependencies, worktree, "reconciliation candidate")
+
+
+def _reconcile_final_identity(
+    request: ReconcileCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+    reconcile_sha: str,
+) -> None:
+    """Prove ordered parents, tree, refs, and clean completed merge."""
+    worktree = request.worktree
+    _require_equal(
+        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
+        request.branch_ref,
+        "checked-out branch",
+    )
+    for revision, expected, label in (
+        ("HEAD", reconcile_sha, "HEAD"),
+        (request.branch_ref, reconcile_sha, "branch"),
+        ("refs/remotes/origin/main", request.target_sha, "origin/main"),
+        (request.red_ref, request.red_sha, "Red ref"),
+    ):
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", "--verify", revision)),
+            expected,
+            label,
+        )
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%P", reconcile_sha)),
+        f"{request.source_sha} {request.target_sha}",
+        "reconciliation parents",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("show", "-s", "--format=%T", reconcile_sha)),
+        request.judge_tree,
+        "reconciliation tree",
+    )
+    _no_pending_merge(dependencies, worktree)
+    _clean(dependencies, worktree)
+
+
+def _check_commit_preflight(
+    judge_tree: str,
+    dependencies: InteractiveCommitDependencies,
+) -> None:
+    """Run the shared license and cheap candidate gates before committing."""
+    if dependencies.run_license_preflight is None:
+        raise InteractiveCommitError("license preflight is unavailable")
+    try:
+        license_result = dependencies.run_license_preflight(judge_tree)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise InteractiveCommitError("license preflight failed") from error
+    if not license_preflight_compliant(judge_tree, license_result):
+        raise InteractiveCommitError("license preflight failed")
+    if dependencies.check_candidate_gate is None:
+        raise InteractiveCommitError("cheap candidate gate is unavailable")
+    try:
+        gate = dependencies.check_candidate_gate(judge_tree)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise InteractiveCommitError("cheap candidate gate failed") from error
+    if gate.returncode != 0:
+        raise InteractiveCommitError(f"{cheap_gate_failure_id(gate)} failed")
+
+
+def commit_reconcile(
+    request: ReconcileCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+    *,
+    apply: bool,
+) -> InteractiveCommitReport:
+    """Preview or commit the exact staged tree from a pending merge."""
+    _reconcile_identity(request, dependencies)
+    if not apply:
+        return InteractiveCommitReport(applied=False, new_commit=None)
+    _check_commit_preflight(request.judge_tree, dependencies)
+    _reconcile_identity(request, dependencies)
+    if dependencies.commit_worktree is None:
+        raise InteractiveCommitError("worktree commit boundary is unavailable")
+    if request.message_file is None:
+        raise InteractiveCommitError("reconciliation commit message file is required")
+    result = dependencies.commit_worktree(
+        request.worktree, ("commit", "-F", str(request.message_file))
+    )
+    if result.returncode != 0:
+        diagnostic = sanitize_diagnostic(
+            f"installed pre-commit rejected reconciliation: {result.stdout} {result.stderr}",
+            limit=2048,
+        )
+        raise InteractiveCommitError(diagnostic)
+    reconcile_sha = _git(dependencies, request.worktree, ("rev-parse", "HEAD"))
+    _reconcile_final_identity(request, dependencies, reconcile_sha)
+    return InteractiveCommitReport(applied=True, new_commit=reconcile_sha)
+
+
+def verify_reconcile_final(
+    request: ReconcileCommitRequest,
+    dependencies: InteractiveCommitDependencies,
+) -> ReconcileFinalReport:
+    """Verify a completed reconciliation without changing Git state."""
+    if request.reconcile_sha is None:
+        raise InteractiveCommitError("reconciliation commit ID is required")
+    _reconcile_final_identity(request, dependencies, request.reconcile_sha)
+    return ReconcileFinalReport(request.reconcile_sha, request.judge_tree)
+
+
 def _require_test_only_commit(
     dependencies: InteractiveCommitDependencies,
     worktree: Path,
@@ -373,22 +559,7 @@ def commit_interactive_green(
     _tests_frozen(dependencies, worktree, request.red_sha)
     if not apply:
         return InteractiveCommitReport(applied=False, new_commit=None)
-    if dependencies.run_license_preflight is None:
-        raise InteractiveCommitError("license preflight is unavailable")
-    try:
-        license_result = dependencies.run_license_preflight(request.judge_tree)
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        raise InteractiveCommitError("license preflight failed") from error
-    if not license_preflight_compliant(request.judge_tree, license_result):
-        raise InteractiveCommitError("license preflight failed")
-    if dependencies.check_candidate_gate is None:
-        raise InteractiveCommitError("cheap candidate gate is unavailable")
-    try:
-        gate = dependencies.check_candidate_gate(request.judge_tree)
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        raise InteractiveCommitError("cheap candidate gate failed") from error
-    if gate.returncode != 0:
-        raise InteractiveCommitError(f"{cheap_gate_failure_id(gate)} failed")
+    _check_commit_preflight(request.judge_tree, dependencies)
     _require_equal(
         _git(dependencies, worktree, ("write-tree",)),
         request.judge_tree,
