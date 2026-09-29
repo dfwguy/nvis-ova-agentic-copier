@@ -70,6 +70,7 @@ def _review(
     *,
     changed_tests: tuple[str, ...] = (),
     affected_by_helper: tuple[str, ...] = (),
+    production_changed: bool = False,
     focused: Callable[..., dict[str, Any]] = _focused,
 ) -> Any:
     from agent_work.test_timing import review_test_timings
@@ -82,6 +83,7 @@ def _review(
         candidate_runs=candidate,
         changed_tests=changed_tests,
         affected_by_helper=affected_by_helper,
+        production_changed=production_changed,
         run_focused=focused,
     )
 
@@ -145,6 +147,140 @@ def test_unaffected_existing_slowdown_is_inherited_without_focused_repeats(
     assert {(item.environment, item.name, item.reason) for item in result.findings} == {
         (env, CASE, "inherited_slow") for env in ENVIRONMENTS
     }
+
+
+def test_untouched_inherited_slow_case_with_opposite_version_deltas_reports_only() -> (
+    None
+):
+    case = "tests/test_template.py::test_copier_update_preserves_legacy_project_context"
+    baseline, candidate = _runs({}, {})
+    baseline["py311"]["cases"] = {case: 1.22}
+    candidate["py311"]["cases"] = {case: 1.479614}
+    baseline["py314"]["cases"] = {case: 1.52}
+    candidate["py314"]["cases"] = {case: 1.273201}
+    for run in (*baseline.values(), *candidate.values()):
+        run["test_count"] = 1
+
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        evidence = _focused(**request)
+        calls = {
+            ("py311", BASE_TREE): 1.2,
+            ("py311", CANDIDATE_TREE): 1.459614,
+            ("py314", BASE_TREE): 1.5,
+            ("py314", CANDIDATE_TREE): 1.253201,
+        }
+        evidence["cases"] = {
+            case: {
+                "setup": 0.01,
+                "call": calls[(request["environment"], request["source_tree"])],
+                "teardown": 0.01,
+            }
+        }
+        return evidence
+
+    from agent_work.test_timing import review_test_timings
+
+    result = review_test_timings(
+        baseline_tree=BASE_TREE,
+        candidate_tree=CANDIDATE_TREE,
+        baseline_runs=baseline,
+        candidate_runs=candidate,
+        changed_tests=(),
+        affected_by_helper=(),
+        production_changed=True,
+        run_focused=focused,
+    )
+
+    assert result.outcome == "report_only"
+    assert candidate["py311"]["cases"][case] - baseline["py311"]["cases"][case] == (
+        pytest.approx(0.259614)
+    )
+    assert candidate["py314"]["cases"][case] - baseline["py314"]["cases"][case] == (
+        pytest.approx(-0.246799)
+    )
+    assert {(item.environment, item.name) for item in result.findings} == {
+        (environment, case) for environment in ENVIRONMENTS
+    }
+    assert all(
+        item.reason not in {"new_slow", "corroborated_regression"}
+        for item in result.findings
+    )
+    assert (
+        next(item.reason for item in result.findings if item.environment == "py311")
+        == "inherited_variance"
+    )
+    assert (
+        next(item.reason for item in result.findings if item.environment == "py314")
+        == "inherited_slow"
+    )
+    assert next(
+        item.phase_deltas for item in result.findings if item.environment == "py311"
+    ) == pytest.approx({"setup": 0.0, "call": 0.259614, "teardown": 0.0})
+    assert len(requests) == 4
+    assert all(
+        request["environment"] == "py311"
+        and request["seed"] == SEED
+        and request["case_names"] == (case,)
+        for request in requests
+    )
+    assert {request["source_tree"] for request in requests} == {
+        BASE_TREE,
+        CANDIDATE_TREE,
+    }
+
+    affected = review_test_timings(
+        baseline_tree=BASE_TREE,
+        candidate_tree=CANDIDATE_TREE,
+        baseline_runs=baseline,
+        candidate_runs=candidate,
+        changed_tests=(),
+        affected_by_helper=(case,),
+        run_focused=focused,
+    )
+
+    assert affected.outcome == "correction_required"
+    assert any(
+        item.environment == "py311"
+        and item.name == case
+        and item.reason == "corroborated_regression"
+        for item in affected.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("full_increase", "focused_increase"),
+    ((1.0, 1.0), (1.0, 0.75), (0.75, 1.0)),
+)
+def test_inherited_variance_reaching_one_second_requires_correction(
+    full_increase: float, focused_increase: float
+) -> None:
+    def focused(**request: Any) -> dict[str, Any]:
+        evidence = _focused(**request)
+        evidence["cases"] = {
+            CASE: {
+                "setup": 0.0,
+                "call": (
+                    1.25 + focused_increase
+                    if request["source_tree"] == CANDIDATE_TREE
+                    else 1.25
+                ),
+                "teardown": 0.0,
+            }
+        }
+        return evidence
+
+    result = _review(
+        {CASE: 1.25},
+        {CASE: 1.25 + full_increase},
+        production_changed=True,
+        focused=focused,
+    )
+
+    assert result.outcome == "correction_required"
+    assert any(item.reason == "corroborated_regression" for item in result.findings)
 
 
 @pytest.mark.parametrize(
@@ -318,6 +454,43 @@ def test_newly_crossing_one_second_repeats_each_exact_source_twice_per_version()
         for item in result.findings
         if item.reason == "corroborated_regression"
     )
+
+
+@pytest.mark.parametrize("impact", ("none", "changed", "affected"))
+def test_small_focused_setup_rise_needs_causal_review(
+    impact: str,
+) -> None:
+    def focused(**request: Any) -> dict[str, Any]:
+        evidence = _focused(**request)
+        evidence["cases"] = {
+            CASE: {
+                "setup": 0.046 if request["source_tree"] == CANDIDATE_TREE else 0.01,
+                "call": 0.98,
+                "teardown": 0.0,
+            }
+        }
+        return evidence
+
+    result = _review(
+        {CASE: 0.99},
+        {CASE: 1.026},
+        changed_tests=(CASE,) if impact == "changed" else (),
+        affected_by_helper=(CASE,) if impact == "affected" else (),
+        focused=focused,
+    )
+
+    assert result.outcome == (
+        "report_only" if impact == "none" else "correction_required"
+    )
+    if impact == "none":
+        assert all(item.reason == "inherited_slow" for item in result.findings)
+    else:
+        assert all(
+            item.phase_deltas
+            == pytest.approx({"setup": 0.036, "call": 0.0, "teardown": 0.0})
+            for item in result.findings
+            if item.reason == "corroborated_regression"
+        )
 
 
 def test_uncorroborated_one_second_spike_is_report_only() -> None:

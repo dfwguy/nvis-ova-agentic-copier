@@ -1725,6 +1725,7 @@ class GitRepository:
                         "inherited_slow",
                         "corroborated_regression",
                         "uncorroborated_spike",
+                        "inherited_variance",
                     }
                     or deltas is not None
                     and (

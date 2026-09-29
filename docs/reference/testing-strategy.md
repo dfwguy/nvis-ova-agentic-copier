@@ -92,6 +92,12 @@ finding; subsecond cases get no individual finding. Neither group gets
 focused repeats or automatic correction.
 Missing repeat proof blocks a decision that needs it.
 
+When only production code changes, an existing slow case may vary by less
+than 1 second. Paired runs can report this as `inherited_variance`. The
+reviewer checks for a causal link. Unrelated variance does not block work.
+A case newly above 1 second, a rise of at least 1 second, or a changed test
+still needs correction and exact timing proof.
+
 For an existing touched case that stays above 100 ms and below 1 second, the
 controller uses the complete baseline and candidate JUnit inventories to mark
 it `touched_slow`. This finding alone does not require correction. A changed
