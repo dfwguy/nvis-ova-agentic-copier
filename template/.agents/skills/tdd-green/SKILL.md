@@ -33,8 +33,9 @@ skill's `metadata.model-tier`. The Architect router picks the mapping.
 
 For reconciliation, Green gets the rechecked Red proof, source, target, and
 conflict list. Keep new merge proof apart from the saved Red to source proof.
-Finalizer commits the passed staged tree from the pending merge. Do not fold
-another commit into it.
+Judge validates the exact staged candidate while the merge is pending. Main
+commits the passed tree through `agent-work reconcile-commit commit --apply`;
+Finalizer verifies that commit read-only. Do not fold another commit into it.
 
 The workflow owner waits for Green and Diátaxis Writer to stop editing. In interactive work, Main
 stages their combined candidate and returns the tree ID. In serial work,

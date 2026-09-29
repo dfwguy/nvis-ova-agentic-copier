@@ -220,14 +220,20 @@ The pre-commit candidate is the exact approved tree, not an ancestry object.
 Keep the prior source work through the allowed strategy. Do not hide lost source
 changes.
 
-On the full coding route, TDD Finalizer alone creates the final local
-publication object by directly committing the exact Judge-approved staged tree
-from the still-pending merge state. That consumes `MERGE_HEAD` and creates
-exactly one ordered two-parent commit: captured old source first and exact
-target/`MERGE_HEAD` second. It atomically updates the local branch, creates no
-intermediate passing commit or ordinary sole-parent compaction, and leaves the
-Red ref unchanged. Finalizer postchecks the cleared merge state, clean index
-and worktree, exact parents, tree, and message, and unchanged Red ref.
+On the full coding route, Main invokes
+`agent-work reconcile-commit commit --apply` on the exact Judge-approved staged
+tree from the still-pending merge.
+Supply the worktree, clanker branch ref, captured old source SHA, exact target
+SHA, retained Red ref and SHA, Judge tree, and message file. The trusted
+boundary consumes `MERGE_HEAD` and creates exactly one ordered two-parent
+commit: old source first and exact target second. It makes no intermediate
+passing commit or sole-parent compaction and leaves the Red ref unchanged.
+TDD Finalizer invokes `agent-work reconcile-commit verify` with the same
+identities and Judge tree to check the resulting commit read-only, including
+cleared merge state, clean index and worktree, exact parents, tree, and
+unchanged Red ref. Finalizer separately compares the commit message with the
+reviewed message file.
+
 For content-only reconciliation, including an accepted narrow route,
 Documentation Finalizer approves the tree and Main directly commits that exact
 staged tree from the still-pending merge state, with the corresponding parent

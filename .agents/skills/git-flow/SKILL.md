@@ -25,15 +25,19 @@ MR. Publication hands work to a human reviewer. Waiting for a merge is not
 part of the active run. It does not block unrelated work. **There is no
 direct-to-`main` path.** Setup protects `main`. GitLab rejects pushes to it and
 requires approval to merge. Even a one-line typo fix needs an MR. For
-interactive coding work, Judge requests the sole Green commit through the
-trusted boundary and Finalizer verifies it read-only. This main-thread skill
+normal interactive Green work, Judge asks the trusted boundary to make one
+Green commit. Finalizer checks it without edits. For a pending coding merge,
+Judge checks the staged tree before review. Main makes the ordered two-parent
+commit through the trusted boundary. Finalizer checks it without edits. This
+main-thread skill
 owns only the push and MR update. Content or trivial work keeps its normal
 main-thread commit. **Do not spawn a subagent for the main-thread publication
 steps below.** They are short, local-only, or one remote command.
 
-Judge owns the sole normal interactive Green commit and installed hook under
-the TDD Judge contract. Only retained test-only Red commits use `--no-verify`.
-Finalizer verifies the Green commit read-only. The serial runner keeps its
+Judge owns the normal interactive Green commit and its hook under the TDD Judge
+contract. A pending coding merge keeps its staged tree through review. Main's
+trusted two-parent commit runs the hook. Only test-only Red commits use
+`--no-verify`. Finalizer checks the resulting commit without edits. The serial runner keeps its
 ordinary controller commit. Exact-source pipeline checks after push are another
 defense. They never replace Judge.
 

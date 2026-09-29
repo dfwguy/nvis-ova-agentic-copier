@@ -101,10 +101,12 @@ files yield trusted counts, digests, slow cases, and `timing_complete` flags;
 a successful hook with a missing or `OSError`-unreadable fixed JUnit file
 yields bounded `timing_status=unknown` and `timing_unknown`, without times.
 Judge returns its Non-functional Reviewer child receipt. Only after the
-interactive Green commit or serial validation may concurrent specialist
+normal interactive Green commit, pending-merge candidate validation, or serial
+validation may concurrent specialist
 reviews start. Test Judge verifies the Red-to-Green Git diff. During
 finalization, Finalizer checks that diff, checkpoint, and validation proof.
-In interactive work, it invokes `agent-work interactive-commit verify` and
+For normal interactive Green work, it invokes
+`agent-work interactive-commit verify` and
 remains read-only. Main publishes only the verified Green tip. Pipeline review
 independently observes the exact-source pipeline.
 
@@ -129,16 +131,23 @@ fresh Test Writer. TDD Red does not manufacture evidence.
 Architect prepares the pending target merge and conflict manifest. It freshly
 routes the joined diff. Green resolves coding conflicts by preserving approved
 source and target intent. Fresh validation and reviews cover the combined
-candidate. Judge and Finalizer keep historical Red-to-source proof apart from
+candidate. While the merge is pending, Judge invokes
+`agent-work validation run --candidate-tree <staged-tree> --apply` for read-only
+validation of the exact staged candidate before specialist review. It does not
+create a Green commit or consume `MERGE_HEAD`. Judge and Finalizer keep
+historical Red-to-source proof apart from
 fresh three-way source-plus-target-to-candidate proof. Main supplies freshly
 fetched exact source and target ref proof before finalization. Finalizer checks
-it and local identities. It makes no remote or GitLab calls. Main commits the
-exact Judge-approved staged tree from the still-pending merge state. This
-consumes `MERGE_HEAD`. Captured old source is first. Exact target/`MERGE_HEAD`
-is second. Do not create an intermediate passing commit or a sole-parent
-compaction. Postchecks require cleared merge state, a clean index and worktree,
-exact parents, tree, message, and unchanged Red ref. Any source or target ref
-drift invalidates receipts. Restart exact selection and preparation. Main
+it and local identities. It makes no remote or GitLab calls. Main invokes
+`agent-work reconcile-commit commit --apply` for the exact Judge-approved
+staged tree from the still-pending merge state. Its installed hook runs during
+the commit, which consumes `MERGE_HEAD`.
+Captured old source is first. Exact target is second. Finalizer invokes
+`agent-work reconcile-commit verify` read-only for the resulting commit and
+checks clean state, exact parents, tree, and unchanged Red ref. It separately
+compares the commit message with the reviewed message file. Any
+source or target ref drift invalidates receipts. Restart exact selection and
+preparation. Main
 fetches and rechecks both refs just before publishing with exact old-source
 `--force-with-lease` and same-merge-request readback. Humans alone approve and
 merge. Keep the readback. The factory timer is irrelevant to reconciliation.

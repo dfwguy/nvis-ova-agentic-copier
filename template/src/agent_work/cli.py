@@ -36,7 +36,7 @@ from . import (
     template_update_publication,
 )
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
-from .cheap_gate import check_candidate_gate
+from .cheap_gate import check_candidate_gate as default_check_candidate_gate
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -62,10 +62,13 @@ from .interactive_commit import (
     InteractiveCommitDependencies,
     InteractiveCommitError,
     InteractiveCommitRequest,
+    ReconcileCommitRequest,
     commit_interactive_green,
     commit_interactive_red,
+    commit_reconcile,
     run_worktree_commit,
     verify_interactive_final,
+    verify_reconcile_final,
 )
 from .interactive_commit import (
     run_git as run_interactive_git,
@@ -736,6 +739,35 @@ def build_parser() -> argparse.ArgumentParser:
             command,
             apply=action != "verify",
             apply_help="create the exact retained commit",
+        )
+    reconcile_commit = resources.add_parser(
+        "reconcile-commit", help="commit or verify an exact pending merge"
+    )
+    reconcile_actions = reconcile_commit.add_subparsers(dest="action", required=True)
+    for action in ("commit", "verify"):
+        command = reconcile_actions.add_parser(action)
+        command.add_argument("--worktree", type=Path, required=True)
+        for name in (
+            "branch-ref",
+            "source-sha",
+            "target-sha",
+            "red-ref",
+            "red-sha",
+            "judge-tree",
+        ):
+            command.add_argument(f"--{name}", required=True)
+        if action == "commit":
+            command.add_argument("--message-file", type=Path, required=True)
+        else:
+            command.add_argument("--reconcile-sha", required=True)
+        _common(
+            command,
+            explicit_dry_run=action == "commit",
+            apply_help=(
+                "create the exact two-parent reconciliation commit"
+                if action == "commit"
+                else "verify the commit without changing Git state"
+            ),
         )
     slow_root = resources.add_parser("slow-root", help="reconcile confirmed slow roots")
     slow_root_actions = slow_root.add_subparsers(dest="action", required=True)
@@ -1692,6 +1724,91 @@ def main(
         write_stderr("candidate read selector is invalid")
         return 2
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "reconcile-commit":
+        try:
+            request = ReconcileCommitRequest(
+                worktree=parsed.worktree,
+                branch_ref=parsed.branch_ref,
+                source_sha=parsed.source_sha,
+                target_sha=parsed.target_sha,
+                red_ref=parsed.red_ref,
+                red_sha=parsed.red_sha,
+                judge_tree=parsed.judge_tree,
+                message_file=getattr(parsed, "message_file", None),
+                reconcile_sha=getattr(parsed, "reconcile_sha", None),
+            )
+        except ValueError as error:
+            write_stderr(str(error))
+            return 2
+
+        def reconcile_license_preflight(tree: str) -> CommandResult:
+            result = run_command(
+                (
+                    sys.executable,
+                    "scripts/check_licenses.py",
+                    "--root",
+                    ".",
+                    "--policy",
+                    ".license-policy.toml",
+                    "--candidate-tree",
+                    tree,
+                    "--json",
+                ),
+                current_directory=Path(parsed.worktree),
+                environment=environment,
+            )
+            return CommandResult(result.returncode, result.stdout, result.stderr)
+
+        dependencies = InteractiveCommitDependencies(
+            run_git=partial(
+                run_interactive_git,
+                run_command=run_command,
+                environment=environment,
+            ),
+            commit_worktree=partial(
+                run_worktree_commit,
+                run_command=run_command,
+                environment=environment,
+            ),
+            run_license_preflight=reconcile_license_preflight,
+            check_candidate_gate=candidate_gate
+            or (
+                lambda tree: default_check_candidate_gate(
+                    tree,
+                    source=Path(parsed.worktree),
+                    current_staged_tree=lambda: run_interactive_git(
+                        Path(parsed.worktree),
+                        ("write-tree",),
+                        run_command=run_command,
+                        environment=environment,
+                    ).stdout.strip(),
+                    run_command=run_command,
+                    environment=environment,
+                )
+            ),
+        )
+        try:
+            if parsed.action == "commit":
+                report = commit_reconcile(request, dependencies, apply=parsed.apply)
+                payload = {"applied": report.applied, "new_commit": report.new_commit}
+            else:
+                final = verify_reconcile_final(request, dependencies)
+                payload = {
+                    "verified": True,
+                    "reconcile_commit": final.reconcile_commit,
+                    "judge_tree": final.judge_tree,
+                }
+        except InteractiveCommitError as error:
+            if parsed.debug:
+                raise
+            write_stderr(str(error))
+            return 1
+        write_stdout(
+            json.dumps(payload, sort_keys=True)
+            if parsed.json
+            else " ".join(f"{key}={value}" for key, value in payload.items())
+        )
+        return 0
     if parsed.resource == "interactive-commit":
         try:
             request = InteractiveCommitRequest(
@@ -1745,7 +1862,7 @@ def main(
                 run_license_preflight=interactive_license_preflight,
                 check_candidate_gate=candidate_gate
                 or (
-                    lambda tree: check_candidate_gate(
+                    lambda tree: default_check_candidate_gate(
                         tree,
                         source=Path(parsed.worktree),
                         current_staged_tree=lambda: run_interactive_git(
@@ -2312,7 +2429,7 @@ def main(
                     run_command=run_command,
                     check_candidate_gate=candidate_gate
                     or (
-                        lambda tree: check_candidate_gate(
+                        lambda tree: default_check_candidate_gate(
                             tree,
                             source=current_checkout(),
                             current_staged_tree=lambda: git_read(("git", "write-tree")),
