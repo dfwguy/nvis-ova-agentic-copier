@@ -32,11 +32,13 @@ trusted status boundary for the same candidate or return to Green for safe
 recovery. The
 durable tree-keyed session prevents duplicate hook runs. A terminal nonzero
 returns to Green. Only terminal zero permits Judge to check the unchanged tree
-and, in serial work, require controller-owned baseline and candidate JUnit
-timing proof for Python 3.11 and 3.14, bound to their exact source trees and
+and, in serial work, require available controller-owned baseline and candidate
+JUnit timing proof for Python 3.11 and 3.14, bound to their exact source trees and
 opaque evidence identities. Use bounded run digests, counts, completeness,
 candidate slow-case data, findings, and transcript outcome. Full inventories
-and exact-source repeats stay private. Missing, partial, or mismatched serial proof is
+and exact-source repeats stay private. If the hook passes but a fixed JUnit
+file is missing or raises `OSError`, set timing to `UNKNOWN` and keep reviewing.
+Do not claim a timing pass. Other missing, partial, or mismatched serial proof is
 no pass. Do not request controller-private snapshot paths. Delegate
 `$nonfunctional-review` with this source-bound evidence. Return the joined
 handoff to Green before specialist review.

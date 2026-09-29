@@ -62,8 +62,10 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    failure marker, and output digest. Require Test Judge approval of the final
    Git diff from Red to Green. The local ref must still match its saved identity.
    Reject a missing, changed, or wrong checkpoint.
-3. Check that Judge's result binds each JUnit result to its SHA-256 hash, test
-   count, and exact tree ID for each supported version. Interactive work uses
+3. Check that Judge's result binds each readable JUnit result to its SHA-256
+   hash, test count, and exact tree ID. A successful hook's missing or
+   `OSError`-unreadable fixed JUnit file needs explicit timing `UNKNOWN`, not
+   invented times or a performance pass. Interactive work uses
    fixed file paths. Serial work uses an opaque proof ID and bounded time data
    from trusted code. Never ask for private paths. Compare the docs and README
    verdicts to the final diff. Do not rerun tests, lint, or pre-commit.

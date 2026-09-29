@@ -2524,6 +2524,59 @@ def test_serial_publication_respects_trusted_timing_outcome(
     assert repository.judged_paths == [repository.paths]
 
 
+def test_serial_candidate_unknown_timing_unlocks_review_after_trusted_validation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class UnknownTimingRepository(FakeRepository):
+        def judge_candidate(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+            changed_paths: tuple[str, ...],
+            action: str,
+            timeout_seconds: int,
+            timing_review_required: bool = False,
+        ) -> dict[str, object]:
+            del worktree, base_sha, allow_base_ancestor, timeout_seconds
+            assert timing_review_required is True
+            assert action == "validate"
+            self.judged_paths.append(changed_paths)
+            return {
+                "candidate_tree": candidate_tree,
+                "state": "terminal-success",
+                "timing_status": "unknown",
+                "timing_unknown": {"environment": "py311", "reason": "missing"},
+                "timing_review": None,
+            }
+
+    repository = UnknownTimingRepository(config)
+    invoker = SingleSessionInvoker()
+    invoker.changed_paths = repository.paths
+    checkpoint = _red_checkpoint_evidence_for_segment(record)
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: checkpoint,
+    )
+
+    assert result is not None and result.state is RunnerState.PUBLISHING
+    assert repository.judged_paths == [repository.paths]
+
+
 @pytest.mark.parametrize("lane", (WorkflowLane.CODING, WorkflowLane.UNKNOWN))
 def test_coding_candidate_read_requires_successful_validation(
     tmp_path: Path, lane: WorkflowLane

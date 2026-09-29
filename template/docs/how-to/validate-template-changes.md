@@ -5,7 +5,7 @@ summary: Run local tests and CI checks for a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -178,11 +178,14 @@ Inside the admitted child shell:
    consuming case's setup cost to its test body.
 
 A `review` result needs closer review; it does not by itself prove a
-regression. Missing, mismatched, or partial proof blocks approval until the
-evidence owner repairs it. If sound paired proof shows mixed case directions,
-record the doubt and queue case-specific diagnosis. That doubt alone need not
-block an unrelated change when its impact map is clear and no other timing
-rule blocks it. Do not call the mixed case a timing pass or a regression.
+regression. Missing, mismatched, or partial readable proof blocks approval until
+the evidence owner repairs it. A successful hook with a missing or
+`OSError`-unreadable fixed JUnit file reports timing `UNKNOWN`; continue review
+without a timing pass, times, or counts. If sound paired proof shows mixed case
+directions, record the doubt and queue case-specific diagnosis. That doubt
+alone need not block an unrelated change when its impact map is clear and no
+other timing rule blocks it. Do not call the mixed case a timing pass or a
+regression.
 Check host load and fixture setup before assigning cause. Do not infer cause
 from one run. An inherited case that stays above 100 ms but is unchanged or
 faster remains in the report without automatic rejection. Give each confirmed
@@ -191,14 +194,16 @@ audit or linked issue record. Keep the full per-run inventory and proof there.
 The serial controller collects full-suite baseline and candidate proof by
 default for both supported Python versions. It checks the same seed and
 prepared environments, then runs focused comparisons where needed. Use its
-source-bound timing findings and complete candidate inventory for review.
-Missing or mismatched paired proof stops serial validation.
+source-bound timing findings and complete candidate inventory for review when
+timing is complete. Missing or mismatched readable paired proof stops serial
+validation. Timing `UNKNOWN` needs no paired proof or timing-only recovery.
 
 ### Resume after an interrupted successful hook
 
 If the window ends after a successful Judge hook but before timing is done,
-close it. Read the saved status for the same staged tree. Require
-`terminal-success`, hook exit code `0`, and both saved full-suite JUnit files.
+close it. Read the saved status for the same staged tree. For timing-only
+recovery, require `terminal-success`, hook exit code `0`, complete timing, and
+both saved full-suite JUnit files. Timing `UNKNOWN` needs no such recovery.
 Keep each absolute path, SHA-256 digest, and test count. Do not run the hook,
 validation run, or retry again for that tree.
 

@@ -3549,9 +3549,10 @@ def _execute(
             timing_review = report.get("timing_review")
             if report.get("state") != "deferred" and pending_deferred_tree == tree:
                 pending_deferred_tree = None
-            if (
-                report.get("state") == "terminal-success"
-                and isinstance(timing_review, dict)
+            if report.get("state") == "terminal-success" and (
+                report.get("timing_status") == "unknown"
+                and isinstance(report.get("timing_unknown"), dict)
+                or isinstance(timing_review, dict)
                 and cast(dict[str, object], timing_review).get("outcome")
                 in {"clear", "report_only"}
             ):

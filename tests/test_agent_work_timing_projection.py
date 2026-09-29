@@ -21,6 +21,116 @@ from agent_work.repository import CommandResult, GitRepository, RepositoryError
 from tests.test_agent_work_boundaries import _config
 
 
+@pytest.mark.parametrize("action", ("validate", "status"))
+def test_serial_projection_accepts_explicit_unknown_timing_without_proof(
+    tmp_path: Path, action: str
+) -> None:
+    tree = "b" * 40
+    report: dict[str, object] = {
+        "candidate_tree": tree,
+        "state": "terminal-success",
+        "exit_code": 0,
+        "timing_status": "unknown",
+        "timing_unknown": {"environment": "py314", "reason": "os_error"},
+        "junit_artifacts": [],
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "junit_timings": [],
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            0, tree if command[-1] == "write-tree" else json.dumps(report), ""
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return "a" * 40
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return ("tests/test_speed.py",)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return tree
+
+    repository = ObservedRepository(_config(tmp_path), run)
+    observed = repository.judge_candidate(
+        tmp_path,
+        tree,
+        base_sha="a" * 40,
+        changed_paths=("tests/test_speed.py",),
+        action=action,
+        timeout_seconds=30,
+        timing_review_required=True,
+    )
+
+    assert observed["state"] == "terminal-success"
+    assert observed["timing_status"] == "unknown"
+    assert observed["timing_unknown"] == report["timing_unknown"]
+    assert observed["junit_artifacts"] == observed["junit_timings"] == []
+    assert observed["timing_review"] is None
+    assert observed["evidence_id"]
+
+    for invalid in (
+        {"reason": "os_error", "environment": "py399"},
+        {"reason": "invalid_xml", "environment": "py314"},
+        {"reason": "os_error", "environment": "py314", "path": "/secret"},
+    ):
+        report["timing_unknown"] = invalid
+        with pytest.raises(RepositoryError):
+            repository.judge_candidate(
+                tmp_path,
+                tree,
+                base_sha="a" * 40,
+                changed_paths=("tests/test_speed.py",),
+                action=action,
+                timeout_seconds=30,
+                timing_review_required=True,
+            )
+
+    report["timing_unknown"] = {"environment": "py314", "reason": "os_error"}
+    for field, item in (
+        (
+            "junit_artifacts",
+            {
+                "environment": "py311",
+                "path": str(tmp_path / "private-py311.xml"),
+                "sha256": "c" * 64,
+                "test_count": 1,
+            },
+        ),
+        (
+            "junit_timings",
+            {
+                "environment": "py311",
+                "total_seconds": 0.1,
+                "slowest_cases": [],
+                "timing_complete": True,
+                "over_100ms_cases": [],
+            },
+        ),
+    ):
+        report[field] = [item]
+        with pytest.raises(
+            RepositoryError, match="candidate timing evidence is invalid"
+        ):
+            repository.judge_candidate(
+                tmp_path,
+                tree,
+                base_sha="a" * 40,
+                changed_paths=("tests/test_speed.py",),
+                action=action,
+                timeout_seconds=30,
+                timing_review_required=True,
+            )
+        report[field] = []
+
+
 @pytest.mark.parametrize(
     ("state", "returncode", "artifact_reason"),
     (

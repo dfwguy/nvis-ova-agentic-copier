@@ -68,12 +68,14 @@ classification, owner, and plan to cut cost or review an exception in the
 durable audit or linked issue record. An inherited case that is no slower
 does not block an unrelated change on cost alone.
 
-The serial controller checks full-suite baseline and candidate proof for
-Python 3.11 and 3.14. It binds both runs to exact source trees and checks
-full case lists, test environments, commands, and seeds.
-Missing or mismatched proof stops review. The reviewer receives bounded
-identities, findings, an outcome, and the candidate's complete list above
-100 ms. The three slowest cases are not a complete inventory. A touched
+For complete serial timing, the controller checks baseline and candidate
+proof for Python 3.11 and 3.14. It binds each full run to its source tree.
+It checks case lists, environments, commands, and seeds. Missing or
+mismatched readable proof stops review. A successful hook with a missing or
+`OSError`-unreadable fixed JUnit file reports timing `UNKNOWN`. Review
+continues without a timing pass, times, or counts. With complete timing, the
+reviewer gets bounded identities, findings, an outcome, and the full candidate
+list above 100 ms. The three slowest cases are not a complete list. A touched
 case above 100 ms, a new slow case, or a corroborated ordinary regression
 needs correction unless an approved integration exception applies. When an
 existing case first reaches or gets slower above 1 second, the controller

@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-28
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -170,9 +170,11 @@ checkout's Git administrative data or controller state.
 For coding work, the Validation Judge first uses that socket to validate the
 staged tree and read its durable status. The trusted controller checks licenses
 in that tree before it starts the full-hook session. It runs one hook
-for each tree and records fixed JUnit snapshots, digests, test counts, and
-elapsed time. It returns an opaque evidence ID and bounded results without
-private snapshot paths. A failed result gives the same live worker safe test
+for each tree and records elapsed time. Complete timing also records fixed
+JUnit snapshots, digests, and test counts; a successful hook with missing or
+`OSError`-unreadable fixed JUnit evidence records timing `UNKNOWN` instead. It
+returns an opaque evidence ID and bounded results without private snapshot
+paths. A failed result gives the same live worker safe test
 names and digests when available; the worker can correct the code, stage a
 new tree, and validate it. Status recovers the saved result without rerunning
 the hook.

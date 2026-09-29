@@ -1719,6 +1719,102 @@ def test_validation_cli_reports_safe_timing_failure_code(action: str) -> None:
     assert json.loads(output[0])["timing_failure_code"] == "baseline_hook_failed"
 
 
+@pytest.mark.parametrize("action", ("run", "status"))
+def test_validation_cli_reports_successful_unknown_timing_without_fabricated_proof(
+    action: str,
+) -> None:
+    report = SimpleNamespace(
+        candidate_tree="a" * 40,
+        applied=action == "run",
+        action="ran" if action == "run" else "status",
+        state="terminal-success",
+        terminal=True,
+        exit_code=0,
+        diagnostic=None,
+        timing_status="unknown",
+        timing_unknown={"environment": "py314", "reason": "os_error"},
+        artifact_failure=None,
+        hook_failures=(),
+        junit_artifacts=(),
+        failed_tests=(),
+        failed_junit_digests=(),
+        elapsed_seconds=0.1,
+        junit_timings=(),
+    )
+    output: list[str] = []
+    arguments = ["validation", action, "--candidate-tree", "a" * 40, "--json"]
+    if action == "run":
+        arguments.append("--apply")
+
+    exit_code = main(
+        arguments,
+        validation_run=lambda **_kwargs: report,
+        validation_status=lambda **_kwargs: report,
+        write_stdout=output.append,
+    )
+
+    payload = json.loads(output[0])
+    assert exit_code == 0
+    assert payload["timing_status"] == "unknown"
+    assert payload["timing_unknown"] == report.timing_unknown
+    assert payload["junit_artifacts"] == payload["junit_timings"] == []
+    assert "timing_review" not in payload
+
+
+@pytest.mark.parametrize("action", ("run", "status"))
+def test_serial_validation_cli_skips_transcript_for_unknown_timing(
+    action: str,
+) -> None:
+    report = SimpleNamespace(
+        candidate_tree="a" * 40,
+        applied=action == "run",
+        action="ran" if action == "run" else "status",
+        state="terminal-success",
+        terminal=True,
+        exit_code=0,
+        diagnostic=None,
+        timing_status="unknown",
+        timing_unknown={"environment": "py314", "reason": "os_error"},
+        artifact_failure=None,
+        hook_failures=(),
+        junit_artifacts=(),
+        failed_tests=(),
+        failed_junit_digests=(),
+        elapsed_seconds=0.1,
+        junit_timings=(),
+    )
+    output: list[str] = []
+    errors: list[str] = []
+    arguments = [
+        "validation",
+        action,
+        "--candidate-tree",
+        "a" * 40,
+        "--serial-timing",
+        "--baseline-sha",
+        "b" * 40,
+        "--json",
+    ]
+    if action == "run":
+        arguments.extend(("--changed-path", "tests/test_speed.py", "--apply"))
+
+    exit_code = main(
+        arguments,
+        validation_run=lambda **_kwargs: report,
+        validation_status=lambda **_kwargs: report,
+        write_stdout=output.append,
+        write_stderr=errors.append,
+    )
+
+    assert exit_code == 0
+    assert errors == []
+    payload = json.loads(output[0])
+    assert payload["timing_status"] == "unknown"
+    assert payload["timing_unknown"] == report.timing_unknown
+    assert payload["junit_artifacts"] == payload["junit_timings"] == []
+    assert "timing_review" not in payload
+
+
 def test_validation_retry_cli_supports_help_json_dry_run_and_apply(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

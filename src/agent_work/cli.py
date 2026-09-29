@@ -272,6 +272,8 @@ class _ValidationReport(Protocol):
     exit_code: int | None
     diagnostic: str | None
     elapsed_seconds: float | None
+    timing_status: Literal["complete", "unknown"] | None
+    timing_unknown: dict[str, str] | None
 
     @property
     def artifact_failure(self) -> _ArtifactFailure | None: ...
@@ -2508,7 +2510,14 @@ def main(
                 for artifact in report.junit_artifacts
             ],
         }
-        if parsed.baseline_sha is not None and report.state == "terminal-success":
+        if getattr(report, "timing_status", None) == "unknown":
+            payload["timing_status"] = "unknown"
+            payload["timing_unknown"] = report.timing_unknown
+        if (
+            parsed.baseline_sha is not None
+            and report.state == "terminal-success"
+            and payload.get("timing_status") != "unknown"
+        ):
             try:
                 if timing_dependencies is None:
                     raise JudgeValidationError("serial timing boundary is unavailable")
