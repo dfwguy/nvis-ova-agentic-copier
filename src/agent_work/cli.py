@@ -277,6 +277,8 @@ class _ValidationReport(Protocol):
     elapsed_seconds: float | None
     timing_status: Literal["complete", "unknown"] | None
     timing_unknown: dict[str, str] | None
+    timing_comparison_status: Literal["unknown"] | None
+    timing_comparison_reason: Literal["baseline_unavailable"] | None
 
     @property
     def artifact_failure(self) -> _ArtifactFailure | None: ...
@@ -1007,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
         "candidate", help="preview or request live controller candidate operations"
     )
     candidate_actions = candidate.add_subparsers(dest="action", required=True)
-    for action in ("stage", "changed-paths", "read", "validate", "status"):
+    for action in ("stage", "changed-paths", "read", "validate", "commit", "status"):
         candidate_action = candidate_actions.add_parser(
             action,
             help=f"preview or request live candidate {action}; --json selects JSON output",
@@ -2619,10 +2621,25 @@ def main(
         if getattr(report, "timing_status", None) == "unknown":
             payload["timing_status"] = "unknown"
             payload["timing_unknown"] = report.timing_unknown
+        comparison_status = getattr(report, "timing_comparison_status", None)
+        comparison_reason = getattr(report, "timing_comparison_reason", None)
+        if comparison_status is not None or comparison_reason is not None:
+            if (
+                comparison_status != "unknown"
+                or comparison_reason != "baseline_unavailable"
+                or getattr(report, "timing_status", None) != "complete"
+                or report.state != "terminal-success"
+            ):
+                write_stderr("serial timing comparison evidence is invalid")
+                return 1
+            payload["timing_status"] = "complete"
+            payload["timing_comparison_status"] = "unknown"
+            payload["timing_comparison_reason"] = comparison_reason
         if (
             parsed.baseline_sha is not None
             and report.state == "terminal-success"
             and payload.get("timing_status") != "unknown"
+            and comparison_status != "unknown"
         ):
             try:
                 if timing_dependencies is None:
@@ -2839,6 +2856,7 @@ def main(
         "read",
         "changed-paths",
         "validate",
+        "commit",
         "status",
     }:
         selector: dict[str, object] | None = None
@@ -2914,6 +2932,9 @@ def main(
                     "state",
                     "changed_path_count",
                     "evidence_id",
+                    "commit_sha",
+                    "committed_tree",
+                    "red_sha",
                     "diagnostic",
                 )
                 if key in receipt and receipt[key] is not None

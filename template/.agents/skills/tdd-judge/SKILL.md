@@ -23,23 +23,28 @@ Judge does not edit.
 It checks one tree. It gives one receipt.
 
 In serial work, Green supplies the controller-staged candidate tree. Judge
-invokes the controller-owned, identity-bound durable validation and status
-boundary for that exact tree while active. The controller runs one
-mutation-gated session and returns a bounded program-owned result. Judge does
+requests the controller-owned, identity-bound `candidate commit` for that
+exact tree while active. The transaction runs the installed hook once and
+returns the Green SHA, committed tree, and bounded validation proof. Judge does
 not call `git add`, `git write-tree`, the hook, `agent-work validation run`, or
 `agent-work validation status`. A lost or incomplete result is no pass; use the
 trusted status boundary for the same candidate or return to Green for safe
-recovery. The
-durable tree-keyed session prevents duplicate hook runs. A terminal nonzero
-returns to Green. Only terminal zero permits Judge to check the unchanged tree
-and, in serial work, require available controller-owned baseline and candidate
-JUnit timing proof for Python 3.11 and 3.14, bound to their exact source trees and
-opaque evidence identities. Use bounded run digests, counts, completeness,
-candidate slow-case data, findings, and transcript outcome. Full inventories
-and exact-source repeats stay private. If the hook passes but a fixed JUnit
-file is missing or raises `OSError`, set timing to `UNKNOWN` and keep reviewing.
-Do not claim a timing pass. Other missing, partial, or mismatched serial proof is
-no pass. Do not request controller-private snapshot paths. Delegate
+recovery. The candidate commit runs no separate prior validation hook. A
+terminal nonzero
+returns to Green. Only a verified Green commit permits Judge to check its
+exact tree, retained Red parent/ref, clean state, and available Green hook
+JUnit proof for Python 3.11 and 3.14. Bind it to the Green SHA, committed
+tree, and opaque evidence identity. Use JUnit digests, counts, and the complete
+bounded list of cases above 0.100 seconds. Do not require paired baseline
+runs or phase deltas in ordinary serial coding. Baseline-relative regression
+remains `UNKNOWN` and nonblocking. If the hook passes but a JUnit file is
+missing or `OSError`-unreadable, use timing `UNKNOWN` and keep reviewing
+without a timing pass. A valid readable JUnit file with an overflowing
+bounded advisory case summary also has timing `UNKNOWN`. Malformed,
+oversized, or invalid present JUnit data blocks review. A failed hook still
+fails. Missing or mismatched commit identity
+proof is no pass. The legacy staged-tree route still rejects malformed
+validation proof. Do not request controller-private snapshot paths. Delegate
 `$nonfunctional-review` with this source-bound evidence. Return the joined
 handoff to Green before specialist review.
 

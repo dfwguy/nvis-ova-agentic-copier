@@ -69,6 +69,70 @@ def test_workflow_prompt_requires_live_candidate_read_for_both_lanes() -> None:
     )
 
 
+def test_workflow_prompt_routes_coding_judge_by_merge_state() -> None:
+    """Ordinary coding commits Green; a pending merge validates its joined tree."""
+    base = "a" * 40
+    checkpoint = RedCheckpointEvidence(
+        project_id=310967,
+        issue_iid=12,
+        source_branch="agent/issue-12",
+        base_sha=base,
+        tree_oid="b" * 40,
+        ref=checkpoint_ref(12, base),
+        test_paths=("tests/test_candidate.py",),
+        argv=("uv", "run", "pytest", "tests/test_candidate.py"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256="e" * 64,
+    )
+    broker = WorkerResultBrokerRequest(
+        nonce="f" * 32,
+        project_id=310967,
+        issue_iid=12,
+        ledger_revision=0,
+        expected_state=RunnerState.EXECUTING,
+        expected_phase=WorkflowPhase.WORKFLOW,
+        source_branch="agent/issue-12",
+        source_sha=base,
+    )
+    prompt = build_worker_prompt(
+        {
+            "state": "executing",
+            "phase": "workflow",
+            "workflow_lane": "coding",
+            "work_kind": "ordinary",
+            "source_sha": base,
+        },
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+        retained_red_checkpoint=checkpoint,
+        worker_result_broker=broker,
+        worker_result_builder=Path("/trusted/agent-work"),
+    )
+
+    assert "candidate commit --candidate-tree TREE" in prompt
+    assert "candidate status --candidate-tree TREE" in prompt
+    assert (
+        "pending merge" in prompt
+        and "candidate validate --candidate-tree TREE" in prompt
+    )
+    ordinary_route = prompt.split("For ordinary coding,", 1)[1].split(
+        "For a pending merge,", 1
+    )[0]
+    pending_route = prompt.split("For a pending merge,", 1)[1].split(
+        "After successful coding validation,", 1
+    )[0]
+    assert "candidate commit --candidate-tree TREE" in ordinary_route
+    assert "candidate status" not in ordinary_route
+    assert "candidate validate --candidate-tree TREE" in pending_route
+    assert "candidate status --candidate-tree TREE" in pending_route
+    assert prompt.index("candidate commit --candidate-tree TREE") < prompt.index(
+        "candidate changed-paths --candidate-tree TREE"
+    )
+    assert "no intermediate commits" not in prompt
+
+
 def test_workflow_prompt_routes_only_verified_retained_red_checkpoint() -> None:
     base = "c" * 40
     checkpoint = RedCheckpointEvidence(
@@ -408,15 +472,17 @@ def test_workflow_prompt_keeps_quality_rerun_accounting_with_controller() -> Non
     assert "compact, token-neutral scope metadata" in prompt
     assert "future #134 comparison" in prompt
     assert "do not add timing storage" in prompt
-    assert "serial finalizer never commits" in prompt
-    assert "trusted runner retains its normal controller commit path" in prompt
-    assert (
-        "judge requests one normal green commit through the trusted boundary" in prompt
+    assert "trusted green commit before reviews" in prompt
+    assert any(
+        "serial finalizer" in sentence
+        and "read-only" in sentence
+        and re.search(r"\bverif(?:y|ies)\b", sentence)
+        and re.search(r"\b(?:committed|green sha)\b", sentence)
+        for sentence in prompt.split(". ")
     )
-    assert "finalizer verifies it read-only" in prompt
     assert "finalizer owns one verified commit" not in prompt
     assert "finalizer alone may commit" not in prompt
-    assert "no intermediate commits" in prompt
+    assert "no intermediate commits" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -612,6 +678,25 @@ def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review(
     assert "irreconcilable requirements" in normalized
     assert "exact unapproved project-owned values" in normalized
     assert "Do not commit, push, approve, or merge" in prompt
+
+
+def test_worker_prompt_keeps_publication_with_runner_and_approval_with_humans() -> None:
+    prompt = build_worker_prompt(
+        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
+        project_id=310967,
+        issue_iid=12,
+        effective_worker_budget_seconds=1800,
+    ).casefold()
+
+    assert re.search(
+        r"\b(?:runner|controller)\b.{0,120}\bpublish(?:es)?\b.{0,50}\b(?:mr|merge request)\b",
+        prompt,
+    )
+    assert re.search(r"\bhuman(?:s)?\b.{0,80}\bapprove\b.{0,50}\bmerge\b", prompt)
+    assert not re.search(
+        r"\bhuman(?:s)?\b.{0,80}\b(?:approval|approve)\b.{0,50}\bbefore\b.{0,30}\b(?:publication|publishing)\b",
+        prompt,
+    )
 
 
 def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> None:

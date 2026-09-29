@@ -43,17 +43,20 @@ Green asks the trusted boundary to stage while still live. The controller
 scans the worktree, normalizes changed paths, stages only allowed files, and
 returns the tree ID. Green's path list cannot grant access. Green and Judge
 do not stage with Git or call the old validation CLI in a serial worker.
-Judge asks the trusted boundary to validate that exact tree and read its
-saved status. The result binds the unchanged tree and the
+Judge requests the trusted `candidate commit` for that exact tree and reads
+its saved status. The result binds the Green SHA, committed tree, and the
 `$nonfunctional-review` child result through an opaque proof ID. Readable
-JUnit provides counts, hashes, and time data. A successful hook with a missing
-or `OSError`-unreadable fixed JUnit file carries explicit timing `UNKNOWN`
-without invented times. It does not give private JUnit paths to the worker.
+JUnit provides counts, hashes, and time data. A successful serial Green hook
+with a missing or `OSError`-unreadable JUnit file carries explicit timing
+`UNKNOWN` without invented times. A valid readable JUnit file with an
+overflowing bounded advisory case summary also has timing `UNKNOWN`.
+Malformed, oversized, or invalid present JUnit data blocks review. A failed
+hook still fails. It does not give private JUnit paths to the worker.
 Interactive Judge evidence includes immutable JUnit snapshots, SHA-256
 digests, and counts for readable results, plus the child receipt.
 
 After a change, use the applicable staging boundary for a new tree. Get a
-fresh Judge receipt before review or finalization. Each coding candidate needs
-the full hook. Green uses fast format, lint, and type commands for repair.
-The trusted validation session owns one costly tox or full-suite check. It
-runs one hook.
+fresh serial Green commit and Judge receipt before review or finalization.
+Green uses fast format, lint, and type commands for repair. The trusted
+candidate commit runs one installed hook. There is no separate serial
+full-validation hook before that commit.

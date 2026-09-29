@@ -43,7 +43,7 @@ from agent_work.models import (
 from agent_work.repository import CommandResult
 from agent_work.timing_admission import TimingAdmissionLease
 from agent_work.upstream_finding import UpstreamFindingPreview
-from agent_work.worker import WorkerResultBrokerClientRequest
+from agent_work.worker import WorkerProtocolError, WorkerResultBrokerClientRequest
 
 
 def test_validation_window_preview_does_not_launch_child() -> None:
@@ -857,6 +857,143 @@ def test_candidate_cli_keeps_stage_preview_and_validation_failure(
         "tests.test_example::test_failure"
     ]
     assert calls == [("stage", None), ("validate", tree)]
+
+
+def test_candidate_commit_cli_previews_then_dispatches_exact_live_request(
+    tmp_path: Path,
+) -> None:
+    tree = "b" * 40
+    commit = "c" * 40
+    socket = tmp_path / "candidate.sock"
+    calls: list[tuple[Path, str, int, str, str | None]] = []
+    output: list[str] = []
+
+    def request(
+        path: Path,
+        identity: WorkerResultBrokerClientRequest,
+        *,
+        action: str,
+        candidate_tree: str | None,
+    ) -> dict[str, object]:
+        calls.append((path, identity.nonce, identity.issue_iid, action, candidate_tree))
+        return {
+            "candidate_tree": tree,
+            "state": "terminal-success",
+            "commit_sha": commit,
+            "committed_tree": tree,
+            "red_sha": "d" * 40,
+        }
+
+    assert (
+        main(
+            [
+                "candidate",
+                "commit",
+                "--issue-iid",
+                "81",
+                "--candidate-tree",
+                tree,
+                "--json",
+            ],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output.pop()) == {
+        "action": "commit",
+        "applied": False,
+        "candidate_tree": tree,
+        "issue_iid": 81,
+        "state": "preview",
+    }
+    assert calls == []
+    assert (
+        main(
+            [
+                "candidate",
+                "commit",
+                "--issue-iid",
+                "81",
+                "--candidate-tree",
+                tree,
+                "--candidate-socket",
+                str(socket),
+                "--broker-nonce",
+                "a" * 32,
+                "--apply",
+                "--json",
+            ],
+            candidate_request=request,
+            write_stdout=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output.pop())["commit_sha"] == commit
+    assert calls == [(socket, "a" * 32, 81, "commit", tree)]
+
+
+@pytest.mark.parametrize("missing", ("socket", "nonce"))
+def test_candidate_commit_cli_apply_requires_both_live_identity_fields(
+    tmp_path: Path, missing: str
+) -> None:
+    calls: list[object] = []
+    errors: list[str] = []
+    arguments = [
+        "candidate",
+        "commit",
+        "--issue-iid",
+        "81",
+        "--candidate-tree",
+        "b" * 40,
+    ]
+    if missing != "socket":
+        arguments.extend(("--candidate-socket", str(tmp_path / "candidate.sock")))
+    if missing != "nonce":
+        arguments.extend(("--broker-nonce", "a" * 32))
+    arguments.append("--apply")
+
+    assert (
+        main(
+            arguments,
+            candidate_request=lambda *_args, **_kwargs: calls.append(True) or {},
+            write_stderr=errors.append,
+        )
+        == 2
+    )
+    assert errors == ["--apply requires --candidate-socket and --broker-nonce"]
+    assert calls == []
+
+
+def test_candidate_commit_cli_reports_live_broker_rejection_as_failure(
+    tmp_path: Path,
+) -> None:
+    errors: list[str] = []
+
+    def reject(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise WorkerProtocolError("candidate_broker", "candidate changed")
+
+    assert (
+        main(
+            [
+                "candidate",
+                "commit",
+                "--issue-iid",
+                "81",
+                "--candidate-tree",
+                "b" * 40,
+                "--candidate-socket",
+                str(tmp_path / "candidate.sock"),
+                "--broker-nonce",
+                "a" * 32,
+                "--apply",
+            ],
+            candidate_request=reject,
+            write_stderr=errors.append,
+        )
+        == 1
+    )
+    assert len(errors) == 1 and "candidate changed" in errors[0]
 
 
 def test_candidate_cli_stateless_inventory_and_read_forward_exact_selector(

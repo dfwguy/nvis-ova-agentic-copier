@@ -103,6 +103,8 @@ agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
                            [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate commit --issue-iid IID --candidate-tree TREE
+                            [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate changed-paths --issue-iid IID --candidate-tree TREE
                                    [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate read --issue-iid IID --candidate-tree TREE
@@ -144,10 +146,11 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths; status checks the saved timing proof or retry result. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
+| `candidate commit` | Same identity and returned tree | The controller makes or replays the coding Green commit. Its installed hook validates that exact tree once; the response binds the commit, tree, and Red checkpoint. |
 | `candidate changed-paths` | Same identity and returned tree | Lists canonical changed paths and old and new file metadata from the controller. |
 | `candidate read` | Same identity and returned tree, changed path, side, offset, and length | Reads one bounded byte range from the exact old or new Git blob. |
-| `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
-| `candidate status` | Same identity and returned tree | Reads the durable result without rerunning the hook. |
+| `candidate validate` | Same identity and returned tree | Content and remediation work, and coding work with a pending target merge, run or return the durable staged-tree Judge result. |
+| `candidate status` | Same identity and returned tree | Those staged-tree routes read the durable result without rerunning the hook. Ordinary coding work replays `candidate commit` to recover its exact result. |
 | `migration preview` | None | Returns the planned migration actions. |
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
@@ -354,7 +357,7 @@ already verified labels. Callers, not the CLI boundary, must verify labels
 before supplying `--label`. It never assigns, approves, or merges an issue.
 `--json` returns the bounded publication result.
 
-### Candidate stage, read, validate, and status
+### Candidate stage, commit, read, validate, and status
 
 #### Opt-in worker read MCP primitive
 
@@ -460,44 +463,101 @@ commands in addition to its applicable checkpoint and worker-result
 boundaries. Each live request includes a nonce. A `stage` request has no model
 path list. The controller finds changed files, stages them outside the worker
 sandbox, and returns the tree ID and path count. `read` requires that tree ID.
+For ordinary coding work, `commit` uses that staged tree and the authentic Red
+checkpoint to make the sole Green commit before specialist review. The
+installed hook runs during that commit. A successful replay returns the same
+Green identity without another hook or commit. Reads require the exact Green
+head, ref, and tree. Content and remediation work keep staged-tree `validate`
+and `status`.
 Every read response binds `project_id`, `issue_iid`, `ledger_revision`,
 `source_branch`, `base_sha`, and `nonce` to the current request. In coding
-work, `read` follows successful `validate` or `status` for that tree. Content
-work reads after staging. A correction requires a new stage, applicable
-coding validation, and read.
+work, `read` follows the successful Green commit for that tree. For a pending
+target merge, it follows successful staged-tree validation. Content work reads
+after staging. A correction requires a new stage, applicable validation or
+commit, and fresh reads and reviews. Earlier receipts are stale.
 
 For an exact, authorized authored-candidate recovery, the original baseline
 supplies the old tree and publication path set. The controller requires that
 baseline to be an ancestor of the current source commit. Other candidates
-use the source commit as their base and require it to be the current head.
-The read response's `base_sha` names that actual base. The broker requires a
+without a pending target merge use the source commit as their read base and
+require it to be the current head.
+A pending target merge stages and validates against its saved Green source,
+but reads the joined tree against the exact target SHA. This shows the work
+being proposed to the target branch. The read response's `base_sha` names
+that review base. The broker requires a
 40-character lowercase hexadecimal SHA and the same value across reads.
 
 `candidate changed-paths` returns `candidate_tree`, `base_tree`, sorted
 `changed_paths`, and `files`. Each file entry has its `path` and old and new
 mode, OID, and byte size; an absent side of an addition or deletion has null
 metadata. A mode is `100644` or `100755`.
+In ordinary serial coding work, this inventory also has `commit_sha` and
+`committed_tree` for the verified Green commit.
 
 `candidate read --path PATH --side old|new --offset N --length N` returns one
 range from an existing side. The offset is nonnegative and the requested
 length is 1 to 131072 bytes. The response gives `candidate_tree`, `base_tree`,
 `path`, `side`, `offset`, `length`, `oid`, `size`, and `data_base64`. The returned
-length equals the requested length. Reads can precede inventory, overlap,
+length equals the requested length. In ordinary serial coding work, the response also
+has `commit_sha` and `committed_tree`; the latter equals the requested
+`candidate_tree`. The controller verifies the Green commit, tree, and
+immutable Red ref before returning those fields. Pending reconciliation,
+content, and remediation reads keep the existing fields. Reads can precede
+inventory, overlap,
 repeat, or arrive in any order. The controller checks the exact issue,
 repository, base, tree, changed path, blob, and requested range on every call.
 There is no cursor, manifest state, completion call, recovery token, or local
 durable read receipt. A missing, rejected, or stale read cannot support
 finalization.
 
-In coding work, `validate` requires the tree ID and runs the Validation Judge
-while the producer is active. Judge checks the tree's license, then runs the
-shared cheap gate. Both checks finish before the full hook starts. A failed
-check or tree drift stops before JUnit cleanup or a hook run. The producer can
-fix the files and stage a new tree. A failed full-hook result returns safe test
-names and JUnit digests when available. `status` reads a saved result without
-another hook run. Saved `validate` and `status` results return an opaque evidence ID, test
-counts, digests, and hook time when available. For success, JUnit also gives
-total test time and the three slowest safe test names per Python version. Each
+In ordinary coding work, `commit` requires the tree ID and runs the installed hook
+while the producer is active. A failed hook or tree drift stops the commit.
+The producer can fix the files and stage a new tree. A successful response
+has `candidate_tree`, `committed_tree`, `commit_sha`, `red_sha`, `red_ref`,
+`state="terminal-success"`, and `timing_status`. `red_ref` names the immutable
+Red commit ref under
+`refs/agent-work/red-commits/`; the retained checkpoint has a separate ref
+under `refs/agent-work/red-checkpoints/`. The response also carries bounded
+`junit_timings` when available. A missing or `OSError`-unreadable fixed JUnit
+file reports timing `UNKNOWN`. A present malformed or oversized JUnit file
+rejects the candidate. A valid file with more advisory slow cases than the
+bounded response can carry reports timing `UNKNOWN`, without a timing pass. The
+[testing strategy](testing-strategy.md#local-case-timing) defines the timing
+gate; the commit response alone does not establish a timing pass.
+
+Replaying the same commit verifies its identity without rerunning the hook.
+After the worker exits, the controller checks the Green SHA, tree, and changed
+files again before publication. It does not make another commit.
+
+#### Pending target reconciliation
+
+If the target advances after the Green commit and before the first merge
+request, the pending coding merge keeps the exact Green source and target
+identities. `candidate commit` rejects this state. The worker stages the
+combined tree, uses `candidate validate` or `candidate status`, and reads that
+same tree for review. The validation response includes `source_sha` and
+`target_sha`. The controller rechecks the retained Red and Green refs, pending
+merge head, current target, and reviewed tree before publication. It records
+one `reconcile_commit` intent with those identities, then makes an ordered
+two-parent commit with Green first and target second. The installed hook runs
+on that commit. The controller verifies its parents, tree, clean worktree,
+and refs before pushing its SHA. A changed source, target, tree, or ref needs
+fresh validation and review.
+
+If the target moves again after that commit but before push, the controller
+blocks the handoff. It keeps the original Green source and the saved merge
+proof. It does not push, reset the worktree, or start another pending merge.
+Recovery needs a new merge with the exact current target and a fresh review
+of the joined tree.
+
+#### Legacy staged-tree validation and paired timing
+
+Staged-tree `validate` and `status` remain available for content and
+remediation. The paired baseline/candidate timing rules below apply only when
+that legacy path requests serial timing. They do not describe the ordinary
+coding Green commit. Saved staged-tree results return an opaque evidence ID,
+test counts, digests, and hook time when available. For success, JUnit also gives total
+test time and the three slowest safe test names per Python version. Each
 supported version also has `over_100ms_cases`, a complete trusted list of safe
 case names and durations strictly greater than 0.100 s, and `timing_complete`.
 An unsafe JUnit parameter appears as a stable `[param_<hash>]` suffix on its
@@ -505,13 +565,11 @@ safe base test name. The hash has 64 lowercase SHA-256 hex digits. Each suffix
 identifies a distinct case. Match the emitted ID with its Python environment.
 It hashes the raw JUnit class and case name. An unsafe class name, malformed
 case name, or duplicate emitted ID makes `timing_complete` false. Do not
-request the raw parameter text.
-If either field is missing or `timing_complete` is false, the timing proof is
-incomplete and non-functional review rejects it when JUnit is available. The
-three slowest names do not replace the complete list. These summaries remain
-in the saved record for later status reads. They contain no controller state or
-JUnit file path. After the worker exits, the controller checks the tree and
-changed files again before publication. It keeps no extra authorization ledger.
+request the raw parameter text. If either field is missing or
+`timing_complete` is false, the timing proof is incomplete and non-functional
+review rejects it when JUnit is available. The three slowest names do not
+replace the complete list. These summaries remain in the saved record for
+later status reads. They contain no controller state or JUnit file path.
 
 After the full hook exits `0`, a missing fixed `py311` or `py314` JUnit file
 or a read `OSError` yields terminal success with `timing_status="unknown"` and
@@ -522,64 +580,53 @@ and review continue. Timing `UNKNOWN` needs no timing-only recovery. Usable
 JUnit evidence keeps the existing complete record shape. Malformed or oversized
 XML, invalid counts, and hook failure remain failures.
 
-For complete timing, serial timing review also requires trusted full-suite
-baseline and candidate proof for both `py311` and `py314`, bound to their exact
-source trees. The trusted controller privately checks complete case inventories
-and matching prepared environments, commands, and seeds. On that path, it
-rejects missing, partial, or mismatched proof. The worker receives bounded
-proof identities, an outcome, up to 128 deterministic findings, an
-`omitted_findings` count, and the candidate's complete list of cases above
-0.100 s. Every candidate finding at or above 1.000 s is retained before any
-subsecond finding. If more than 128 such findings exist, validation fails closed
-with the stable artifact reason
-`finding_budget_exhausted` and retains the full-suite JUnit snapshots. The
-private transcript keeps the full JUnit inventories and the same omission
-count. Focused checks run only for slow cases affected by the diff. Unaffected
-existing cases above 0.100 s stay in the full candidate inventory. Those at
-or above 1.000 s get an `inherited_slow` report-only finding; subsecond cases
-get no individual finding. Neither group gets focused repeats or automatic
-correction. Cases that need focused checks are grouped by
-Python version, with at most 32 case selectors per invocation. New cases above
-0.100 s need one candidate check. Affected existing cases are changed tests or
-cases explicitly mapped as consumers of changed fixtures in
-`tests/**/conftest.py`. An affected case gets two checks per tree if the
-candidate takes at least 1.000 s. The baseline must be below 1.000 s, or
-the candidate must be slower. A
-changed `.py` file outside both `tests/` and `template/tests/` also marks
-each case that meets this rule as affected.
-Focused checks share a limit of 32 invocations and
-900 seconds across the review. If either limit is exhausted, validation
-reports the stable artifact reason
-`focused_budget_exhausted` and keeps the saved full-suite JUnit snapshots.
-When `omitted_findings` is positive, the worker reviews the omitted subsecond
-cases in the complete candidate list above 0.100 s with the outcome. The
-private transcript remains the controller's source-bound proof for the full
-inventories and omission count.
-The outcome is `clear` when there are no findings, `report_only` for findings
-that need review but no correction, or `correction_required` when a new slow
-or corroborated regressed case needs correction. A `touched_slow` finding
-alone is report-only. An `inherited_variance` finding reports a corroborated
-increase below 1 second in an existing slow case without a changed test or
-mapped helper. The Non-functional Reviewer must confirm no causal impact
-before it can proceed.
+For paired staged-tree diagnosis, the controller compares full-suite baseline
+and candidate JUnit inventories for `py311` and `py314`, bound to exact trees.
+Supplied proof must have matching environments, commands, and seeds. If paired
+proof is supplied, missing parts, malformed data, or mismatches cause
+rejection. With valid candidate JUnit and no paired comparator,
+baseline-relative timing is `UNKNOWN` and does not block the ordinary handoff.
+In that state, validation and saved status keep `timing_status="complete"` for
+the candidate JUnit and return `timing_comparison_status="unknown"` with
+`timing_comparison_reason="baseline_unavailable"`. They have no
+`timing_review` transcript. These fields do not claim a comparison pass.
+Complete paired proof retains the existing `timing_review` result.
+
+The worker receives bounded proof identities, an outcome, up to 128 findings,
+an `omitted_findings` count, and the full candidate list above 0.100 s. The
+private transcript keeps both complete inventories. Findings for new cases
+strictly above 1.000 s and directly changed tests strictly above 1.000 s take
+priority in the 128 slots. If more than 128 such findings exist, validation
+fails with `finding_budget_exhausted`. The controller may omit report-only
+findings and record their count without blocking on that omission.
+
+Focused checks diagnose only new cases above 1.000 s and regressions in
+directly changed tests. They add setup, call, and teardown deltas when proof is
+available. Each invocation has at most 32 case selectors; the paired review
+allows at most 32 invocations and 900 seconds. A required focused run that
+exceeds its budget reports `focused_budget_exhausted`. Report-only diagnosis
+does not require focused repeats and cannot exhaust that budget. Unchanged
+cases linked to changed fixtures, helpers, or production code stay report-only,
+even when the paired run shows a slowdown.
+
+The outcome is `clear` with no findings, `report_only` when findings need no
+correction, or `correction_required` for a new or directly changed test
+strictly above 1.000 s. Cases above 0.100 s remain advice. The full candidate
+JUnit and test diff set the ordinary gate; paired deltas do not add one.
+
 While the original terminal timing failure is current, `candidate validate`
 and `candidate status` report its safe `timing_failure_code` and bind it to the
 evidence ID. Once a retry starts, status reports the retry state. It includes
 a code only if that retry ends in a timing failure.
 
-The reviewer records a touched case above 0.100 s for its test owner. It
-needs correction only if repeats corroborate a regression. For every
-candidate case at or above 1.000 s, the reviewer checks
-the controller's finding and records its classification, owner, and reduction
-or exception plan in the durable audit or linked issue record, even if another
-finding already needs correction. For those affected existing cases, focused
-repeats run per tree and Python version under matching conditions. The
-controller batches up to 32 cases per repeat. The `corroborated_regression`
-or `uncorroborated_spike` finding from each repeated case reports setup,
-call, and teardown deltas. `corroborated_regression` requires correction;
-`uncorroborated_spike` is report-only.
-Missing or mismatched repeat proof blocks a decision that depends on it. One
-slow observation alone does not establish a regression.
+The reviewer records cases above 0.100 s for an owner and separate
+follow-up. For each candidate case at or above 1.000 s, record its class,
+owner, and reduction or exception plan in the durable audit or linked issue.
+A directly changed case above 1.000 s needs correction under the ordinary
+gate. An unchanged case remains report-only, even if its paired delta is
+corroborated. Focused phase deltas help find a cause; one slow observation does
+not prove a regression. An absent paired comparison does not waive the valid
+candidate JUnit gate.
 
 The socket has a private directory and a fixed deadline. A read permits at
 most 128 paths, 2 MiB per Git blob, and 16 MiB of combined old and new
@@ -622,7 +669,9 @@ verdict, or a specific not-applicable reason when copied facts did not change.
 There is no new workflow receipt slot. A missing, failed, or stale expected
 read blocks finalization; it is not a not-applicable result. Content
 finalization requires the read tree to match the current candidate. Coding
-also requires a trusted successful Validation Judge result for that tree.
+requires the current Green SHA and tree, successful hook proof, and reviews
+bound to that same commit. A restart recovers identity from Git and GitLab;
+it does not restore role receipts from a session summary.
 
 Without `--apply`, each candidate command previews its action on standard
 output and does not contact the socket. Applied `changed-paths` and `read`
@@ -1350,9 +1399,9 @@ Use this note to review the shown work.
 | New work | Uses `WORKFLOW`. |
 | Approved design | Architect gives it to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
 | Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
-| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. In serial work, Green requests controller staging through the private candidate socket and receives one tree ID for coding Judge validation, then Consistency Judge's read. In interactive work, Main stages their combined work and records its tree ID. |
+| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. Ordinary serial coding requests controller staging and the Green commit through the private candidate socket. A pending target merge validates its joined staged tree before the ordered two-parent commit. In interactive work, Main stages the combined work and records its tree ID. |
 | Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
-| Before specialist review | The Judge's unchanged tree OID is needed. Complete timing also needs supported-version JUnit digests and counts. A successful hook with missing or `OSError`-unreadable fixed JUnit evidence instead carries trusted timing `UNKNOWN` for that exact tree, without JUnit proof; specialist review continues without a timing pass. Malformed, oversized, invalid-count, or mismatched readable proof still blocks review. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. After successful coding validation, Consistency Judge uses the controller-owned read when copied facts changed. |
+| Before specialist review | Ordinary serial coding requires the verified Green SHA and committed tree. A pending target merge instead uses the validated joined tree and exact source and target identities. Each applicable specialist, including `$license-checker`, reviews that same candidate. Consistency Judge uses controller-owned reads when copied facts changed. |
 | Findings | Green combines all initial findings. |
 | Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
 | Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |
@@ -1765,7 +1814,7 @@ text.
 | Target-only protected-policy change | A protected-policy change that arrived only on the target branch during reconciliation is not issue-owned. |
 | Issue-owned protected-policy change | An issue-owned protected change, or a resolved merge whose final tree differs from that target, still needs protected-policy evidence. |
 | Merge-identity outcome | The repository boundary rejects an unresolved, mismatched, or ambiguous merge identity before publication. Identity ambiguity or drift remains `publication_identity_mismatch`. |
-| Installed pre-commit rejection | Standard pre-commit output must identify at least one failed installed hook. The controller then proves the exact issue, branch, retained worktree, unchanged `HEAD`, publication baseline, pending-merge identity, staged Git tree, and retained changes before recording `publication_commit_rejected`. A hook may fix an unstaged working file only when the staged tree remains exact. The controller records an immutable durable correction identity that is independent of the current `error_code` and transition intent. It binds the exact worktree, branch, `HEAD`, merge state, read-only staged-index fingerprint, staged and unstaged paths, selected workflow lane, and the exact coding Red checkpoint. Content work binds no Red checkpoint. Worker exit, worker-protocol, and retry failures retain this identity. Each controller-authored snapshot is immutable; after an authorized worker attempt the controller may replace it only with the next fully observed exact snapshot. The controller clears the intent, `publication_sha`, old merge request draft, completed worker result, historical receipts, and final audit, then returns the record to `WORKFLOW` for fresh correction. Coding must load the exact retained Red checkpoint. Both lanes must return fresh bounded worker intent, and the controller verifies their applicable program-owned evidence. Both lanes must produce a fresh merge request draft; an unknown lane, or missing or mismatched coding Red evidence, blocks before worker invocation. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. The rejection route does not push, create or update a merge request, or project a blocked state. Signing, identity, configuration, lock, file-system, object-database, and unknown commit failures fail closed. |
+| Installed pre-commit rejection | This publication recovery path applies to content and remediation commits, plus retained older coding candidates. New ordinary serial coding work commits with its installed hook before specialist review. For a publication commit rejection, standard pre-commit output must identify at least one failed installed hook. The controller then proves the exact issue, branch, retained worktree, unchanged `HEAD`, publication baseline, pending-merge identity, staged Git tree, and retained changes before recording `publication_commit_rejected`. A hook may fix an unstaged working file only when the staged tree remains exact. The controller records an immutable durable correction identity that is independent of the current `error_code` and transition intent. It binds the exact worktree, branch, `HEAD`, merge state, read-only staged-index fingerprint, staged and unstaged paths, selected workflow lane, and the exact coding Red checkpoint. Content work binds no Red checkpoint. Worker exit, worker-protocol, and retry failures retain this identity. Each controller-authored snapshot is immutable; after an authorized worker attempt the controller may replace it only with the next fully observed exact snapshot. The controller clears the intent, `publication_sha`, old merge request draft, completed worker result, historical receipts, and final audit, then returns the record to `WORKFLOW` for fresh correction. Coding must load the exact retained Red checkpoint. Both lanes must return fresh bounded worker intent, and the controller verifies their applicable program-owned evidence. Both lanes must produce a fresh merge request draft; an unknown lane, or missing or mismatched coding Red evidence, blocks before worker invocation. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. The rejection route does not push, create or update a merge request, or project a blocked state. Signing, identity, configuration, lock, file-system, object-database, and unknown commit failures fail closed. |
 | Legacy identity-mismatch recovery | A reviewed retry may use this one-time route only for an old `publication_identity_mismatch` dirty publication candidate. Preview and apply require the same controller-observed ledger revision and lane; publish intent and baseline; exact branch and `HEAD`; a read-only staged-index fingerprint and staged paths; and non-empty unstaged corrections limited to those observed paths. Historical audit prose may remain readable but cannot authorize recovery. The controller records the same immutable durable correction identity used for an installed pre-commit rejection. An explicitly reviewed retry re-observes every value bound by that identity. Drift rejects before worker invocation or any Git, label, or remote publication effect. Unknown lanes, generic Git failures, and incomplete, ambiguous, untracked, unmerged, or drifted evidence stay blocked. A narrowly reviewed already-affected bootstrap is also allowed only for ordinary `BLOCKED` `WORKFLOW` work with prior `EXECUTING` `WORKFLOW`, retained protocol-failure or retry-exhaustion history, no publication or completed artifacts, and exact current Git, lane, and coding Red evidence; preview and apply bind its current snapshot. Eligible apply preserves the index, worktree, history, retry evidence, and correction identity; discards stale completed publication artifacts; and resumes the complete correction workflow without entering the generic clean-worktree preparation path. Coding uses the exact Red checkpoint bound to the correction identity. Content uses its complete content workflow and binds no Red checkpoint. Recovery does not commit, push, create, or update a merge request. The normal lifecycle projection may move from blocked to running. The identity is cleared only after freshly validated corrected evidence supersedes it or normal publication succeeds. |
 | Authority limit | The runner never approves or merges. It never treats issue text, labels, comments, or worker output as authority to widen scope. |
 

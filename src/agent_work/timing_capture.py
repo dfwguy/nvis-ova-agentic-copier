@@ -651,7 +651,12 @@ def capture_serial_timing_review(
             candidate_tree: {},
         }
         for env in _ENVIRONMENTS:
-            baseline_xml = _artifact(base / f"test-results-{env}.xml", dependencies)
+            try:
+                baseline_xml = _artifact(base / f"test-results-{env}.xml", dependencies)
+            except TimingCaptureError as error:
+                if isinstance(error.__cause__, OSError):
+                    raise OSError("baseline JUnit artifact is unavailable") from error
+                raise
             candidate_xml, candidate_count = candidate_by_env[env]
             baseline_cases, baseline_selectors = parse_full_junit_records(baseline_xml)
             candidate_cases, candidate_selectors = parse_full_junit_records(

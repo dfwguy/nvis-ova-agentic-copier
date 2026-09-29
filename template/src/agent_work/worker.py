@@ -184,7 +184,7 @@ class WorkerResultBrokerClientRequest:
     issue_iid: int
 
 
-CandidateOperation = Literal["stage", "read", "validate", "status", "review"]
+CandidateOperation = Literal["stage", "read", "validate", "commit", "status", "review"]
 
 
 class WorkerResultBrokerFactory(Protocol):
@@ -495,7 +495,15 @@ class CandidateBrokerSession:
                             "candidate_broker", "request identity mismatch"
                         )
                     if (
-                        action not in {"stage", "read", "validate", "status", "review"}
+                        action
+                        not in {
+                            "stage",
+                            "read",
+                            "validate",
+                            "commit",
+                            "status",
+                            "review",
+                        }
                         or (action not in {"read", "review"} and selector is not None)
                         or (action == "stage" and supplied_tree is not None)
                         or (
@@ -644,13 +652,13 @@ class CandidateBrokerSession:
                             raise WorkerProtocolError(
                                 "candidate_broker", "malformed candidate read"
                             )
-                    if action in {"validate", "status"}:
+                    if action in {"validate", "commit", "status"}:
                         self._candidate = (
                             candidate
                             if outcome.get("state") == "terminal-success"
                             else None
                         )
-                        if action == "validate":
+                        if action in {"validate", "commit"}:
                             self._validated_tree = self._candidate
                     response_identity: dict[str, object] = {
                         "accepted": True,
@@ -1775,6 +1783,11 @@ def build_worker_result(
             and record.pending_feedback is None
             and record.correction_identity is None
         )
+        reconciled_green_candidate = (
+            initial_ordinary_candidate
+            and record.main_sha is not None
+            and red_checkpoint.base_sha != record.source_sha
+        )
         if (
             red_checkpoint.project_id != record.project_id
             or red_checkpoint.issue_iid != record.issue_iid
@@ -1782,6 +1795,7 @@ def build_worker_result(
             or not expected_paths
             or (
                 initial_ordinary_candidate
+                and not reconciled_green_candidate
                 and (
                     red_checkpoint.base_sha != record.source_sha
                     or not expected_paths.issubset(changed_paths)
@@ -2331,7 +2345,7 @@ def build_worker_prompt(
             "administration and verifies the exact retained identity before review or publication. "
             "For existing-MR feedback repair, retain the exact retained Red-to-source provenance "
             "separately from fresh three-way reconciliation proof; never substitute one for the other. "
-            "Human approval remains required before publication or merge. "
+            "The trusted controller publishes the validated merge request. Humans alone approve and merge it. "
             "After the trusted coding checkpoint is present, Architect remains live. It resolves optional "
             "applicability, delegates conditional $agent-policy-writer, receives its receipt or N/A, "
             "then delegates Green and Diátaxis Writer concurrently. The Policy Writer exclusively owns policy paths. "
@@ -2355,7 +2369,7 @@ def build_worker_prompt(
             "Green runs evidence-based correction cycles while material progress exists; repeated or reopened fingerprint, unchanged relevant evidence, scope, authority, or controversy stops correction. "
             "Green returns all receipts and "
             "unresolved findings to the still-live Architect. Architect decides finalization, revision, or needs_human. "
-            "Use staged-tree identities and no intermediate commits. The serial Finalizer never commits; the trusted runner retains its normal controller commit path. In normal interactive work, Judge requests one normal Green commit through the trusted boundary and Finalizer verifies it read-only. "
+            "For ordinary coding, create the trusted Green commit before reviews; the serial Finalizer verifies that committed source read-only. "
             "Content-only work uses a sole Documentation Writer, controller stage/read, applicable reviews, "
             "and Documentation Finalizer without Red or code judges. "
         )
@@ -2380,9 +2394,12 @@ def build_worker_prompt(
             f"`{worker_command} candidate stage --issue-iid {issue_iid} "
             "--candidate-socket PATH --broker-nonce "
             f"{worker_result_broker.nonce} --apply --json` while you are active. "
-            "For coding, first use `candidate validate --candidate-tree TREE` with the same "
-            "issue, socket, nonce, --apply, and --json arguments to run the trusted Judge hook; "
-            "use `candidate status --candidate-tree TREE` for durable Judge status. "
+            "For ordinary coding, first use `candidate commit --candidate-tree TREE` "
+            "with the same issue, socket, nonce, --apply, and --json arguments to "
+            "create the trusted Green commit and Judge proof. For a pending merge, "
+            "use `candidate validate --candidate-tree TREE` to validate the joined "
+            "tree without consuming MERGE_HEAD. For that pending merge, use "
+            "`candidate status --candidate-tree TREE` for durable Judge status. "
             "After successful coding validation, or directly after content staging, use "
             "`candidate changed-paths --candidate-tree TREE` with those same arguments; "
             "the MCP tool is `candidate_changed_paths`. "

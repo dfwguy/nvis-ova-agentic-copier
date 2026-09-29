@@ -87,6 +87,10 @@ class RepositoryTransientError(RepositoryError):
     """A Git transport operation may be retried safely."""
 
 
+class ReconciliationTargetChanged(RepositoryError):
+    """The reviewed two-parent merge no longer targets current default."""
+
+
 class PublicationFailureCategory(str, Enum):
     """Safe categories for failed Git publication."""
 
@@ -1276,9 +1280,14 @@ class GitRepository:
                 path = isolated_worktree / f"test-results-{environment}.xml"
                 try:
                     with path.open("rb") as artifact:
-                        cases = parse_full_junit_inventory(artifact.read(1_048_577))
-                except (OSError, ValueError):
+                        junit_bytes = artifact.read(1_048_577)
+                        if len(junit_bytes) > 1_048_576:
+                            raise RepositoryError("present JUnit proof is oversized")
+                        cases = parse_full_junit_inventory(junit_bytes)
+                except OSError:
                     return IsolatedGreenCommit(commit, "unknown", ())
+                except ValueError as error:
+                    raise RepositoryError("present JUnit proof is invalid") from error
                 slow_cases = [
                     {"name": name, "seconds": seconds}
                     for name, seconds in sorted(cases.items())
@@ -1292,6 +1301,8 @@ class GitRepository:
                 summaries.append(
                     {
                         "environment": environment,
+                        "sha256": sha256(junit_bytes).hexdigest(),
+                        "test_count": len(cases),
                         "timing_complete": True,
                         "over_100ms_cases": slow_cases,
                     }
@@ -1394,6 +1405,16 @@ class GitRepository:
             ),
             cas_ref=cas_ref,
         )
+
+    def committed_candidate_read_base(
+        self, worktree: Path, baseline_sha: str, green_sha: str, red_sha: str
+    ) -> str:
+        """Keep reviews anchored to the original base after Green moves HEAD."""
+        if self.single_parent(worktree, green_sha) != red_sha or not self._is_ancestor(
+            baseline_sha, green_sha, worktree
+        ):
+            raise RepositoryError("committed candidate ancestry changed")
+        return baseline_sha
 
     def write_red_checkpoint_ref(
         self, worktree: Path, evidence: RedCheckpointEvidence
@@ -1671,11 +1692,11 @@ class GitRepository:
     ) -> dict[str, object]:
         """Describe the exact changed Git objects without reading their blobs."""
         if (
-            self.head(worktree) != base_sha
-            and not (
-                allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+            not self._candidate_read_base_is_exact(
+                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
             )
-        ) or self._git("write-tree", cwd=worktree) != candidate_tree:
+            or self._git("write-tree", cwd=worktree) != candidate_tree
+        ):
             raise RepositoryError("candidate changed")
         base_tree = self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
@@ -1725,11 +1746,11 @@ class GitRepository:
                 }
             )
         if (
-            self.head(worktree) != base_sha
-            and not (
-                allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+            not self._candidate_read_base_is_exact(
+                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
             )
-        ) or self._git("write-tree", cwd=worktree) != candidate_tree:
+            or self._git("write-tree", cwd=worktree) != candidate_tree
+        ):
             raise RepositoryError("candidate changed")
         return {
             "candidate_tree": candidate_tree,
@@ -1766,11 +1787,11 @@ class GitRepository:
         if "\\" in path or "\0" in path:
             raise RepositoryError("candidate read path is invalid")
         if (
-            self.head(worktree) != base_sha
-            and not (
-                allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+            not self._candidate_read_base_is_exact(
+                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
             )
-        ) or self._git("write-tree", cwd=worktree) != candidate_tree:
+            or self._git("write-tree", cwd=worktree) != candidate_tree
+        ):
             raise RepositoryError("candidate changed")
         base_tree = self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
@@ -1796,9 +1817,8 @@ class GitRepository:
         if (
             len(blob) != size
             or b"\0" in blob
-            or self.head(worktree) != base_sha
-            and not (
-                allow_base_ancestor and self._is_ancestor(base_sha, "HEAD", worktree)
+            or not self._candidate_read_base_is_exact(
+                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
             )
             or self._git("write-tree", cwd=worktree) != candidate_tree
         ):
@@ -1821,6 +1841,18 @@ class GitRepository:
                     "ascii"
                 ),
             }
+        )
+
+    def _candidate_read_base_is_exact(
+        self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool
+    ) -> bool:
+        """Authorize HEAD ancestry or the exact pending target as a read base."""
+        if self.head(worktree) == base_sha:
+            return True
+        if not allow_base_ancestor:
+            return False
+        return self._is_ancestor(base_sha, "HEAD", worktree) or (
+            self._merge_head(worktree) == base_sha
         )
 
     def judge_candidate(
@@ -1990,6 +2022,24 @@ class GitRepository:
             raise RepositoryError("candidate timing failure code is invalid")
         timing_status = report.get("timing_status")
         timing_unknown = report.get("timing_unknown")
+        comparison_status = report.get("timing_comparison_status")
+        comparison_reason = report.get("timing_comparison_reason")
+        comparison_unknown = comparison_status == "unknown"
+        if comparison_unknown:
+            if (
+                comparison_reason != "baseline_unavailable"
+                or not timing_review_required
+                or state != "terminal-success"
+                or report.get("exit_code") != 0
+                or timing_status != "complete"
+                or timing_unknown is not None
+                or report.get("timing_review") is not None
+                or {item["environment"] for item in safe_artifacts}
+                != {"py311", "py314"}
+            ):
+                raise RepositoryError("candidate timing comparison is invalid")
+        elif comparison_status is not None or comparison_reason is not None:
+            raise RepositoryError("candidate timing comparison is invalid")
         if timing_status is not None and timing_status not in (
             "complete",
             "unknown",
@@ -2025,6 +2075,7 @@ class GitRepository:
             timing_review_required
             and state == "terminal-success"
             and timing_status != "unknown"
+            and not comparison_unknown
         ):
             if (
                 not isinstance(timing_review, dict)
@@ -2096,6 +2147,7 @@ class GitRepository:
                     or reason
                     not in {
                         "new_slow",
+                        "new_advisory",
                         "touched_slow",
                         "inherited_slow",
                         "corroborated_regression",
@@ -2126,9 +2178,30 @@ class GitRepository:
                 )
             if len(json.dumps(safe_findings, separators=(",", ":")).encode()) > 65_536:
                 raise RepositoryError("candidate timing proof is invalid")
-            corrective = {"new_slow", "corroborated_regression"}
+
+            def changed_test(finding: dict[str, object]) -> bool:
+                name = str(finding["name"])
+                return any(
+                    re.fullmatch(
+                        r"tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py",
+                        path,
+                    )
+                    is not None
+                    and name.startswith(f"{path}::")
+                    for path in changed_paths
+                )
+
             has_correction = any(
-                finding["reason"] in corrective for finding in safe_findings
+                finding["reason"] == "new_slow"
+                or finding["reason"] in {"corroborated_regression", "touched_slow"}
+                and changed_test(finding)
+                for finding in safe_findings
+            )
+            has_required_correction = any(
+                finding["reason"] == "new_slow"
+                or finding["reason"] == "corroborated_regression"
+                and changed_test(finding)
+                for finding in safe_findings
             )
             if (
                 timing_review["outcome"] == "clear"
@@ -2136,7 +2209,7 @@ class GitRepository:
                 or timing_review["outcome"] == "correction_required"
                 and not has_correction
                 or timing_review["outcome"] == "report_only"
-                and (not (safe_findings or omitted_findings) or has_correction)
+                and (not (safe_findings or omitted_findings) or has_required_correction)
             ):
                 raise RepositoryError("candidate timing proof is invalid")
             safe_timing_review = {
@@ -2263,6 +2336,12 @@ class GitRepository:
                     "over_100ms_cases": safe_over_100ms,
                 }
             )
+        if comparison_unknown and (
+            {item["environment"] for item in safe_timings} != {"py311", "py314"}
+            or len(safe_timings) != 2
+            or not all(item["timing_complete"] is True for item in safe_timings)
+        ):
+            raise RepositoryError("candidate timing comparison is invalid")
         if (
             (
                 self.head(worktree) != base_sha
@@ -2298,6 +2377,8 @@ class GitRepository:
                 "timing_review",
                 "timing_status",
                 "timing_unknown",
+                "timing_comparison_status",
+                "timing_comparison_reason",
                 "artifact_failure",
             )
         }
@@ -2322,6 +2403,8 @@ class GitRepository:
             "timing_review": safe_timing_review,
             "timing_status": timing_status,
             "timing_unknown": timing_unknown,
+            "timing_comparison_status": comparison_status,
+            "timing_comparison_reason": comparison_reason,
             "artifact_failure": safe_failure,
             **(
                 {"timing_failure_code": timing_failure_code}
@@ -2415,10 +2498,17 @@ class GitRepository:
         )
 
     def reconcile_default_branch(
-        self, worktree: Path, branch: str, expected_head: str
+        self,
+        worktree: Path,
+        branch: str,
+        expected_head: str,
+        *,
+        expected_default_sha: str | None = None,
     ) -> str | None:
         """Start or recover the exact merge needed to include current default."""
         default_sha = self.observe_current_default(worktree, branch, expected_head)
+        if expected_default_sha is not None and default_sha != expected_default_sha:
+            raise ReconciliationTargetChanged("reconciliation target changed")
         merge_head = self._merge_head(worktree)
         if merge_head:
             if not self._is_ancestor(merge_head, default_sha, worktree):
@@ -2522,6 +2612,86 @@ class GitRepository:
         if parents != expected_parents:
             raise RepositoryError("prepared publication merge parents are not exact")
         return prepared
+
+    def prepare_reconcile_commit(
+        self,
+        worktree: Path,
+        branch: str,
+        source_sha: str,
+        target_sha: str,
+        candidate_tree: str,
+        red_ref: str,
+        green_ref: str,
+    ) -> str:
+        """Commit one reviewed pending merge with source and target in order."""
+        self._git(
+            "fetch", "origin", self.config.default_branch, cwd=worktree, transient=True
+        )
+        if self._git("branch", "--show-current", cwd=worktree) != branch:
+            raise RepositoryError("reconciliation branch changed")
+        if (
+            self._git("rev-parse", f"origin/{self.config.default_branch}", cwd=worktree)
+            != target_sha
+        ):
+            raise ReconciliationTargetChanged("reconciliation target changed")
+        head = self.head(worktree)
+        if head == source_sha:
+            if (
+                self._merge_head(worktree) != target_sha
+                or self._git("ls-files", "--unmerged", cwd=worktree)
+                or self._git("write-tree", cwd=worktree) != candidate_tree
+                or self._git("diff", "--name-only", cwd=worktree)
+                or any(
+                    line.startswith("?? ")
+                    for line in self._git(
+                        "status", "--porcelain", cwd=worktree, preserve_output=True
+                    ).splitlines()
+                )
+            ):
+                raise RepositoryError("reviewed reconciliation candidate changed")
+            red_sha = self._git("rev-parse", red_ref, cwd=worktree)
+            if (
+                self._git("rev-parse", green_ref, cwd=worktree) != source_sha
+                or self._git("show", "-s", "--format=%P", source_sha, cwd=worktree)
+                != red_sha
+            ):
+                raise RepositoryError("retained Red or Green identity changed")
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "commit",
+                    "-m",
+                    f"Resolve issue #{branch.removeprefix('agent/issue-')}",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                raise RepositoryError("installed hook rejected reconciliation commit")
+            head = self.head(worktree)
+        if (
+            self._git("rev-list", "--parents", "-n", "1", head, cwd=worktree).split()
+            != [head, source_sha, target_sha]
+            or self._git("show", "-s", "--format=%T", head, cwd=worktree)
+            != candidate_tree
+            or self._merge_head(worktree) is not None
+            or self.has_changes(worktree)
+            or self._git("rev-parse", red_ref, cwd=worktree)
+            != self._git("show", "-s", "--format=%P", source_sha, cwd=worktree)
+            or self._git("rev-parse", green_ref, cwd=worktree) != source_sha
+        ):
+            raise RepositoryError("reconciliation commit identity changed")
+        self._git(
+            "fetch", "origin", self.config.default_branch, cwd=worktree, transient=True
+        )
+        if (
+            self._git("rev-parse", f"origin/{self.config.default_branch}", cwd=worktree)
+            != target_sha
+        ):
+            raise ReconciliationTargetChanged("reconciliation target changed")
+        return head
 
     def push_prepared(self, worktree: Path, branch: str, publication_sha: str) -> str:
         """Push only the exact durable prepared commit."""

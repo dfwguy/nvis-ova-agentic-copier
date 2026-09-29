@@ -28,8 +28,9 @@ During normal interactive Green finalization, invoke
 for the exact Green commit, tree, retained Red ancestry and ref, and clean
 state. Never stage, commit, or compact. A failed call stops publication. A serial
 worker never commits, stages, or runs `git write-tree`. It checks the
-controller-owned exact-tree proof and opaque validation evidence instead of
-private JUnit paths. Do not add a check or change the validated tree.
+controller-owned Green SHA, exact committed tree, retained Red proof, clean
+state, and opaque validation evidence instead of private JUnit paths. Do not
+add a check or change the validated commit.
 
 For coding reconciliation, Main invokes
 `agent-work reconcile-commit commit --apply` on the Judge-approved staged tree

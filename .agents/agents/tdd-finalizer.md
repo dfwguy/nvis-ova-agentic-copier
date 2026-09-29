@@ -40,10 +40,14 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    guidance, run claims, or old proof. If so, get the Temporality Judge receipt
    for the final tree. Otherwise get Architect's exact
    `$temporality-judge: not applicable — <reason>` with its scope rationale.
-   In serial work, an applicable receipt must approve the final candidate tree
-   and cite a live controller-owned `candidate read` snapshot taken after Judge
-   validation. Check its immutable issue and session identity, base commit and
-   tree, candidate tree OID, and canonical changed paths from the controller.
+   In serial work, an applicable receipt must approve the final Green SHA and candidate tree
+   and cite a live controller-owned `candidate read` snapshot taken after the
+   Judge-approved Green commit. Check its immutable issue and session
+   identity, base commit and tree, candidate tree OID, verified `commit_sha`
+   and `committed_tree`, and canonical changed paths from the controller.
+   Match the read commit identity to Judge's candidate-commit response and
+   require `committed_tree` to equal the candidate tree. Content and
+   remediation reads keep their tree-only contract.
    Check each controller-authorized exact Git read. It must name the path,
    old/new side, byte offset, and length. Reads may be in any order. Each read
    is capped at 128 KiB. Check the review of changed and absent sides. Check
@@ -81,9 +85,12 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    Git diff from Red to Green. The local ref must still match its saved identity.
    Reject a missing, changed, or wrong checkpoint.
 3. Check that Judge's result binds each readable JUnit result to its SHA-256
-   hash, test count, and exact tree ID. A successful hook's missing or
-   `OSError`-unreadable fixed JUnit file needs explicit timing `UNKNOWN`, not
-   invented times or a performance pass. Interactive work uses
+   hash, test count, and exact tree ID. If the serial Green hook passes but a
+   JUnit file is missing or `OSError`-unreadable, require timing `UNKNOWN`.
+   A valid readable JUnit file with an overflowing bounded advisory case
+   summary also has timing `UNKNOWN`. Claim no timing pass. Malformed,
+   oversized, or invalid present JUnit data blocks approval. A failed hook
+   still fails. Interactive work uses
    fixed file paths. Serial work uses an opaque proof ID and bounded time data
    from trusted code. Never ask for private paths. Compare the docs and README
    verdicts to the final diff. Do not rerun tests, lint, or pre-commit.
@@ -92,7 +99,9 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    `agent-work interactive-commit verify` with
    the accepted base, final Red ref, Judge tree, and Green commit. Require its
    exact Green tree, sole Red parent, unchanged Red ref, and clean state. For serial work, require the
-   controller's tree and changed-path proof.
+   controller's Green SHA, exact committed tree, retained Red parent/ref,
+   clean state, and changed-path proof. Any newer candidate commit or tree
+   invalidates the receipts and requires fresh applicable review.
    Do not run worker-side Git staging or `git write-tree`.
    Check the changed-file readability result for changed Markdown. If none
    changed, record N/A. An interactive actionable finding starts a fresh branch
@@ -118,7 +127,8 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 6. Main may publish the verified normal interactive Green tip or, for a pending
    coding merge, the verified ordered two-parent reconciliation commit through
    `$git-flow`. Never push a Red ref. A serial-worker Finalizer never commits;
-   its trusted runner owns the final commit and Git hooks.
+   its trusted runner publishes the same verified Green SHA without a second
+   commit.
 
 ## Verdict
 

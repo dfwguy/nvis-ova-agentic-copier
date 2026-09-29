@@ -63,10 +63,10 @@ you are live. Do not stage with Git or supply a model path list as authority.
 A canonical rejection allows one corrected request. Restage after a change.
 
 Delegate `$tdd-judge` for the exact tree. In normal interactive Green work,
-Judge owns the sole Green commit and installed hook under its role contract.
-For a pending coding merge, Judge validates the staged candidate before review;
-Main later creates the ordered two-parent commit through the trusted boundary.
-In serial work, Judge uses the trusted validation boundary. Green does
+Judge owns the sole Green commit and installed hook. For a pending coding
+merge, Judge validates the staged candidate before review; Main later makes
+the ordered two-parent commit through the trusted boundary. In serial work,
+Judge requests the trusted `candidate commit` for the exact staged tree. Green does
 not run a direct full suite, hook, or old validation CLI. Do not start
 specialist review until the applicable Judge step succeeds.
 
@@ -95,13 +95,14 @@ project-owned values, and scope growth there. Repair only
 approved production/test findings. Return documentation/README findings via
 Architect to Diátaxis Writer, and policy findings via Architect to Policy
 Writer. After their edits stop, restage the exact tree through the applicable
-boundary. Each new coding candidate tree needs fresh Judge and
-Non-functional Review. Get those results before later reviews or Finalizer.
-Rerun specialists when their finding, domain, or proof changed. Rerun License
-Checker if maintained in-scope files changed.
+boundary. Each corrected serial candidate needs a new Green commit, fresh
+Judge, and Non-functional Review. Get those results before later reviews or
+Finalizer.
+The new Green SHA and tree void prior specialist receipts. Rerun every
+applicable specialist, including License Checker, for that commit.
 
 Only Architect may allow a focused Quality Judge rerun. Give the old and
-new tree OIDs, the first full receipt, stable finding IDs, the repair log,
+new Green SHAs and tree OIDs, the first full receipt, stable finding IDs, the repair log,
 and exact changed paths. Missing or mixed-up proof goes to Architect as a
 non-code rejection. Quality Judge owns the fresh review and when to widen it. Widen for
 public interfaces, schemas, shared constants, or finite state machines.
@@ -131,5 +132,5 @@ and Main publishes the verified Green tip through `$git-flow`. For a pending
 coding merge, Main commits the approved staged tree with old source first and
 exact target second; Finalizer uses `agent-work reconcile-commit verify`
 read-only before publication. Never push the Red ref. Serial Finalizer never
-commits; the trusted controller owns its final commit. Keep each proof and
-report its exact result.
+commits; the controller publishes the verified Green SHA without another
+commit. Keep each proof and report its exact result.
