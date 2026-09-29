@@ -37,14 +37,20 @@ from .candidate_boundary import (
     validate_git_read_paths,
     validate_git_read_size,
 )
-from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS, ErrorCode, sanitize_diagnostic
+from .domain import (
+    DEFAULT_MAX_ACTIVATION_SECONDS,
+    HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+    ErrorCode,
+    sanitize_diagnostic,
+)
+from .green_commit import GreenCommitDependencies, IsolatedGreenCommit
 from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
 from .red_commit import RedCommitDependencies
-from .test_timing import is_safe_timing_case_id
+from .test_timing import is_safe_timing_case_id, parse_full_junit_inventory
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
     MAX_TIMING_CASE_NAME_BYTES,
@@ -1172,6 +1178,220 @@ class GitRepository:
                 test_paths=paths,
             ),
             commit_identity=commit_identity,
+            cas_ref=cas_ref,
+        )
+
+    def create_isolated_green_commit(
+        self,
+        *,
+        worktree: Path,
+        isolated_worktree: Path,
+        red_sha: str,
+        candidate_tree: str,
+        message: str,
+    ) -> IsolatedGreenCommit:
+        """Run one normal hooked commit in a detached worktree from Red."""
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", red_sha)
+            or not re.fullmatch(r"[0-9a-f]{40}", candidate_tree)
+            or not message.strip()
+        ):
+            raise RepositoryError("isolated Green commit inputs are invalid")
+        self._git(
+            "worktree", "add", "--detach", str(isolated_worktree), red_sha, cwd=worktree
+        )
+        try:
+            self._git(
+                "read-tree", "--reset", "-u", candidate_tree, cwd=isolated_worktree
+            )
+            if self._git("write-tree", cwd=isolated_worktree) != candidate_tree:
+                raise RepositoryError("isolated Green index differs from candidate")
+            clean = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(isolated_worktree),
+                    "diff-files",
+                    "--quiet",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if clean.returncode != 0:
+                raise RepositoryError("isolated Green worktree differs from index")
+            hooks_config = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(isolated_worktree),
+                    "config",
+                    "--get",
+                    "core.hooksPath",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if hooks_config.returncode == 1:
+                common_dir = Path(
+                    self._git("rev-parse", "--git-common-dir", cwd=isolated_worktree)
+                )
+                if not common_dir.is_absolute():
+                    common_dir = isolated_worktree / common_dir
+                hook_path = common_dir / "hooks" / "pre-commit"
+            elif hooks_config.returncode == 0 and hooks_config.stdout.strip():
+                hook_path = Path(hooks_config.stdout.strip())
+                if not hook_path.is_absolute():
+                    hook_path = isolated_worktree / hook_path
+                hook_path /= "pre-commit"
+            else:
+                raise RepositoryError("effective Green hook path could not be read")
+            if not hook_path.is_file() or not os.access(hook_path, os.X_OK):
+                raise RepositoryError("installed Green pre-commit hook is unavailable")
+            identity = {
+                **self._environment,
+                "GIT_AUTHOR_NAME": "agent-work",
+                "GIT_AUTHOR_EMAIL": "agent-work@localhost",
+                "GIT_COMMITTER_NAME": "agent-work",
+                "GIT_COMMITTER_EMAIL": "agent-work@localhost",
+            }
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(isolated_worktree),
+                    "commit",
+                    "-m",
+                    message,
+                ),
+                environment=identity,
+                timeout_seconds=DEFAULT_MAX_ACTIVATION_SECONDS,
+            )
+            if result.returncode != 0:
+                raise RepositoryError("installed hook rejected isolated Green commit")
+            commit = self._git("rev-parse", "HEAD", cwd=isolated_worktree)
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise RepositoryError("isolated Green commit oid is invalid")
+            summaries: list[dict[str, object]] = []
+            for environment in ("py311", "py314"):
+                path = isolated_worktree / f"test-results-{environment}.xml"
+                try:
+                    with path.open("rb") as artifact:
+                        cases = parse_full_junit_inventory(artifact.read(1_048_577))
+                except (OSError, ValueError):
+                    return IsolatedGreenCommit(commit, "unknown", ())
+                slow_cases = [
+                    {"name": name, "seconds": seconds}
+                    for name, seconds in sorted(cases.items())
+                    if seconds > 0.100
+                ]
+                if (
+                    len(slow_cases) > MAX_TIMING_CASES
+                    or len(json.dumps(slow_cases)) > MAX_TIMING_CASE_LIST_BYTES
+                ):
+                    return IsolatedGreenCommit(commit, "unknown", ())
+                summaries.append(
+                    {
+                        "environment": environment,
+                        "timing_complete": True,
+                        "over_100ms_cases": slow_cases,
+                    }
+                )
+            return IsolatedGreenCommit(commit, "complete", tuple(summaries))
+        finally:
+            self._git(
+                "worktree", "remove", "--force", str(isolated_worktree), cwd=worktree
+            )
+
+    def green_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> GreenCommitDependencies:
+        """Wire the native-hook Green transaction to this Git boundary."""
+
+        def worker_state(path: Path) -> tuple[str, str, str, str]:
+            branch = self._git("branch", "--show-current", cwd=path)
+            head = self.head(path)
+            index = self._git("write-tree", cwd=path)
+            porcelain = self._git(
+                "status", "--porcelain=v1", "-z", cwd=path, preserve_output=True
+            )
+            entries = iter(porcelain.split("\0"))
+            clean_against_index = True
+            for entry in entries:
+                if not entry:
+                    continue
+                if len(entry) < 4 or entry[2] != " " or entry[1] != " ":
+                    clean_against_index = False
+                    break
+                if {"R", "C"} & set(entry[:2]):
+                    previous_path = next(entries, None)
+                    if not previous_path:
+                        clean_against_index = False
+                        break
+            return branch, head, index, index if clean_against_index else ""
+
+        def read_ref(ref: str) -> str | None:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    ref,
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 1:
+                return None
+            oid = result.stdout.strip()
+            if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", oid):
+                raise RepositoryError("Green transaction ref could not be read")
+            return oid
+
+        def commit_identity(oid: str) -> tuple[str, str, str]:
+            parents = self._git(
+                "rev-list", "--parents", "-n", "1", oid, cwd=worktree
+            ).split()
+            if len(parents) != 2 or parents[0] != oid:
+                raise RepositoryError("Green transaction commit has wrong parents")
+            tree = self._git("rev-parse", f"{oid}^{{tree}}", cwd=worktree)
+            message = self._git("log", "-1", "--format=%B", oid, cwd=worktree)
+            return parents[1], tree, message
+
+        def cas_ref(ref: str, oid: str, old: str | None) -> bool:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(worktree),
+                    "update-ref",
+                    ref,
+                    oid,
+                    old or "",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            return result.returncode == 0
+
+        return GreenCommitDependencies(
+            worker_state=worker_state,
+            read_ref=read_ref,
+            commit_identity=commit_identity,
+            blob_oid=lambda tree, path: self._git(
+                "rev-parse", f"{tree}:{path}", cwd=worktree
+            ),
+            isolated_commit=lambda red, tree, message: (
+                self.create_isolated_green_commit(
+                    worktree=worktree,
+                    isolated_worktree=isolated_worktree,
+                    red_sha=red,
+                    candidate_tree=tree,
+                    message=message,
+                )
+            ),
             cas_ref=cas_ref,
         )
 
