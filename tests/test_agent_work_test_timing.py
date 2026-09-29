@@ -128,7 +128,32 @@ def test_inherited_one_second_case_is_reported_without_correction() -> None:
     }
 
 
-def test_worsened_inherited_slow_case_repeats_both_sources_and_reports_phases() -> None:
+@pytest.mark.parametrize(
+    ("baseline_seconds", "candidate_seconds"),
+    ((0.22, 1.22), (1.22, 2.02)),
+)
+def test_unaffected_existing_slowdown_is_inherited_without_focused_repeats(
+    baseline_seconds: float, candidate_seconds: float
+) -> None:
+    result = _review(
+        {CASE: baseline_seconds},
+        {CASE: candidate_seconds},
+        focused=lambda **_request: pytest.fail("unaffected case was focused"),
+    )
+
+    assert result.outcome == "report_only"
+    assert {(item.environment, item.name, item.reason) for item in result.findings} == {
+        (env, CASE, "inherited_slow") for env in ENVIRONMENTS
+    }
+
+
+@pytest.mark.parametrize(
+    ("changed_tests", "affected_by_helper"),
+    (((CASE,), ()), ((), (CASE,))),
+)
+def test_worsened_inherited_slow_case_repeats_both_sources_and_reports_phases(
+    changed_tests: tuple[str, ...], affected_by_helper: tuple[str, ...]
+) -> None:
     requests: list[dict[str, Any]] = []
 
     def focused(**request: Any) -> dict[str, Any]:
@@ -143,7 +168,13 @@ def test_worsened_inherited_slow_case_repeats_both_sources_and_reports_phases() 
         }
         return evidence
 
-    result = _review({CASE: 1.22}, {CASE: 2.02}, changed_tests=(CASE,), focused=focused)
+    result = _review(
+        {CASE: 1.22},
+        {CASE: 2.02},
+        changed_tests=changed_tests,
+        affected_by_helper=affected_by_helper,
+        focused=focused,
+    )
 
     assert result.outcome == "correction_required"
     assert len(requests) == 8
@@ -157,6 +188,88 @@ def test_worsened_inherited_slow_case_repeats_both_sources_and_reports_phases() 
         for item in result.findings
         if item.reason == "corroborated_regression"
     )
+
+
+@pytest.mark.parametrize(
+    ("changed_tests", "affected_by_helper"),
+    (((CASE,), ()), ((), (CASE,))),
+)
+def test_mixed_slow_inventory_focuses_only_affected_case(
+    changed_tests: tuple[str, ...], affected_by_helper: tuple[str, ...]
+) -> None:
+    unrelated_case = "tests/test_other.py::test_unrelated"
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        evidence = _focused(**request)
+        evidence["cases"] = {
+            name: {
+                "setup": 0.01,
+                "call": 2.0 if request["source_tree"] == CANDIDATE_TREE else 1.2,
+                "teardown": 0.01,
+            }
+            for name in request["case_names"]
+        }
+        return evidence
+
+    baseline = {CASE: 1.22, unrelated_case: 1.22}
+    candidate = {CASE: 2.02, unrelated_case: 2.02}
+    result = _review(
+        baseline,
+        candidate,
+        changed_tests=changed_tests,
+        affected_by_helper=affected_by_helper,
+        focused=focused,
+    )
+
+    assert len(requests) == 8
+    assert all(request["case_names"] == (CASE,) for request in requests)
+    assert result.outcome == "correction_required"
+    assert {(item.environment, item.name, item.reason) for item in result.findings} == {
+        (env, CASE, reason)
+        for env in ENVIRONMENTS
+        for reason in ("corroborated_regression", "touched_slow")
+    } | {(env, unrelated_case, "inherited_slow") for env in ENVIRONMENTS}
+
+
+def test_production_change_keeps_threshold_impact_within_each_python_version() -> None:
+    from agent_work.test_timing import review_test_timings
+
+    baseline, candidate = _runs({CASE: 0.22}, {CASE: 1.22})
+    candidate["py314"]["cases"] = {CASE: 0.5}
+    requests: list[dict[str, Any]] = []
+
+    def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
+        evidence = _focused(**request)
+        evidence["cases"] = {
+            CASE: {
+                "setup": 0.01,
+                "call": 1.2 if request["source_tree"] == CANDIDATE_TREE else 0.2,
+                "teardown": 0.01,
+            }
+        }
+        return evidence
+
+    result = review_test_timings(
+        baseline_tree=BASE_TREE,
+        candidate_tree=CANDIDATE_TREE,
+        baseline_runs=baseline,
+        candidate_runs=candidate,
+        changed_tests=(),
+        affected_by_helper=(),
+        production_changed=True,
+        run_focused=focused,
+    )
+
+    assert len(requests) == 4
+    assert all(request["environment"] == "py311" for request in requests)
+    assert result.outcome == "correction_required"
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        ("py311", "corroborated_regression"),
+        ("py311", "touched_slow"),
+    }
 
 
 def test_newly_crossing_one_second_repeats_each_exact_source_twice_per_version() -> (
@@ -173,7 +286,7 @@ def test_newly_crossing_one_second_repeats_each_exact_source_twice_per_version()
         }
         return evidence
 
-    result = _review({CASE: 0.22}, {CASE: 1.22}, focused=focused)
+    result = _review({CASE: 0.22}, {CASE: 1.22}, changed_tests=(CASE,), focused=focused)
 
     assert len(requests) == 8
     assert {
@@ -195,10 +308,15 @@ def test_newly_crossing_one_second_repeats_each_exact_source_twice_per_version()
         for request in requests
     )
     assert result.outcome == "correction_required"
-    assert all(item.reason == "corroborated_regression" for item in result.findings)
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("corroborated_regression", "touched_slow")
+    }
     assert all(
         item.phase_deltas == pytest.approx({"setup": 0.0, "call": 1.0, "teardown": 0.0})
         for item in result.findings
+        if item.reason == "corroborated_regression"
     )
 
 
@@ -221,11 +339,15 @@ def test_uncorroborated_one_second_spike_is_report_only() -> None:
         }
         return evidence
 
-    result = _review({CASE: 0.22}, {CASE: 1.22}, focused=focused)
+    result = _review({CASE: 0.22}, {CASE: 1.22}, changed_tests=(CASE,), focused=focused)
 
     assert attempts == {env: 2 for env in ENVIRONMENTS}
     assert result.outcome == "report_only"
-    assert all(item.reason == "uncorroborated_spike" for item in result.findings)
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("uncorroborated_spike", "touched_slow")
+    }
 
 
 def test_touched_inherited_integration_spike_with_faster_repeats_is_report_only() -> (
@@ -405,7 +527,7 @@ def test_many_new_cases_are_focused_in_bounded_batches() -> None:
 
 
 def test_many_one_second_regressions_keep_paired_focused_evidence() -> None:
-    baseline = {f"tests/test_speed.py::test_case_{index}": 0.9 for index in range(64)}
+    baseline = {f"tests/test_speed.py::test_case_{index}": 0.9 for index in range(32)}
     candidate = {name: 1.1 for name in baseline}
     requests: list[dict[str, Any]] = []
 
@@ -422,13 +544,22 @@ def test_many_one_second_regressions_keep_paired_focused_evidence() -> None:
         }
         return result
 
-    result = _review(baseline, candidate, focused=focused)
+    result = _review(
+        baseline,
+        candidate,
+        changed_tests=("tests/test_speed.py",),
+        focused=focused,
+    )
 
-    assert len(requests) == 16
+    assert len(requests) == 8
     assert result.outcome == "correction_required"
     assert len(result.findings) == 128
     assert result.omitted_findings == 0
-    assert all(item.reason == "corroborated_regression" for item in result.findings)
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("corroborated_regression", "touched_slow")
+    }
     for environment in ENVIRONMENTS:
         per_source = {
             source: [
@@ -439,7 +570,7 @@ def test_many_one_second_regressions_keep_paired_focused_evidence() -> None:
             ]
             for source in (BASE_TREE, CANDIDATE_TREE)
         }
-        assert all(len(group) == 4 for group in per_source.values())
+        assert all(len(group) == 2 for group in per_source.values())
         assert all(
             sorted(name for request in group for name in request["case_names"])
             == sorted(list(baseline) * 2)
@@ -492,10 +623,14 @@ def test_crossing_one_second_with_slow_baseline_repeat_is_spike() -> None:
         }
         return evidence
 
-    result = _review({CASE: 0.22}, {CASE: 1.22}, focused=focused)
+    result = _review({CASE: 0.22}, {CASE: 1.22}, changed_tests=(CASE,), focused=focused)
 
     assert result.outcome == "report_only"
-    assert all(item.reason == "uncorroborated_spike" for item in result.findings)
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("uncorroborated_spike", "touched_slow")
+    }
 
 
 @pytest.mark.parametrize(
@@ -553,7 +688,7 @@ def test_focused_repeat_with_wrong_source_binding_fails_closed() -> None:
         return evidence
 
     with pytest.raises(ValueError):
-        _review({CASE: 0.2}, {CASE: 1.2}, focused=wrong_source)
+        _review({CASE: 0.2}, {CASE: 1.2}, changed_tests=(CASE,), focused=wrong_source)
 
 
 def test_full_junit_inventory_keeps_qualified_parameterized_case_times() -> None:

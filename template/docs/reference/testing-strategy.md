@@ -5,7 +5,7 @@ summary: Look up test design, validation layers, and local case timing rules.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-29
 related:
   - path: ../how-to/validate-template-changes.md
     why: Shows how to run the local and CI validation checks.
@@ -78,19 +78,27 @@ reviewer gets bounded identities, findings, an outcome, and the full candidate
 list above 100 ms. The three slowest cases are not a complete list. A touched
 case above 100 ms is report-only unless repeats corroborate a regression.
 New slow cases and corroborated regressions need correction unless an
-approved integration exception applies. When an existing case first reaches
-or gets slower above 1 second, the controller
-checks two focused repeats from each exact tree and reports setup, call,
-and teardown changes. Missing repeat proof blocks a decision that needs it.
+approved integration exception applies. Affected existing cases are changed
+tests or cases explicitly mapped as consumers of changed fixtures in
+`tests/**/conftest.py`. An affected existing case gets two focused repeats
+on each exact tree when its candidate time is at least 1 second. Its baseline
+must be below 1 second, or its candidate time must exceed the baseline. The
+`corroborated_regression` or `uncorroborated_spike` finding reports setup,
+call, and teardown changes. A changed `.py` file not in either `tests/` or
+`template/tests/` also marks each case meeting this rule as potentially affected.
+Unaffected existing cases stay in the full candidate
+inventory. Those at or above 1 second get an `inherited_slow` report-only
+finding; subsecond cases get no individual finding. Neither group gets
+focused repeats or automatic correction.
+Missing repeat proof blocks a decision that needs it.
 
 For an existing touched case that stays above 100 ms and below 1 second, the
 controller uses the complete baseline and candidate JUnit inventories to mark
 it `touched_slow`. This finding alone does not require correction. A changed
 test file can mark many cases this way without using focused runs. New cases
 above 100 ms get one candidate focused check.
-Existing cases that first reach 1 second or worsen above it get two baseline
-and two candidate repeats. The controller groups up to 32 cases per focused
-invocation within each Python version. It allows at most 32 focused
+The controller groups up to 32 cases per
+focused invocation within each Python version. It allows at most 32 focused
 invocations and 900 seconds for the review. The worker receives up to 128
 timing findings and an `omitted_findings` count. Every candidate finding at
 or above 1 second is retained before subsecond findings. More than 128 such
