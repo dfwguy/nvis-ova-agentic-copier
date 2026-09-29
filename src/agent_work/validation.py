@@ -361,6 +361,8 @@ class _Record(BaseModel):
     failed_junit_digests: tuple[str, ...] = ()
     elapsed_seconds: float | None = Field(default=None, ge=0, le=10_800)
     junit_timings: tuple[_PersistedJUnitTiming, ...] = Field(default=(), max_length=2)
+    timing_status: Literal["complete", "unknown"] | None = None
+    timing_unknown: dict[str, str] | None = None
     artifact_failure: _PersistedArtifactFailure | None = None
     requested_baseline_tree: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     requested_baseline_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
@@ -376,6 +378,24 @@ class _Record(BaseModel):
     ) = None
 
     def model_post_init(self, _context: object) -> None:
+        if self.timing_status == "unknown":
+            if (
+                self.state != "terminal-success"
+                or self.returncode != 0
+                or self.timing_unknown is None
+                or set(self.timing_unknown) != {"environment", "reason"}
+                or self.timing_unknown["environment"] not in {"py311", "py314"}
+                or self.timing_unknown["reason"] not in {"os_error", "missing"}
+                or self.junit_artifacts
+                or self.junit_timings
+                or self.timing_baseline_tree is not None
+                or self.timing_transcript_sha256 is not None
+            ):
+                raise ValueError("invalid unknown timing evidence")
+        elif self.timing_unknown is not None or (
+            self.timing_status == "complete" and self.state != "terminal-success"
+        ):
+            raise ValueError("invalid timing status")
         terminal = self.state in {
             "terminal-success",
             "terminal-failure",
@@ -460,6 +480,7 @@ class _Record(BaseModel):
         if (
             self.schema_version == 2
             and self.state == "terminal-success"
+            and self.timing_status != "unknown"
             and not _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
         ):
             raise ValueError("invalid JUnit artifact evidence")
@@ -532,6 +553,8 @@ class JudgeValidationReport:
     junit_timings: tuple[JUnitTiming, ...] = ()
     artifact_failure: ArtifactFailure | None = None
     timing_failure_code: str | None = None
+    timing_status: Literal["complete", "unknown"] | None = None
+    timing_unknown: dict[str, str] | None = None
 
     @property
     def exit_code(self) -> int | None:
@@ -1191,6 +1214,8 @@ def _report(
         if record.artifact_failure is not None
         else None,
         record.timing_failure_code,
+        record.timing_status,
+        record.timing_unknown,
     )
 
 
@@ -1523,37 +1548,82 @@ def run_judge_validation(
 
         captured: list[tuple[str, bytes, int]] = []
         artifact_failure: tuple[str, str, str, Path] | None = None
-        try:
-            for environment, path in _JUNIT_ARTIFACTS:
+        for environment, path in _JUNIT_ARTIFACTS:
+            try:
                 artifact = dependencies.read_artifact(path)
-                test_count = _junit_test_count(artifact)
-                if artifact is None or test_count is None:
+            except OSError:
+                if artifact_failure is None:
                     artifact_failure = (
                         "post_hook_success_evidence_read",
-                        _unusable_artifact_reason(artifact),
+                        "os_error",
                         environment,
                         path,
                     )
+                continue
+            test_count = _junit_test_count(artifact)
+            if artifact is None or test_count is None:
+                reason = _unusable_artifact_reason(artifact)
+                if reason != "missing" or artifact_failure is None:
+                    artifact_failure = (
+                        "post_hook_success_evidence_read",
+                        reason,
+                        environment,
+                        path,
+                    )
+                if reason != "missing":
                     break
-                captured.append((environment, artifact, test_count))
-        except OSError:
-            artifact_failure = (
-                "post_hook_success_evidence_read",
-                "os_error",
-                environment,
-                path,
-            )
+                continue
+            captured.append((environment, artifact, test_count))
+        cleanup_failure: tuple[str, str, str, Path] | None = None
         try:
             for environment, path in _JUNIT_ARTIFACTS:
                 dependencies.remove_junit_artifact(path)
         except OSError:
-            if artifact_failure is None:
-                artifact_failure = (
-                    "post_hook_success_cleanup",
-                    "os_error",
-                    environment,
-                    path,
+            cleanup_failure = (
+                "post_hook_success_cleanup",
+                "os_error",
+                environment,
+                path,
+            )
+        if cleanup_failure is not None:
+            artifact_failure = cleanup_failure
+        if (
+            artifact_failure is not None
+            and artifact_failure[0] == "post_hook_success_evidence_read"
+            and artifact_failure[1] in {"missing", "os_error"}
+        ):
+            unknown_timing = {
+                "environment": artifact_failure[2],
+                "reason": artifact_failure[1],
+            }
+            if (
+                dependencies.timing_review_required
+                and not dependencies.verify_candidate_source(candidate_tree)
+            ):
+                return _write_terminal(
+                    candidate_tree,
+                    _artifact_failure_record(
+                        candidate_tree,
+                        result.returncode,
+                        elapsed,
+                        stage="timing_review",
+                        reason="invalid_timing",
+                    ),
+                    dependencies,
                 )
+            return _write_terminal(
+                candidate_tree,
+                _Record(
+                    candidate_tree=candidate_tree,
+                    schema_version=2,
+                    state="terminal-success",
+                    returncode=0,
+                    elapsed_seconds=elapsed,
+                    timing_status="unknown",
+                    timing_unknown=unknown_timing,
+                ),
+                dependencies,
+            )
         if artifact_failure is not None:
             stage, reason, environment, path = artifact_failure
             return _write_terminal(
@@ -2055,6 +2125,8 @@ def _verify_required_timing(
     if record.requested_baseline_sha != dependencies.expected_baseline_sha:
         raise JudgeValidationError("required timing baseline commit changed")
     if record.state == "terminal-success":
+        if record.timing_status == "unknown":
+            return
         baseline_tree = dependencies.expected_baseline_tree
         transcript = dependencies.read_timing_transcript(candidate_tree)
         if (

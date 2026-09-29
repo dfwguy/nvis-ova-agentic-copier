@@ -1549,15 +1549,44 @@ class GitRepository:
             or safe_failure["stage"] != "timing_review"
         ):
             raise RepositoryError("candidate timing failure code is invalid")
+        timing_status = report.get("timing_status")
+        timing_unknown = report.get("timing_unknown")
+        if timing_status is not None and timing_status not in (
+            "complete",
+            "unknown",
+        ):
+            raise RepositoryError("candidate timing evidence is invalid")
+        if timing_status == "unknown":
+            if (
+                state != "terminal-success"
+                or report.get("exit_code") != 0
+                or not isinstance(timing_unknown, dict)
+                or set(timing_unknown) != {"environment", "reason"}
+                or timing_unknown["environment"] not in ("py311", "py314")
+                or timing_unknown["reason"] not in ("os_error", "missing")
+                or safe_artifacts
+                or report.get("junit_timings") != []
+                or report.get("timing_review") is not None
+            ):
+                raise RepositoryError("candidate timing evidence is invalid")
+        elif timing_unknown is not None or (
+            timing_status == "complete" and state != "terminal-success"
+        ):
+            raise RepositoryError("candidate timing evidence is invalid")
         if (
             timing_review_required
             and state == "terminal-success"
+            and timing_status != "unknown"
             and {item["environment"] for item in safe_artifacts} != {"py311", "py314"}
         ):
             raise RepositoryError("candidate timing proof is invalid")
         timing_review = report.get("timing_review")
         safe_timing_review: dict[str, object] | None = None
-        if timing_review_required and state == "terminal-success":
+        if (
+            timing_review_required
+            and state == "terminal-success"
+            and timing_status != "unknown"
+        ):
             if (
                 not isinstance(timing_review, dict)
                 or timing_review.get("baseline_sha") != base_sha
@@ -1707,6 +1736,8 @@ class GitRepository:
             )
         ):
             raise RepositoryError("candidate failure evidence is invalid")
+        if timing_status == "unknown" and (failed_tests or failed_digests):
+            raise RepositoryError("candidate timing evidence is invalid")
         elapsed = report.get("elapsed_seconds")
         if elapsed is not None and (
             not isinstance(elapsed, (float, int))
@@ -1825,6 +1856,8 @@ class GitRepository:
                 "elapsed_seconds",
                 "junit_timings",
                 "timing_review",
+                "timing_status",
+                "timing_unknown",
                 "artifact_failure",
             )
         }
@@ -1847,6 +1880,8 @@ class GitRepository:
             "elapsed_seconds": elapsed,
             "junit_timings": safe_timings,
             "timing_review": safe_timing_review,
+            "timing_status": timing_status,
+            "timing_unknown": timing_unknown,
             "artifact_failure": safe_failure,
             **(
                 {"timing_failure_code": timing_failure_code}

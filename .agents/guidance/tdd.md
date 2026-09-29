@@ -96,10 +96,10 @@ normal Green commit and installed hook under its role contract. In
 serial work, Judge invokes the
 controller-owned durable validation and status boundary for that exact tree.
 The session runs the installed hook and persists evidence. The controller
-returns an unchanged-tree proof, opaque evidence identity, and trusted
-program-derived JUnit counts, digests, three slowest cases, complete
-`over_100ms_cases` lists, and `timing_complete` flags for each supported local
-Python environment without revealing controller-private snapshot paths.
+returns an unchanged-tree proof and opaque evidence identity. Readable JUnit
+files yield trusted counts, digests, slow cases, and `timing_complete` flags;
+a successful hook with a missing or `OSError`-unreadable fixed JUnit file
+yields bounded `timing_status=unknown` and `timing_unknown`, without times.
 Judge returns its Non-functional Reviewer child receipt. Only after the
 interactive Green commit or serial validation may concurrent specialist
 reviews start. Test Judge verifies the Red-to-Green Git diff. During

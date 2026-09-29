@@ -408,21 +408,31 @@ It hashes the raw JUnit class and case name. An unsafe class name, malformed
 case name, or duplicate emitted ID makes `timing_complete` false. Do not
 request the raw parameter text.
 If either field is missing or `timing_complete` is false, the timing proof is
-incomplete and non-functional review rejects it. The three slowest names do not
-replace the complete list. These summaries remain in the saved record for
-later status reads. They contain no controller state or JUnit file path. After
-the worker exits, the controller checks the tree and changed files again before
-publication. It keeps no extra authorization ledger.
+incomplete and non-functional review rejects it when JUnit is available. The
+three slowest names do not replace the complete list. These summaries remain
+in the saved record for later status reads. They contain no controller state or
+JUnit file path. After the worker exits, the controller checks the tree and
+changed files again before publication. It keeps no extra authorization ledger.
 
-Serial timing review also requires trusted full-suite baseline and candidate
-proof for both `py311` and `py314`, bound to their exact source trees. The
-trusted controller privately checks complete case inventories and matching
-prepared environments, commands, and seeds. It rejects missing, partial, or
-mismatched proof. The worker receives bounded proof identities, an outcome,
-up to 128 deterministic findings, an `omitted_findings` count, and the
-candidate's complete list of cases above 0.100 s. Every candidate finding at
-or above 1.000 s is retained before any subsecond finding. If more than 128
-such findings exist, validation fails closed with the stable artifact reason
+After the full hook exits `0`, a missing fixed `py311` or `py314` JUnit file
+or a read `OSError` yields terminal success with `timing_status="unknown"` and
+`timing_unknown` containing only `environment` (`py311` or `py314`) and
+`reason` (`missing` or `os_error`). The result has no JUnit artifacts, counts,
+test times, or timing transcript and claims no performance pass; validation
+and review continue. Timing `UNKNOWN` needs no timing-only recovery. Usable
+JUnit evidence keeps the existing complete record shape. Malformed or oversized
+XML, invalid counts, and hook failure remain failures.
+
+For complete timing, serial timing review also requires trusted full-suite
+baseline and candidate proof for both `py311` and `py314`, bound to their exact
+source trees. The trusted controller privately checks complete case inventories
+and matching prepared environments, commands, and seeds. On that path, it
+rejects missing, partial, or mismatched proof. The worker receives bounded
+proof identities, an outcome, up to 128 deterministic findings, an
+`omitted_findings` count, and the candidate's complete list of cases above
+0.100 s. Every candidate finding at or above 1.000 s is retained before any
+subsecond finding. If more than 128 such findings exist, validation fails closed
+with the stable artifact reason
 `finding_budget_exhausted` and retains the full-suite JUnit snapshots. The
 private transcript keeps the full JUnit inventories and the same omission
 count. A changed test
@@ -563,7 +573,8 @@ have the existing bounded, canonical
 `diagnostic` and additive structured `hook_failures` from that one invocation.
 The command returns only when the hook has a terminal result.
 
-On terminal success, the hook saves fixed `py311` and `py314` JUnit snapshots.
+On terminal success with complete timing, the hook saves fixed `py311` and
+`py314` JUnit snapshots.
 It saves them under the candidate tree in the state root. Each result gives its
 environment, absolute path, SHA-256 digest, and `test_count`. Status reads this
 saved evidence. It never reads checkout XML or runs the hook again.
@@ -581,14 +592,14 @@ compares complete JUnit case inventories for `py311` and `py314`, then runs
 bounded focused checks where a case needs timing diagnosis. The private
 transcript binds the source trees, JUnit digests and counts, case findings,
 and setup, call, and teardown changes. A serial status read verifies the
-saved transcript against its digest without rerunning tests. Missing or
-changed proof fails closed. A status read or retry cannot bypass the timing
-baseline identity saved for that candidate. Status also checks the saved timing
-transcript before it reports success. The worker sees bounded timing findings
-and proof identities, with no private paths.
+saved transcript against its digest without rerunning tests. For complete
+timing, missing or changed proof fails closed. A status read or retry cannot
+bypass the timing baseline identity saved for that candidate. Status also checks
+the saved timing transcript before it reports complete timing. The worker sees
+bounded timing findings and proof identities, with no private paths.
 
 Capture clears source artifacts before and after the hook. It fails closed if
-cleanup fails or the full set is missing, bad, or cannot be saved. The session
+cleanup fails or artifacts are bad or cannot be saved. The session
 then has `terminal-artifact-failure` with CLI status `1`. A serial timing-review
 failure after a successful hook retains the immutable `py311` and `py314`
 snapshot identities in the original record, including their paths, SHA-256
@@ -1178,7 +1189,7 @@ Use this note to review the shown work.
 | Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
 | Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. In serial work, Green requests controller staging through the private candidate socket and receives one tree ID for coding Judge validation, then Consistency Judge's read. In interactive work, Main stages their combined work and records its tree ID. |
 | Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
-| Before specialist review | The Judge's unchanged tree OID and supported-version JUnit digests and counts are needed. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. After successful coding validation, Consistency Judge uses the controller-owned read when copied facts changed. |
+| Before specialist review | The Judge's unchanged tree OID is needed. Complete timing also needs supported-version JUnit digests and counts. A successful hook with missing or `OSError`-unreadable fixed JUnit evidence instead carries trusted timing `UNKNOWN` for that exact tree, without JUnit proof; specialist review continues without a timing pass. Malformed, oversized, invalid-count, or mismatched readable proof still blocks review. Each applicable concurrent specialist reviewer, including `$license-checker`, then reviews the same staged code-and-documentation tree. After successful coding validation, Consistency Judge uses the controller-owned read when copied facts changed. |
 | Findings | Green combines all initial findings. |
 | Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
 | Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |

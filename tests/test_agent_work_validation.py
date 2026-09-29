@@ -783,7 +783,6 @@ def test_project_admission_keeps_distinct_projects_independent() -> None:
         ("before", 0, "pre_hook_cleanup", "os_error", None),
         ("failed_read", 7, "post_hook_failed_evidence_read", "os_error", 7),
         ("failed_cleanup", 7, "post_hook_failed_cleanup", "os_error", 7),
-        ("success_read", 0, "post_hook_success_evidence_read", "os_error", 0),
         ("success_cleanup", 0, "post_hook_success_cleanup", "os_error", 0),
         ("snapshot", 0, "immutable_snapshot", "os_error", 0),
     ),
@@ -869,12 +868,11 @@ def test_artifact_io_failure_persists_bounded_stage_and_actual_hook_code(
 @pytest.mark.parametrize(
     ("artifact", "reason"),
     (
-        (None, "missing"),
         (b"<testsuite>", "invalid_xml"),
         (b"x" * 1_048_577, "oversized"),
         (b"<testsuite tests='unknown'/>", "invalid_count"),
     ),
-    ids=("missing", "malformed", "oversized", "invalid-count"),
+    ids=("malformed", "oversized", "invalid-count"),
 )
 def test_successful_hook_classifies_unusable_fixed_xml_without_raw_bytes(
     artifact: bytes | None, reason: str
@@ -896,6 +894,118 @@ def test_successful_hook_classifies_unusable_fixed_xml_without_raw_bytes(
     assert report.artifact_failure.environment == "py311"
     assert report.artifact_failure.path == Path("test-results-py311.xml")
     assert len(str(state.records[_CANDIDATE]).encode()) < 2048
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "reason", "environment"),
+    (
+        (None, "missing", "py311"),
+        (OSError("PRIVATE_TOKEN=read-secret /private/path"), "os_error", "py314"),
+    ),
+)
+def test_successful_hook_with_unreadable_fixed_junit_records_unknown_timing(
+    unavailable: bytes | OSError | None, reason: str, environment: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+
+    def read(path: Path) -> bytes | None:
+        if path.name == f"test-results-{environment}.xml":
+            if isinstance(unavailable, OSError):
+                raise unavailable
+            return unavailable
+        return b"<testsuite tests='1' failures='0' errors='0'/>"
+
+    dependencies = replace(dependencies, read_artifact=read)
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == status.state == "terminal-success"
+    assert report.exit_code == status.exit_code == 0
+    assert report.timing_status == status.timing_status == "unknown"
+    assert (
+        report.timing_unknown
+        == status.timing_unknown
+        == {
+            "environment": environment,
+            "reason": reason,
+        }
+    )
+    assert report.junit_artifacts == status.junit_artifacts == ()
+    assert report.junit_timings == status.junit_timings == ()
+    assert state.records[_CANDIDATE]["timing_status"] == "unknown"
+    assert state.records[_CANDIDATE]["timing_unknown"] == {
+        "environment": environment,
+        "reason": reason,
+    }
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "unusable", "reason"),
+    (
+        (None, b"<testsuite>", "invalid_xml"),
+        (None, b"x" * 1_048_577, "oversized"),
+        (None, b"<testsuite tests='unknown'/>", "invalid_count"),
+        (OSError("PRIVATE_TOKEN=read-secret"), b"<testsuite>", "invalid_xml"),
+    ),
+    ids=(
+        "missing-malformed",
+        "missing-oversized",
+        "missing-invalid-count",
+        "read-error-malformed",
+    ),
+)
+def test_unusable_second_junit_remains_terminal_when_first_is_unavailable(
+    unavailable: OSError | None, unusable: bytes, reason: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    reads: list[Path] = []
+    removals: list[Path] = []
+    captures: list[object] = []
+
+    def read(path: Path) -> bytes | None:
+        reads.append(path)
+        if path.name == "test-results-py311.xml":
+            if isinstance(unavailable, OSError):
+                raise unavailable
+            return None
+        return unusable
+
+    dependencies = replace(
+        dependencies,
+        read_artifact=read,
+        remove_junit_artifact=removals.append,
+        capture_junit_artifacts=lambda *_args: captures.append(_args),
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert reads == [Path("test-results-py311.xml"), Path("test-results-py314.xml")]
+    assert removals == [
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+        Path("test-results-py311.xml"),
+        Path("test-results-py314.xml"),
+    ]
+    assert captures == []
+    assert report.state == "terminal-artifact-failure"
+    assert report.returncode == 0
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == "post_hook_success_evidence_read"
+    assert report.artifact_failure.reason == reason
+    assert report.artifact_failure.environment == "py314"
+    assert report.artifact_failure.path == Path("test-results-py314.xml")
+    assert "timing_unknown" not in state.records[_CANDIDATE]
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
 
 
 def test_actual_failed_xml_file_is_classified_through_fixed_reader(
@@ -3581,16 +3691,15 @@ def test_pre_hook_junit_cleanup_failure_is_terminal_without_a_hook_return_code()
 @pytest.mark.parametrize(
     "artifact",
     (
-        None,
         b"<testsuite tests='1' failures='0' errors='0'>",
         b"x" * 1_048_577,
     ),
-    ids=("missing", "malformed", "oversized"),
+    ids=("malformed", "oversized"),
 )
 def test_unusable_success_junit_xml_is_terminal_without_capture_or_hook_retry(
-    artifact: bytes | None,
+    artifact: bytes,
 ) -> None:
-    """A zero hook exit is not success when its required produced XML is unusable."""
+    """Malformed or oversized XML remains a terminal artifact failure."""
     state = ValidationStateFake()
     calls: list[tuple[str, ...]] = []
     removals: list[Path] = []

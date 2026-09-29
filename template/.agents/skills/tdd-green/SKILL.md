@@ -43,11 +43,13 @@ scans the worktree, normalizes changed paths, stages only allowed files, and
 returns the tree ID. Green's path list cannot grant access. Green and Judge
 do not stage with Git or call the old validation CLI in a serial worker.
 Judge asks the trusted boundary to validate that exact tree and read its
-saved status. The result binds the unchanged tree to trusted JUnit counts,
-hashes, time data, and the `$nonfunctional-review` child result through an
-opaque proof ID. It does not give private JUnit paths to the worker.
-Interactive Judge evidence includes immutable supported-version JUnit
-snapshots, SHA-256 digests, counts, and the child receipt.
+saved status. The result binds the unchanged tree and the
+`$nonfunctional-review` child result through an opaque proof ID. Readable
+JUnit provides counts, hashes, and time data. A successful hook with a missing
+or `OSError`-unreadable fixed JUnit file carries explicit timing `UNKNOWN`
+without invented times. It does not give private JUnit paths to the worker.
+Interactive Judge evidence includes immutable JUnit snapshots, SHA-256
+digests, and counts for readable results, plus the child receipt.
 
 After a change, use the applicable staging boundary for a new tree. Get a
 fresh Judge receipt before review or finalization. Each coding candidate needs

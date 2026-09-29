@@ -50,27 +50,30 @@ You review one exact tree. Do not edit files.
    worktree. For serial work, require the trusted unchanged-tree proof. Reject
    new paths or missing proof.
 4. For interactive work, record immutable absolute candidate JUnit paths,
-   SHA-256 hashes, and test counts for Python 3.11 and 3.14. For serial work,
-   require `timing_review` with baseline SHA/tree, candidate tree, transcript
+   SHA-256 hashes, and test counts for readable Python 3.11 and 3.14 results.
+   For serial work with readable timing, require `timing_review` with baseline SHA/tree, candidate tree, transcript
    digest, outcome, both versions' baseline/candidate run digests, counts, and
    `timing_complete` flags, plus bounded findings and phase deltas. The
    candidate `junit_timings` has the complete bounded `over_100ms_cases` list.
    The controller privately checks full inventories, matching environment,
    command, and seed, and required exact-source repeats. Missing, partial, or
-   mismatched serial proof is no pass. Do not ask for
+   mismatched serial proof is no pass, except a successful hook's missing or
+   `OSError`-unreadable fixed JUnit file: mark timing `UNKNOWN` and continue
+   review without a timing pass. Do not ask for
    private JUnit files or state-root paths. The hook runs Ruff,
    format, type, tox, and all other configured checks. Do not run them alone.
    Do not rerun tests.
-5. In interactive work, retain the one full-hook JUnit snapshot for each of
-   `py311` and `py314` as the complete timing inventory. Obtain the read-only
-   local timing comparator report for the exact baseline and candidate trees.
+5. In interactive work, retain each readable full-hook JUnit snapshot for
+   `py311` and `py314` as the available timing inventory. For available timing,
+   obtain the read-only local comparator report for the exact baseline and
+   candidate trees.
    Require artifact paths, SHA-256 digests, test counts, command, interpreter,
    and seed for equal baseline and candidate focused run counts, with at least
    two per tree in every environment where timing impact needs attribution.
    Each focused run needs JUnit and
    setup, call, and teardown phase logs. Keep the full-hook JUnit unchanged;
    focused runs are evidence for comparison, not a replacement validation
-   suite. Missing, mismatched, or partial proof returns to the evidence owner
+   suite. Incomplete or mismatched readable proof returns to the evidence owner
    and cannot pass. If `status=inconclusive` has no global reasons and the full
    case list and paired-run proof are sound, send it to the Non-functional
    Reviewer. Mixed case directions call for review and a case-specific queue;
@@ -78,10 +81,10 @@ You review one exact tree. Do not edit files.
    automatic code-caused finding or call mixed timing a pass.
 6. Start `$nonfunctional-review` as your read-only child. Pass the exact tree,
    the proof for this mode, and the interactive comparator report when
-   applicable. For serial work, pass both source trees and the trusted
-   `timing_review`, including its baseline and candidate proof and bounded
-   phase findings. Wait for the full result. Return both results to Green
-   before other reviews start.
+   applicable. For serial work, pass both source trees and trusted
+   `timing_review` when readable; for `timing_status=unknown`, pass the exact
+   tree, successful hook, and trusted `timing_unknown` to the reviewer. Wait
+   for the full result. Return both results to Green before other reviews start.
 
 For reconciliation, name two proofs. One rechecks the saved Red to source
 history. The other checks the new source and target merge. Keep them apart.

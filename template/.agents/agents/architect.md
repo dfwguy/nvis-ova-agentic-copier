@@ -150,8 +150,10 @@ SHA and tree and candidate tree. Its handoff includes transcript digest and
 outcome, Python 3.11 and 3.14 baseline and candidate run digests, counts,
 `timing_complete` flags, bounded findings, and phase deltas. Candidate
 `junit_timings` includes the complete bounded `over_100ms_cases` list. Judge
-passes that trusted proof to Non-functional Review. Missing or mismatched
-proof returns to its owner; model prose cannot establish a timing pass.
+passes that trusted proof to Non-functional Review. A successful hook with a
+missing or `OSError`-unreadable fixed JUnit file has timing `UNKNOWN`; review
+continues without a timing pass. Other missing or mismatched proof returns to
+its owner; model prose cannot establish a timing pass.
 
 Green starts read-only reviews only after Judge and Non-functional Review
 pass the same tree. Required reviewers are
