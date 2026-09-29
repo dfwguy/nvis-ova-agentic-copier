@@ -73,8 +73,8 @@ class _Run(BaseModel):
 class _Environment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     candidate_full_junit: _Artifact
-    baseline_runs: tuple[_Run, ...]
-    candidate_runs: tuple[_Run, ...]
+    baseline_runs: tuple[_Run, ...] | None = None
+    candidate_runs: tuple[_Run, ...] | None = None
 
 
 class _Manifest(BaseModel):
@@ -106,7 +106,7 @@ class ComparedCase:
 class TimingComparison:
     """Read-only comparison and complete candidate slow-case inventory."""
 
-    status: Literal["clear", "review", "inconclusive"]
+    status: Literal["clear", "review", "inconclusive", "unknown"]
     reasons: tuple[str, ...]
     compared_cases: tuple[ComparedCase, ...]
     over_100ms_cases: Mapping[str, tuple[tuple[str, float], ...]]
@@ -360,6 +360,8 @@ def compare_local_test_timings(
         over_100ms: dict[str, tuple[tuple[str, float], ...]] = {}
         at_least_1s: dict[str, tuple[tuple[str, float], ...]] = {}
         artifact_paths: set[str] = set()
+        missing_paired_proof = False
+        over_limit_changed = False
         for environment, evidence in sorted(proof.environments.items()):
             if environment not in {"py311", "py314"}:
                 raise ValueError("unsupported environment")
@@ -367,7 +369,10 @@ def compare_local_test_timings(
                 evidence.candidate_full_junit,
                 *(
                     item
-                    for run in (*evidence.baseline_runs, *evidence.candidate_runs)
+                    for run in (
+                        *(evidence.baseline_runs or ()),
+                        *(evidence.candidate_runs or ()),
+                    )
                     for item in (run.junit, run.phase_log)
                 ),
             ):
@@ -385,9 +390,28 @@ def compare_local_test_timings(
             at_least_1s[environment] = tuple(
                 (name, seconds) for name, seconds in full.items() if seconds >= 1.000
             )
-            if len(evidence.baseline_runs) < 2 or len(evidence.candidate_runs) < 2:
+            if any(name not in full for name in changed_ids):
+                raise ValueError("changed case missing from full JUnit inventory")
+            over_limit_changed |= any(
+                full[name] > 1.000 for name in changed_ids if name is not None
+            )
+            baseline_runs = evidence.baseline_runs
+            candidate_runs = evidence.candidate_runs
+            if (
+                "baseline_runs" in evidence.model_fields_set and baseline_runs is None
+            ) or (
+                "candidate_runs" in evidence.model_fields_set and candidate_runs is None
+            ):
+                raise ValueError("invalid paired timing proof")
+            if (baseline_runs is not None and len(baseline_runs) < 2) or (
+                candidate_runs is not None and len(candidate_runs) < 2
+            ):
                 raise ValueError("at least two runs per tree are required")
-            if len(evidence.baseline_runs) != len(evidence.candidate_runs):
+            if (
+                baseline_runs is not None
+                and candidate_runs is not None
+                and len(baseline_runs) != len(candidate_runs)
+            ):
                 raise ValueError("focused repeat counts must be equal")
             baseline = tuple(
                 _run_cases(
@@ -396,7 +420,7 @@ def compare_local_test_timings(
                     environment=environment,
                     read_bytes=read_bytes,
                 )
-                for run in evidence.baseline_runs
+                for run in baseline_runs or ()
             )
             candidate = tuple(
                 _run_cases(
@@ -405,51 +429,56 @@ def compare_local_test_timings(
                     environment=environment,
                     read_bytes=read_bytes,
                 )
-                for run in evidence.candidate_runs
+                for run in candidate_runs or ()
             )
             if (
                 len(
                     {
                         _run_identity(run)
-                        for run in (*evidence.baseline_runs, *evidence.candidate_runs)
+                        for run in (*(baseline_runs or ()), *(candidate_runs or ()))
                     }
                 )
-                != 1
+                > 1
             ):
                 raise ValueError("focused run commands or seeds differ")
-            if any(set(cases) != set(baseline[0][0]) for cases, _ in baseline) or any(
-                set(cases) != set(candidate[0][0]) for cases, _ in candidate
+            if (
+                baseline
+                and any(set(cases) != set(baseline[0][0]) for cases, _ in baseline)
+            ) or (
+                candidate
+                and any(set(cases) != set(candidate[0][0]) for cases, _ in candidate)
             ):
                 raise ValueError("focused repeat case sets differ")
             if any(name not in full for cases, _ in candidate for name in cases):
                 raise ValueError(
                     "focused candidate case missing from full JUnit inventory"
                 )
-            if any(
-                name not in full or any(name not in cases for cases, _ in candidate)
-                for name in changed_ids
+            if candidate and any(
+                any(name not in cases for cases, _ in candidate) for name in changed_ids
             ):
                 raise ValueError("changed case lacks candidate timing evidence")
+            if baseline_runs is None or candidate_runs is None:
+                missing_paired_proof = True
+                continue
             names = set().union(*(set(cases) for cases, _ in (*baseline, *candidate)))
             for name in sorted(names):
-                compared.append(
-                    _compare_case(
-                        environment, name, baseline, candidate, name in changed_ids
-                    )
+                case = _compare_case(
+                    environment, name, baseline, candidate, name in changed_ids
                 )
-        if any(case.classification == "inconclusive" for case in compared):
-            status = "inconclusive"
-        elif any(
-            (
-                case.classification == "introduced"
-                and all(seconds > 0.100 for seconds in case.candidate_seconds)
-            )
-            or case.classification == "consistent_slowdown"
-            for case in compared
-        ):
+                compared.append(case)
+                if case.classification == "introduced" and full[name] > 1.000:
+                    over_limit_changed = True
+        if over_limit_changed:
             status = "review"
+        elif missing_paired_proof:
+            status = "unknown"
+        elif any(case.classification == "inconclusive" for case in compared):
+            status = "inconclusive"
         else:
             status = "clear"
-        return TimingComparison(status, (), tuple(compared), over_100ms, at_least_1s)
+        reasons = ("paired timing proof absent",) if missing_paired_proof else ()
+        return TimingComparison(
+            status, reasons, tuple(compared), over_100ms, at_least_1s
+        )
     except (ValidationError, ValueError, KeyError, OSError, TypeError) as error:
         return TimingComparison("inconclusive", (str(error)[:200],), (), {}, {})

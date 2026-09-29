@@ -28,7 +28,12 @@ in this skill.
 
 The TDD Judge delegates this review after the validation session's one hook
 run. In interactive work, use the exact staged tree and its available immutable
-candidate JUnit snapshots, digests, and counts. In serial work, require the
+candidate JUnit snapshots, digests, and counts. A new or modified test strictly
+above 1.000 seconds is the ordinary hard block; exactly 1.000 is allowed.
+Send 0.100-second suggestions to a separate follow-up. Absent paired proof
+makes baseline regression `UNKNOWN` without waiving the full-JUnit gate;
+malformed or mismatched present proof is invalid. Controlled task-specific
+hard budgets still apply. In serial work, require the
 available Python 3.11 and 3.14 baseline and candidate timing proof bound to exact source
 trees. Use only controller-owned source/run digests, counts, completeness,
 candidate slow-case data, findings, and transcript outcome. The controller

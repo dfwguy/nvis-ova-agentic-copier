@@ -77,21 +77,17 @@ in this session; follow `.agents/guidance/read-only-mcp.md`.
    format, type, tox, and all other configured checks. Do not run them alone.
    Do not rerun tests.
 5. In interactive work, retain each readable full-hook JUnit snapshot for
-   `py311` and `py314` as the available timing inventory. For available timing,
-   obtain the read-only local comparator report for the exact baseline and
-   candidate trees.
-   Require artifact paths, SHA-256 digests, test counts, command, interpreter,
-   and seed for equal baseline and candidate focused run counts, with at least
-   two per tree in every environment where timing impact needs attribution.
-   Each focused run needs JUnit and
-   setup, call, and teardown phase logs. Keep the full-hook JUnit unchanged;
-   focused runs are evidence for comparison, not a replacement validation
-   suite. Incomplete or mismatched readable proof returns to the evidence owner
-   and cannot pass. If `status=inconclusive` has no global reasons and the full
-   case list and paired-run proof are sound, send it to the Non-functional
-   Reviewer. Mixed case directions call for review and a case-specific queue;
-   they do not alone block unrelated code. Do not turn `review` into an
-   automatic code-caused finding or call mixed timing a pass.
+   `py311` and `py314` as the candidate timing inventory. Check the fixed
+   paths, SHA-256 hashes, counts, and exact tree. Inspect new and modified
+   test cases in that full inventory for times strictly above 1.000 seconds;
+   exactly 1.000 is allowed. This hard gate still applies when no paired
+   baseline or focused proof exists. Mark that comparison `UNKNOWN` and
+   continue review. If a comparator report is present, check its source
+   trees, artifact hashes and counts, command, interpreter, seed, repeated
+   runs, and phase logs. Malformed or mismatched present proof is invalid and
+   returns to its owner. A `review` flag or mixed directions need assessment,
+   but do not themselves prove a code-caused regression. Cases above 0.100
+   seconds are advisory and go to a separate follow-up. Do not rerun tests.
 6. Start `$nonfunctional-review` as your read-only child. Pass the exact tree,
    the proof for this mode, and the interactive comparator report when
    applicable. For serial work, pass both source trees and trusted

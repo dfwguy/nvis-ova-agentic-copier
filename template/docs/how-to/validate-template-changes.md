@@ -5,7 +5,7 @@ summary: Run local tests and CI checks for a template change.
 audience: maintainer
 tags: [template-maintenance]
 status: current
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-29
 related:
   - path: ../reference/template-contract.md
     why: Defines the template behavior those checks protect.
@@ -82,9 +82,21 @@ the job log. Root coverage excludes the generated Copier payload.
 
 The [testing strategy](../reference/testing-strategy.md) defines per-case
 timing targets and slow-case review rules. Use the JUnit case times to review
-changed tests.
+changed tests. In interactive work, only a new or modified case strictly above
+1.000 seconds triggers the default hard timing gate. Exactly 1.000 seconds is
+allowed. The 100 ms target is advisory; record slow cases for a separate
+follow-up. A tighter controlled task limit still applies. After a successful
+hook, a missing or `OSError`-unreadable fixed JUnit file makes timing `UNKNOWN`;
+continue without a timing pass, times, or counts. Repair a malformed or
+mismatched file that is present.
 
 ## Investigate local test timing
+
+Use these paired runs to diagnose a cost or meet a task that requires them.
+When both full candidate JUnit files are valid, an absent baseline or focused
+side makes the paired comparison `unknown` and does not block by itself.
+Malformed, mismatched, or incomplete artifacts that are provided need repair.
+The full candidate JUnit still decides the changed-case gate above.
 
 Enter one project-scoped validation window before the Judge hook and keep it
 through the focused repeats and comparison. `GITLAB_HOST` must be a bare host
@@ -177,11 +189,15 @@ Inside the admitted child shell:
    to changed code. Check session fixtures before attributing the first
    consuming case's setup cost to its test body.
 
-A `review` result needs closer review; it does not by itself prove a
-regression. Missing, mismatched, or partial readable proof blocks approval until
-the evidence owner repairs it. A successful hook with a missing or
-`OSError`-unreadable fixed JUnit file reports timing `UNKNOWN`; continue review
-without a timing pass, times, or counts. If sound paired proof shows mixed case
+A `review` result marks a new or modified case strictly above 1.000 seconds
+in the valid full candidate JUnit and blocks the interactive handoff. It does
+not by itself prove a regression. A case at exactly 1.000 seconds clears that
+gate. An absent baseline or focused side is `unknown` and nonblocking when
+both candidate JUnit files are valid. Provided paired artifacts that are
+malformed, mismatched, or incomplete are `inconclusive` and block approval
+until repaired. A missing or `OSError`-unreadable fixed full JUnit
+file after a successful hook makes timing `UNKNOWN`; a malformed or mismatched
+file that is present needs repair. If sound paired proof shows mixed case
 directions, record the doubt and queue case-specific diagnosis. That doubt
 alone need not block an unrelated change when its impact map is clear and no
 other timing rule blocks it. Do not call the mixed case a timing pass or a

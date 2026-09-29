@@ -34,21 +34,14 @@ git hook run pre-commit
 
 These files are read-only proof. They are not shared worktree state. For each
 readable file, check its path, hash, and count before reading valid JUnit XML
-and numeric `time` fields. Available full-hook `py311` and `py314` files list
-candidate case times. For available timing, Judge also gives you a read-only
-comparator report for the exact baseline and candidate trees. Check each SHA-256 hash and count, command, Python
-interpreter, and seed. Where timing impact needs proof, require equal baseline
-and candidate focused run counts, with at least two per tree in each relevant
-environment. Each run needs JUnit and
-setup, call, and teardown phase logs. The report shows signed
-candidate-minus-baseline deltas. A `review` flag asks you to assess the cause;
-it does not prove the diff caused a regression. Incomplete or mismatched
-readable proof cannot pass. A report with `status=inconclusive`, no global reasons, a
-full case list, and full paired-run proof may have mixed case directions.
-Report that doubt and queue case-specific diagnosis or repair. You may
-approve if the impact map is clear and no new or newly slow test, controlled
-limit, or proven diff-caused regression blocks the work. Do not call the
-mixed case a timing pass or a regression.
+and numeric `time` fields. Available full-hook `py311` and `py314` files list candidate case times.
+Judge may also give a read-only paired comparator for the exact baseline and
+candidate trees. If present, check its SHA-256 hashes, counts, commands,
+interpreters, seeds, and source trees. Reject malformed, partial, or mismatched
+present proof. If paired baseline or focused proof is absent, mark baseline
+relative regression `UNKNOWN` and continue with the valid full JUnit. The
+missing comparison cannot waive a full-JUnit finding. Use available paired
+runs and phase data to explain a cause; mixed directions alone prove none.
 
 For serial work, Judge gives you controller-owned `timing_review`: baseline
 SHA and tree, candidate tree, transcript digest and outcome, Python 3.11 and
@@ -92,33 +85,32 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    work, check that changed tests state a set latency, rate, or resource limit.
    Timing tests must use an injected or controlled boundary, not the machine
    clock.
-4. Compare run times with each stated task limit, design limit, baseline, or
-   budget. Apply a task-specific tighter limit when present. Touched cases are
-   added or modified tests, including their parameterizations. Also include
-   cases affected by a changed shared fixture or helper when they can be
-   identified. A changed `.py` file outside `tests/` and `template/tests/`
-   conservatively marks an existing case as affected when its candidate time
-   reaches 1.000 s and either its baseline was below 1.000 s or its candidate
-   time is slower in that Python version. This is an impact map, not proof
-   that the diff caused the cost. Return an unclear impact map to Architect and the test owner for
-   resolution before approval. In serial timing proof, an unsafe parameter
+4. Apply each stated controlled task budget, including a tighter one. For
+   interactive work, the ordinary timing hard gate applies only to new or
+   modified tests and their parameterizations. Reject any such case strictly
+   above 1.000 seconds in either valid full-hook JUnit file. Exactly 1.000
+   seconds is allowed. Cases above 0.100 seconds are optimization suggestions;
+   route them to a separate follow-up. Unchanged tests, including cases linked
+   to changed code or fixtures, are report-only under this ordinary gate.
+   Missing paired proof leaves baseline-relative regression `UNKNOWN` but
+   does not change the full-JUnit hard gate. When valid paired proof exists,
+   report signed deltas and possible causes without adding an ordinary hard
+   gate. A controlled task-specific budget still applies to its own scope.
+
+   In serial work, touched cases include added or modified tests and their
+   parameterizations. Include cases affected by a changed shared fixture or
+   helper when they can be identified. A changed `.py` file outside `tests/`
+   and `template/tests/` conservatively marks an existing case as affected
+   when its candidate time reaches 1.000 s and either its baseline was below
+   1.000 s or its candidate time is slower in that Python version. This is an
+   impact map, not proof that the diff caused the cost. Return an unclear
+   serial impact map to Architect and the test owner for resolution.
+   In serial timing proof, an unsafe parameter
    becomes `[param_<64 lowercase SHA-256 hex>]` after the safe base test name.
    Treat each emitted ID as a distinct case. Map a touched base test to all its
    parameterizations, and match the emitted ID and Python environment to its
    durable audit or linked issue record. Do not request raw unsafe parameter
-   text. In interactive work, compare repeated baseline and candidate times
-   and their signed deltas. An
-   added ordinary test above 0.100 s in repeated runs in either environment
-   goes back to the test owner unless an integration exception is approved. A
-   changed test goes back if it adds a cost above 0.100 s or causes a proven
-   slowdown due to the changed test, fixture, or code. Exactly 0.100 s is
-   allowed. Keep a touched test that was already above 0.100 s at baseline in
-   the report. Its same or faster cost alone does not reject the change. Call
-   an existing-case slowdown a regression only if candidate runs are
-   consistently slower, phase logs show the cost, environments are alike, and the diff
-   shows the cause. Report positive and negative signed deltas. Send bad or
-   partial proof to its owner. Queue diagnosis for mixed case directions in
-   sound proof. In serial work, send a newly introduced ordinary case above
+   text. In serial work, send a newly introduced ordinary case above
    0.100 s to the test owner unless a documented integration exception applies.
    Send an existing touched case back only when sound repeat and phase evidence
    corroborates attributable added cost above 0.100 s or a regression caused by
@@ -141,35 +133,36 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    in that record. Do not
    invent a limit. CI case times give context; local goals are not CI gates.
 5. A successful hook with a missing or `OSError`-unreadable fixed `py311` or
-   `py314` JUnit file has timing `UNKNOWN`; continue review without a timing
-   pass or invented times. Reject other missing, incomplete, or bad proof.
-   Reject if available proof lacks time data or
-   tests for a stated speed or resource need, an applicable ordinary-test
-   0.100 s rule is exceeded, an explicit controlled task-specific hard budget
-   is exceeded, or an ordinary-test regression is corroborated and unexplained.
-   In serial work, reject missing baseline, candidate, or required repeat
-   proof outside that `UNKNOWN` case. In interactive work, a comparator `review` flag requires adjudication, not
-   automatic rejection. A structurally bad `inconclusive` report cannot pass.
-   A sound report with mixed case directions may support approval under the
-   rule above; record the doubt and the case-specific queue. A case at or above
-   1.000 s alone triggers full reporting and review, not rejection. Assess a
-   documented integration exception against its plan and the task budget.
-   Route code gaps to the Implementer and test gaps to the Test Writer. Report
-   every case at or above 1.000 s, its environment, and any missing follow-up
-   to Architect, regardless of the verdict.
+   `py314` JUnit file has timing `UNKNOWN`; continue without invented times or
+   a timing pass. Reject malformed or mismatched proof that is present.
+   In interactive work, apply the full-JUnit hard gate in step 4 even when
+   paired proof is absent. Mark the baseline comparison `UNKNOWN` without
+   blocking on that absence. Cases above 0.100 seconds remain suggestions
+   for a separate follow-up. Exactly 1.000 seconds is allowed; an unchanged
+   case above that value is reported, not an ordinary hard block. A valid
+   controlled task-specific hard budget can still reject its own scope.
+   A comparator `review` flag asks for assessment, not automatic rejection;
+   malformed present comparator proof is invalid. In serial work, retain its
+   0.100-second ordinary-test rule, required paired proof, and corroborated
+   regression checks. Assess documented integration exceptions against their
+   plan and task budget. Route code gaps to Implementer and test gaps to Test
+   Writer. Report each case at or above 1.000 seconds and any follow-up to
+   Architect, regardless of the verdict.
 
 ## Output
 
 Return `Overall: Approve` or `Overall: Reject`. Give the proof ID or file
 paths for this mode; in serial work, name the candidate tree and the baseline
-when readable. For interactive work, include the comparator status,
-global reasons, proof completeness, exact trees, repeated times, phases, and
-signed deltas for reviewed cases. Name any mixed cases and their diagnosis
-or repair queue.
+when readable. For interactive work, name the exact full-JUnit proof and
+classify each new or modified case above 1.000 seconds. Mark absent paired
+proof and baseline regression `UNKNOWN`; for present valid proof, report its
+trees, repeated times, phases, and signed deltas. Name mixed cases and their
+separate follow-up.
 Give available total and slowest run times, every available case above 0.100 s
 and at or above 1.000 s, its environment, classification and next
 action, each touched case
-above 0.100 s and its environment, and each stated limit. For readable
+above 0.100 s and its environment, and each stated limit. Route interactive
+0.100-second suggestions to a separate follow-up. For readable
 serial timing, report both `timing_complete` flags per environment and the
 controller's finding and phase deltas for each review. For
 `timing_status=unknown`, report the trusted environment and reason.
