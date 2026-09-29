@@ -566,6 +566,59 @@ The window returns
 These results mean the local timing proof must wait; they do not claim a clean
 measurement.
 
+While an applied interactive window waits, it publishes a short-lived request
+for its exact configured host and numeric project. The controller recognizes
+only a live request from that window. A contention record, inherited environment
+value, expired request, or request for another project cannot ask it to yield.
+Malformed or unreadable retained request JSON raises an explicit error. The
+controller leaves that file in place for review.
+The waiting window takes the controller's project lock first. It then takes
+timing admission within one bounded wait. It holds both while its child runs.
+If it cannot take both locks, it marks the request unavailable. It returns the
+deferred result without starting validation. A later controller run cannot
+yield to that request.
+
+After it durably binds a coding Red checkpoint, the controller checks for a live
+request. If it finds one, it finishes the current worker segment and returns
+`stop_reason=interactive_validation_yield`. The issue stays in `EXECUTING`
+with its worktree and Red evidence. The service exits successfully, leaving
+the interactive window free to take the locks. Its wrapper does not start
+another applied run in that pass. If the issue remains active, the next timer
+run reloads the checkpoint and resumes the worker. With no live request, the
+workflow continues.
+
+The resumed report's `validation_admission` evidence has `resolution=resumed`
+and identifies the request. It records `request_at`, `yield_at`, `validation_started_at`,
+`validation_finished_at`, `resume_at`, `wait_elapsed_seconds`, and
+`unavailable=false` when those boundaries were observed. The elapsed value
+measures the wait from request to validation start. These are controller and
+admission timestamps for this handoff. They are separate from the ledger's
+`phase_timings` entries for workflow phases and roles.
+
+When the bounded wait ends before both locks are acquired, the next applied
+report may instead show `resolution=unavailable` and `unavailable=true`. It
+records the request, end of wait, later report time, and actual wait. JSON omits `yield_at` and
+`validation_started_at` because neither event occurred.
+That record does not claim a validation run.
+
+Only one request can remain outstanding per project. A new applied window
+returns the deferred `project_timing_admission_busy` result until the controller
+reports the earlier request. If the yielded issue remains active, the report
+records `resume_at` after the worker returns. If it is no longer active, the
+report records `resolved_at` without invoking the worker. For an unavailable
+window, a later applied run reports `validation_admission.unavailable=true`.
+A run that exits before one of these reports leaves the request outstanding.
+After the report consumes the request, a new window can start.
+
+If the exact yielded issue is no longer active in the ledger before worker
+invocation, the next applied run does not invoke that worker. It returns
+`stop_reason=validation_admission_resolved` with the `issue_iid`. Its
+`validation_admission.resolution` is `closed_without_resume` for `COMPLETE` or
+`ineligible_without_resume` for another non-active state, such as `BLOCKED`.
+The report keeps the request, yield, and validation times, sets `resolved_at`,
+and leaves `resume_at=null`. This consumes the request, so a new window can
+start.
+
 The trusted controller or an interactive Judge checks one staged candidate in a
 durable session keyed by `TREE`.
 Use `validation run --candidate-tree TREE` to preview the action. It does not

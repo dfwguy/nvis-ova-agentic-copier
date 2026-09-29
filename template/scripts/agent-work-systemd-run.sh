@@ -319,6 +319,10 @@ validate_applied_report() {
         (.outcome == "pipeline_blocked" or .outcome == "activation_complete")) or
        (.stop_reason == "pipeline_inventory_blocked" and
         .outcome == "pipeline_inventory_blocked") or
+       (.stop_reason == "interactive_validation_yield" and
+        .outcome == "activation_complete") or
+       (.stop_reason == "validation_admission_resolved" and
+        .outcome == "activation_complete") or
        (.stop_reason == "retry_wait" and .outcome == "activation_complete") or
        (.stop_reason == "repair" and .outcome == "activation_complete") or
        (.stop_reason == "needs_repair" and .outcome == "activation_complete") or

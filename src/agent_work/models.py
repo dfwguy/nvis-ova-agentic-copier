@@ -1140,6 +1140,24 @@ class PrerequisiteLabelProjectionReport(BoundaryModel):
     intended_labels: tuple[str, ...] = ()
 
 
+class ValidationAdmissionReport(BoundaryModel):
+    """Bounded timing for one interactive validation admission."""
+
+    request_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    request_at: datetime
+    yield_at: datetime | None = None
+    validation_started_at: datetime | None = None
+    validation_finished_at: datetime | None = None
+    resume_at: datetime | None = None
+    resolved_at: datetime | None = None
+    issue_iid: int | None = Field(default=None, gt=0)
+    resolution: Literal[
+        "resumed", "unavailable", "closed_without_resume", "ineligible_without_resume"
+    ] = "resumed"
+    wait_elapsed_seconds: float = Field(ge=0)
+    unavailable: bool
+
+
 class CommandReport(BoundaryModel):
     """Common safe JSON envelope for every CLI action."""
 
@@ -1160,6 +1178,7 @@ class CommandReport(BoundaryModel):
     recovery_candidates: tuple[RecoveryCandidateReport, ...] = ()
     recovery_summary: RecoverySummary | None = None
     prerequisite_projections: tuple[PrerequisiteLabelProjectionReport, ...] = ()
+    validation_admission: ValidationAdmissionReport | None = None
 
 
 class RecoverySummary(BoundaryModel):
