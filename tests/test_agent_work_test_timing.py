@@ -86,12 +86,12 @@ def _review(
     )
 
 
-def test_touched_case_just_over_100ms_requires_correction_in_both_versions() -> None:
+def test_touched_case_just_over_100ms_is_reported_in_both_versions() -> None:
     result = _review({CASE: 0.099}, {CASE: 0.101}, changed_tests=(CASE,))
 
-    assert result.outcome == "correction_required"
-    assert {(item.environment, item.name) for item in result.findings} == {
-        (env, CASE) for env in ENVIRONMENTS
+    assert result.outcome == "report_only"
+    assert {(item.environment, item.name, item.reason) for item in result.findings} == {
+        (env, CASE, "touched_slow") for env in ENVIRONMENTS
     }
 
 
@@ -143,14 +143,19 @@ def test_worsened_inherited_slow_case_repeats_both_sources_and_reports_phases() 
         }
         return evidence
 
-    result = _review({CASE: 1.22}, {CASE: 2.02}, focused=focused)
+    result = _review({CASE: 1.22}, {CASE: 2.02}, changed_tests=(CASE,), focused=focused)
 
     assert result.outcome == "correction_required"
     assert len(requests) == 8
-    assert all(item.reason == "corroborated_regression" for item in result.findings)
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("corroborated_regression", "touched_slow")
+    }
     assert all(
         item.phase_deltas == pytest.approx({"setup": 0, "call": 0.8, "teardown": 0})
         for item in result.findings
+        if item.reason == "corroborated_regression"
     )
 
 
@@ -223,18 +228,38 @@ def test_uncorroborated_one_second_spike_is_report_only() -> None:
     assert all(item.reason == "uncorroborated_spike" for item in result.findings)
 
 
-def test_touched_slow_limit_still_requires_correction_when_spike_does_not_repeat() -> (
+def test_touched_inherited_integration_spike_with_faster_repeats_is_report_only() -> (
     None
 ):
+    requests: list[dict[str, Any]] = []
+
     def focused(**request: Any) -> dict[str, Any]:
+        requests.append(request)
         evidence = _focused(**request)
-        evidence["cases"] = {CASE: {"setup": 0.01, "call": 0.2, "teardown": 0.01}}
+        call_seconds = 1.18 if request["source_tree"] == BASE_TREE else 1.08
+        evidence["cases"] = {
+            CASE: {"setup": 0.01, "call": call_seconds, "teardown": 0.01}
+        }
         return evidence
 
-    result = _review({CASE: 0.22}, {CASE: 1.22}, changed_tests=(CASE,), focused=focused)
+    result = _review({CASE: 1.20}, {CASE: 1.22}, changed_tests=(CASE,), focused=focused)
 
-    assert result.outcome == "correction_required"
-    assert any(item.reason == "touched_slow" for item in result.findings)
+    assert len(requests) == 8
+    assert all(
+        sum(
+            request["environment"] == env and request["source_tree"] == tree
+            for request in requests
+        )
+        == 2
+        for env in ENVIRONMENTS
+        for tree in (BASE_TREE, CANDIDATE_TREE)
+    )
+    assert result.outcome == "report_only"
+    assert {(item.environment, item.reason) for item in result.findings} == {
+        (env, reason)
+        for env in ENVIRONMENTS
+        for reason in ("uncorroborated_spike", "touched_slow")
+    }
 
 
 def test_changed_shared_helper_requires_explicit_consumer_impact() -> None:
@@ -256,9 +281,8 @@ def test_helper_affected_existing_subsecond_case_uses_full_junit_pair() -> None:
         focused=focused,
     )
 
-    assert result.outcome == "correction_required"
+    assert result.outcome == "report_only"
     assert requests == []
-    assert result.outcome == "correction_required"
     assert all(item.reason == "touched_slow" for item in result.findings)
 
 
@@ -267,10 +291,11 @@ def test_changed_test_file_marks_its_parameterized_cases_as_touched() -> None:
         {NEW_CASE: 0.08}, {NEW_CASE: 0.11}, changed_tests=("tests/test_speed.py",)
     )
 
-    assert result.outcome == "correction_required"
+    assert result.outcome == "report_only"
     assert {(item.environment, item.name) for item in result.findings} == {
         (env, NEW_CASE) for env in ENVIRONMENTS
     }
+    assert all(item.reason == "touched_slow" for item in result.findings)
 
 
 def test_many_existing_subsecond_cases_in_changed_file_need_no_focused_runs() -> None:
@@ -285,7 +310,7 @@ def test_many_existing_subsecond_cases_in_changed_file_need_no_focused_runs() ->
         cases, cases, changed_tests=("tests/test_speed.py",), focused=focused
     )
 
-    assert result.outcome == "correction_required"
+    assert result.outcome == "report_only"
     assert {(item.environment, item.name, item.reason) for item in result.findings} == {
         (environment, name, "touched_slow")
         for environment in ENVIRONMENTS
@@ -304,7 +329,7 @@ def test_many_touched_slow_cases_keep_bounded_findings_and_omission_count() -> N
         focused=lambda **_request: pytest.fail("existing subsecond case was focused"),
     )
 
-    assert result.outcome == "correction_required"
+    assert result.outcome == "report_only"
     assert len(result.findings) == 128
     assert result.omitted_findings == 44
     assert all(item.reason == "touched_slow" for item in result.findings)
@@ -422,7 +447,7 @@ def test_many_one_second_regressions_keep_paired_focused_evidence() -> None:
         )
 
 
-def test_bounded_findings_retain_a_corrective_reason_after_many_reports() -> None:
+def test_bounded_findings_retain_touched_slow_report_after_many_reports() -> None:
     inherited = {
         f"tests/test_speed.py::test_inherited_{index}": 1.1 for index in range(63)
     }
@@ -435,7 +460,7 @@ def test_bounded_findings_retain_a_corrective_reason_after_many_reports() -> Non
         focused=lambda **_request: pytest.fail("no focused run expected"),
     )
 
-    assert result.outcome == "correction_required"
+    assert result.outcome == "report_only"
     assert len(result.findings) == 128
     assert result.omitted_findings == 0
     assert any(item.reason == "touched_slow" for item in result.findings)

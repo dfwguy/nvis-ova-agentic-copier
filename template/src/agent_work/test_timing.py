@@ -450,11 +450,10 @@ def review_test_timings(
         len(findings) - len(critical_findings)
     )
     retained_correction = any(
-        item.reason in {"new_slow", "touched_slow", "corroborated_regression"}
-        for item in findings
+        item.reason in {"new_slow", "corroborated_regression"} for item in findings
     )
     omitted_correction = any(
-        item.reason in {"new_slow", "touched_slow", "corroborated_regression"}
+        item.reason in {"new_slow", "corroborated_regression"}
         for item in subsecond_findings[len(findings) - len(critical_findings) :]
     )
     if omitted_correction and not retained_correction:

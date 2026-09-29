@@ -1686,7 +1686,7 @@ class GitRepository:
                 )
             if len(json.dumps(safe_findings, separators=(",", ":")).encode()) > 65_536:
                 raise RepositoryError("candidate timing proof is invalid")
-            corrective = {"new_slow", "touched_slow", "corroborated_regression"}
+            corrective = {"new_slow", "corroborated_regression"}
             has_correction = any(
                 finding["reason"] in corrective for finding in safe_findings
             )

@@ -108,8 +108,13 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    consistently slower, phase logs show the cost, environments are alike, and the diff
    shows the cause. Report positive and negative signed deltas. Send bad or
    partial proof to its owner. Queue diagnosis for mixed case directions in
-   sound proof. In serial work, a touched case above 0.100 s goes back to the
-   test owner unless a documented integration exception applies. Compare each
+   sound proof. In serial work, send a newly introduced ordinary case above
+   0.100 s to the test owner unless a documented integration exception applies.
+   Send an existing touched case back only when sound repeat and phase evidence
+   corroborates attributable added cost above 0.100 s or a regression caused by
+   the change. Report inherited touched cost that is unchanged, faster, or lacks
+   proven attributable slowdown without rejecting it for that cost alone. Keep
+   the 0.100 s optimization goal. Compare each
    candidate case at or above 1.000 s with its baseline where present and
    record the case, environment, and proof in the durable audit or linked
    issue record, even when another finding requires return. Review bounded
