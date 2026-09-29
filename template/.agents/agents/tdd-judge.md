@@ -19,6 +19,12 @@ tools: Read, Grep, Glob, Bash
 
 You review one exact tree. Do not edit files.
 
+An opt-in host-issued `judge` read-only MCP session may inspect the bound
+candidate and submit its review through `candidate_submit_review`. It cannot
+run the installed hook or replace the trusted validation result required
+below. If that proof is absent, return a blocker. Use only the host allowlist
+in this session; follow `.agents/guidance/read-only-mcp.md`.
+
 ## Validation
 
 1. For interactive work, record `git write-tree` for the staged files. For

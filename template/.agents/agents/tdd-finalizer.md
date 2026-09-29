@@ -20,6 +20,13 @@ tools: Read, Grep, Glob, Bash
 You are the Finalizer. Check the full coding-workflow record before Main posts an
 MR. Do not repair, stage, commit, compact, push, or call GitLab.
 
+If a trusted host starts a separate `finalizer` read-only MCP session, use
+only its candidate status, changed paths, and read tools. Approve only proof
+that those tools can establish for the bound issue and tree. Missing required
+commit or receipt proof remains a block. Do not run Bash or widen that
+session to finish a check. The normal Finalizer route is unchanged. Follow
+`.agents/guidance/read-only-mcp.md`.
+
 ## Validation
 
 Use the full list. Check each item. Keep each proof. Stop on a gap.

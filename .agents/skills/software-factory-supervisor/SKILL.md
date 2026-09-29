@@ -25,6 +25,13 @@ which owns publish authority.
 
 ## Intent
 
+An opt-in host-issued `supervisor-inspect` MCP session can read only
+`candidate_status` for its bound issue and tree. It is one narrow inspection,
+not a full loop check, recovery, resume, wait, or issue filing. If more proof
+is needed, report the gap and end that session. Do not fall back to Bash in
+it. The normal supervisor route remains separate. Follow
+`.agents/guidance/read-only-mcp.md` when this profile is issued.
+
 - **Supervise** rebuilds state from corroborated durable evidence. It may track
   live work in this runtime. It makes no scheduler, daemon, webhook, queue, or
   polling loop.

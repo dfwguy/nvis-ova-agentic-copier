@@ -2570,17 +2570,18 @@ def _worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class RoleExecutionProfile:
-    """Explicit host controls for one separate candidate preview invocation."""
+    """Explicit host controls for one separate candidate read-only invocation."""
 
-    role: Literal["candidate-preview"]
+    role: Literal[
+        "candidate-preview", "router", "judge", "finalizer", "supervisor-inspect"
+    ]
     candidate_socket: Path
     nonce: str
     issue_iid: int
     candidate_tree: str
 
     def __post_init__(self) -> None:
-        if self.role != "candidate-preview":
-            raise ValueError("candidate preview role must be candidate-preview")
+        candidate_tools_for_role(self.role)
 
     @classmethod
     def candidate_preview(
@@ -2603,6 +2604,29 @@ class RoleExecutionProfile:
             candidate_tree=candidate_tree,
         )
 
+    @classmethod
+    def read_only(
+        cls,
+        *,
+        role: str,
+        candidate_socket: Path,
+        nonce: str,
+        issue_iid: int,
+        candidate_tree: str,
+    ) -> RoleExecutionProfile:
+        """Create a host-issued read-only profile for one workflow role."""
+        if role not in _READ_ONLY_ROLE_TOOLS:
+            raise ValueError("invalid read-only role")
+        return cls(
+            role=cast(
+                Literal["router", "judge", "finalizer", "supervisor-inspect"], role
+            ),
+            candidate_socket=candidate_socket,
+            nonce=nonce,
+            issue_iid=issue_iid,
+            candidate_tree=candidate_tree,
+        )
+
 
 _CANDIDATE_MCP_TOOLS = (
     "candidate_status",
@@ -2610,6 +2634,45 @@ _CANDIDATE_MCP_TOOLS = (
     "candidate_read",
     "candidate_submit_review",
 )
+_CANDIDATE_READ_TOOLS = _CANDIDATE_MCP_TOOLS[:3]
+_READ_ONLY_ROLE_TOOLS = {
+    "router": _CANDIDATE_READ_TOOLS,
+    "judge": _CANDIDATE_MCP_TOOLS,
+    "finalizer": _CANDIDATE_READ_TOOLS,
+    "supervisor-inspect": ("candidate_status",),
+}
+_READ_ONLY_HOST_FEATURES = frozenset({"shell_tool", "unified_exec", "code_mode_host"})
+
+
+def _parse_read_only_host_features(result: CommandResult) -> dict[str, bool]:
+    """Accept only complete, unambiguous effective Codex feature states."""
+    if result.returncode != 0:
+        raise RuntimeError("read-only host capability unavailable")
+    observed: dict[str, bool] = {}
+    for line in result.stdout.splitlines():
+        columns = line.split()
+        if not columns or columns[0] not in _READ_ONLY_HOST_FEATURES:
+            continue
+        if (
+            len(columns) != 3
+            or columns[0] in observed
+            or columns[2] not in {"true", "false"}
+        ):
+            raise RuntimeError("read-only host capability unavailable")
+        observed[columns[0]] = columns[2] == "true"
+    if observed.keys() != _READ_ONLY_HOST_FEATURES:
+        raise RuntimeError("read-only host capability unavailable")
+    return observed
+
+
+def candidate_tools_for_role(role: str) -> tuple[str, ...]:
+    """Return the closed MCP tool set for a controller-issued role."""
+    if role == "candidate-preview":
+        return _CANDIDATE_MCP_TOOLS
+    try:
+        return _READ_ONLY_ROLE_TOOLS[role]
+    except KeyError:
+        raise ValueError("invalid candidate role") from None
 
 
 def _candidate_preview_command(
@@ -2617,6 +2680,8 @@ def _candidate_preview_command(
     checkout: Path,
     trusted_checkout: Path,
     controller_environment: Mapping[str, str],
+    enabled_tools: tuple[str, ...],
+    role: str,
 ) -> tuple[str, ...]:
     """Build a standalone Codex command with read-only host controls."""
     configured_uv = controller_environment.get("AGENT_WORK_UV")
@@ -2636,10 +2701,16 @@ def _candidate_preview_command(
         "--sandbox",
         "read-only",
         "--ignore-user-config",
+        *(("--strict-config",) if role != "candidate-preview" else ()),
         "-c",
         "features.shell_tool=false",
         "-c",
         "features.unified_exec=false",
+        *(
+            ("-c", "features.code_mode_host=false")
+            if role != "candidate-preview"
+            else ()
+        ),
         "-c",
         "mcp_servers.candidate.command=" + json.dumps(str(uv_path)),
         "-c",
@@ -2666,13 +2737,14 @@ def _candidate_preview_command(
                 "AGENT_WORK_CANDIDATE_NONCE",
                 "AGENT_WORK_CANDIDATE_ISSUE_IID",
                 "AGENT_WORK_CANDIDATE_TREE",
+                "AGENT_WORK_CANDIDATE_ROLE",
             )
         ),
         "-c",
-        "mcp_servers.candidate.enabled_tools=" + json.dumps(_CANDIDATE_MCP_TOOLS),
+        "mcp_servers.candidate.enabled_tools=" + json.dumps(enabled_tools),
         *(
             token
-            for tool in _CANDIDATE_MCP_TOOLS
+            for tool in enabled_tools
             for token in (
                 "-c",
                 f'mcp_servers.candidate.tools.{tool}.approval_mode="approve"',
@@ -2697,6 +2769,9 @@ class AgentInvoker:
         clock: Callable[[], float] = monotonic,
         temporary_directory: Path | None = None,
         trusted_controller_checkout: Path | None = None,
+        read_only_host_audit: (
+            Callable[[tuple[str, ...], Mapping[str, str]], Mapping[str, bool]] | None
+        ) = None,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
@@ -2705,6 +2780,7 @@ class AgentInvoker:
             candidate_broker_factory or create_candidate_broker
         )
         self._clock = clock
+        self._read_only_host_audit = read_only_host_audit
         self._temporary_directory = temporary_directory
         self._trusted_controller_checkout = (
             trusted_controller_checkout or Path(__file__).resolve().parents[2]
@@ -2737,6 +2813,7 @@ class AgentInvoker:
         timeout_seconds: int,
         environment: dict[str, str],
         include_config: bool = True,
+        read_only_role: bool = False,
     ) -> CommandResult:
         """Give a Codex worker an owned session home for exactly one invocation."""
         if agent != "codex":
@@ -2766,6 +2843,46 @@ class AgentInvoker:
                 **environment,
                 "CODEX_HOME": str(home),
             }
+            if read_only_role:
+                audit_command = (
+                    command[0],
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.unified_exec=false",
+                    "-c",
+                    "features.code_mode_host=false",
+                    "features",
+                    "list",
+                )
+                try:
+                    if self._read_only_host_audit is None:
+                        audit_result = self._run_command(
+                            audit_command,
+                            stdin=None,
+                            timeout_seconds=min(
+                                timeout_seconds, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
+                            ),
+                            environment=scoped_environment,
+                        )
+                        features = _parse_read_only_host_features(audit_result)
+                    else:
+                        features = self._read_only_host_audit(
+                            audit_command, scoped_environment
+                        )
+                    if (
+                        not isinstance(features, Mapping)
+                        or features.keys() != _READ_ONLY_HOST_FEATURES
+                        or any(
+                            type(value) is not bool or value
+                            for value in features.values()
+                        )
+                    ):
+                        raise RuntimeError("read-only host capability unavailable")
+                except Exception:  # noqa: BLE001 - injected audit errors must deny launch
+                    raise RuntimeError(
+                        "read-only host capability unavailable"
+                    ) from None
             return self._run_command(
                 command,
                 stdin=stdin,
@@ -2962,6 +3079,7 @@ class AgentInvoker:
                     "AGENT_WORK_CANDIDATE_NONCE": role_profile.nonce,
                     "AGENT_WORK_CANDIDATE_ISSUE_IID": str(role_profile.issue_iid),
                     "AGENT_WORK_CANDIDATE_TREE": role_profile.candidate_tree,
+                    "AGENT_WORK_CANDIDATE_ROLE": role_profile.role,
                 }
             )
             try:
@@ -2972,14 +3090,22 @@ class AgentInvoker:
                         checkout,
                         self._trusted_controller_checkout,
                         self._environment,
+                        candidate_tools_for_role(role_profile.role),
+                        role_profile.role,
                     ),
                     stdin=prompt,
                     timeout_seconds=timeout,
                     environment=worker_environment,
                     include_config=False,
+                    read_only_role=role_profile.role != "candidate-preview",
                 )
             except RuntimeError:
-                return WorkerInvocation(None, stderr="candidate preview setup failed")
+                failure = (
+                    "candidate preview setup failed"
+                    if role_profile.role == "candidate-preview"
+                    else "read-only host capability unavailable"
+                )
+                return WorkerInvocation(None, stderr=failure)
             private_values = (
                 str(role_profile.candidate_socket),
                 role_profile.nonce,

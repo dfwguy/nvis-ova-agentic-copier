@@ -92,6 +92,17 @@ verified retained Red checkpoint when one exists. Without that checkpoint, the
 prompt's advisory input has an unknown lane and suggests Architect. These
 suggestions do not verify specialist receipts or change controller state.
 
+An opt-in host can launch the router, judge, finalizer, or supervisor inspector
+in a separate read-only process with a small set of candidate MCP tools. Each
+role sees only the evidence its host allows. A live capability probe must show
+that the selected host blocks shell and write tools before this route is used.
+The prelaunch audit checks effective feature flags, but it does not prove the
+live tool set. The factory keeps its normal route until the audit and live
+probe pass and the controller is wired to these profiles. The
+[read-only role profile reference](../reference/serial-gitlab-agent-loop.md#opt-in-read-only-role-profiles)
+lists the tool sets and limits. The candidate-preview pilot is separate and
+remains advisory.
+
 ## Architect considers three independent designs
 
 Each fresh session starts with one Architect. Before it starts a child that can
