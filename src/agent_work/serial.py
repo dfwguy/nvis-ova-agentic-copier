@@ -24,12 +24,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
-from .candidate_boundary import (
-    GIT_READ_INLINE_JSON_BYTES,
-    CandidateBoundaryError,
-    git_read_chunk,
-    git_read_manifest,
-)
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
     ACTIVE_STATES,
@@ -3355,7 +3349,6 @@ def _execute(
     successfully_validated_tree: str | None = None
     pending_deferred_tree: str | None = None
     prepared_candidate: str | None = None
-    prepared_evidence: dict[str, object] | None = None
     uses_authored_base = (
         record.correction_identity is not None
         and record.correction_identity.mode == "authored_candidate_recovery"
@@ -3387,7 +3380,18 @@ def _execute(
     ) -> dict[str, object]:
         nonlocal validated_candidate_paths, successfully_validated_tree
         nonlocal pending_deferred_tree
-        nonlocal prepared_candidate, prepared_evidence
+        nonlocal prepared_candidate
+        range_read = (
+            action == "read"
+            and selector is not None
+            and set(selector)
+            == {
+                "path",
+                "side",
+                "offset",
+                "length",
+            }
+        )
         early_content = (
             record.state is RunnerState.EXECUTING
             and record.phase is WorkflowPhase.WORKFLOW
@@ -3398,7 +3402,7 @@ def _execute(
             raise WorkerProtocolError(
                 "candidate_broker", "candidate request is invalid"
             )
-        if early_content:
+        if early_content and not range_read:
             observed = repository.changed_paths(record.worktree)
             if not observed or any(
                 not path.endswith((".md", ".md.jinja")) for path in observed
@@ -3419,7 +3423,6 @@ def _execute(
             raise WorkerProtocolError("candidate_broker", "identity changed")
         try:
             if action == "stage":
-                prepared_evidence = None
                 successfully_validated_tree = None
                 staged_tree = repository.stage_candidate(
                     record.worktree,
@@ -3438,11 +3441,14 @@ def _execute(
                 tree is None
                 or tree != prepared_candidate
                 or validated_candidate_paths is None
-                or validated_candidate_paths != observed_candidate_paths()
-                or repository.red_candidate_tree(
-                    record.worktree, candidate_base_sha, validated_candidate_paths
+                or not range_read
+                and (
+                    validated_candidate_paths != observed_candidate_paths()
+                    or repository.red_candidate_tree(
+                        record.worktree, candidate_base_sha, validated_candidate_paths
+                    )
+                    != tree
                 )
-                != tree
             ):
                 raise WorkerProtocolError("candidate_broker", "candidate changed")
             if action == "read":
@@ -3457,44 +3463,33 @@ def _execute(
                     raise WorkerProtocolError(
                         "candidate_broker", "candidate request is invalid"
                     )
-                mode = selector.get("mode") if selector is not None else None
-                evidence: dict[str, object]
-                if prepared_evidence is None:
-                    if mode in {"chunk", "complete"}:
-                        raise WorkerProtocolError(
-                            "candidate_broker", "candidate request is invalid"
-                        )
-                    prepared_evidence = repository.read_candidate(
+                if selector == {"mode": "changed_paths"}:
+                    evidence = repository.changed_candidate_paths(
                         record.worktree,
                         tree,
                         base_sha=candidate_base_sha,
                         allow_base_ancestor=uses_authored_base,
-                        changed_paths=validated_candidate_paths,
                     )
-                if mode == "chunk":
-                    assert selector is not None
-                    try:
-                        evidence = git_read_chunk(
-                            prepared_evidence,
-                            path=cast(str, selector["path"]),
-                            side=cast(str, selector["side"]),
-                            offset=cast(int, selector["offset"]),
-                            length=cast(int, selector["length"]),
-                        )
-                    except (KeyError, CandidateBoundaryError) as error:
-                        raise WorkerProtocolError(
-                            "candidate_broker", "candidate read chunk is invalid"
-                        ) from error
-                elif mode == "complete":
-                    evidence = {"candidate_tree": tree, "state": "read-complete"}
-                elif (
-                    mode == "manifest"
-                    or len(json.dumps(prepared_evidence).encode())
-                    > GIT_READ_INLINE_JSON_BYTES
-                ):
-                    evidence = git_read_manifest(prepared_evidence)
+                elif selector is not None and set(selector) == {
+                    "path",
+                    "side",
+                    "offset",
+                    "length",
+                }:
+                    evidence = repository.read_candidate_range(
+                        record.worktree,
+                        tree,
+                        base_sha=candidate_base_sha,
+                        allow_base_ancestor=uses_authored_base,
+                        path=cast(str, selector["path"]),
+                        side=cast(str, selector["side"]),
+                        offset=cast(int, selector["offset"]),
+                        length=cast(int, selector["length"]),
+                    )
                 else:
-                    evidence = prepared_evidence
+                    raise WorkerProtocolError(
+                        "candidate_broker", "candidate request is invalid"
+                    )
                 refreshed = ledger.load(record.issue_iid)
                 if (
                     refreshed is None
@@ -3503,14 +3498,11 @@ def _execute(
                     or refreshed.phase is not record.phase
                     or refreshed.source_sha != record.source_sha
                     or repository.head(record.worktree) != record.source_sha
-                    or validated_candidate_paths != observed_candidate_paths()
-                    or repository.red_candidate_tree(
-                        record.worktree, candidate_base_sha, validated_candidate_paths
-                    )
-                    != tree
+                    or not range_read
+                    and validated_candidate_paths != observed_candidate_paths()
                 ):
                     raise WorkerProtocolError("candidate_broker", "identity changed")
-                return evidence | {"base_sha": candidate_base_sha}
+                return dict(evidence) | {"base_sha": candidate_base_sha}
             if action == "review":
                 if (
                     successfully_validated_tree != tree
@@ -4112,13 +4104,13 @@ def _execute(
         except RepositoryError:
             actual_tree = None
         if (
-            invocation.reviewed_candidate is None
+            invocation.inventory_candidate is None
             or (
                 result.workflow_lane is WorkflowLane.CODING
-                and invocation.validated_candidate != invocation.reviewed_candidate
+                and invocation.validated_candidate != invocation.inventory_candidate
             )
             or validated_candidate_paths != final_changed_paths
-            or actual_tree != invocation.reviewed_candidate
+            or actual_tree != invocation.inventory_candidate
         ):
             return _record_retry(
                 record,

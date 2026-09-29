@@ -33,10 +33,14 @@ or untracked maintained files. Reject a wrong tree before review.
 
 In serial work, use the live controller read after it stages the candidate.
 Check the issue, session, base commit and tree, candidate tree OID, and
-changed paths. A full inline old/new response is enough. For a paged read,
-get all old and new bytes in order. Each chunk must be at most 128 KiB.
-Require a passed `candidate read --complete` before review. Reject a read
-that is missing, failed, or stale. If this read is not available in the
+controller-bound canonical changed-path inventory. Use independent
+controller-authorized exact Git reads by path, old/new side, byte offset, and
+length in any needed order. Each read is limited to 128 KiB. Review changed
+sides and explicit absence where relevant. Check each result's repo, issue,
+base and tree, path, side, blob ID, offset, and length. Repeated or direct
+reads need no hidden cursor, prior manifest state, or completion operation.
+Respect the read deadline. Reject a read that is missing, failed, or stale.
+If this read is not available in the
 selected mode, report that limit to Architect. Do not claim an exact-tree
 verdict. A new staged tree voids the receipt.
 

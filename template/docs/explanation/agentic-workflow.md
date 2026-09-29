@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-29
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -183,13 +183,14 @@ After successful coding validation, the controller reads that same staged
 tree for Consistency Judge. Content work reads its tree after staging without
 a coding validation step. The controller binds the read to the current
 project, issue, ledger revision, branch, base commit, and private nonce.
-Consistency Judge gets bounded, read-only evidence for the base and candidate
-trees: changed paths, file modes, and old and new content or deletion. Small
-reads return inline text; larger ones use a manifest and ordered chunks. The
-controller requires full coverage before marking the tree reviewed. The read
-rejects drift, replay, timeout, and oversized evidence. A correction
-needs a new staged tree, coding validation when applicable, and a new
-consistency review.
+Consistency Judge gets a canonical changed-path inventory and can read
+independent bounded ranges from the exact old and new Git trees. The judge
+must review every present side of each changed path before recording a
+verdict. Each response proves which bytes the controller returned; it does
+not prove that the judge understood them. The controller binds each read to
+the exact trees and rejects drift, replay, timeout, and oversized evidence.
+A correction needs a new staged tree, coding validation when applicable, and
+a new consistency review.
 
 The separate result broker accepts final workflow intent. After worker exit,
 the controller checks the tree, changed paths, and identity again before
@@ -455,10 +456,12 @@ In the documentation and agent-policy lane,
 Architect delegates one Documentation Writer. That writer alone may edit.
 In interactive work, the writer stages the candidate and Architect runs the
 Consistency Judge when copied facts change. In serial work, the live workflow
-owner asks the controller to stage the candidate and provide a bounded
-read-only snapshot for Consistency Judge. Large snapshots use a manifest and
-chunks, with full coverage required. The judge checks copied facts when
-applicable.
+owner asks the controller to stage the candidate and provide Consistency Judge
+a canonical changed-path inventory and independent bounded range reads from
+the exact Git trees. The judge must review every present old and new side of
+each changed path before recording a verdict. The Git evidence proves which
+bytes were returned, not that the judge understood them. The judge checks
+copied facts when applicable.
 Architect then delegates one consolidated Documentation Finalizer. Repair
 cycles need material progress. A repeated finding returns to Architect for
 human direction. Unchanged evidence also returns to Architect. Scope

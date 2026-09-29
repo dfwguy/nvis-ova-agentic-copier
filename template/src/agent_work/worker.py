@@ -24,7 +24,6 @@ from base64 import b64decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import UnionType
@@ -33,12 +32,10 @@ from typing import Literal, Protocol, Union, cast, get_args, get_origin
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .candidate_boundary import (
-    GIT_READ_INLINE_JSON_BYTES,
     GIT_READ_MAX_CHUNK_BYTES,
     GIT_READ_MAX_FILE_BYTES,
     GIT_READ_MAX_PATHS,
     GIT_READ_MAX_TOTAL_BYTES,
-    git_read_manifest,
 )
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -207,7 +204,7 @@ class CandidateReviewBroker(Protocol):
     def validated_candidate(self) -> str | None: ...
 
     @property
-    def reviewed_candidate(self) -> str | None: ...
+    def inventory_candidate(self) -> str | None: ...
 
     @property
     def review_result(self) -> dict[str, object] | None: ...
@@ -222,7 +219,9 @@ class CandidateBrokerFactory(Protocol):
 
     def __call__(
         self,
-        candidate_action: Callable[[str, str | None], dict[str, object]],
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
         **kwargs: object,
     ) -> CandidateReviewBroker: ...
 
@@ -230,29 +229,8 @@ class CandidateBrokerFactory(Protocol):
 _BROKER_MAX_BYTES = 1_048_576
 
 
-def _valid_candidate_file(path: object, file: object) -> bool:
-    if not isinstance(path, str) or not isinstance(file, dict):
-        return False
-    entry = cast(dict[str, object], file)
-    old = entry.get("old_content")
-    new = entry.get("new_content")
-    old_mode = entry.get("old_mode")
-    new_mode = entry.get("new_mode")
-    return (
-        entry.get("path") == path
-        and isinstance(old, (str, type(None)))
-        and isinstance(new, (str, type(None)))
-        and (old is not None or new is not None)
-        and old_mode in {None, "100644", "100755"}
-        and new_mode in {None, "100644", "100755"}
-        and (old is None) == (old_mode is None)
-        and (new is None) == (new_mode is None)
-    )
-
-
-def _manifest_sides(
-    outcome: dict[str, object],
-) -> dict[tuple[str, str], tuple[int, str]]:
+def _valid_candidate_inventory(outcome: dict[str, object]) -> bool:
+    """Check the bounded, canonical path inventory returned by the controller."""
     paths = outcome.get("changed_paths")
     files = outcome.get("files")
     base_tree = outcome.get("base_tree")
@@ -266,21 +244,20 @@ def _manifest_sides(
         or len(paths) > GIT_READ_MAX_PATHS
         or paths != sorted(set(paths))
     ):
-        raise WorkerProtocolError("candidate_broker", "malformed candidate read")
-    sides: dict[tuple[str, str], tuple[int, str]] = {}
+        return False
+    total = 0
     for path, raw_file in zip(paths, files, strict=True):
         if not isinstance(path, str) or not isinstance(raw_file, dict):
-            raise WorkerProtocolError("candidate_broker", "malformed candidate read")
+            return False
         file = cast(dict[str, object], raw_file)
-        if file.get("path") != path:
-            raise WorkerProtocolError("candidate_broker", "malformed candidate read")
+        if file.get("path") != path or not _valid_candidate_path(path):
+            return False
         present = False
         for side in ("old", "new"):
             mode = file.get(f"{side}_mode")
             oid = file.get(f"{side}_oid")
             size = file.get(f"{side}_size")
-            digest = file.get(f"{side}_sha256")
-            if mode is None and oid is None and size is None and digest is None:
+            if mode is None and oid is None and size is None:
                 continue
             if (
                 mode not in {"100644", "100755"}
@@ -289,19 +266,27 @@ def _manifest_sides(
                 or not isinstance(size, int)
                 or isinstance(size, bool)
                 or not 0 <= size <= GIT_READ_MAX_FILE_BYTES
-                or not isinstance(digest, str)
-                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
             ):
-                raise WorkerProtocolError(
-                    "candidate_broker", "malformed candidate read"
-                )
-            sides[(path, side)] = size, digest
+                return False
+            total += size
             present = True
         if not present:
-            raise WorkerProtocolError("candidate_broker", "malformed candidate read")
-    if sum(size for size, _ in sides.values()) > GIT_READ_MAX_TOTAL_BYTES:
-        raise WorkerProtocolError("candidate_broker", "malformed candidate read")
-    return sides
+            return False
+        if file.get("old_mode") == file.get("new_mode") and file.get(
+            "old_oid"
+        ) == file.get("new_oid"):
+            return False
+    return total <= GIT_READ_MAX_TOTAL_BYTES
+
+
+def _valid_candidate_path(path: str) -> bool:
+    return (
+        bool(path)
+        and not PurePosixPath(path).is_absolute()
+        and str(PurePosixPath(path)) == path
+        and all(part not in {"", ".", ".."} for part in path.split("/"))
+        and not any(character in path for character in ("\\", "\n", "\r", "\x00"))
+    )
 
 
 def _broker_identity(request: WorkerResultBrokerRequest) -> dict[str, object]:
@@ -405,7 +390,9 @@ class CandidateBrokerSession:
 
     def __init__(
         self,
-        candidate_action: Callable[[str, str | None], dict[str, object]],
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
         *,
         request: WorkerResultBrokerRequest,
         timeout_seconds: int,
@@ -422,15 +409,12 @@ class CandidateBrokerSession:
         self._failure: WorkerProtocolError | None = None
         self._candidate: str | None = None
         self._validated_tree: str | None = None
-        self._reviewed: str | None = None
+        self._inventory_delivered: str | None = None
         self._review_tree: str | None = None
         self._review_result: dict[str, object] | None = None
         self._review_lock = threading.Lock()
         self._prepared: str | None = None
         self._read_base_sha: str | None = None
-        self._manifest: dict[tuple[str, str], tuple[int, str]] | None = None
-        self._next_offset: dict[tuple[str, str], int] = {}
-        self._page_bytes: dict[tuple[str, str], bytearray] = {}
         self._requests = 0
         self._bytes_received = 0
         self._bytes_sent = 0
@@ -483,7 +467,6 @@ class CandidateBrokerSession:
                 selector: object = None
                 supplied_tree: object = None
                 request_ordinal = self._requests + 1
-                selector_state = False
                 request_limit_reached = False
                 try:
                     payload = _read_frame(
@@ -536,21 +519,17 @@ class CandidateBrokerSession:
                         self._candidate = None
                         self._validated_tree = None
                         with self._review_lock:
-                            self._reviewed = None
+                            self._inventory_delivered = None
                             self._review_tree = None
                             self._review_result = None
                         self._prepared = None
                         self._read_base_sha = None
-                        self._manifest = None
-                        self._next_offset = {}
-                        self._page_bytes = {}
                     mode: str | None = None
-                    chunk_key: tuple[str, str] | None = None
                     if action == "review":
                         if (
                             not _valid_candidate_review_selector(selector)
                             or self._review_tree != supplied_tree
-                            or self._reviewed != supplied_tree
+                            or self._inventory_delivered != supplied_tree
                         ):
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate review is invalid"
@@ -561,59 +540,19 @@ class CandidateBrokerSession:
                                 "candidate_broker", "candidate request is invalid"
                             )
                         selection = cast(dict[str, object], selector)
-                        mode_value = selection.get("mode")
-                        if not isinstance(mode_value, str) or mode_value not in {
-                            "manifest",
-                            "chunk",
-                            "complete",
-                        }:
+                        mode = _candidate_selector_mode(selection)
+                        if mode is None:
                             raise WorkerProtocolError(
                                 "candidate_broker", "candidate request is invalid"
                             )
-                        mode = mode_value
-                        if mode in {"manifest", "complete"} and set(selection) != {
-                            "mode"
-                        }:
-                            raise WorkerProtocolError(
-                                "candidate_broker", "candidate request is invalid"
-                            )
-                        if mode == "manifest" and self._manifest is not None:
-                            selector_state = True
-                            raise WorkerProtocolError(
-                                "candidate_broker", "candidate request is invalid"
-                            )
-                        if mode == "complete" and (
-                            self._manifest is None
-                            or any(
-                                self._next_offset[key] != size
-                                for key, (size, _) in self._manifest.items()
-                            )
-                            or any(
-                                sha256(self._page_bytes[key]).hexdigest() != digest
-                                for key, (_, digest) in self._manifest.items()
-                            )
-                        ):
-                            selector_state = True
-                            raise WorkerProtocolError(
-                                "candidate_broker", "candidate request is invalid"
-                            )
-                        if mode == "chunk":
-                            if set(selection) != {
-                                "mode",
-                                "path",
-                                "side",
-                                "offset",
-                                "length",
-                            }:
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "candidate request is invalid"
-                                )
+                        if mode == "range":
                             path = selection.get("path")
                             side = selection.get("side")
                             offset = selection.get("offset")
                             length = selection.get("length")
                             if (
                                 not isinstance(path, str)
+                                or not _valid_candidate_path(path)
                                 or not isinstance(side, str)
                                 or side not in {"old", "new"}
                                 or not isinstance(offset, int)
@@ -626,27 +565,7 @@ class CandidateBrokerSession:
                                 raise WorkerProtocolError(
                                     "candidate_broker", "candidate request is invalid"
                                 )
-                            if self._manifest is None:
-                                selector_state = True
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "candidate request is invalid"
-                                )
-                            chunk_key = (path, side)
-                            if (
-                                chunk_key not in self._manifest
-                                or offset != self._next_offset[chunk_key]
-                                or offset + length > self._manifest[chunk_key][0]
-                            ):
-                                selector_state = True
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "candidate request is invalid"
-                                )
-                    if selector is None:
-                        outcome = self._candidate_action(action, supplied_tree)
-                    else:
-                        outcome = cast(
-                            Callable[..., dict[str, object]], self._candidate_action
-                        )(action, supplied_tree, selector)
+                    outcome = self._candidate_action(action, supplied_tree, selector)
                     if self._stop.is_set() or self._clock() >= self._deadline:
                         raise WorkerProtocolError(
                             "candidate_broker", "request timed out"
@@ -683,15 +602,29 @@ class CandidateBrokerSession:
                                 "candidate_broker", "malformed candidate read"
                             )
                         self._read_base_sha = read_base_sha
-                        if mode == "chunk":
-                            assert chunk_key is not None and self._manifest is not None
+                        if mode == "range":
                             encoded = outcome.get("data_base64")
+                            size = outcome.get("size")
                             if (
-                                outcome.get("path") != chunk_key[0]
-                                or outcome.get("side") != chunk_key[1]
+                                outcome.get("path") != selection["path"]
+                                or outcome.get("side") != selection["side"]
                                 or outcome.get("offset") != selection["offset"]
                                 or outcome.get("length") != selection["length"]
-                                or outcome.get("sha256") != self._manifest[chunk_key][1]
+                                or not isinstance(outcome.get("base_tree"), str)
+                                or re.fullmatch(
+                                    r"[0-9a-f]{40}", cast(str, outcome["base_tree"])
+                                )
+                                is None
+                                or not isinstance(outcome.get("oid"), str)
+                                or re.fullmatch(
+                                    r"[0-9a-f]{40}", cast(str, outcome["oid"])
+                                )
+                                is None
+                                or type(size) is not int
+                                or not 0 <= size <= GIT_READ_MAX_FILE_BYTES
+                                or cast(int, selection["offset"])
+                                + cast(int, selection["length"])
+                                > size
                                 or not isinstance(encoded, str)
                             ):
                                 raise WorkerProtocolError(
@@ -707,45 +640,10 @@ class CandidateBrokerSession:
                                 raise WorkerProtocolError(
                                     "candidate_broker", "malformed candidate read"
                                 )
-                            if (
-                                self._next_offset[chunk_key] + len(decoded)
-                                == self._manifest[chunk_key][0]
-                                and sha256(
-                                    self._page_bytes[chunk_key] + decoded
-                                ).hexdigest()
-                                != self._manifest[chunk_key][1]
-                            ):
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "malformed candidate read"
-                                )
-                        elif mode == "complete":
-                            if outcome.get("state") != "read-complete":
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "malformed candidate read"
-                                )
-                        elif outcome.get("paged") is True:
-                            manifest = _manifest_sides(outcome)
-                        else:
-                            paths = outcome.get("changed_paths")
-                            files = outcome.get("files")
-                            base_tree = outcome.get("base_tree")
-                            if (
-                                mode == "manifest"
-                                or not isinstance(base_tree, str)
-                                or re.fullmatch(r"[0-9a-f]{40}", base_tree) is None
-                                or not isinstance(paths, list)
-                                or not isinstance(files, list)
-                                or len(paths) != len(files)
-                                or len(paths) > GIT_READ_MAX_PATHS
-                                or paths != sorted(set(paths))
-                                or any(
-                                    not _valid_candidate_file(path, file)
-                                    for path, file in zip(paths, files, strict=True)
-                                )
-                            ):
-                                raise WorkerProtocolError(
-                                    "candidate_broker", "malformed candidate read"
-                                )
+                        elif not _valid_candidate_inventory(outcome):
+                            raise WorkerProtocolError(
+                                "candidate_broker", "malformed candidate read"
+                            )
                     if action in {"validate", "status"}:
                         self._candidate = (
                             candidate
@@ -768,23 +666,6 @@ class CandidateBrokerSession:
                         ),
                     }
                     response: dict[str, object] = outcome | response_identity
-                    if (
-                        action == "read"
-                        and selector is None
-                        and outcome.get("paged") is not True
-                        and len(json.dumps(response).encode())
-                        > GIT_READ_INLINE_JSON_BYTES
-                    ):
-                        try:
-                            outcome = git_read_manifest(outcome) | {
-                                "base_sha": self._read_base_sha
-                            }
-                        except KeyError as error:
-                            raise WorkerProtocolError(
-                                "candidate_broker", "malformed candidate read"
-                            ) from error
-                        manifest = _manifest_sides(outcome)
-                        response = outcome | response_identity
                     if (
                         action == "read"
                         and len(json.dumps(response).encode()) > _BROKER_MAX_BYTES
@@ -818,7 +699,6 @@ class CandidateBrokerSession:
                         selector=selector,
                         supplied_tree=supplied_tree,
                         request_ordinal=request_ordinal,
-                        selector_state=selector_state,
                         request_limit_reached=request_limit_reached,
                     )
                     if failure.reason in {
@@ -851,21 +731,12 @@ class CandidateBrokerSession:
                         serialized = json.dumps(response).encode()
                         _write_frame(connection, serialized)
                         self._bytes_sent += len(serialized)
-                        if response.get("accepted") is True and action == "read":
-                            if outcome.get("paged") is True:
-                                self._manifest = manifest
-                                self._next_offset = {key: 0 for key in manifest}
-                                self._page_bytes = {
-                                    key: bytearray() for key in manifest
-                                }
-                            elif mode == "chunk":
-                                assert chunk_key is not None
-                                self._page_bytes[chunk_key].extend(decoded)
-                                self._next_offset[chunk_key] += cast(
-                                    int, selection["length"]
-                                )
-                            elif mode == "complete" or selector is None:
-                                self._reviewed = cast(str, candidate)
+                        if (
+                            response.get("accepted") is True
+                            and action == "read"
+                            and mode == "changed_paths"
+                        ):
+                            self._inventory_delivered = cast(str, candidate)
                         elif response.get("accepted") is True and action == "review":
                             self._review_result = response
                     except (OSError, WorkerProtocolError):
@@ -913,8 +784,15 @@ class CandidateBrokerSession:
 
     def close_and_capture(self) -> str | None:
         """Stop the channel and return only a successfully delivered identity."""
-        self._stop.set()
-        self._socket.close()
+        if self._review_lock.acquire(timeout=self._close_join_timeout_seconds):
+            try:
+                self._stop.set()
+                self._socket.close()
+            finally:
+                self._review_lock.release()
+        else:
+            self._stop.set()
+            self._socket.close()
         self._thread.join(timeout=self._close_join_timeout_seconds)
         if self._thread.is_alive():
             threading.Thread(target=self._finish_deferred_cleanup, daemon=False).start()
@@ -925,10 +803,14 @@ class CandidateBrokerSession:
         return self._candidate
 
     @property
-    def reviewed_candidate(self) -> str | None:
-        """Return the latest successfully delivered exact content read."""
-        with self._review_lock:
-            return self._reviewed if self._failure is None else None
+    def inventory_candidate(self) -> str | None:
+        """Return the tree whose exact path inventory was delivered."""
+        if not self._review_lock.acquire(timeout=0.05):
+            return None
+        try:
+            return self._inventory_delivered if self._failure is None else None
+        finally:
+            self._review_lock.release()
 
     def begin_review(self, expected_tree: str) -> None:
         """Enable one fresh review only after terminal validation of this tree."""
@@ -938,12 +820,9 @@ class CandidateBrokerSession:
                     "candidate_review", "validated tree is required"
                 )
             self._review_tree = expected_tree
-            self._reviewed = None
+            self._inventory_delivered = None
             self._review_result = None
-            self._manifest = None
             self._read_base_sha = None
-            self._next_offset = {}
-            self._page_bytes = {}
 
     @property
     def review_result(self) -> dict[str, object] | None:
@@ -959,7 +838,9 @@ class CandidateBrokerSession:
 
 
 def create_candidate_broker(
-    candidate_action: Callable[[str, str | None], dict[str, object]],
+    candidate_action: Callable[
+        [str, str | None, dict[str, object] | None], dict[str, object]
+    ],
     *,
     request: WorkerResultBrokerRequest,
     timeout_seconds: int,
@@ -984,7 +865,7 @@ def request_candidate_validation(
     *,
     action: CandidateOperation = "validate",
     candidate_tree: str | None = None,
-    selector: dict[str, object] | None = None,
+    selector: Mapping[str, object] | None = None,
     timeout_seconds: int = 10_800,
 ) -> dict[str, object]:
     """Ask the live controller to validate its observed candidate."""
@@ -1556,11 +1437,9 @@ def _candidate_selector_mode(selector: object) -> str | None:
     if not isinstance(selector, dict):
         return None
     selection = cast(dict[str, object], selector)
-    mode = selection.get("mode")
-    if isinstance(mode, str) and mode in {"manifest", "complete"}:
-        return mode if set(selection) == {"mode"} else None
-    if mode != "chunk" or set(selection) != {
-        "mode",
+    if selection == {"mode": "changed_paths"}:
+        return "changed_paths"
+    if set(selection) != {
         "path",
         "side",
         "offset",
@@ -1571,6 +1450,7 @@ def _candidate_selector_mode(selector: object) -> str | None:
     length = selection["length"]
     if (
         not isinstance(selection["path"], str)
+        or not _valid_candidate_path(selection["path"])
         or not isinstance(selection["side"], str)
         or selection["side"] not in {"old", "new"}
         or not isinstance(offset, int)
@@ -1581,15 +1461,15 @@ def _candidate_selector_mode(selector: object) -> str | None:
         or not 0 < length <= GIT_READ_MAX_CHUNK_BYTES
     ):
         return None
-    return "chunk"
+    return "range"
 
 
 def _candidate_rejection_code(
-    reason: str, *, selector_state: bool, request_limit_reached: bool = False
+    reason: str, *, request_limit_reached: bool = False
 ) -> str:
     """Map known failure families to fixed context codes."""
     if reason == "candidate request is invalid":
-        return "invalid_selector_state" if selector_state else "invalid_request"
+        return "invalid_request"
     if reason == "request is not permitted":
         return "request_limit" if request_limit_reached else "candidate_rejected"
     return {
@@ -1611,7 +1491,6 @@ def _candidate_rejection_with_context(
     selector: object,
     supplied_tree: object,
     request_ordinal: int,
-    selector_state: bool,
     request_limit_reached: bool,
 ) -> WorkerProtocolError:
     """Attach bounded request shape to a parsed candidate rejection."""
@@ -1635,7 +1514,6 @@ def _candidate_rejection_with_context(
     count = str(request_ordinal) if request_ordinal <= 513 else "513+"
     code = _candidate_rejection_code(
         failure.reason,
-        selector_state=selector_state,
         request_limit_reached=request_limit_reached,
     )
     return WorkerProtocolError(
@@ -1665,7 +1543,7 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
         base, _, suffix = reason.rpartition(" [reason=")
         context = re.fullmatch(
             r"([a-z_]+) action=(stage|read|validate|status) "
-            r"selector=(none|manifest|chunk|complete) "
+            r"selector=(none|changed_paths|range) "
             r"request=([1-9][0-9]{0,2}|513\+)\]",
             suffix,
         )
@@ -1680,18 +1558,9 @@ def is_safe_worker_result_diagnostic(value: str) -> bool:
             return False
         if code == "request_limit":
             return base == "request is not permitted" and ordinal in {"513", "513+"}
-        if code == "invalid_selector_state":
-            return (
-                base == "candidate request is invalid"
-                and mode in {"manifest", "chunk", "complete"}
-                and ordinal != "513+"
-                and int(ordinal) <= 512
-            )
-        if code not in {"invalid_request", "identity_mismatch"} and (
-            ordinal == "513+" or int(ordinal) > 512
-        ):
+        if ordinal == "513+" or int(ordinal) > 512:
             return False
-        return code == _candidate_rejection_code(base, selector_state=False)
+        return code == _candidate_rejection_code(base)
     if origin in {"builder_input", "final_envelope"}:
         model = (
             WorkerResultBuildInput
@@ -1991,7 +1860,7 @@ class WorkerInvocation:
     worker_result: bytes | None = None
     protocol_error: WorkerProtocolError | None = None
     validated_candidate: str | None = None
-    reviewed_candidate: str | None = None
+    inventory_candidate: str | None = None
 
 
 def build_worker_result_artifact(
@@ -2515,12 +2384,12 @@ def build_worker_prompt(
             "issue, socket, nonce, --apply, and --json arguments to run the trusted Judge hook; "
             "use `candidate status --candidate-tree TREE` for durable Judge status. "
             "After successful coding validation, or directly after content staging, use "
-            "`candidate read --candidate-tree TREE` with those same arguments. A small read "
-            "returns inline old/new content. If paged=true, use its manifest to request every "
-            "existing old/new side in contiguous byte chunks with `candidate read --path PATH "
-            "--side old|new --offset N --length N` (length at most 131072), then call "
-            "`candidate read --complete`; empty sides need no chunks and deleted sides are explicit. "
-            "Only successful complete coverage binds a paged reviewed tree. Give the exact "
+            "`candidate changed-paths --candidate-tree TREE` with those same arguments; "
+            "the MCP tool is `candidate_changed_paths`. "
+            "Use `candidate read --candidate-tree TREE --path PATH --side old|new "
+            "--offset N --length N` or the MCP tool `candidate_read` for independent "
+            "byte ranges (length at most 131072). "
+            "Reads may be repeated or requested in any order. Give the exact "
             "base-to-tree read evidence and Judge proof for coding to Consistency Judge, "
             "and require its review of that tree before the finalizer. "
             "The controller stages its observed paths and runs the durable Judge hook; "
@@ -2735,9 +2604,8 @@ class RoleExecutionProfile:
 
 _CANDIDATE_MCP_TOOLS = (
     "candidate_status",
-    "candidate_read_manifest",
-    "candidate_read_chunk",
-    "candidate_read_complete",
+    "candidate_changed_paths",
+    "candidate_read",
     "candidate_submit_review",
 )
 
@@ -2977,7 +2845,10 @@ class AgentInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
         role_profile: RoleExecutionProfile | None = None,
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
@@ -3113,11 +2984,13 @@ class AgentInvoker:
                         pass
                 return WorkerInvocation(None, stderr=str(error))
             candidate: str | None = None
-            reviewed: str | None = None
+            delivered_inventory: str | None = None
             if candidate_session is not None:
                 try:
                     candidate = candidate_session.close_and_capture()
-                    reviewed = getattr(candidate_session, "reviewed_candidate", None)
+                    delivered_inventory = getattr(
+                        candidate_session, "inventory_candidate", None
+                    )
                 except WorkerProtocolError as error:
                     try:
                         session.close_and_capture()
@@ -3145,7 +3018,7 @@ class AgentInvoker:
                 diagnostic,
                 worker_result=artifact,
                 validated_candidate=candidate,
-                reviewed_candidate=reviewed,
+                inventory_candidate=delivered_inventory,
             )
         command, stdin = _agent_command(agent, executable, checkout, prompt)
         try:

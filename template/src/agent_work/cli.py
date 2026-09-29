@@ -975,7 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
         "candidate", help="preview or request live controller candidate operations"
     )
     candidate_actions = candidate.add_subparsers(dest="action", required=True)
-    for action in ("stage", "read", "validate", "status"):
+    for action in ("stage", "changed-paths", "read", "validate", "status"):
         candidate_action = candidate_actions.add_parser(
             action,
             help=f"preview or request live candidate {action}; --json selects JSON output",
@@ -995,31 +995,21 @@ def build_parser() -> argparse.ArgumentParser:
             )
         if action == "read":
             candidate_action.add_argument(
-                "--manifest",
-                action="store_true",
-                help="request a paged manifest; exclusive with --complete and chunk flags",
-            )
-            candidate_action.add_argument(
-                "--complete",
-                action="store_true",
-                help="finish a paged read after every existing side was fetched; exclusive with other read modes",
-            )
-            candidate_action.add_argument(
                 "--path",
-                help="changed path for one chunk; requires --side, --offset, and --length",
+                help="changed path for one range",
             )
             candidate_action.add_argument(
                 "--side",
                 choices=("old", "new"),
-                help="old or new side for one chunk; use with --path",
+                help="old or new side",
             )
             candidate_action.add_argument(
-                "--offset", type=int, help="zero-based byte offset for one chunk"
+                "--offset", type=int, help="zero-based byte offset"
             )
             candidate_action.add_argument(
                 "--length",
                 type=int,
-                help="chunk byte count (1 to 131072); chunk flags exclude --manifest and --complete",
+                help="range byte count (1 to 131072)",
             )
         _common(
             candidate_action,
@@ -1259,7 +1249,7 @@ def _render_candidate_read(receipt: dict[str, object]) -> str:
             lines.append(f"{label}: {safe(receipt[key])}")
     files = receipt.get("files")
     if isinstance(files, list):
-        lines.append("Paged manifest:" if receipt.get("paged") is True else "Files:")
+        lines.append("Files:")
         for item in files:
             if not isinstance(item, dict):
                 continue
@@ -1273,23 +1263,15 @@ def _render_candidate_read(receipt: dict[str, object]) -> str:
                     continue
                 lines.append(f"    {label} mode: {safe(mode)}")
                 lines.append(f"    {label} blob: {safe(oid)}")
-                if receipt.get("paged") is True:
-                    lines.append(f"    {label} bytes: {safe(file.get(f'{side}_size'))}")
-                    lines.append(
-                        f"    {label} SHA-256: {safe(file.get(f'{side}_sha256'))}"
-                    )
-                else:
-                    lines.append(
-                        f"    {label} content: "
-                        + json.dumps(file.get(f"{side}_content"), ensure_ascii=True)
-                    )
+                lines.append(f"    {label} bytes: {safe(file.get(f'{side}_size'))}")
     elif "data_base64" in receipt:
         for key, label in (
             ("path", "Path"),
             ("side", "Side"),
             ("offset", "Byte offset"),
             ("length", "Byte count"),
-            ("sha256", "Whole-side SHA-256"),
+            ("oid", "Blob"),
+            ("size", "Blob bytes"),
             ("data_base64", "Bytes (base64)"),
         ):
             lines.append(f"{label}: {safe(receipt.get(key, ''))}")
@@ -1702,6 +1684,13 @@ def main(
     write_stderr: Callable[[str], None] = _stderr,
 ) -> int:
     """Dispatch one command and return the documented exit status."""
+    if (
+        arguments is not None
+        and tuple(arguments[:2]) == ("candidate", "read")
+        and any(flag in arguments for flag in ("--manifest", "--complete"))
+    ):
+        write_stderr("candidate read selector is invalid")
+        return 2
     parsed = build_parser().parse_args(arguments)
     if parsed.resource == "interactive-commit":
         try:
@@ -2731,35 +2720,35 @@ def main(
     if parsed.resource == "candidate" and parsed.action in {
         "stage",
         "read",
+        "changed-paths",
         "validate",
         "status",
     }:
         selector: dict[str, object] | None = None
         if parsed.action == "read":
-            chunk_values = (parsed.path, parsed.side, parsed.offset, parsed.length)
-            has_chunk = any(value is not None for value in chunk_values)
-            if sum((parsed.manifest, parsed.complete, has_chunk)) > 1 or (
-                has_chunk
-                and (
-                    any(value is None for value in chunk_values)
-                    or parsed.offset < 0
-                    or not 0 < parsed.length <= GIT_READ_MAX_CHUNK_BYTES
+            if (
+                any(
+                    value is None
+                    for value in (
+                        parsed.path,
+                        parsed.side,
+                        parsed.offset,
+                        parsed.length,
+                    )
                 )
+                or parsed.offset < 0
+                or not 0 < parsed.length <= GIT_READ_MAX_CHUNK_BYTES
             ):
                 write_stderr("candidate read selector is invalid")
                 return 2
-            if parsed.manifest:
-                selector = {"mode": "manifest"}
-            elif parsed.complete:
-                selector = {"mode": "complete"}
-            elif has_chunk:
-                selector = {
-                    "mode": "chunk",
-                    "path": parsed.path,
-                    "side": parsed.side,
-                    "offset": parsed.offset,
-                    "length": parsed.length,
-                }
+            selector = {
+                "path": parsed.path,
+                "side": parsed.side,
+                "offset": parsed.offset,
+                "length": parsed.length,
+            }
+        elif parsed.action == "changed-paths":
+            selector = {"mode": "changed_paths"}
         if not parsed.apply:
             preview = {
                 "action": parsed.action,
@@ -2769,16 +2758,8 @@ def main(
                 "state": "preview",
             }
             if parsed.action == "read":
-                preview["read_mode"] = (
-                    "plain" if selector is None else cast(str, selector["mode"])
-                )
-                if selector is not None and selector["mode"] == "chunk":
-                    preview.update(
-                        {
-                            key: selector[key]
-                            for key in ("path", "side", "offset", "length")
-                        }
-                    )
+                assert selector is not None
+                preview.update(selector)
             write_stdout(
                 json.dumps(preview, separators=(",", ":"), sort_keys=True)
                 if parsed.json
@@ -2797,7 +2778,7 @@ def main(
                 WorkerResultBrokerClientRequest(
                     nonce=cast(str, parsed.broker_nonce), issue_iid=parsed.issue_iid
                 ),
-                action=parsed.action,
+                action="read" if parsed.action == "changed-paths" else parsed.action,
                 candidate_tree=getattr(parsed, "candidate_tree", None),
                 **({"selector": selector} if selector is not None else {}),
             )
@@ -2808,7 +2789,7 @@ def main(
             json.dumps(receipt, separators=(",", ":"), sort_keys=True)
             if parsed.json
             else _render_candidate_read(receipt)
-            if parsed.action == "read"
+            if parsed.action in {"read", "changed-paths"}
             else " ".join(
                 f"{key}={receipt[key]}"
                 for key in (
@@ -2823,7 +2804,7 @@ def main(
         )
         return (
             0
-            if parsed.action in {"stage", "read"}
+            if parsed.action in {"stage", "read", "changed-paths"}
             or receipt.get("state") == "terminal-success"
             else 1
         )

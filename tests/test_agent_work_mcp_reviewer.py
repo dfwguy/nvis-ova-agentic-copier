@@ -40,9 +40,8 @@ NONCE = "private-mcp-preview-nonce"
 GITLAB_SECRET = "private-gitlab-token"
 TOOLS = {
     "candidate_status",
-    "candidate_read_manifest",
-    "candidate_read_chunk",
-    "candidate_read_complete",
+    "candidate_changed_paths",
+    "candidate_read",
     "candidate_submit_review",
 }
 
@@ -194,9 +193,16 @@ def test_host_facing_candidate_preview_disables_edit_and_keeps_candidate_read(
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert "features.shell_tool=false" in config
     assert "features.unified_exec=false" in config
-    assert "candidate_read_manifest" in host_controls
-    assert "candidate_read_chunk" in host_controls
-    assert "candidate_read_complete" in host_controls
+    assert "candidate_changed_paths" in host_controls
+    assert "candidate_read" in host_controls
+    assert not any(
+        retired in host_controls
+        for retired in (
+            "candidate_read_manifest",
+            "candidate_read_chunk",
+            "candidate_read_complete",
+        )
+    )
     assert "candidate_status" in host_controls
     assert "candidate_submit_review" in host_controls
 
@@ -237,7 +243,9 @@ def test_brokered_worker_keeps_trusted_result_authoritative_without_preview(
                 )
             return b'{"accepted":true}'
 
-    def candidate_action(action: str, tree: str | None) -> dict[str, object]:
+    def candidate_action(
+        action: str, tree: str | None, _selector: dict[str, object] | None
+    ) -> dict[str, object]:
         calls.append((action, tree))
         if action == "stage":
             return {"candidate_tree": TREE, "state": "staged"}

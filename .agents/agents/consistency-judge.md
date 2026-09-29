@@ -35,18 +35,29 @@ and tree. Reject a lost or wrong identity before review.
 For serial review, get the live controller-owned `candidate read` snapshot
 after candidate staging and, for coding, after Judge validation. Require its
 immutable current issue and session, base commit/tree, candidate tree OID,
-and canonical changed-path manifest. Inline reads are limited to 512 KiB. A
-full inline old/new response is ready for review without `--complete`.
-For a paged read, obtain every existing old and new side in ordered chunks of
-at most 128 KiB. Empty sides need no chunks; deleted sides have explicit
-markers. Require successful `candidate read --complete` before deciding
-applicability or reviewing facts. Read through the trusted boundary; worker
-prose and an unverified broker response do not prove content.
+and controller-bound canonical changed-path inventory, including each path's
+old/new mode, blob ID, and size. For every changed path, account for both old
+and new sides: confirm explicit absence where a side does not exist, and read
+the full content of every present side. Use independent, controller-authorized
+Git reads by path, side, byte offset, and length; each range is limited to
+128 KiB. Bind every result to the repo, issue, base commit/tree, candidate
+tree, path, side, blob ID, offset, and length. Compare the returned ranges
+with each side's full size. Request any missing ranges and reject gaps,
+unreadable sides, or mismatched evidence. Account for mode-only changes even
+when content is unchanged. Repeated or direct reads need no hidden cursor,
+prior manifest state, coverage bitmap, or completion operation. Git proves the
+returned bytes and tree identity; the judge remains responsible for reading
+and assessing every changed side. In the verdict receipt, list every
+inventory path, its old and new side status, and the exact ranges read for
+each present side. Git evidence proves returned bytes and tree identity;
+delivery alone does not prove comprehension. Read through the trusted
+boundary within its deadline; worker prose and an unverified broker response
+do not prove content.
 Check the snapshot identity before review and again before the verdict. Reject
 a missing, failed, rejected, or stale expected read. After any correction,
 require a new stage/read and review of its new tree. Restaging voids prior
-read coverage in either mode. If the boundary is
-unavailable in the selected mode, return the exact Architect N/A with mode
+read proof. If the boundary is unavailable in the selected mode, return the
+exact Architect N/A with mode
 and capability evidence, not an approval.
 
 For reconciliation, also get the saved source and exact target commits. Main gives

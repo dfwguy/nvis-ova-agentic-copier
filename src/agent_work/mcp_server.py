@@ -43,9 +43,8 @@ _PRIVATE_FIELDS = frozenset({"nonce", "issue_iid", "project_id"})
 _MAX_RESPONSE_BYTES = 900_000
 _TOOL_NAMES = (
     "candidate_status",
-    "candidate_read_manifest",
-    "candidate_read_chunk",
-    "candidate_read_complete",
+    "candidate_changed_paths",
+    "candidate_read",
     "candidate_submit_review",
 )
 
@@ -90,7 +89,7 @@ class _ReviewSubmission(BaseModel):
 
 class _CandidateMCPServer(MCPServer):
     async def list_tools(self) -> list[Tool]:
-        """Advertise closed argument schemas for the five pilot tools."""
+        """Advertise closed argument schemas for the four candidate tools."""
         tools = await super().list_tools()
         return [
             tool.model_copy(
@@ -112,12 +111,21 @@ class _CandidateMCPServer(MCPServer):
                 content=[TextContent(text="candidate_broker: invalid tool")],
                 is_error=True,
             )
-        if name == "candidate_read_chunk":
+        if name == "candidate_read":
             offset = arguments.get("offset")
             length = arguments.get("length")
             valid = (
                 set(arguments) == {"path", "side", "offset", "length"}
                 and isinstance(arguments.get("path"), str)
+                and bool(arguments["path"])
+                and not PurePosixPath(arguments["path"]).is_absolute()
+                and str(PurePosixPath(arguments["path"])) == arguments["path"]
+                and all(
+                    part not in {"", ".", ".."} for part in arguments["path"].split("/")
+                )
+                and not any(
+                    char in arguments["path"] for char in ("\\", "\n", "\r", "\x00")
+                )
                 and arguments.get("side") in {"old", "new"}
                 and type(offset) is int
                 and offset >= 0
@@ -192,33 +200,27 @@ def create_candidate_mcp_server(
         return read("status")
 
     @server.tool()
-    def candidate_read_manifest() -> CallToolResult:
-        """Read the bound candidate's content manifest."""
-        return read("read", {"mode": "manifest"})
+    def candidate_changed_paths() -> CallToolResult:
+        """List changed paths and exact Git side metadata."""
+        return read("read", {"mode": "changed_paths"})
 
     @server.tool()
-    def candidate_read_chunk(
+    def candidate_read(
         path: str,
         side: Literal["old", "new"],
         offset: Annotated[int, Field(strict=True, ge=0)],
         length: Annotated[int, Field(strict=True, gt=0, le=GIT_READ_MAX_CHUNK_BYTES)],
     ) -> CallToolResult:
-        """Read one bounded content page from the manifest."""
+        """Read one independent byte range from a changed Git object."""
         return read(
             "read",
             {
-                "mode": "chunk",
                 "path": path,
                 "side": side,
                 "offset": offset,
                 "length": length,
             },
         )
-
-    @server.tool()
-    def candidate_read_complete() -> CallToolResult:
-        """Confirm that all declared content was read."""
-        return read("read", {"mode": "complete"})
 
     @server.tool()
     def candidate_submit_review(
